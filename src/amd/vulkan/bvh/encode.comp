@@ -63,11 +63,11 @@ main()
       case VK_GEOMETRY_TYPE_TRIANGLES_KHR: {
          output_leaf_node_size = SIZEOF(radv_bvh_triangle_node);
 
-         vk_ir_triangle_node src_node =
-            DEREF(REF(vk_ir_triangle_node)(OFFSET(args.intermediate_bvh, gl_GlobalInvocationID.x * ir_leaf_node_size)));
+         REF(vk_ir_triangle_node) src_node =
+            REF(vk_ir_triangle_node)(OFFSET(args.intermediate_bvh, gl_GlobalInvocationID.x * ir_leaf_node_size));
          VOID_REF dst_node = OFFSET(args.output_bvh, dst_leaf_offset + gl_GlobalInvocationID.x * output_leaf_node_size);
 
-         radv_encode_triangle_gfx10_3(dst_node, src_node);
+         radv_encode_triangle_gfx10_3(dst_node, DEREF(src_node), vk_ir_triangle_node_get_micromap(src_node));
 
          break;
       }

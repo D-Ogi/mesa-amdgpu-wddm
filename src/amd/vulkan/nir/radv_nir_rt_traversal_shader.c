@@ -1324,6 +1324,8 @@ radv_build_traversal(const struct radv_compiler_info *compiler_info, struct radv
       .stack_entries = MAX_STACK_ENTRY_COUNT,
       .ignore_cull_mask = params->ignore_cull_mask,
       .write_ray_history = !!compiler_info->rra_trace->ray_history_addr,
+      .has_opacity_micromap =
+         !!(pipeline->base.base.create_flags & VK_PIPELINE_CREATE_2_RAY_TRACING_OPACITY_MICROMAP_BIT_KHR),
       .set_flags = info ? info->set_flags : 0,
       .unset_flags = info ? info->unset_flags : 0,
       .stack_store_cb = store_stack_entry,

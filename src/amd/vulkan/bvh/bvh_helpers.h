@@ -73,6 +73,10 @@ radv_encode_sbt_offset_and_flags(uint32_t src)
       ret |= RADV_INSTANCE_TRIANGLE_FACING_CULL_DISABLE;
    if ((flags & VK_GEOMETRY_INSTANCE_TRIANGLE_FLIP_FACING_BIT_KHR) != 0)
       ret |= RADV_INSTANCE_TRIANGLE_FLIP_FACING;
+   if ((flags & VK_GEOMETRY_INSTANCE_DISABLE_OPACITY_MICROMAPS_BIT_KHR) != 0)
+      ret |= RADV_INSTANCE_DISABLE_MICROMAPS;
+   if ((flags & VK_GEOMETRY_INSTANCE_FORCE_OPACITY_MICROMAP_2_STATE_BIT_KHR) != 0)
+      ret |= RADV_INSTANCE_FORCE_2_STATE_MICROMAPS;
    return ret;
 }
 
@@ -137,5 +141,11 @@ spirv_instruction(set = "MesaInternal", id = SpvOpFConvertRDMesa) float16_t radv
 #if ((VK_USED_BUILD_FLAGS & RADV_BUILD_FLAG_USE_BOX16) != 0)
 #define RADV_TEST_BUILD_FLAG_USE_BOX16 ((BUILD_FLAGS & RADV_BUILD_FLAG_USE_BOX16) != 0)
 #endif
+
+uint64_t
+radv_micromap_addr_get_addr(radv_micromap_addr addr)
+{
+   return packUint2x32(uvec2(addr.addr_lo, addr.addr_hi));
+}
 
 #endif /* BUILD_HELPERS_H */

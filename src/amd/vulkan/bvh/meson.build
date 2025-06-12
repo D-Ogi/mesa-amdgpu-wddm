@@ -27,6 +27,18 @@ bvh_shaders = [
     'header',
   ],
   [
+    'micromap_global_prefix_sum.comp',
+    'micromap_global_prefix_sum',
+  ],
+  [
+    'micromap_local_prefix_sum.comp',
+    'micromap_local_prefix_sum',
+  ],
+  [
+    'micromap_transcode.comp',
+    'micromap_transcode',
+  ],
+  [
     'update.comp',
     'update',
   ],

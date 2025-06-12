@@ -1,0 +1,81 @@
+/*
+ * Copyright © 2025 Valve Corporation
+ *
+ * SPDX-License-Identifier: MIT
+ */
+
+#version 460
+
+#extension GL_GOOGLE_include_directive : require
+
+#extension GL_EXT_shader_explicit_arithmetic_types_int8 : require
+#extension GL_EXT_shader_explicit_arithmetic_types_int16 : require
+#extension GL_EXT_shader_explicit_arithmetic_types_int32 : require
+#extension GL_EXT_shader_explicit_arithmetic_types_int64 : require
+#extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
+#extension GL_EXT_scalar_block_layout : require
+#extension GL_EXT_buffer_reference : require
+#extension GL_EXT_buffer_reference2 : require
+#extension GL_KHR_memory_scope_semantics : require
+#extension GL_KHR_shader_subgroup_arithmetic : require
+#extension GL_KHR_shader_subgroup_ballot : require
+#extension GL_KHR_shader_subgroup_basic : require
+
+layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
+
+#define VK_USED_BUILD_FLAGS (0)
+#include "bvh_helpers.h"
+
+layout(push_constant) uniform CONSTS
+{
+   micromap_prefix_sum_args args;
+};
+
+struct VkMicromapTriangleKHR {
+   uint32_t dataOffset;
+   uint16_t subdivisionLevel;
+   uint16_t format;
+};
+
+TYPE(VkMicromapTriangleKHR, 4);
+
+void
+main(void)
+{
+   uint32_t global_id = gl_GlobalInvocationID.x;
+
+   REF(radv_micromap_prefix_sum_partition) current_partition =
+      INDEX(radv_micromap_prefix_sum_partition, args.partitions, global_id);
+
+   uint32_t partition_size = 0;
+   if (global_id < args.partition_count)
+      partition_size = DEREF(current_partition).local_sum;
+
+   uint32_t prefix_sum = subgroupExclusiveAdd(partition_size);
+
+   for (int32_t lookback_index = int32_t(global_id) - int32_t(gl_SubgroupSize); lookback_index >= 0;
+        lookback_index -= int32_t(gl_SubgroupSize)) {
+      REF(radv_micromap_prefix_sum_partition) previous_partition =
+         INDEX(radv_micromap_prefix_sum_partition, args.partitions, lookback_index);
+
+      uint32_t previous_partition_size = DEREF(previous_partition).local_sum;
+      prefix_sum += subgroupAdd(previous_partition_size);
+
+      uint32_t start = 0;
+      if (gl_SubgroupInvocationID == 0) {
+         start = atomicLoad(DEREF(previous_partition).start, gl_ScopeDevice, gl_StorageSemanticsBuffer,
+                            gl_SemanticsAcquire | gl_SemanticsMakeVisible);
+      }
+      start = subgroupBroadcast(start, 0);
+
+      if (start != 0) {
+         prefix_sum += start;
+         break;
+      }
+   }
+
+   if (global_id < args.partition_count) {
+      atomicStore(DEREF(current_partition).start, prefix_sum, gl_ScopeDevice, gl_StorageSemanticsBuffer,
+                  gl_SemanticsRelease | gl_SemanticsMakeAvailable);
+   }
+}
