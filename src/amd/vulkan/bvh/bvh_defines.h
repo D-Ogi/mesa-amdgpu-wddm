@@ -21,6 +21,17 @@
 #define RADV_INSTANCE_NO_FORCE_NOT_OPAQUE          (1u << 30)
 #define RADV_INSTANCE_TRIANGLE_FACING_CULL_DISABLE (1u << 29)
 #define RADV_INSTANCE_TRIANGLE_FLIP_FACING         (1u << 28)
+#define RADV_INSTANCE_DISABLE_MICROMAPS            (1u << 27)
+#define RADV_INSTANCE_FORCE_2_STATE_MICROMAPS      (1u << 26)
+
+#define RADV_GFX12_INSTANCE_DISABLE_MICROMAPS       (1ul << 52)
+#define RADV_GFX12_INSTANCE_FORCE_2_STATE_MICROMAPS (1ul << 53)
+
+/* [ special_index:2, subdivision_level:4, special_index_enable:1, addr:57 ] */
+#define RADV_MICROMAP_ADDR_SPECIAL_INDEX_ENABLE    (0x1ul << 57)
+#define RADV_MICROMAP_ADDR_SUBDIVISION_LEVEL_SHIFT 58
+#define RADV_MICROMAP_ADDR_SPECIAL_INDEX_SHIFT     62
+#define RADV_MICROMAP_ADDR_ADDR_MASK               (~(0x7ful << 57))
 
 #define RADV_BLAS_POINTER_FORCE_OPAQUE     (1ul << 54)
 #define RADV_BLAS_POINTER_FORCE_NON_OPAQUE (1ul << 55)
@@ -46,17 +57,46 @@
 typedef uint16_t float16_t;
 typedef struct radv_aabb16 radv_aabb16;
 typedef struct radv_accel_struct_header radv_accel_struct_header;
+typedef struct radv_accel_struct_serialization_header_base radv_accel_struct_serialization_header_base;
+typedef struct radv_micromap_addr radv_micromap_addr;
 #endif
 
-struct radv_accel_struct_serialization_header {
+struct radv_accel_struct_serialization_header_base {
    uint8_t driver_uuid[VK_UUID_SIZE];
    uint8_t accel_struct_compat[VK_UUID_SIZE];
    uint64_t serialization_size;
    uint64_t compacted_size;
+};
+
+struct radv_tlas_serialization_header {
+   radv_accel_struct_serialization_header_base base;
    uint64_t instance_count;
 #ifndef VULKAN
    uint64_t instances[];
 #endif
+};
+
+struct radv_blas_serialization_block {
+   uint32_t type;
+   uint32_t reserved;
+   uint64_t buffer_count;
+#ifndef VULKAN
+   uint64_t buffers[];
+#endif
+};
+
+struct radv_blas_serialization_header {
+   radv_accel_struct_serialization_header_base base;
+   uint64_t block_count;
+#ifndef VULKAN
+   struct radv_blas_serialization_block blocks[];
+#endif
+};
+
+struct radv_micromap_addr {
+   uint32_t offset;
+   uint32_t addr_lo;
+   uint32_t addr_hi;
 };
 
 struct radv_accel_struct_geometry_info {
@@ -67,7 +107,7 @@ struct radv_accel_struct_geometry_info {
 
 struct radv_bvh_triangle_node {
    float coords[3][3];
-   uint32_t reserved[3];
+   radv_micromap_addr micromap_addr;
    uint32_t triangle_id;
    /* flags in upper 4 bits */
    uint32_t geometry_id_and_flags;
@@ -188,6 +228,9 @@ struct radv_gfx12_instance_node_user_data {
 /* Size of a primitive pair description in bits. */
 #define RADV_GFX12_PRIMITIVE_NODE_PAIR_DESC_SIZE 29
 
+/* 24 dwords is enought space for two triangles and leaves space for the pair desc. */
+#define RADV_GFX12_PRIMITIVE_NODE_MICROMAP_OFFSET 24 * 4
+
 struct radv_gfx12_primitive_node {
    uint32_t dwords[32];
 };
@@ -224,10 +267,10 @@ struct radv_accel_struct_header {
    uint32_t build_flags;
    uint32_t type;
 
-   /* Padd the struct to a multiple of 8 bytes so member offsets match between C and GLSL if radv_accel_struct_header is
-    * nested.
+   /* Also keeps the struct a multiple of 8 bytes so member offsets match between C and GLSL if radv_accel_struct_header
+    * is nested.
     */
-   uint32_t padding2;
+   uint32_t has_micromaps;
 };
 
 struct radv_accel_struct_header_gfx12 {
@@ -238,10 +281,24 @@ struct radv_accel_struct_header_gfx12 {
    radv_gfx12_box_child instance_children[4];
 };
 
+struct radv_micromap_prefix_sum_partition {
+   uint32_t start;
+   uint32_t local_sum;
+};
+
+struct radv_micromap_triangle_header {
+   uint32_t offset;
+   uint32_t level;
+};
+
 #ifdef VULKAN
-TYPE(radv_accel_struct_serialization_header, 8);
+TYPE(radv_accel_struct_serialization_header_base, 8);
+TYPE(radv_blas_serialization_block, 8);
+TYPE(radv_blas_serialization_header, 8);
+TYPE(radv_tlas_serialization_header, 8);
 TYPE(radv_accel_struct_header, 8);
 TYPE(radv_accel_struct_header_gfx12, 8);
+TYPE(radv_micromap_addr, 4);
 TYPE(radv_bvh_triangle_node, 4);
 TYPE(radv_bvh_aabb_node, 4);
 TYPE(radv_bvh_instance_node, 8);
@@ -252,6 +309,8 @@ TYPE(radv_gfx12_instance_node, 8);
 TYPE(radv_gfx12_instance_node_user_data, 4);
 TYPE(radv_gfx12_primitive_node, 4);
 TYPE(radv_triangle_encode_task, 4);
+TYPE(radv_micromap_prefix_sum_partition, 4);
+TYPE(radv_micromap_triangle_header, 4);
 #endif
 
 #define RADV_COPY_MODE_COPY        0
@@ -314,7 +373,8 @@ struct header_args {
    uint32_t type;
 };
 
-#define RADV_UPDATE_BUILD_FLAGS (VK_BUILD_FLAG_PROPAGATE_CULL_FLAGS | RADV_BUILD_FLAG_UPDATE_IN_PLACE)
+#define RADV_UPDATE_BUILD_FLAGS                                                                                        \
+   (VK_BUILD_FLAG_PROPAGATE_CULL_FLAGS | VK_BUILD_FLAG_HAS_MICROMAPS | RADV_BUILD_FLAG_UPDATE_IN_PLACE)
 
 struct update_args {
    REF(radv_accel_struct_header) src;
@@ -326,7 +386,8 @@ struct update_args {
 };
 
 #define RADV_UPDATE_GFX12_BUILD_FLAGS                                                                                  \
-   (VK_BUILD_FLAG_PROPAGATE_CULL_FLAGS | RADV_BUILD_FLAG_UPDATE_SINGLE_GEOMETRY | RADV_BUILD_FLAG_UPDATE_IN_PLACE)
+   (VK_BUILD_FLAG_PROPAGATE_CULL_FLAGS | VK_BUILD_FLAG_HAS_MICROMAPS | RADV_BUILD_FLAG_UPDATE_SINGLE_GEOMETRY |        \
+    RADV_BUILD_FLAG_UPDATE_IN_PLACE)
 
 struct update_gfx12_args {
    REF(radv_accel_struct_header_gfx12) src;
@@ -337,6 +398,30 @@ struct update_gfx12_args {
    uint32_t leaf_node_count;
 
    vk_bvh_geometry_data geom_data0;
+};
+
+struct micromap_prefix_sum_args {
+   VOID_REF triangles;
+   REF(radv_micromap_prefix_sum_partition) partitions;
+   REF(uint32_t) local_offsets;
+   uint32_t partition_count;
+   uint32_t stride;
+};
+
+struct micromap_copy_args {
+   VOID_REF src_addr;
+   VOID_REF dst_addr;
+};
+
+struct micromap_transcode_args {
+   VOID_REF triangles;
+   VOID_REF data;
+   VOID_REF dst;
+   REF(radv_micromap_prefix_sum_partition) partitions;
+   REF(uint32_t) local_offsets;
+   uint32_t triangle_count;
+   uint32_t data_offset;
+   uint32_t stride;
 };
 
 #define RADV_IR_HEADER_ENCODE_TRIANGLES_INVOCATIONS_X       0

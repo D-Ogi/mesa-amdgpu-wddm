@@ -8001,7 +8001,8 @@ radv_src_access_flush(struct radv_cmd_buffer *cmd_buffer, VkPipelineStageFlags2 
    if (src_flags & VK_ACCESS_2_COMMAND_PREPROCESS_WRITE_BIT_EXT)
       flush_bits |= AC_BARRIER_INV_L2;
 
-   if (src_flags & (VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT | VK_ACCESS_2_ACCELERATION_STRUCTURE_WRITE_BIT_KHR)) {
+   if (src_flags & (VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT | VK_ACCESS_2_ACCELERATION_STRUCTURE_WRITE_BIT_KHR |
+                    VK_ACCESS_2_MICROMAP_WRITE_BIT_EXT)) {
       /* since the STORAGE bit isn't set we know that this is a meta operation.
        * on the dst flush side we skip CB/DB flushes without the STORAGE bit, so
        * set it here. */
@@ -8166,9 +8167,10 @@ radv_dst_access_flush(struct radv_cmd_buffer *cmd_buffer, VkPipelineStageFlags2 
       flush_bits |= AC_BARRIER_INV_SMEM;
 
    if (dst_flags & (VK_ACCESS_2_SHADER_STORAGE_READ_BIT | VK_ACCESS_2_SHADER_BINDING_TABLE_READ_BIT_KHR |
-                    VK_ACCESS_2_ACCELERATION_STRUCTURE_READ_BIT_KHR | VK_ACCESS_2_SHADER_SAMPLED_READ_BIT)) {
+                    VK_ACCESS_2_ACCELERATION_STRUCTURE_READ_BIT_KHR | VK_ACCESS_2_MICROMAP_READ_BIT_EXT |
+                    VK_ACCESS_2_SHADER_SAMPLED_READ_BIT)) {
       if (dst_flags & (VK_ACCESS_2_SHADER_STORAGE_READ_BIT | VK_ACCESS_2_SHADER_BINDING_TABLE_READ_BIT_KHR |
-                       VK_ACCESS_2_ACCELERATION_STRUCTURE_READ_BIT_KHR)) {
+                       VK_ACCESS_2_ACCELERATION_STRUCTURE_READ_BIT_KHR | VK_ACCESS_2_MICROMAP_READ_BIT_EXT)) {
          /* Unlike LLVM, ACO uses SMEM for SSBOs and we have to
           * invalidate the scalar cache. */
          if (!pdev->use_llvm && !image)

@@ -13,6 +13,36 @@
 #include "bvh_helpers.h"
 #include "invocation_cluster.h"
 
+radv_micromap_addr
+radv_encode_micromap_addr(vk_ir_triangle_node_micromap src)
+{
+   bool use_special_index = src.opacity_index < 0;
+
+   uint64_t opacity_addr = packUint2x32(uvec2(src.opacity_addr_lo, src.opacity_addr_hi));
+
+   radv_micromap_triangle_header micromap_header;
+   micromap_header.offset = 0;
+   micromap_header.level = 0;
+   if (!use_special_index) {
+      micromap_header = DEREF(
+         INDEX(radv_micromap_triangle_header, opacity_addr + SIZEOF(radv_accel_struct_header), src.opacity_index));
+   }
+
+   uint64_t micromap_addr = OFFSET(opacity_addr, micromap_header.offset) & RADV_MICROMAP_ADDR_ADDR_MASK;
+   if (use_special_index) {
+      micromap_addr = (uint64_t((-src.opacity_index) - 1) << RADV_MICROMAP_ADDR_SPECIAL_INDEX_SHIFT) |
+                      RADV_MICROMAP_ADDR_SPECIAL_INDEX_ENABLE;
+   } else {
+      micromap_addr |= uint64_t(micromap_header.level) << RADV_MICROMAP_ADDR_SUBDIVISION_LEVEL_SHIFT;
+   }
+
+   radv_micromap_addr result;
+   result.offset = micromap_header.offset;
+   result.addr_lo = uint32_t(micromap_addr & 0xffffffff);
+   result.addr_hi = uint32_t(micromap_addr >> 32);
+   return result;
+}
+
 void
 radv_encode_aabb_gfx10_3(VOID_REF dst_addr, vk_ir_aabb_node src)
 {
@@ -47,8 +77,9 @@ radv_encode_instance_gfx10_3(VOID_REF dst_addr, vk_ir_instance_node src)
    DEREF(dst).instance_id = src.instance_id;
 }
 
+#if ((VK_USED_BUILD_FLAGS & VK_BUILD_FLAG_HAS_MICROMAPS) != 0)
 void
-radv_encode_triangle_gfx10_3(VOID_REF dst_addr, vk_ir_triangle_node src)
+radv_encode_triangle_gfx10_3(VOID_REF dst_addr, vk_ir_triangle_node src, vk_ir_triangle_node_micromap micromap)
 {
    REF(radv_bvh_triangle_node) dst = REF(radv_bvh_triangle_node)(dst_addr);
 
@@ -58,11 +89,15 @@ radv_encode_triangle_gfx10_3(VOID_REF dst_addr, vk_ir_triangle_node src)
       barycentrics_control |= (opaque ? 128 : 0);
    }
 
+   if (VK_TEST_BUILD_FLAG_HAS_MICROMAPS)
+      DEREF(dst).micromap_addr = radv_encode_micromap_addr(micromap);
+
    DEREF(dst).coords = src.coords;
    DEREF(dst).triangle_id = src.triangle_id;
    DEREF(dst).geometry_id_and_flags = src.geometry_id_and_flags;
    DEREF(dst).id = barycentrics_control;
 }
+#endif
 #endif
 
 struct bit_writer {

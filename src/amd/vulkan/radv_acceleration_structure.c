@@ -50,6 +50,78 @@ static const uint32_t leaf_spv[] = {
 #include "bvh/radv_leaf.spv.h"
 };
 
+static const uint32_t micromap_global_prefix_sum_spv[] = {
+#include "bvh/micromap_global_prefix_sum.spv.h"
+};
+
+static const uint32_t micromap_local_prefix_sum_spv[] = {
+#include "bvh/micromap_local_prefix_sum.spv.h"
+};
+
+static const uint32_t micromap_transcode_spv[] = {
+#include "bvh/micromap_transcode.spv.h"
+};
+
+struct micromap_layout {
+   uint32_t triangle_count;
+
+   uint32_t data_offset;
+   uint32_t data_size;
+
+   uint32_t size;
+
+   /* scratch */
+   uint32_t prefix_sum_partition_count;
+   uint32_t prefix_sum_partitions_offset;
+   uint32_t local_prefix_sum_offset;
+   uint32_t scratch_size;
+};
+
+static struct micromap_layout
+get_micromap_layout(const VkAccelerationStructureBuildGeometryInfoKHR *build_info)
+{
+   struct micromap_layout layout = {0};
+
+   layout.data_offset = sizeof(struct radv_accel_struct_header);
+
+   for (uint32_t i = 0; i < build_info->geometryCount; i++) {
+      const VkAccelerationStructureGeometryKHR *geometry =
+         build_info->pGeometries ? &build_info->pGeometries[i] : build_info->ppGeometries[i];
+      const VkAccelerationStructureGeometryMicromapDataKHR *micromap_data =
+         vk_find_struct_const(geometry->pNext, ACCELERATION_STRUCTURE_GEOMETRY_MICROMAP_DATA_KHR);
+      for (uint32_t j = 0; j < micromap_data->usageCountsCount; j++) {
+         const VkMicromapUsageKHR *usage;
+         if (micromap_data->pUsageCounts)
+            usage = micromap_data->pUsageCounts + j;
+         else
+            usage = micromap_data->ppUsageCounts[j];
+
+         layout.triangle_count += usage->count;
+         layout.data_offset += usage->count * sizeof(struct radv_micromap_triangle_header);
+
+         uint32_t subtriangle_count = 1u << (usage->subdivisionLevel * 2);
+         /* Always use 4-state opacity to avoid divergence during traversal. */
+         layout.data_size += usage->count * MAX2(DIV_ROUND_UP(subtriangle_count * 2, 8), sizeof(uint32_t));
+      }
+   }
+
+   layout.size = align(layout.data_offset + layout.data_size, 16);
+
+   layout.prefix_sum_partition_count = DIV_ROUND_UP(layout.triangle_count, 64);
+
+   uint32_t offset = 0;
+
+   layout.prefix_sum_partitions_offset = offset;
+   offset += sizeof(struct radv_micromap_prefix_sum_partition) * layout.prefix_sum_partition_count;
+
+   layout.local_prefix_sum_offset = offset;
+   offset += sizeof(uint32_t) * layout.triangle_count;
+
+   layout.scratch_size = offset;
+
+   return layout;
+}
+
 struct acceleration_structure_layout {
    uint32_t geometry_info_offset;
    uint32_t leaf_node_offsets_offset;
@@ -213,8 +285,15 @@ radv_GetAccelerationStructureBuildSizesKHR(VkDevice _device, VkAccelerationStruc
    STATIC_ASSERT(sizeof(struct radv_gfx12_instance_node) == RADV_GFX12_BVH_NODE_SIZE);
    STATIC_ASSERT(sizeof(struct radv_gfx12_instance_node_user_data) == RADV_GFX12_BVH_NODE_SIZE);
 
-   vk_get_as_build_sizes(_device, buildType, pBuildInfo, pMaxPrimitiveCounts, pSizeInfo,
-                         &device->meta_state.accel_struct_build.build_args);
+   if (pBuildInfo->type == VK_ACCELERATION_STRUCTURE_TYPE_OPACITY_MICROMAP_KHR) {
+      struct micromap_layout layout = get_micromap_layout(pBuildInfo);
+      pSizeInfo->accelerationStructureSize = layout.size;
+      pSizeInfo->buildScratchSize = layout.scratch_size;
+      pSizeInfo->updateScratchSize = 0;
+   } else {
+      vk_get_as_build_sizes(_device, buildType, pBuildInfo, pMaxPrimitiveCounts, pSizeInfo,
+                            &device->meta_state.accel_struct_build.build_args);
+   }
 }
 
 static VkDeviceSize
@@ -893,18 +972,26 @@ radv_init_header(VkCommandBuffer commandBuffer, struct vk_device *vk_device, str
       header.copy_dispatch_size[1] = 1;
       header.copy_dispatch_size[2] = 1;
 
-      uint32_t blas_addrs_size = 0;
-      if (state->build_info->type == VK_ACCELERATION_STRUCTURE_TYPE_TOP_LEVEL_KHR)
-         blas_addrs_size = state->leaf_node_count * sizeof(uint64_t);
+      uint32_t serialization_metadata_size = 0;
+      if (state->build_info->type == VK_ACCELERATION_STRUCTURE_TYPE_TOP_LEVEL_KHR) {
+         serialization_metadata_size =
+            sizeof(struct radv_tlas_serialization_header) + sizeof(uint64_t) * header.primitive_count;
+      } else {
+         serialization_metadata_size = sizeof(struct radv_blas_serialization_header);
+         if (state->config.build_flags & VK_BUILD_FLAG_HAS_MICROMAPS)
+            serialization_metadata_size +=
+               sizeof(struct radv_blas_serialization_block) + sizeof(uint64_t) * header.primitive_count;
+      }
 
-      header.serialization_size =
-         header.compacted_size + align(sizeof(struct radv_accel_struct_serialization_header) + blas_addrs_size, 128);
+      header.serialization_size = header.compacted_size + align(serialization_metadata_size, 128);
 
-      header.size = header.serialization_size - sizeof(struct radv_accel_struct_serialization_header) - blas_addrs_size;
+      header.size = header.serialization_size - serialization_metadata_size;
 
       header.build_flags = state->build_info->flags;
       header.geometry_type = vk_get_as_geometry_type(state->build_info);
       header.geometry_count = state->build_info->geometryCount;
+
+      header.has_micromaps = !!(state->config.build_flags & VK_BUILD_FLAG_HAS_MICROMAPS);
       header.type = state->build_info->type;
 
       radv_update_memory_cp(cmd_buffer, vk_acceleration_structure_get_va(dst) + base, (const char *)&header + base,
@@ -1067,6 +1154,199 @@ pack_geometry_id_and_flags(uint32_t geometry_id, uint32_t flags)
 }
 
 static void
+radv_build_micromaps(VkCommandBuffer commandBuffer, uint32_t build_count,
+                     const VkAccelerationStructureBuildGeometryInfoKHR *build_infos)
+{
+   VK_FROM_HANDLE(radv_cmd_buffer, cmd_buffer, commandBuffer);
+   struct radv_device *device = radv_cmd_buffer_device(cmd_buffer);
+
+   const struct vk_acceleration_structure_build_args *build_args = &device->meta_state.accel_struct_build.build_args;
+
+   STACK_ARRAY(struct micromap_layout, layouts, build_count);
+
+   bool has_micromap = false;
+   for (uint32_t i = 0; i < build_count; i++) {
+      if (build_infos[i].type != VK_ACCELERATION_STRUCTURE_TYPE_OPACITY_MICROMAP_KHR)
+         continue;
+
+      has_micromap = true;
+
+      layouts[i] = get_micromap_layout(build_infos + i);
+
+      uint64_t scratch_addr = build_infos[i].scratchData.deviceAddress;
+
+      radv_fill_memory(cmd_buffer, scratch_addr + layouts[i].prefix_sum_partitions_offset,
+                       layouts[i].prefix_sum_partition_count * sizeof(struct radv_micromap_prefix_sum_partition), 0,
+                       VK_ADDRESS_COPY_DEVICE_LOCAL_BIT_KHR, false);
+   }
+
+   if (!has_micromap)
+      return;
+
+   /* Wait for update scratch initialization to finish. */
+   cmd_buffer->state.flush_bits |= AC_BARRIER_SYNC_CS |
+                                   radv_src_access_flush(cmd_buffer, VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+                                                         VK_ACCESS_2_SHADER_WRITE_BIT, 0, NULL, NULL) |
+                                   radv_dst_access_flush(cmd_buffer, VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+                                                         VK_ACCESS_2_SHADER_READ_BIT, 0, NULL, NULL);
+
+   if (build_args->emit_markers) {
+      vk_accel_struct_cmd_begin_debug_marker_formatted(commandBuffer, "micromap_local_prefix_sum");
+      radv_utrace_begin_micromap_local_prefix_sum(cmd_buffer);
+   }
+
+   radv_bvh_build_bind_pipeline(commandBuffer, RADV_META_OBJECT_KEY_MICROMAP_LOCAL_PREFIX_SUM,
+                                micromap_local_prefix_sum_spv, sizeof(micromap_local_prefix_sum_spv),
+                                sizeof(struct micromap_prefix_sum_args), 0);
+
+   for (uint32_t i = 0; i < build_count; i++) {
+      const VkAccelerationStructureBuildGeometryInfoKHR *build_info = build_infos + i;
+      if (build_info->type != VK_ACCELERATION_STRUCTURE_TYPE_OPACITY_MICROMAP_KHR)
+         continue;
+
+      for (uint32_t j = 0; j < build_info->geometryCount; j++) {
+         const VkAccelerationStructureGeometryKHR *geometry =
+            build_info->pGeometries ? &build_info->pGeometries[j] : build_info->ppGeometries[j];
+         const VkAccelerationStructureGeometryMicromapDataKHR *micromap_data =
+            vk_find_struct_const(geometry->pNext, ACCELERATION_STRUCTURE_GEOMETRY_MICROMAP_DATA_KHR);
+
+         uint64_t scratch_addr = build_info->scratchData.deviceAddress;
+
+         struct micromap_prefix_sum_args args = {
+            .triangles = micromap_data->triangleArray,
+            .partitions = scratch_addr + layouts[i].prefix_sum_partitions_offset,
+            .local_offsets = scratch_addr + layouts[i].local_prefix_sum_offset,
+            .partition_count = layouts[i].prefix_sum_partition_count,
+            .stride = micromap_data->triangleArrayStride,
+         };
+
+         radv_bvh_build_set_args(commandBuffer, &args, sizeof(args));
+
+         radv_unaligned_dispatch(cmd_buffer, layouts[i].triangle_count, 1, 1);
+      }
+   }
+
+   /* Wait for the local pass to finish. */
+   cmd_buffer->state.flush_bits |= AC_BARRIER_SYNC_CS |
+                                   radv_src_access_flush(cmd_buffer, VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+                                                         VK_ACCESS_2_SHADER_WRITE_BIT, 0, NULL, NULL) |
+                                   radv_dst_access_flush(cmd_buffer, VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+                                                         VK_ACCESS_2_SHADER_READ_BIT, 0, NULL, NULL);
+   if (build_args->emit_markers) {
+      vk_accel_struct_cmd_end_debug_marker(commandBuffer, NULL);
+      radv_utrace_end_micromap_local_prefix_sum(cmd_buffer);
+      vk_accel_struct_cmd_begin_debug_marker_formatted(commandBuffer, "micromap_global_prefix_sum");
+      radv_utrace_begin_micromap_global_prefix_sum(cmd_buffer);
+   }
+
+   radv_bvh_build_bind_pipeline(commandBuffer, RADV_META_OBJECT_KEY_MICROMAP_GLOBAL_PREFIX_SUM,
+                                micromap_global_prefix_sum_spv, sizeof(micromap_global_prefix_sum_spv),
+                                sizeof(struct micromap_prefix_sum_args), 0);
+
+   for (uint32_t i = 0; i < build_count; i++) {
+      const VkAccelerationStructureBuildGeometryInfoKHR *build_info = build_infos + i;
+      if (build_info->type != VK_ACCELERATION_STRUCTURE_TYPE_OPACITY_MICROMAP_KHR)
+         continue;
+
+      for (uint32_t j = 0; j < build_info->geometryCount; j++) {
+         const VkAccelerationStructureGeometryKHR *geometry =
+            build_info->pGeometries ? &build_info->pGeometries[j] : build_info->ppGeometries[j];
+         const VkAccelerationStructureGeometryMicromapDataKHR *micromap_data =
+            vk_find_struct_const(geometry->pNext, ACCELERATION_STRUCTURE_GEOMETRY_MICROMAP_DATA_KHR);
+
+         uint64_t scratch_addr = build_info->scratchData.deviceAddress;
+
+         struct micromap_prefix_sum_args args = {
+            .triangles = micromap_data->triangleArray,
+            .partitions = scratch_addr + layouts[i].prefix_sum_partitions_offset,
+            .local_offsets = scratch_addr + layouts[i].local_prefix_sum_offset,
+            .partition_count = layouts[i].prefix_sum_partition_count,
+            .stride = micromap_data->triangleArrayStride,
+         };
+
+         radv_bvh_build_set_args(commandBuffer, &args, sizeof(args));
+
+         radv_CmdDispatchBase(commandBuffer, 0, 0, 0, DIV_ROUND_UP(layouts[i].prefix_sum_partition_count, 64), 1, 1);
+      }
+   }
+
+   /* Wait for the global pass to finish. */
+   cmd_buffer->state.flush_bits |= AC_BARRIER_SYNC_CS |
+                                   radv_src_access_flush(cmd_buffer, VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+                                                         VK_ACCESS_2_SHADER_WRITE_BIT, 0, NULL, NULL) |
+                                   radv_dst_access_flush(cmd_buffer, VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+                                                         VK_ACCESS_2_SHADER_READ_BIT, 0, NULL, NULL);
+
+   if (build_args->emit_markers) {
+      vk_accel_struct_cmd_end_debug_marker(commandBuffer, NULL);
+      radv_utrace_end_micromap_global_prefix_sum(cmd_buffer);
+      vk_accel_struct_cmd_begin_debug_marker_formatted(commandBuffer, "micromap_transcode");
+      radv_utrace_begin_micromap_transcode(cmd_buffer);
+   }
+
+   radv_bvh_build_bind_pipeline(commandBuffer, RADV_META_OBJECT_KEY_MICROMAP_TRANSCODE, micromap_transcode_spv,
+                                sizeof(micromap_transcode_spv), sizeof(struct micromap_transcode_args), 0);
+
+   for (uint32_t i = 0; i < build_count; i++) {
+      const VkAccelerationStructureBuildGeometryInfoKHR *build_info = build_infos + i;
+      if (build_info->type != VK_ACCELERATION_STRUCTURE_TYPE_OPACITY_MICROMAP_KHR)
+         continue;
+
+      VK_FROM_HANDLE(vk_acceleration_structure, micromap, build_info->dstAccelerationStructure);
+
+      for (uint32_t j = 0; j < build_info->geometryCount; j++) {
+         const VkAccelerationStructureGeometryKHR *geometry =
+            build_info->pGeometries ? &build_info->pGeometries[j] : build_info->ppGeometries[j];
+         const VkAccelerationStructureGeometryMicromapDataKHR *micromap_data =
+            vk_find_struct_const(geometry->pNext, ACCELERATION_STRUCTURE_GEOMETRY_MICROMAP_DATA_KHR);
+
+         uint64_t scratch_addr = build_info->scratchData.deviceAddress;
+
+         struct micromap_transcode_args args = {
+            .triangles = micromap_data->triangleArray,
+            .data = micromap_data->data,
+            .dst = vk_acceleration_structure_get_va(micromap),
+            .partitions = scratch_addr + layouts[i].prefix_sum_partitions_offset,
+            .local_offsets = scratch_addr + layouts[i].local_prefix_sum_offset,
+            .triangle_count = layouts[i].triangle_count,
+            .data_offset = layouts[i].data_offset,
+            .stride = micromap_data->triangleArrayStride,
+         };
+
+         radv_bvh_build_set_args(commandBuffer, &args, sizeof(args));
+
+         radv_unaligned_dispatch(cmd_buffer, layouts[i].data_size / sizeof(uint32_t), 1, 1);
+
+         struct radv_accel_struct_header header = {};
+
+         header.compacted_size = layouts[i].size;
+
+         header.copy_dispatch_size[0] = DIV_ROUND_UP(header.compacted_size, 16 * 64);
+         header.copy_dispatch_size[1] = 1;
+         header.copy_dispatch_size[2] = 1;
+
+         header.serialization_size = header.compacted_size + sizeof(struct radv_accel_struct_serialization_header_base);
+
+         header.size = header.compacted_size;
+
+         header.type = VK_ACCELERATION_STRUCTURE_TYPE_OPACITY_MICROMAP_KHR;
+
+         radv_update_memory_cp(cmd_buffer, vk_acceleration_structure_get_va(micromap), &header, sizeof(header));
+      }
+   }
+
+   if (radv_device_physical(device)->info.cp_sdma_ge_use_system_memory_scope)
+      cmd_buffer->state.flush_bits |= AC_BARRIER_INV_L2;
+
+   if (build_args->emit_markers) {
+      vk_accel_struct_cmd_end_debug_marker(commandBuffer, NULL);
+      radv_utrace_end_micromap_transcode(cmd_buffer);
+   }
+
+   STACK_ARRAY_FINISH(layouts);
+}
+
+static void
 radv_write_buffer_cp(VkCommandBuffer commandBuffer, VkDeviceAddress addr, void *data, uint32_t size)
 {
    VK_FROM_HANDLE(radv_cmd_buffer, cmd_buffer, commandBuffer);
@@ -1203,7 +1483,7 @@ radv_device_init_accel_struct_build_state(struct radv_device *device)
    build_args->subgroup_size = 64;
    build_args->bvh_bounds_offset = offsetof(struct radv_accel_struct_header, aabb);
    build_args->root_flags_offset = offsetof(struct radv_accel_struct_header, root_flags);
-   build_args->has_micromaps_offset = UINT32_MAX;
+   build_args->has_micromaps_offset = offsetof(struct radv_accel_struct_header, has_micromaps);
    build_args->propagate_cull_flags = pdev->info.gfx_level >= GFX11;
    build_args->emit_markers = device->sqtt.bo || device->utrace.context;
    build_args->has_update = true;
@@ -1226,6 +1506,8 @@ radv_CmdBuildAccelerationStructuresKHR(VkCommandBuffer commandBuffer, uint32_t i
 
    vk_cmd_build_acceleration_structures(commandBuffer, &device->vk, &device->meta_state.device, infoCount, pInfos,
                                         ppBuildRangeInfos, &device->meta_state.accel_struct_build.build_args);
+
+   radv_build_micromaps(commandBuffer, infoCount, pInfos);
 
    radv_meta_end(cmd_buffer);
 }
