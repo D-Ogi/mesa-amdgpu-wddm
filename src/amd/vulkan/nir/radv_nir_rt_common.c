@@ -13,6 +13,7 @@
 
 #include "radv_device.h"
 #include "radv_physical_device.h"
+#include "radv_shader.h"
 
 static nir_def *build_node_to_addr(const struct radv_compiler_info *compiler_info, nir_builder *b, nir_def *node,
                                    bool skip_type_and);
@@ -570,13 +571,110 @@ radv_build_accel_struct_token(nir_builder *b, const struct radv_compiler_info *c
  * is assumed to be an actual hit. */
 static nir_def *
 hit_is_opaque(nir_builder *b, nir_def *sbt_offset_and_flags, const struct radv_ray_flags *ray_flags,
-              nir_def *geometry_id_and_flags)
+              nir_def *geometry_id_and_flags, nir_def *opacity)
 {
-   nir_def *opaque = nir_uge_imm(b, nir_ior(b, geometry_id_and_flags, sbt_offset_and_flags),
-                                 RADV_INSTANCE_FORCE_OPAQUE | RADV_INSTANCE_NO_FORCE_NOT_OPAQUE);
+   nir_def *opaque;
+   nir_def *combined_flags = nir_ior(b, geometry_id_and_flags, sbt_offset_and_flags);
+   if (opacity) {
+      opaque = nir_ieq_imm(b, opacity, VK_OPACITY_MICROMAP_SPECIAL_INDEX_FULLY_OPAQUE_KHR);
+      opaque = nir_bcsel(b, nir_test_mask(b, sbt_offset_and_flags, RADV_INSTANCE_FORCE_OPAQUE), nir_imm_bool(b, true),
+                         opaque);
+      opaque = nir_bcsel(b, nir_ieq_imm(b, nir_iand_imm(b, sbt_offset_and_flags, RADV_INSTANCE_NO_FORCE_NOT_OPAQUE), 0),
+                         nir_imm_bool(b, false), opaque);
+   } else {
+      opaque =
+         nir_uge(b, combined_flags, nir_imm_int(b, RADV_INSTANCE_FORCE_OPAQUE | RADV_INSTANCE_NO_FORCE_NOT_OPAQUE));
+   }
+
    opaque = nir_bcsel(b, ray_flags->force_opaque, nir_imm_true(b), opaque);
    opaque = nir_bcsel(b, ray_flags->force_not_opaque, nir_imm_false(b), opaque);
    return opaque;
+}
+
+static nir_def *
+load_opacity(nir_builder *b, nir_def *addr, nir_def *level, nir_def *barycentrics)
+{
+   nir_def *triangle_count = nir_ishl(b, nir_imm_int(b, 1), level);
+   nir_def *max_triangle_index_v = nir_iadd_imm(b, triangle_count, -1);
+   nir_def *triangle_count_f = nir_i2f32(b, triangle_count);
+
+   nir_def *fu = nir_fmul(b, nir_channel(b, barycentrics, 0), triangle_count_f);
+   nir_def *fv = nir_fmul(b, nir_channel(b, barycentrics, 1), triangle_count_f);
+
+   nir_def *iu = nir_imul_imm(b, nir_f2i32(b, fu), 2);
+   nir_def *iv = nir_f2i32(b, fv);
+
+   nir_def *fu_fract = nir_ffract(b, fu);
+   nir_def *fv_fract = nir_ffract(b, fv);
+
+   /* if The sum is >1, we are inside the second triangle of a triangle pair with some iu,iv integer coordinates. */
+   nir_def *other_triangle = nir_fgt_imm(b, nir_fadd(b, fu_fract, fv_fract), 1.0);
+   iu = nir_bcsel(b, other_triangle, nir_iadd_imm(b, iu, 1), iu);
+
+   /* iv counting from v2. */
+   nir_def *iv_reversed = nir_isub(b, max_triangle_index_v, iv);
+
+   /* Reduce iu if the index would be out of bounds otherwise. */
+   nir_def *overflow = nir_ige(b, iu, nir_imul_imm(b, iv_reversed, 2));
+   iu = nir_bcsel(b, overflow, nir_imul_imm(b, iv_reversed, 2), iu);
+
+   /* The micro triangles are arranged in rows, which allows us to index them using a multiplication instead of
+    * performing many bitwise operations to compute the space filling curve of the spec.
+    */
+   nir_def *num_row_triangles_reversed = nir_imul(b, iv_reversed, iv_reversed);
+
+   nir_def *index = nir_iadd(b, num_row_triangles_reversed, iu);
+
+   nir_def *load_addr = nir_iadd(b, addr, nir_u2u64(b, nir_udiv_imm(b, index, 4)));
+
+   nir_def *data = nir_u2u32(b, nir_load_global(b, 1, 8, load_addr));
+   nir_def *bit_offset = nir_imul_imm(b, nir_umod(b, index, nir_imm_int(b, 4)), 2);
+
+   return nir_isub_imm(b, -1, nir_iand_imm(b, nir_ishr(b, data, bit_offset), 0b11));
+}
+
+static nir_def *
+get_opacity(nir_builder *b, const struct radv_compiler_info *compiler_info, const struct radv_ray_traversal_args *args,
+            nir_def *addr, nir_def *barycentrics, nir_def *force_2_state, nir_def *disable)
+{
+   nir_def *addr_hi = nir_channel(b, addr, 1);
+   nir_def *use_special_index = nir_test_mask(b, addr_hi, RADV_MICROMAP_ADDR_SPECIAL_INDEX_ENABLE >> 32);
+
+   nir_def *ignored, *non_ignored, *special_index, *loaded;
+   nir_push_if(b, disable);
+   {
+      ignored = nir_imm_int(b, VK_OPACITY_MICROMAP_SPECIAL_INDEX_FULLY_UNKNOWN_OPAQUE_KHR);
+   }
+   nir_push_else(b, NULL);
+   {
+      nir_push_if(b, use_special_index);
+      {
+         special_index = nir_isub_imm(b, -1, nir_ushr_imm(b, addr_hi, RADV_MICROMAP_ADDR_SPECIAL_INDEX_SHIFT - 32));
+      }
+      nir_push_else(b, NULL);
+      {
+         nir_def *level = nir_ubitfield_extract_imm(b, addr_hi, RADV_MICROMAP_ADDR_SUBDIVISION_LEVEL_SHIFT - 32, 4);
+
+         if (compiler_info->ac->gfx_level >= GFX9)
+            addr_hi = nir_ior_imm(b, addr_hi, 0xffff0000);
+         else
+            addr_hi = nir_iand_imm(b, addr_hi, 0xffff);
+
+         loaded = load_opacity(b, nir_pack_64_2x32_split(b, nir_channel(b, addr, 0), addr_hi), level, barycentrics);
+      }
+      nir_pop_if(b, NULL);
+      non_ignored = nir_if_phi(b, special_index, loaded);
+
+      force_2_state =
+         nir_ior(b, force_2_state, nir_test_mask(b, args->flags, SpvRayFlagsForceOpacityMicromap2StateKHRMask));
+
+      nir_def *is_4_state = nir_ilt(b, non_ignored, nir_imm_int(b, VK_OPACITY_MICROMAP_SPECIAL_INDEX_FULLY_OPAQUE_KHR));
+
+      non_ignored = nir_bcsel(b, nir_iand(b, force_2_state, is_4_state), nir_iadd_imm(b, non_ignored, 2), non_ignored);
+   }
+   nir_pop_if(b, NULL);
+
+   return nir_if_phi(b, ignored, non_ignored);
 }
 
 static nir_def *
@@ -630,6 +728,26 @@ create_bvh_descriptor(nir_builder *b, const struct radv_compiler_info *compiler_
                    nir_imm_intN_t(b, dword3, 32));
 }
 
+static nir_def *
+build_triangle_barycentrics(nir_builder *b, nir_def *result, nir_def *div)
+{
+   /* fdiv becomes a multiplication by v_rcp_f32, which can be 1 ULP off. One correction step with the
+    * residual gives the correctly rounded quotient, as D3D12 drivers return for barycentrics such as
+    * 0.5 * (1 - 5/256). Exact, so that the residual is not optimized away.
+    */
+   nir_def *divs[2] = {div, div};
+   nir_def *num = nir_channels(b, result, 0xc);
+   nir_def *den = nir_vec(b, divs, 2);
+   const unsigned old_math_ctrl = b->fp_math_ctrl;
+   b->fp_math_ctrl |= nir_fp_exact;
+   nir_def *rcp = nir_frcp(b, den);
+   nir_def *quot = nir_fmul(b, num, rcp);
+   nir_def *residual = nir_ffma(b, nir_fneg(b, den), quot, num);
+   nir_def *barycentrics = nir_ffma(b, residual, rcp, quot);
+   b->fp_math_ctrl = old_math_ctrl;
+   return barycentrics;
+}
+
 static void
 insert_traversal_triangle_case(const struct radv_compiler_info *compiler_info, nir_builder *b,
                                const struct radv_ray_traversal_args *args, const struct radv_ray_flags *ray_flags,
@@ -638,7 +756,7 @@ insert_traversal_triangle_case(const struct radv_compiler_info *compiler_info, n
    if (!args->triangle_cb)
       return;
 
-   struct radv_triangle_intersection intersection;
+   struct radv_triangle_intersection intersection = {0};
    intersection.t = nir_channel(b, result, 0);
    nir_def *div = nir_channel(b, result, 1);
    intersection.t = nir_fdiv(b, intersection.t, div);
@@ -671,31 +789,46 @@ insert_traversal_triangle_case(const struct radv_compiler_info *compiler_info, n
                               nir_flt(b, args->tmin, intersection.t), not_cull));
       {
          intersection.base.node_addr = build_node_to_addr(compiler_info, b, bvh_node, false);
-         nir_def *triangle_info = nir_load_global(
-            b, 2, 32,
-            nir_iadd_imm(b, intersection.base.node_addr, offsetof(struct radv_bvh_triangle_node, triangle_id)));
-         intersection.base.primitive_id = nir_channel(b, triangle_info, 0);
-         intersection.base.geometry_id_and_flags = nir_channel(b, triangle_info, 1);
+
+         nir_def *opacity = NULL;
+         if (args->has_opacity_micromap) {
+            nir_def *triangle_info =
+               nir_load_global(b, 4, 32,
+                               nir_iadd_imm(b, intersection.base.node_addr,
+                                            offsetof(struct radv_bvh_triangle_node, micromap_addr.addr_lo)));
+            nir_def *micromap_addr = nir_channels(b, triangle_info, 0x3);
+            intersection.base.primitive_id = nir_channel(b, triangle_info, 2);
+            intersection.base.geometry_id_and_flags = nir_channel(b, triangle_info, 3);
+
+            intersection.barycentrics = build_triangle_barycentrics(b, result, div);
+
+            nir_def *instance_flags = nir_load_deref(b, args->vars.sbt_offset_and_flags);
+            nir_def *force_2_state = nir_test_mask(b, instance_flags, RADV_INSTANCE_FORCE_2_STATE_MICROMAPS);
+            nir_def *disable_micromap = nir_test_mask(b, instance_flags, RADV_INSTANCE_DISABLE_MICROMAPS);
+            opacity = get_opacity(b, compiler_info, args, micromap_addr, intersection.barycentrics, force_2_state,
+                                  disable_micromap);
+         } else {
+            nir_def *triangle_info = nir_load_global(
+               b, 2, 32,
+               nir_iadd_imm(b, intersection.base.node_addr, offsetof(struct radv_bvh_triangle_node, triangle_id)));
+            intersection.base.primitive_id = nir_channel(b, triangle_info, 0);
+            intersection.base.geometry_id_and_flags = nir_channel(b, triangle_info, 1);
+         }
+
          intersection.base.opaque = hit_is_opaque(b, nir_load_deref(b, args->vars.sbt_offset_and_flags), ray_flags,
-                                                  intersection.base.geometry_id_and_flags);
+                                                  intersection.base.geometry_id_and_flags, opacity);
 
          not_cull = nir_bcsel(b, intersection.base.opaque, ray_flags->no_cull_opaque, ray_flags->no_cull_no_opaque);
+
+         if (opacity) {
+            not_cull =
+               nir_iand(b, not_cull, nir_ine_imm(b, opacity, VK_OPACITY_MICROMAP_SPECIAL_INDEX_FULLY_TRANSPARENT_KHR));
+         }
+
          nir_push_if(b, not_cull);
          {
-            /* fdiv becomes a multiplication by v_rcp_f32, which can be 1 ULP off. One correction step with the
-             * residual gives the correctly rounded quotient, as D3D12 drivers return for barycentrics such as
-             * 0.5 * (1 - 5/256). Exact, so that the residual is not optimized away.
-             */
-            nir_def *divs[2] = {div, div};
-            nir_def *num = nir_channels(b, result, 0xc);
-            nir_def *den = nir_vec(b, divs, 2);
-            const unsigned old_math_ctrl = b->fp_math_ctrl;
-            b->fp_math_ctrl |= nir_fp_exact;
-            nir_def *rcp = nir_frcp(b, den);
-            nir_def *quot = nir_fmul(b, num, rcp);
-            nir_def *residual = nir_ffma(b, nir_fneg(b, den), quot, num);
-            intersection.barycentrics = nir_ffma(b, residual, rcp, quot);
-            b->fp_math_ctrl = old_math_ctrl;
+            if (!intersection.barycentrics)
+               intersection.barycentrics = build_triangle_barycentrics(b, result, div);
 
             args->triangle_cb(b, &intersection, args, ray_flags);
          }
@@ -786,7 +919,7 @@ insert_traversal_aabb_case(const struct radv_compiler_info *compiler_info, nir_b
       intersection.primitive_id = nir_channel(b, triangle_info, 0);
       intersection.geometry_id_and_flags = nir_channel(b, triangle_info, 1);
       intersection.opaque = hit_is_opaque(b, nir_load_deref(b, args->vars.sbt_offset_and_flags), ray_flags,
-                                          intersection.geometry_id_and_flags);
+                                          intersection.geometry_id_and_flags, NULL);
 
       nir_push_if(b, nir_bcsel(b, intersection.opaque, ray_flags->no_cull_opaque, ray_flags->no_cull_no_opaque));
       {
@@ -910,8 +1043,10 @@ radv_build_ray_traversal(const struct radv_compiler_info *compiler_info, nir_bui
       .no_skip_aabbs = radv_test_flag(b, args, SpvRayFlagsSkipAABBsKHRMask, false),
    };
 
-   nir_def *ptr_flags =
-      nir_iand_imm(b, args->flags, ~(SpvRayFlagsTerminateOnFirstHitKHRMask | SpvRayFlagsSkipClosestHitShaderKHRMask));
+   uint32_t cleared_ptr_flags = SpvRayFlagsTerminateOnFirstHitKHRMask | SpvRayFlagsSkipClosestHitShaderKHRMask;
+   if (args->has_opacity_micromap)
+      cleared_ptr_flags |= (SpvRayFlagsCullOpaqueKHRMask | SpvRayFlagsCullNoOpaqueKHRMask);
+   nir_def *ptr_flags = nir_iand_imm(b, args->flags, ~cleared_ptr_flags);
 
    nir_def *midpoint_sort_disabled = nir_imm_true(b);
    nir_def *desc = create_bvh_descriptor(b, compiler_info, &ray_flags, &midpoint_sort_disabled);

@@ -26,42 +26,106 @@ main(void)
    uint64_t accel_struct_addr = args.mode == RADV_COPY_MODE_SERIALIZE ? args.src_addr : args.dst_addr;
    uint64_t serialized_addr = args.mode == RADV_COPY_MODE_SERIALIZE ? args.dst_addr : args.src_addr;
 
-   uint64_t blas_addrs = serialized_addr + SIZEOF(radv_accel_struct_serialization_header);
-
-   radv_accel_struct_serialization_header serialization_header =
-      DEREF(REF(radv_accel_struct_serialization_header)(serialized_addr));
-
    radv_accel_struct_header header = DEREF(REF(radv_accel_struct_header)(accel_struct_addr));
 
-   for (uint32_t i = global_id; i < serialization_header.instance_count; i += total_invocations) {
-      if (RADV_TEST_BUILD_FLAG_BVH8) {
-         uint64_t instance_offset_addr = accel_struct_addr + (header.leaf_node_offsets_offset + i * 4);
-         uint64_t instance_addr = accel_struct_addr + (header.bvh_offset + DEREF(REF(uint32_t)(instance_offset_addr)));
-         REF(radv_gfx12_instance_node) instance_node = REF(radv_gfx12_instance_node)(instance_addr);
-         REF(radv_gfx12_instance_node_user_data) instance_data =
-            REF(radv_gfx12_instance_node_user_data)(instance_addr + SIZEOF(radv_gfx12_instance_node));
+   if (header.type == VK_ACCELERATION_STRUCTURE_TYPE_TOP_LEVEL_KHR) {
+      uint64_t blas_addrs = serialized_addr + SIZEOF(radv_tlas_serialization_header);
 
-         if (args.mode == RADV_COPY_MODE_SERIALIZE) {
-            DEREF(INDEX(uint64_t, blas_addrs, i)) =
-               node_to_addr(DEREF(instance_node).pointer_flags_bvh_addr) - DEREF(instance_data).bvh_offset;
+      if (global_id == 0) {
+         REF(radv_tlas_serialization_header) serialization_header =
+            REF(radv_tlas_serialization_header)(serialized_addr);
+         DEREF(serialization_header).instance_count = header.primitive_count;
+      }
+
+      for (uint32_t i = global_id; i < header.primitive_count; i += total_invocations) {
+         if (RADV_TEST_BUILD_FLAG_BVH8) {
+            uint64_t instance_offset_addr = accel_struct_addr + (header.leaf_node_offsets_offset + i * 4);
+            uint64_t instance_addr =
+               accel_struct_addr + (header.bvh_offset + DEREF(REF(uint32_t)(instance_offset_addr)));
+            REF(radv_gfx12_instance_node) instance_node = REF(radv_gfx12_instance_node)(instance_addr);
+            REF(radv_gfx12_instance_node_user_data) instance_data =
+               REF(radv_gfx12_instance_node_user_data)(instance_addr + SIZEOF(radv_gfx12_instance_node));
+
+            if (args.mode == RADV_COPY_MODE_SERIALIZE) {
+               DEREF(INDEX(uint64_t, blas_addrs, i)) =
+                  node_to_addr(DEREF(instance_node).pointer_flags_bvh_addr) - DEREF(instance_data).bvh_offset;
+            } else {
+               uint32_t bvh_offset = DEREF(instance_data).bvh_offset;
+
+               /* Replace the address while keeping the pointer flags. */
+               uint64_t pointer_flags_bvh_addr = DEREF(instance_node).pointer_flags_bvh_addr;
+               uint64_t blas_addr = DEREF(INDEX(uint64_t, blas_addrs, i));
+               DEREF(instance_node).pointer_flags_bvh_addr =
+                  (pointer_flags_bvh_addr & 0xFFC0000000000000ul) | addr_to_node(blas_addr + bvh_offset);
+            }
          } else {
-            uint32_t bvh_offset = DEREF(instance_data).bvh_offset;
+            REF(radv_bvh_instance_node) instance_node =
+               INDEX(radv_bvh_instance_node, accel_struct_addr + header.leaf_nodes_offset, i);
 
-            /* Replace the address while keeping the pointer flags. */
-            uint64_t pointer_flags_bvh_addr = DEREF(instance_node).pointer_flags_bvh_addr;
-            uint64_t blas_addr = DEREF(INDEX(uint64_t, blas_addrs, i));
-            DEREF(instance_node).pointer_flags_bvh_addr =
-               (pointer_flags_bvh_addr & 0xFFC0000000000000ul) | addr_to_node(blas_addr + bvh_offset);
+            uint32_t bvh_offset = DEREF(instance_node).bvh_offset;
+            if (args.mode == RADV_COPY_MODE_SERIALIZE)
+               DEREF(INDEX(uint64_t, blas_addrs, i)) = node_to_addr(DEREF(instance_node).bvh_ptr) - bvh_offset;
+            else
+               DEREF(instance_node).bvh_ptr = addr_to_node(DEREF(INDEX(uint64_t, blas_addrs, i)) + bvh_offset);
          }
-      } else {
-         REF(radv_bvh_instance_node) instance_node =
-            INDEX(radv_bvh_instance_node, accel_struct_addr + header.leaf_nodes_offset, i);
+      }
+   } else if (header.type == VK_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL_KHR) {
+      REF(radv_blas_serialization_block) block =
+         REF(radv_blas_serialization_block)(serialized_addr + SIZEOF(radv_blas_serialization_header));
 
-         uint32_t bvh_offset = DEREF(instance_node).bvh_offset;
-         if (args.mode == RADV_COPY_MODE_SERIALIZE)
-            DEREF(INDEX(uint64_t, blas_addrs, i)) = node_to_addr(DEREF(instance_node).bvh_ptr) - bvh_offset;
-         else
-            DEREF(instance_node).bvh_ptr = addr_to_node(DEREF(INDEX(uint64_t, blas_addrs, i)) + bvh_offset);
+      bool has_micromaps = header.has_micromaps != 0;
+
+      if (global_id == 0) {
+         REF(radv_blas_serialization_header) serialization_header =
+            REF(radv_blas_serialization_header)(serialized_addr);
+         DEREF(serialization_header).block_count = 0xFFFFFFFF00000000ul + (has_micromaps ? 1ul : 0ul);
+
+         if (has_micromaps) {
+            DEREF(block).type = VK_ACCELERATION_STRUCTURE_SERIALIZED_BLOCK_TYPE_OPACITY_MICROMAP_KHR;
+            DEREF(block).buffer_count = header.primitive_count;
+         }
+      }
+
+      if (!has_micromaps)
+         return;
+
+      uint64_t serialized_addrs =
+         serialized_addr + SIZEOF(radv_blas_serialization_header) + SIZEOF(radv_blas_serialization_block);
+
+      for (uint32_t i = global_id; i < header.primitive_count; i += total_invocations) {
+         radv_micromap_addr micromap_addr;
+         if (RADV_TEST_BUILD_FLAG_BVH8) {
+            VOID_REF triangle_node = accel_struct_addr + header.leaf_nodes_offset + SIZEOF(radv_gfx12_primitive_node);
+            micromap_addr = DEREF(REF(radv_micromap_addr)(triangle_node + RADV_GFX12_PRIMITIVE_NODE_MICROMAP_OFFSET));
+         } else {
+            REF(radv_bvh_triangle_node) triangle_node =
+               INDEX(radv_bvh_triangle_node, accel_struct_addr + header.leaf_nodes_offset, i);
+            micromap_addr = DEREF(triangle_node).micromap_addr;
+         }
+
+         uint64_t micromap_addr64 = radv_micromap_addr_get_addr(micromap_addr);
+         if (args.mode == RADV_COPY_MODE_SERIALIZE) {
+            DEREF(INDEX(uint64_t, serialized_addrs, i)) =
+               (micromap_addr64 | 0xffff000000000000ul) - micromap_addr.offset;
+         } else {
+            uint64_t loaded_addr = DEREF(INDEX(uint64_t, serialized_addrs, i));
+            micromap_addr64 = (micromap_addr64 & (~RADV_MICROMAP_ADDR_ADDR_MASK)) |
+                              ((loaded_addr + micromap_addr.offset) & RADV_MICROMAP_ADDR_ADDR_MASK);
+
+            if (RADV_TEST_BUILD_FLAG_BVH8) {
+               VOID_REF triangle_node =
+                  accel_struct_addr + header.leaf_nodes_offset + SIZEOF(radv_gfx12_primitive_node);
+               REF(radv_micromap_addr) dst_micromap_addr =
+                  REF(radv_micromap_addr)(triangle_node + RADV_GFX12_PRIMITIVE_NODE_MICROMAP_OFFSET);
+               DEREF(dst_micromap_addr).addr_lo = uint32_t(micromap_addr64 & 0xffffffff);
+               DEREF(dst_micromap_addr).addr_hi = uint32_t(micromap_addr64 >> 32);
+            } else {
+               REF(radv_bvh_triangle_node) triangle_node =
+                  INDEX(radv_bvh_triangle_node, accel_struct_addr + header.leaf_nodes_offset, i);
+               DEREF(triangle_node).micromap_addr.addr_lo = uint32_t(micromap_addr64 & 0xffffffff);
+               DEREF(triangle_node).micromap_addr.addr_hi = uint32_t(micromap_addr64 >> 32);
+            }
+         }
       }
    }
 }

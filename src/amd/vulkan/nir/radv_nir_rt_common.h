@@ -153,6 +153,9 @@ struct radv_ray_traversal_args {
    bool write_ray_history;
 
    bool use_bvh_stack_rtn;
+
+   bool has_opacity_micromap;
+
    radv_rt_stack_store_cb stack_store_cb;
    radv_rt_stack_load_cb stack_load_cb;
 

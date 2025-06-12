@@ -989,6 +989,8 @@ radv_physical_device_get_supported_extensions(const struct radv_physical_device 
       .EXT_mutable_descriptor_type = true, /* Trivial promotion from VALVE. */
       .EXT_nested_command_buffer = true,
       .EXT_non_seamless_cube_map = true,
+      /* The GFX12 node format has no micromap encoding in this port. */
+      .KHR_opacity_micromap = radv_enable_rt(pdev) && !radv_use_bvh8(pdev),
       .EXT_pci_bus_info = true,
 #ifndef _WIN32
       .EXT_physical_device_drm = true,
@@ -1808,6 +1810,8 @@ radv_physical_device_get_features(const struct radv_physical_device *pdev, struc
 
       /* VK_AMD_anti_lag */
       .antiLag = true,
+      /* VK_KHR_opacity_micromap */
+      .micromap = true,
    };
 }
 
@@ -2555,6 +2559,11 @@ radv_get_physical_device_properties(struct radv_physical_device *pdev)
 
       /* VK_EXT_shader_split_barrier */
       .splitBarrierReservedSharedMemory = 0,
+
+      /* VK_KHR_opacity_micromap */
+      .maxOpacity2StateSubdivisionLevel = 12,
+      .maxOpacity4StateSubdivisionLevel = 12,
+      .maxOpacityLossy4StateSubdivisionLevel = 12,
    };
 
    struct vk_properties *p = &pdev->vk.properties;

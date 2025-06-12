@@ -51,10 +51,18 @@ radv_build_triangle(inout vk_aabb bounds, VOID_REF dst_ptr, vk_bvh_geometry_data
    vk_ir_triangle_node node;
    radv_get_triangle(bounds, node, geom_data, global_id);
 
+   vk_ir_triangle_node_micromap micromap;
+   if (VK_TEST_BUILD_FLAG_HAS_MICROMAPS) {
+      micromap.opacity_addr_lo = unpackUint2x32(geom_data.micromap_addr).x;
+      micromap.opacity_addr_hi = unpackUint2x32(geom_data.micromap_addr).y;
+      micromap.opacity_index = vk_load_micromap_index(geom_data, global_id);
+   }
+
+   /* Opacity micromaps are not implemented for the GFX12 node format. */
    if (gfx12)
       radv_encode_triangle_gfx12(dst_ptr, node);
    else
-      radv_encode_triangle_gfx10_3(dst_ptr, node);
+      radv_encode_triangle_gfx10_3(dst_ptr, node, micromap);
 }
 
 void
