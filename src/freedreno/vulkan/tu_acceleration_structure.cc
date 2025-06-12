@@ -338,6 +338,7 @@ tu_CmdBuildAccelerationStructuresKHR(VkCommandBuffer commandBuffer, uint32_t inf
       .bvh_bounds_offset = offsetof(tu_accel_struct_header, aabb),
       .morton_sort_workgroup_size = 512,
       .morton_sort_kvs_per_thread = 2,
+      .has_micromaps_offset = UINT32_MAX,
       .emit_markers = false,
    };
 

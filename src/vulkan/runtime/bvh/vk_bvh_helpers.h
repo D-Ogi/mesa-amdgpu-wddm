@@ -36,6 +36,7 @@ layout (constant_id = BUILD_FLAGS_ID) const int BUILD_FLAGS = 0;
 layout (constant_id = ROOT_FLAGS_OFFSET_ID) const int ROOT_FLAGS_OFFSET = -1;
 layout (constant_id = MORTON_SORT_WORKGROUP_SIZE_ID) const int MORTON_SORT_WORKGROUP_SIZE = 512;
 layout (constant_id = MORTON_SORT_KVS_PER_THREAD_ID) const int MORTON_SORT_KVS_PER_THREAD = 2;
+layout (constant_id = HAS_MICROMAPS_OFFSET_ID) const int HAS_MICROMAPS_OFFSET = -1;
 
 /* copied from u_math.h */
 uint32_t
@@ -232,6 +233,41 @@ uint32_t fetch_child_flags(VOID_REF bvh, uint32_t node_ptr)
    default:
       return 0;
    }
+}
+
+int32_t
+vk_load_micromap_index(vk_bvh_geometry_data geom_data, uint32_t global_id)
+{
+   int32_t opacity_index = 0;
+   if (geom_data.micromap_indices != 0) {
+      uint64_t index_addr = geom_data.micromap_indices + global_id * geom_data.micromap_index_stride;
+      switch (geom_data.micromap_index_type) {
+      case VK_INDEX_TYPE_UINT16: {
+         opacity_index = DEREF(REF(int16_t)(index_addr));
+         break;
+      }
+      case VK_INDEX_TYPE_UINT32: {
+         opacity_index = DEREF(REF(int32_t)(index_addr));
+         break;
+      }
+      case VK_INDEX_TYPE_NONE_KHR: {
+         opacity_index = int32_t(global_id);
+         break;
+      }
+      case VK_INDEX_TYPE_UINT8_EXT: {
+         opacity_index = DEREF(REF(int8_t)(index_addr));
+         break;
+      }
+      }
+   }
+
+   if (opacity_index >= 0) {
+      opacity_index += int32_t(geom_data.micromap_base_index);
+      if (geom_data.micromap_addr == 0)
+         opacity_index = -4;
+   }
+
+   return opacity_index;
 }
 
 /** Compute ceiling of integer quotient of A divided by B.
@@ -474,7 +510,29 @@ vk_ir_triangle_node_get_quad(REF(vk_ir_triangle_node) node)
       quad = DEREF(vk_ir_triangle_node_get_quad_ref(node));
    return quad;
 }
+#endif
 
+REF(vk_ir_triangle_node_micromap)
+vk_ir_triangle_node_get_micromap_ref(REF(vk_ir_triangle_node) node)
+{
+   return REF(vk_ir_triangle_node_micromap)(uint64_t(node) + SIZEOF(vk_ir_triangle_node));
+}
+
+#if ((VK_USED_BUILD_FLAGS & VK_BUILD_FLAG_HAS_MICROMAPS) != 0)
+#define VK_TEST_BUILD_FLAG_HAS_MICROMAPS ((BUILD_FLAGS & VK_BUILD_FLAG_HAS_MICROMAPS) != 0)
+
+vk_ir_triangle_node_micromap
+vk_ir_triangle_node_get_micromap(REF(vk_ir_triangle_node) node)
+{
+   vk_ir_triangle_node_micromap micromap;
+   if (VK_TEST_BUILD_FLAG_HAS_MICROMAPS)
+      micromap = DEREF(vk_ir_triangle_node_get_micromap_ref(node));
+   return micromap;
+}
+#endif
+
+#if ((VK_USED_BUILD_FLAGS & VK_BUILD_FLAG_HAS_MICROMAPS) != 0)
+#if ((VK_USED_BUILD_FLAGS & VK_BUILD_FLAG_HAS_QUADS) != 0)
 uint32_t
 vk_ir_node_size(uint32_t geometry_type)
 {
@@ -483,6 +541,8 @@ vk_ir_node_size(uint32_t geometry_type)
       size = SIZEOF(vk_ir_triangle_node);
       if (VK_TEST_BUILD_FLAG_HAS_QUADS)
          size += SIZEOF(vk_ir_triangle_node_quad);
+      if (VK_TEST_BUILD_FLAG_HAS_MICROMAPS)
+         size += SIZEOF(vk_ir_triangle_node_micromap);
    } else if (geometry_type == VK_GEOMETRY_TYPE_AABBS_KHR) {
       size = SIZEOF(vk_ir_aabb_node);
    } else {
@@ -490,6 +550,7 @@ vk_ir_node_size(uint32_t geometry_type)
    }
    return size;
 }
+#endif
 #endif
 
 #endif
