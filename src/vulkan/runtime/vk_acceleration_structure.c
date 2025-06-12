@@ -242,6 +242,15 @@ vk_acceleration_structure_build_state_init(struct vk_acceleration_structure_buil
        build_info->type == VK_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL_KHR && args->has_update)
       state->config.updateable = true;
 
+   state->has_micromap = false;
+   for (uint32_t j = 0; j < build_info->geometryCount; ++j) {
+      const VkAccelerationStructureGeometryKHR *geometry =
+         build_info->pGeometries ? &build_info->pGeometries[j] : build_info->ppGeometries[j];
+      const VkAccelerationStructureTrianglesOpacityMicromapKHR *micromap_info = vk_find_struct_const(
+         geometry->geometry.triangles.pNext, ACCELERATION_STRUCTURE_TRIANGLES_OPACITY_MICROMAP_KHR);
+      state->has_micromap |= !!micromap_info;
+   }
+
    if (device->as_build_ops->get_build_config)
       device->as_build_ops->get_build_config(vk_device_to_handle(device), state);
 
@@ -253,6 +262,8 @@ vk_acceleration_structure_build_state_init(struct vk_acceleration_structure_buil
       state->config.build_flags |= VK_BUILD_FLAG_64BIT_KEYS;
    if (state->config.late_pair_compression)
       state->config.build_flags |= VK_BUILD_FLAG_HAS_QUADS;
+   if (state->has_micromap)
+      state->config.build_flags |= VK_BUILD_FLAG_HAS_MICROMAPS;
 
    uint32_t keyval_size = state->config.u64_keys ? sizeof(struct key64_id_pair) : sizeof(struct key32_id_pair);
    uint32_t morton_keyvals_per_workgroup = args->morton_sort_workgroup_size * args->morton_sort_kvs_per_thread;
@@ -395,7 +406,7 @@ vk_get_bvh_build_pipeline_spv(struct vk_device *device, struct vk_meta_device *m
       .pCode = spv,
    };
 
-   VkSpecializationMapEntry spec_map[6] = {
+   VkSpecializationMapEntry spec_map[7] = {
       {
          .constantID = SUBGROUP_SIZE_ID,
          .offset = 0,
@@ -427,16 +438,24 @@ vk_get_bvh_build_pipeline_spv(struct vk_device *device, struct vk_meta_device *m
          .offset = sizeof(args->subgroup_size) + sizeof(args->bvh_bounds_offset) +
                    sizeof(flags) + sizeof(args->root_flags_offset) + sizeof(args->morton_sort_workgroup_size),
          .size = sizeof(args->morton_sort_kvs_per_thread),
-      }
+      },
+      {
+         .constantID = HAS_MICROMAPS_OFFSET_ID,
+         .offset = sizeof(args->subgroup_size) + sizeof(args->bvh_bounds_offset) +
+                   sizeof(flags) + sizeof(args->root_flags_offset) + sizeof(args->morton_sort_workgroup_size) +
+                   sizeof(args->morton_sort_kvs_per_thread),
+         .size = sizeof(args->has_micromaps_offset),
+      },
    };
 
-   uint32_t spec_constants[6] = {
+   uint32_t spec_constants[7] = {
       args->subgroup_size,
       args->bvh_bounds_offset,
       flags,
       args->root_flags_offset,
       args->morton_sort_workgroup_size,
       args->morton_sort_kvs_per_thread,
+      args->has_micromaps_offset,
    };
 
    VkSpecializationInfo spec_info = {
@@ -521,6 +540,26 @@ vk_fill_geometry_data(VkAccelerationStructureTypeKHR type, uint32_t first_id, ui
       data.stride = geometry->geometry.triangles.vertexStride;
       data.vertex_format = geometry->geometry.triangles.vertexFormat;
       data.index_format = geometry->geometry.triangles.indexType;
+
+      const VkAccelerationStructureTrianglesOpacityMicromapKHR *micromap_info =
+         vk_find_struct_const(geometry->geometry.triangles.pNext,
+                              ACCELERATION_STRUCTURE_TRIANGLES_OPACITY_MICROMAP_KHR);
+
+      if (micromap_info) {
+         data.micromap_indices = micromap_info->indexBuffer;
+         data.micromap_index_type = micromap_info->indexType;
+         data.micromap_index_stride = (int32_t)micromap_info->indexStride;
+         data.micromap_base_index = micromap_info->baseTriangle;
+
+         data.micromap_addr = 0;      
+         if (micromap_info->micromap) {
+            VK_FROM_HANDLE(vk_acceleration_structure, micromap, micromap_info->micromap);
+            data.micromap_addr = vk_acceleration_structure_get_va(micromap);
+         }
+      } else {
+         data.micromap_indices = 0;
+      }
+
       break;
    case VK_GEOMETRY_TYPE_AABBS_KHR:
       assert(type == VK_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL_KHR);
@@ -664,6 +703,8 @@ build_leaves(VkCommandBuffer commandBuffer, struct vk_device *device,
       commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline);
 
    for (uint32_t i = 0; i < build_count; ++i) {
+      if (states[i].build_info->type == VK_ACCELERATION_STRUCTURE_TYPE_OPACITY_MICROMAP_KHR)
+         continue;
       if (states[i].config.internal_type == VK_INTERNAL_BUILD_TYPE_UPDATE)
          continue;
       if ((states[i].config.build_flags & VK_LEAF_BUILD_FLAGS) != build_flags)
@@ -751,6 +792,8 @@ morton_generate(VkCommandBuffer commandBuffer, struct vk_device *device,
       commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline);
 
    for (uint32_t i = 0; i < build_count; ++i) {
+      if (states[i].build_info->type == VK_ACCELERATION_STRUCTURE_TYPE_OPACITY_MICROMAP_KHR)
+         continue;
       if (states[i].config.internal_type == VK_INTERNAL_BUILD_TYPE_UPDATE)
          continue;
       if ((states[i].config.build_flags & VK_MORTON_BUILD_FLAGS) != build_flags)
@@ -959,6 +1002,8 @@ lbvh_main(VkCommandBuffer commandBuffer, struct vk_device *device,
       commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline);
 
    for (uint32_t i = 0; i < build_count; ++i) {
+      if (states[i].build_info->type == VK_ACCELERATION_STRUCTURE_TYPE_OPACITY_MICROMAP_KHR)
+         continue;
       if (states[i].config.internal_type != VK_INTERNAL_BUILD_TYPE_LBVH)
          continue;
       if ((states[i].config.build_flags & VK_LBVH_MAIN_BUILD_FLAGS) != build_flags)
@@ -1023,6 +1068,8 @@ lbvh_generate_ir(VkCommandBuffer commandBuffer, struct vk_device *device,
       commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline);
 
    for (uint32_t i = 0; i < build_count; ++i) {
+      if (states[i].build_info->type == VK_ACCELERATION_STRUCTURE_TYPE_OPACITY_MICROMAP_KHR)
+         continue;
       if (states[i].config.internal_type != VK_INTERNAL_BUILD_TYPE_LBVH)
          continue;
       if ((states[i].config.build_flags & VK_LBVH_GENERATE_IR_BUILD_FLAGS) != build_flags)
@@ -1084,6 +1131,8 @@ ploc_build_internal(VkCommandBuffer commandBuffer, struct vk_device *device,
       commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline);
 
    for (uint32_t i = 0; i < build_count; ++i) {
+      if (states[i].build_info->type == VK_ACCELERATION_STRUCTURE_TYPE_OPACITY_MICROMAP_KHR)
+         continue;
       if (states[i].config.internal_type != VK_INTERNAL_BUILD_TYPE_PLOC)
          continue;
       if ((states[i].config.build_flags & VK_PLOC_BUILD_FLAGS) != build_flags)
@@ -1152,6 +1201,8 @@ hploc_build_internal(VkCommandBuffer commandBuffer, struct vk_device *device,
       commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline);
 
    for (uint32_t i = 0; i < build_count; ++i) {
+      if (states[i].build_info->type == VK_ACCELERATION_STRUCTURE_TYPE_OPACITY_MICROMAP_KHR)
+         continue;
       if (states[i].config.internal_type != VK_INTERNAL_BUILD_TYPE_HPLOC)
          continue;
       if ((states[i].config.build_flags & VK_HPLOC_BUILD_FLAGS) != build_flags)
@@ -1191,7 +1242,8 @@ vk_build_stage(vk_build_stage_cb cb, VkCommandBuffer commandBuffer, struct vk_de
 {
    for (uint32_t i = 0; i < build_count; i++) {
       bool build_is_update = states[i].config.internal_type == VK_INTERNAL_BUILD_TYPE_UPDATE;
-      if (states[i].processed || (update != build_is_update)) {
+      if (states[i].processed || (update != build_is_update) ||
+          states[i].build_info->type == VK_ACCELERATION_STRUCTURE_TYPE_OPACITY_MICROMAP_KHR) {
          states[i].processed = false;
          continue;
       }
@@ -1247,10 +1299,15 @@ vk_cmd_build_acceleration_structures(VkCommandBuffer commandBuffer,
    }
 
    for (uint32_t i = 0; i < infoCount; ++i) {
-      uint32_t leaf_node_count = 0;
-      for (uint32_t j = 0; j < pInfos[i].geometryCount; ++j) {
-         leaf_node_count += ppBuildRangeInfos[i][j].primitiveCount;
+      if (pInfos[i].type == VK_ACCELERATION_STRUCTURE_TYPE_OPACITY_MICROMAP_KHR) {
+         /* The build stages test build_info->type to skip micromaps. */
+         states[i].build_info = pInfos + i;
+         continue;
       }
+
+      uint32_t leaf_node_count = 0;
+      for (uint32_t j = 0; j < pInfos[i].geometryCount; ++j)
+         leaf_node_count += ppBuildRangeInfos[i][j].primitiveCount;
 
       vk_acceleration_structure_build_state_init(&states[i], cmd_buffer->base.device, leaf_node_count,
                                                  pInfos + i, args);

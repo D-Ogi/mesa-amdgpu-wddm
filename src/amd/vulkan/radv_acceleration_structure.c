@@ -1197,6 +1197,7 @@ radv_device_init_accel_struct_build_state(struct radv_device *device)
    build_args->subgroup_size = 64;
    build_args->bvh_bounds_offset = offsetof(struct radv_accel_struct_header, aabb);
    build_args->root_flags_offset = offsetof(struct radv_accel_struct_header, root_flags);
+   build_args->has_micromaps_offset = UINT32_MAX;
    build_args->propagate_cull_flags = pdev->info.gfx_level >= GFX11;
    build_args->emit_markers = device->sqtt.bo || device->utrace.context;
    build_args->has_update = true;

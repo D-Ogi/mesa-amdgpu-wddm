@@ -950,6 +950,7 @@ anv_device_init_accel_struct_build_state(struct anv_device *device)
           */
          .bvh_bounds_offset = 0,
          .root_flags_offset = offsetof(struct anv_accel_struct_header, root_flags),
+         .has_micromaps_offset = UINT32_MAX,
    };
 
 exit:
