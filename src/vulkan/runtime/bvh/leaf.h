@@ -90,6 +90,13 @@ build_triangle(inout vk_aabb bounds, VOID_REF dst_ptr, vk_bvh_geometry_data geom
       DEREF(quad).triangle_id = VK_QUAD_TRIANGLE_ID_UNUSED;
    }
 
+   if (VK_TEST_BUILD_FLAG_HAS_MICROMAPS) {
+      REF(vk_ir_triangle_node_micromap) micromap = vk_ir_triangle_node_get_micromap_ref(node);
+      DEREF(micromap).opacity_addr_lo = unpackUint2x32(geom_data.micromap_addr).x;
+      DEREF(micromap).opacity_addr_hi = unpackUint2x32(geom_data.micromap_addr).y;
+      DEREF(micromap).opacity_index = vk_load_micromap_index(geom_data, global_id);
+   }
+
    return is_valid;
 }
 
@@ -193,9 +200,14 @@ build_instance(inout vk_aabb bounds, VOID_REF src_ptr, VOID_REF dst_ptr, uint32_
    if (any(isnan(bounds.min)) || any(isnan(bounds.max)))
       return false;
 
+   uint32_t sbt_offset_and_flags = instance.sbt_offset_and_flags;
+   /* Explicitly disable micromaps if the BLAS does not use micromaps. */
+   if (HAS_MICROMAPS_OFFSET >= 0 && DEREF(REF(uint32_t)(instance.accelerationStructureReference + HAS_MICROMAPS_OFFSET)) == 0)
+      sbt_offset_and_flags |= (VK_GEOMETRY_INSTANCE_DISABLE_OPACITY_MICROMAPS_BIT_KHR << 24);
+
    DEREF(node).base.aabb = bounds;
    DEREF(node).custom_instance_and_mask = instance.custom_instance_and_mask;
-   DEREF(node).sbt_offset_and_flags = instance.sbt_offset_and_flags;
+   DEREF(node).sbt_offset_and_flags = sbt_offset_and_flags;
    DEREF(node).instance_id = global_id;
 
    if (!VK_TEST_BUILD_FLAG_PROPAGATE_CULL_FLAGS)

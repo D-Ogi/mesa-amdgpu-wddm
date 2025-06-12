@@ -153,6 +153,12 @@ struct vk_ir_triangle_node_quad {
    float coords[3];
 };
 
+struct vk_ir_triangle_node_micromap {
+   uint32_t opacity_addr_lo;
+   uint32_t opacity_addr_hi;
+   int32_t opacity_index;
+};
+
 struct vk_ir_instance_node {
    vk_ir_node base;
    /* See radv_bvh_instance_node */
@@ -175,6 +181,8 @@ struct vk_bvh_geometry_data {
    uint64_t data;
    uint64_t indices;
    uint64_t transform;
+   uint64_t micromap_indices;
+   uint64_t micromap_addr;
 
    uint32_t geometry_id;
    uint32_t geometry_type;
@@ -182,6 +190,9 @@ struct vk_bvh_geometry_data {
    uint32_t stride;
    uint32_t vertex_format;
    uint32_t index_format;
+   uint32_t micromap_index_stride;
+   uint32_t micromap_index_type;
+   uint32_t micromap_base_index;
 };
 
 struct key32_id_pair {
@@ -349,6 +360,8 @@ struct morton_ready_count {
 #define VK_GEOMETRY_INSTANCE_TRIANGLE_FLIP_FACING_BIT_KHR         2
 #define VK_GEOMETRY_INSTANCE_FORCE_OPAQUE_BIT_KHR                 4
 #define VK_GEOMETRY_INSTANCE_FORCE_NO_OPAQUE_BIT_KHR              8
+#define VK_GEOMETRY_INSTANCE_FORCE_OPACITY_MICROMAP_2_STATE_BIT_KHR 16
+#define VK_GEOMETRY_INSTANCE_DISABLE_OPACITY_MICROMAPS_BIT_KHR    32
 
 #define TYPE(type, align)                                                                                              \
    layout(buffer_reference, buffer_reference_align = align, scalar) buffer type##_ref                                  \
@@ -403,6 +416,7 @@ TYPE(vk_ir_node, 4);
 TYPE(vk_ir_box_node, 4);
 TYPE(vk_ir_triangle_node, 4);
 TYPE(vk_ir_triangle_node_quad, 4);
+TYPE(vk_ir_triangle_node_micromap, 4);
 TYPE(vk_ir_aabb_node, 4);
 TYPE(vk_ir_instance_node, 8);
 
@@ -434,15 +448,17 @@ TYPE(vk_prefix_scan_partition, 4);
 #define ROOT_FLAGS_OFFSET_ID 3
 #define MORTON_SORT_WORKGROUP_SIZE_ID 4
 #define MORTON_SORT_KVS_PER_THREAD_ID 5
+#define HAS_MICROMAPS_OFFSET_ID 6
 
 #define VK_BUILD_FLAG_ALWAYS_ACTIVE (1 << 0)
 #define VK_BUILD_FLAG_PROPAGATE_CULL_FLAGS (1 << 1)
 #define VK_BUILD_FLAG_64BIT_KEYS (1 << 2)
 #define VK_BUILD_FLAG_HAS_QUADS (1 << 3)
-#define VK_BUILD_FLAG_COUNT 4
+#define VK_BUILD_FLAG_HAS_MICROMAPS (1 << 4)
+#define VK_BUILD_FLAG_COUNT 5
 
 #define VK_LEAF_BUILD_FLAGS (VK_BUILD_FLAG_ALWAYS_ACTIVE | VK_BUILD_FLAG_PROPAGATE_CULL_FLAGS | \
-                             VK_BUILD_FLAG_HAS_QUADS)
+                             VK_BUILD_FLAG_HAS_QUADS | VK_BUILD_FLAG_HAS_MICROMAPS)
 
 struct leaf_args {
    VOID_REF bvh;
