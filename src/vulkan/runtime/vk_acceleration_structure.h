@@ -131,6 +131,7 @@ struct vk_acceleration_structure_build_state {
    uint32_t internal_node_count;
    struct vk_scratch_layout scratch;
    struct vk_build_config config;
+   bool has_micromap;
 
    /* Internal state of vk_acceleration_structure.c */
    uint32_t scratch_offset;
@@ -148,6 +149,7 @@ struct vk_acceleration_structure_build_args {
    uint32_t root_flags_offset;
    uint32_t morton_sort_workgroup_size;
    uint32_t morton_sort_kvs_per_thread;
+   uint32_t has_micromaps_offset;
    bool propagate_cull_flags;
    bool emit_markers;
    bool has_update;
@@ -265,6 +267,8 @@ vk_ir_node_size(VkGeometryTypeKHR geometry_type, uint32_t build_flags)
       size = sizeof(struct vk_ir_triangle_node);
       if (build_flags & VK_BUILD_FLAG_HAS_QUADS)
          size += sizeof(struct vk_ir_triangle_node_quad);
+      if (build_flags & VK_BUILD_FLAG_HAS_MICROMAPS)
+         size += sizeof(struct vk_ir_triangle_node_micromap);
    } else if (geometry_type == VK_GEOMETRY_TYPE_AABBS_KHR) {
       size = sizeof(struct vk_ir_aabb_node);
    } else {
