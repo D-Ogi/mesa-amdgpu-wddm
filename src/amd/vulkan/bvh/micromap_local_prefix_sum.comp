@@ -1,0 +1,58 @@
+/*
+ * Copyright © 2025 Valve Corporation
+ *
+ * SPDX-License-Identifier: MIT
+ */
+
+#version 460
+
+#extension GL_GOOGLE_include_directive : require
+
+#extension GL_EXT_shader_explicit_arithmetic_types_int8 : require
+#extension GL_EXT_shader_explicit_arithmetic_types_int16 : require
+#extension GL_EXT_shader_explicit_arithmetic_types_int32 : require
+#extension GL_EXT_shader_explicit_arithmetic_types_int64 : require
+#extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
+#extension GL_EXT_scalar_block_layout : require
+#extension GL_EXT_buffer_reference : require
+#extension GL_EXT_buffer_reference2 : require
+#extension GL_KHR_shader_subgroup_arithmetic : require
+#extension GL_KHR_shader_subgroup_ballot : require
+#extension GL_KHR_shader_subgroup_basic : require
+
+layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
+
+#define VK_USED_BUILD_FLAGS (0)
+#include "bvh_helpers.h"
+
+layout(push_constant) uniform CONSTS
+{
+   micromap_prefix_sum_args args;
+};
+
+struct VkMicromapTriangleKHR {
+   uint32_t dataOffset;
+   uint16_t subdivisionLevel;
+   uint16_t format;
+};
+
+TYPE(VkMicromapTriangleKHR, 4);
+
+void
+main(void)
+{
+   uint32_t global_id = gl_GlobalInvocationID.x;
+
+   VkMicromapTriangleKHR triangle = DEREF(REF(VkMicromapTriangleKHR)(args.triangles + global_id * args.stride));
+
+   uint32_t data_count = 1u << (triangle.subdivisionLevel * 2);
+   uint32_t dword_count = max(data_count * 2 / 32, 1);
+
+   uint32_t prefix_sum = subgroupExclusiveAdd(dword_count);
+   DEREF(INDEX(uint32_t, args.local_offsets, global_id)) = prefix_sum;
+
+   if (gl_SubgroupInvocationID == subgroupBallotFindMSB(subgroupBallot(true))) {
+      DEREF(INDEX(radv_micromap_prefix_sum_partition, args.partitions, global_id / gl_SubgroupSize)).local_sum =
+         prefix_sum + dword_count;
+   }
+}

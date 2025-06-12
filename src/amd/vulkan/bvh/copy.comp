@@ -27,25 +27,23 @@ main(void)
    uint64_t copy_dst_addr = args.dst_addr;
 
    if (args.mode == RADV_COPY_MODE_DESERIALIZE) {
-      copy_src_addr += SIZEOF(radv_accel_struct_serialization_header) +
-                       DEREF(REF(radv_accel_struct_serialization_header)(args.src_addr)).instance_count * SIZEOF(uint64_t);
-
+      radv_accel_struct_serialization_header_base serialization_header =
+         DEREF(REF(radv_accel_struct_serialization_header_base)(args.src_addr));
+      copy_src_addr += serialization_header.serialization_size - serialization_header.compacted_size;
    }
 
    REF(radv_accel_struct_header) header = REF(radv_accel_struct_header)(copy_src_addr);
    uint64_t size = DEREF(header).compacted_size;
 
    if (args.mode == RADV_COPY_MODE_SERIALIZE) {
-      uint64_t instance_count = DEREF(header).instance_count;
-
-      copy_dst_addr += SIZEOF(radv_accel_struct_serialization_header) + instance_count * SIZEOF(uint64_t);
+      uint64_t serialization_size = DEREF(header).serialization_size;
+      copy_dst_addr += serialization_size - size;
 
       if (global_id == 0) {
-         REF(radv_accel_struct_serialization_header) ser_header =
-            REF(radv_accel_struct_serialization_header)(args.dst_addr);
-         DEREF(ser_header).serialization_size = DEREF(header).serialization_size;
+         REF(radv_accel_struct_serialization_header_base) ser_header =
+            REF(radv_accel_struct_serialization_header_base)(args.dst_addr);
+         DEREF(ser_header).serialization_size = serialization_size;
          DEREF(ser_header).compacted_size = size;
-         DEREF(ser_header).instance_count = instance_count;
       }
    }
 

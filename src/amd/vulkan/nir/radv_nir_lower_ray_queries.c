@@ -571,6 +571,7 @@ lower_rq_proceed(nir_builder *b, nir_intrinsic_instr *instr, struct ray_query_va
       .vars = trav_vars,
       .stack_entries = vars->stack_entries,
       .ignore_cull_mask = ignore_cull_mask,
+      .has_opacity_micromap = b->shader->info.ray_query_has_opacity_micromap,
       .stack_store_cb = store_stack_entry,
       .stack_load_cb = load_stack_entry,
       .aabb_cb = handle_candidate_aabb,

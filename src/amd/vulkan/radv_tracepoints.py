@@ -118,6 +118,9 @@ begin_end_tp('encode_triangles_retry', toggle_name='internal', tp_args=[
 begin_end_tp('init_header', toggle_name='internal', tp_args=[
     Arg(type='uint32_t', var='build_flags', c_format=r'0x%x', fuzzy_hash=''),
 ])
+begin_end_tp('micromap_local_prefix_sum', toggle_name='internal')
+begin_end_tp('micromap_global_prefix_sum', toggle_name='internal')
+begin_end_tp('micromap_transcode', toggle_name='internal')
 
 class ArgInfo:
     def __init__(self, type, c_format, name, expr=None):
