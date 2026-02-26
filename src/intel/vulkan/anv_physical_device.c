@@ -619,6 +619,7 @@ get_device_extensions(const struct anv_physical_device *device,
       .EXT_shader_atomic_float2              = true,
       .EXT_shader_demote_to_helper_invocation = true,
       .EXT_shader_image_atomic_int64         = true,
+      .EXT_shader_long_vector                = true,
       .EXT_shader_module_identifier          = true,
       .EXT_shader_object                     = true,
       .EXT_shader_replicated_composites      = true,
@@ -1256,6 +1257,9 @@ get_features(const struct anv_physical_device *pdevice,
 
       /* VK_EXT_shader_object */
       .shaderObject = true,
+
+      /* VK_EXT_shader_long_vector */
+      .longVector = true,
 
       /* VK_EXT_shader_uniform_buffer_unsized_array */
       .shaderUniformBufferUnsizedArray = true,
@@ -2427,6 +2431,11 @@ get_properties(const struct anv_physical_device *pdevice,
       memcpy(props->shaderModuleIdentifierAlgorithmUUID,
              vk_shaderModuleIdentifierAlgorithmUUID,
              sizeof(props->shaderModuleIdentifierAlgorithmUUID));
+   }
+
+   /* VK_EXT_shader_long_vector */
+   {
+      props->maxVectorComponents = 1024;
    }
 
    /* VK_EXT_transform_feedback */
