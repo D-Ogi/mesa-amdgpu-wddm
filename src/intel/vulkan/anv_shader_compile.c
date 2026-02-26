@@ -350,6 +350,8 @@ anv_shader_get_spirv_options(struct vk_physical_device *device,
       .min_ubo_alignment = ANV_UBO_ALIGNMENT,
       .min_ssbo_alignment = ANV_SSBO_ALIGNMENT,
 
+      .max_vector_components = pdevice->vk.properties.maxVectorComponents,
+
       .workarounds = {
          .lower_terminate_to_discard = pdevice->drirc.debug.lower_terminate_to_discard,
       },
