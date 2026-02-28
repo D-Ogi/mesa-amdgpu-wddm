@@ -155,6 +155,39 @@ handle_workgroup_size_decoration_cb(struct vtn_builder *b,
    b->workgroup_size_builtin = val;
 }
 
+static inline nir_const_value
+vtn_constant_nonnative_float_to_f32(const glsl_type *t, nir_const_value c)
+{
+   if (glsl_type_is_bfloat_16(t))
+      c.f32 = _mesa_bfloat16_bits_to_float(c.u16);
+   else if (glsl_type_is_e4m3fn(t))
+      c.f32 = _mesa_e4m3fn_to_float(c.u8);
+   else if (glsl_type_is_e5m2(t))
+      c.f32 = _mesa_e5m2_to_float(c.u8);
+
+   return c;
+}
+
+static inline nir_const_value
+vtn_constant_f32_to_nonnative_float(const glsl_type *t, nir_const_value c, bool saturate)
+{
+   nir_const_value v;
+   memset(&v, 0, sizeof(v));
+
+   if (glsl_type_is_bfloat_16(t))
+      v.u16 = _mesa_float_to_bfloat16_bits_rte(c.f32);
+   else if (glsl_type_is_e4m3fn(t))
+      v.u8 = saturate ? _mesa_float_to_e4m3fn_sat(c.f32)
+                      : _mesa_float_to_e4m3fn(c.f32);
+   else if (glsl_type_is_e5m2(t))
+      v.u8 = saturate ? _mesa_float_to_e5m2_sat(c.f32)
+                      : _mesa_float_to_e5m2(c.f32);
+   else
+      v = c;
+
+   return v;
+}
+
 static void
 vtn_handle_spec_constant_op(struct vtn_builder *b, struct vtn_value *val,
                             const uint32_t *w, unsigned count)
@@ -439,13 +472,8 @@ vtn_handle_spec_constant_op(struct vtn_builder *b, struct vtn_value *val,
 
          unsigned j = swap ? 1 - i : i;
          for (unsigned c = 0; c < src_comps; c++) {
-            src[j][c] = src_val[i]->constant->values[c];
-            if (glsl_type_is_bfloat_16(src_type[i]))
-               src[j][c].f32 = _mesa_bfloat16_bits_to_float(src[j][c].u16);
-            else if (glsl_type_is_e4m3fn(src_type[i]))
-               src[j][c].f32 = _mesa_e4m3fn_to_float(src[j][c].u8);
-            else if (glsl_type_is_e5m2(src_type[i]))
-               src[j][c].f32 = _mesa_e5m2_to_float(src[j][c].u8);
+            src[j][c] = vtn_constant_nonnative_float_to_f32(
+                  src_type[i], src_val[i]->constant->values[c]);
          }
 
          /* Fix up source to respect NIR expected sizes. */
@@ -479,24 +507,8 @@ vtn_handle_spec_constant_op(struct vtn_builder *b, struct vtn_value *val,
                             b->shader->info.float_controls_execution_mode);
 
       for (int i = 0; i < num_components; i++) {
-         uint16_t conv;
-         if (glsl_type_is_bfloat_16(dst_type)) {
-            conv = _mesa_float_to_bfloat16_bits_rte(val->constant->values[i].f32);
-         } else if (glsl_type_is_e4m3fn(dst_type)) {
-            if (saturate)
-               conv = _mesa_float_to_e4m3fn_sat(val->constant->values[i].f32);
-            else
-               conv = _mesa_float_to_e4m3fn(val->constant->values[i].f32);
-         } else if (glsl_type_is_e5m2(dst_type)) {
-            if (saturate)
-               conv = _mesa_float_to_e5m2_sat(val->constant->values[i].f32);
-            else
-               conv = _mesa_float_to_e5m2(val->constant->values[i].f32);
-         } else {
-            continue;
-         }
-
-         val->constant->values[i] = nir_const_value_for_raw_uint(conv, glsl_get_bit_size(dst_type));
+         val->constant->values[i] = vtn_constant_f32_to_nonnative_float(
+               dst_type, val->constant->values[i], saturate);
       }
 
       break;
