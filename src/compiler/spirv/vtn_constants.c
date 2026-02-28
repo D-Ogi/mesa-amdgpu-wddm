@@ -10,6 +10,25 @@
 #include "util/bfloat.h"
 #include "util/float8.h"
 
+static unsigned
+vtn_type_bit_size(struct vtn_type *t)
+{
+   return glsl_get_bit_size(t->type);
+}
+
+static nir_const_value
+vtn_constant_get(const struct vtn_value *val, unsigned idx)
+{
+   return val->constant->values[idx];
+}
+
+static void
+vtn_constant_set(struct vtn_value *val, unsigned idx,
+                 nir_const_value value)
+{
+   val->constant->values[idx] = value;
+}
+
 nir_constant *
 vtn_null_constant(struct vtn_builder *b, struct vtn_type *type)
 {
@@ -206,8 +225,8 @@ vtn_handle_spec_constant_op(struct vtn_builder *b, struct vtn_value *val,
       unsigned src_len = vtn_type_num_elements(src->type);
       unsigned dst_len = vtn_type_num_elements(val->type);
 
-      unsigned src_bit_size = glsl_get_bit_size(src->type->type);
-      unsigned dst_bit_size = glsl_get_bit_size(val->type->type);
+      unsigned src_bit_size = vtn_type_bit_size(src->type);
+      unsigned dst_bit_size = vtn_type_bit_size(val->type);
 
       vtn_assert(src_len * src_bit_size == dst_len * dst_bit_size);
 
@@ -218,7 +237,7 @@ vtn_handle_spec_constant_op(struct vtn_builder *b, struct vtn_value *val,
       if (src_bit_size == dst_bit_size) {
          /* This is just a copy */
          for (unsigned i = 0; i < src_len; i++)
-            val->constant->values[i] = src->constant->values[i];
+            vtn_constant_set(val, i, vtn_constant_get(src, i));
       } else {
          /* You can't non-trivially bitcast booleans */
          vtn_assert(src_bit_size >= 8 && dst_bit_size >= 8);
@@ -231,7 +250,7 @@ vtn_handle_spec_constant_op(struct vtn_builder *b, struct vtn_value *val,
          uint8_t bits[NIR_MAX_VEC_COMPONENTS * sizeof(nir_const_value)];
 
          for (unsigned i = 0; i < src_len; i++) {
-            uint64_t v = nir_const_value_as_int(src->constant->values[i],
+            uint64_t v = nir_const_value_as_int(vtn_constant_get(src, i),
                                                 src_bit_size);
             memcpy(bits + i * src_byte_size, &v, src_byte_size);
          }
@@ -239,8 +258,8 @@ vtn_handle_spec_constant_op(struct vtn_builder *b, struct vtn_value *val,
          for (unsigned i = 0; i < dst_len; i++) {
             uint64_t v = 0;
             memcpy(&v, bits + i * dst_byte_size, dst_byte_size);
-            val->constant->values[i] =
-               nir_const_value_for_uint(v, dst_bit_size);
+            vtn_constant_set(val, i,
+                  nir_const_value_for_uint(v, dst_bit_size));
          }
       }
       break;
@@ -259,9 +278,9 @@ vtn_handle_spec_constant_op(struct vtn_builder *b, struct vtn_value *val,
 
       vtn_assert(len0 + len1 < 16);
 
-      unsigned bit_size = glsl_get_bit_size(val->type->type);
-      unsigned bit_size0 = glsl_get_bit_size(v0->type->type);
-      unsigned bit_size1 = glsl_get_bit_size(v1->type->type);
+      unsigned bit_size  = vtn_type_bit_size(val->type);
+      unsigned bit_size0 = vtn_type_bit_size(v0->type);
+      unsigned bit_size1 = vtn_type_bit_size(v1->type);
 
       vtn_assert(bit_size == bit_size0 && bit_size == bit_size1);
       (void)bit_size0; (void)bit_size1;
@@ -272,11 +291,11 @@ vtn_handle_spec_constant_op(struct vtn_builder *b, struct vtn_value *val,
 
       if (v0->value_type == vtn_value_type_constant) {
          for (unsigned i = 0; i < len0; i++)
-            combined[i] = v0->constant->values[i];
+            combined[i] = vtn_constant_get(v0, i);
       }
       if (v1->value_type == vtn_value_type_constant) {
          for (unsigned i = 0; i < len1; i++)
-            combined[len0 + i] = v1->constant->values[i];
+            combined[len0 + i] = vtn_constant_get(v1, i);
       }
 
       for (unsigned i = 0, j = 0; i < count - 6; i++, j++) {
@@ -285,12 +304,12 @@ vtn_handle_spec_constant_op(struct vtn_builder *b, struct vtn_value *val,
             /* If component is not used, set the value to a known constant
              * to detect if it is wrongly used.
              */
-            val->constant->values[j] = undef;
+            vtn_constant_set(val, j, undef);
          } else {
             vtn_fail_if(comp >= len0 + len1,
                         "All Component literals must either be FFFFFFFF "
                         "or in [0, N - 1] (inclusive).");
-            val->constant->values[j] = combined[comp];
+            vtn_constant_set(val, j, combined[comp]);
          }
       }
       break;
@@ -473,7 +492,7 @@ vtn_handle_spec_constant_op(struct vtn_builder *b, struct vtn_value *val,
          unsigned j = swap ? 1 - i : i;
          for (unsigned c = 0; c < src_comps; c++) {
             src[j][c] = vtn_constant_nonnative_float_to_f32(
-                  src_type[i], src_val[i]->constant->values[c]);
+                  src_type[i], vtn_constant_get(src_val[i], c));
          }
 
          /* Fix up source to respect NIR expected sizes. */
@@ -507,8 +526,9 @@ vtn_handle_spec_constant_op(struct vtn_builder *b, struct vtn_value *val,
                             b->shader->info.float_controls_execution_mode);
 
       for (int i = 0; i < num_components; i++) {
-         val->constant->values[i] = vtn_constant_f32_to_nonnative_float(
-               dst_type, val->constant->values[i], saturate);
+         vtn_constant_set(val, i,
+            vtn_constant_f32_to_nonnative_float(dst_type,
+               vtn_constant_get(val, i), saturate));
       }
 
       break;
