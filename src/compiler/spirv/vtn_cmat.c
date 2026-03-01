@@ -301,7 +301,7 @@ vtn_handle_cooperative_instruction(struct vtn_builder *b, SpvOp opcode,
          if (ssa->is_variable) {
             deref = nir_build_deref_var(&b->nb, ssa->var);
             def = &deref->def;
-         } else if (glsl_type_is_vector_or_scalar(ssa->type)) {
+         } else if (glsl_type_is_vector_or_scalar(ssa->type->type)) {
             def = ssa->def;
          } else
             def = ssa->elems[0]->def;
@@ -335,7 +335,7 @@ vtn_handle_cooperative_instruction(struct vtn_builder *b, SpvOp opcode,
       if (tensor_addressing & SpvTensorAddressingOperandsTensorViewMask) {
          struct vtn_type *view_type = vtn_get_value_type(b, w[idx]);
          struct vtn_ssa_value *view_val = vtn_ssa_value(b, w[idx]);
-         nir_deref_instr *view_tmp = vtn_create_cmat_temporary(b, view_val->type, "store_view_tmp");
+         nir_deref_instr *view_tmp = vtn_create_cmat_temporary(b, view_val->type->type, "store_view_tmp");
          vtn_local_store(b, view_val, view_tmp, 0);
          view = &view_tmp->def;
          tensor_load.tensor_view = 1;
@@ -359,7 +359,7 @@ vtn_handle_cooperative_instruction(struct vtn_builder *b, SpvOp opcode,
       tensor_load.layout_clamp_mode = layout_type->tensor_layout_clamp_mode;
 
       struct vtn_ssa_value *layout_val = vtn_ssa_value(b, w[5]);
-      nir_deref_instr *layout_tmp = vtn_create_cmat_temporary(b, layout_val->type, "store_layout_tmp");
+      nir_deref_instr *layout_tmp = vtn_create_cmat_temporary(b, layout_val->type->type, "store_layout_tmp");
       vtn_local_store(b, layout_val, layout_tmp, 0);
 
       nir_deref_instr *dst = vtn_create_cmat_temporary(b, dst_type->type, "cmat_tensor");
@@ -386,7 +386,7 @@ vtn_handle_cooperative_instruction(struct vtn_builder *b, SpvOp opcode,
       nir_deref_instr *src = vtn_get_cmat_deref(b, w[2]);
 
       struct vtn_ssa_value *layout_val = vtn_ssa_value(b, w[3]);
-      nir_deref_instr *layout_tmp = vtn_create_cmat_temporary(b, layout_val->type, "store_layout_tmp");
+      nir_deref_instr *layout_tmp = vtn_create_cmat_temporary(b, layout_val->type->type, "store_layout_tmp");
       vtn_local_store(b, layout_val, layout_tmp, 0);
 
       nir_def *view = NULL;
@@ -403,7 +403,7 @@ vtn_handle_cooperative_instruction(struct vtn_builder *b, SpvOp opcode,
          if (w[idx] == SpvTensorAddressingOperandsTensorViewMask) {
             struct vtn_type *view_type = vtn_get_value_type(b, w[idx + 1]);
             struct vtn_ssa_value *view_val = vtn_ssa_value(b, w[idx + 1]);
-            nir_deref_instr *view_tmp = vtn_create_cmat_temporary(b, view_val->type, "store_view_tmp");
+            nir_deref_instr *view_tmp = vtn_create_cmat_temporary(b, view_val->type->type, "store_view_tmp");
             vtn_local_store(b, view_val, view_tmp, 0);
             view = &view_tmp->def;
             tensor_load.tensor_view = 1;
@@ -528,8 +528,8 @@ vtn_handle_cooperative_alu(struct vtn_builder *b, struct vtn_value *dest_val,
          nir_deref_instr *mat = vtn_get_cmat_deref(b, w[3]);
 
          struct vtn_ssa_value *scalar_val = vtn_ssa_value(b, w[4]);
-         vtn_assert(glsl_type_is_scalar(scalar_val->type));
-         nir_op op = glsl_type_is_integer(scalar_val->type) ? nir_op_imul : nir_op_fmul;
+         vtn_assert(glsl_type_is_scalar(scalar_val->type->type));
+         nir_op op = glsl_type_is_integer(scalar_val->type->type) ? nir_op_imul : nir_op_fmul;
 
          nir_deref_instr *dst = vtn_create_cmat_temporary(b, dst_type->type, "cmat_times_scalar");
          nir_cmat_scalar_op(&b->nb, &dst->def, &mat->def, scalar_val->def,
@@ -547,15 +547,15 @@ struct vtn_ssa_value *
 vtn_cooperative_matrix_extract(struct vtn_builder *b, struct vtn_ssa_value *mat,
                                const uint32_t *indices, unsigned num_indices)
 {
-   vtn_assert(glsl_type_is_cmat(mat->type));
+   vtn_assert(glsl_type_is_cmat(mat->type->type));
    nir_deref_instr *mat_deref = vtn_get_deref_for_ssa_value(b, mat);
 
    vtn_assert(num_indices == 1);
    nir_def *index = nir_imm_intN_t(&b->nb, indices[0], 32);
 
-   const struct glsl_type *element_type = glsl_get_cmat_element(mat->type);
+   const struct vtn_type *element_type = mat->type->component_type;
    struct vtn_ssa_value *ret = vtn_create_ssa_value(b, element_type);
-   ret->def = nir_cmat_extract(&b->nb, glsl_get_bit_size(element_type), &mat_deref->def, index);
+   ret->def = nir_cmat_extract(&b->nb, glsl_get_bit_size(element_type->type), &mat_deref->def, index);
    return ret;
 }
 
@@ -564,7 +564,7 @@ vtn_cooperative_matrix_insert(struct vtn_builder *b, struct vtn_ssa_value *mat,
                               struct vtn_ssa_value *insert, const uint32_t *indices,
                               unsigned num_indices)
 {
-   vtn_assert(glsl_type_is_cmat(mat->type));
+   vtn_assert(glsl_type_is_cmat(mat->type->type));
    nir_deref_instr *mat_deref = vtn_get_deref_for_ssa_value(b, mat);
 
    vtn_assert(num_indices == 1);
@@ -573,7 +573,7 @@ vtn_cooperative_matrix_insert(struct vtn_builder *b, struct vtn_ssa_value *mat,
    nir_deref_instr *dst = vtn_create_cmat_temporary(b, mat_deref->type, "cmat_insert");
    nir_cmat_insert(&b->nb, &dst->def, insert->def, &mat_deref->def, index);
 
-   struct vtn_ssa_value *ret = vtn_create_ssa_value(b, dst->type);
+   struct vtn_ssa_value *ret = vtn_create_ssa_value(b, mat->type);
    vtn_set_ssa_value_var(b, ret, dst->var);
    return ret;
 }
@@ -680,7 +680,7 @@ init_vec_field(struct vtn_builder *b,
 {
    struct vtn_ssa_value *new_field = vtn_create_ssa_value(b, field->type);
    nir_def *srcs[5];
-   int nc = glsl_get_vector_elements(field->type);
+   int nc = glsl_get_vector_elements(field->type->type);
    for (unsigned i = 0; i < nc; i++) {
       srcs[i] = vtn_get_nir_ssa(b, w[4 + i]);
    }
@@ -716,7 +716,7 @@ init_clip_scalars(struct vtn_builder *b,
       uint32_t this_index = index_base + f;
       struct vtn_ssa_value *field = vtn_composite_extract(b, src, &this_index, 1);
       struct vtn_ssa_value *new_field = vtn_create_ssa_value(b, field->type);
-      assert(glsl_get_vector_elements(field->type) <= 1);
+      assert(glsl_get_vector_elements(field->type->type) <= 1);
       new_field->def = vtn_get_nir_ssa(b, w[4 + f]);
 
       new = vtn_composite_insert(b, new, src_type, new_field, &this_index, 1);
@@ -781,7 +781,7 @@ vtn_handle_tensor_layout_instruction(struct vtn_builder *b, SpvOp opcode,
       struct vtn_ssa_value *new_offset_field = vtn_create_ssa_value(b, offset_field->type);
       nir_def *offsets[5];
 
-      int nc = glsl_get_vector_elements(dim_field->type);
+      int nc = glsl_get_vector_elements(dim_field->type->type);
       for (unsigned i = 0; i < nc; i++) {
          offsets[i] = nir_imm_int(&b->nb, 0);
       }
@@ -829,7 +829,7 @@ vtn_handle_tensor_layout_instruction(struct vtn_builder *b, SpvOp opcode,
       struct vtn_ssa_value *field = vtn_composite_extract(b, src, &offset_index, 1);
       struct vtn_ssa_value *new_field = vtn_create_ssa_value(b, field->type);
       nir_def *srcs[5];
-      int nc = glsl_get_vector_elements(field->type);
+      int nc = glsl_get_vector_elements(field->type->type);
       for (unsigned i = 0; i < nc; i++) {
          srcs[i] = nir_iadd(&b->nb, nir_channel(&b->nb, field->def, i), vtn_get_nir_ssa(b, w[4 + i * 2]));
       }
@@ -839,7 +839,7 @@ vtn_handle_tensor_layout_instruction(struct vtn_builder *b, SpvOp opcode,
       unsigned span_index = NIR_TENSOR_LAYOUT_SPAN;
       field = vtn_composite_extract(b, new, &span_index, 1);
       new_field = vtn_create_ssa_value(b, field->type);
-      nc = glsl_get_vector_elements(field->type);
+      nc = glsl_get_vector_elements(field->type->type);
       for (unsigned i = 0; i < nc; i++) {
          srcs[i] = vtn_get_nir_ssa(b, w[5 + i * 2]);
       }
@@ -867,7 +867,7 @@ vtn_handle_tensor_layout_instruction(struct vtn_builder *b, SpvOp opcode,
       nir_def *strides[5];
       unsigned stride_index = NIR_TENSOR_VIEW_STRIDE;
       struct vtn_ssa_value *field = vtn_composite_extract(b, new, &stride_index, 1);
-      int nc = glsl_get_vector_elements(field->type);
+      int nc = glsl_get_vector_elements(field->type->type);
       strides[nc - 1] = nir_imm_int(&b->nb, 1);
       for (int dim = nc - 2; dim >= 0; dim--) {
          strides[dim] = nir_imul(&b->nb, strides[dim + 1], nir_channel(&b->nb, new_dim_field->def, dim + 1));

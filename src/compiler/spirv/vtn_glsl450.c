@@ -79,7 +79,7 @@ build_det(nir_builder *b, nir_def **col, unsigned size)
 static nir_def *
 build_mat_det(struct vtn_builder *b, struct vtn_ssa_value *src)
 {
-   unsigned size = glsl_get_vector_elements(src->type);
+   unsigned size = glsl_get_vector_elements(src->type->type);
 
    nir_def *cols[4];
    for (unsigned i = 0; i < size; i++)
@@ -92,7 +92,7 @@ static struct vtn_ssa_value *
 matrix_inverse(struct vtn_builder *b, struct vtn_ssa_value *src)
 {
    nir_def *adj_col[4];
-   unsigned size = glsl_get_vector_elements(src->type);
+   unsigned size = glsl_get_vector_elements(src->type->type);
 
    nir_def *cols[4];
    for (unsigned i = 0; i < size; i++)
@@ -191,7 +191,7 @@ handle_glsl450_alu(struct vtn_builder *b, enum GLSLstd450 entrypoint,
                    const uint32_t *w, unsigned count)
 {
    struct nir_builder *nb = &b->nb;
-   const struct glsl_type *dest_type = vtn_get_type(b, w[1])->type;
+   const struct vtn_type *dest_type = vtn_get_type(b, w[1]);
 
    const bool mediump_16bit =
       vtn_value_needs_mediump_16bit(b, vtn_untyped_value(b, w[2]));
@@ -515,7 +515,7 @@ handle_glsl450_modf_frexp(struct vtn_builder *b, enum GLSLstd450 opcode,
 
    nir_def *src = vtn_src->def;
 
-   struct vtn_ssa_value *dest = vtn_create_ssa_value(b, dest_type);
+   struct vtn_ssa_value *dest = vtn_create_ssa_value(b, vtn_get_type(b, w[1]));
 
    switch (opcode) {
    case GLSLstd450Modf: {
@@ -537,7 +537,7 @@ handle_glsl450_modf_frexp(struct vtn_builder *b, enum GLSLstd450 opcode,
                             nir_ior(nb, signed_zero, nir_ffract(nb, abs)));
 
       struct vtn_pointer *i_ptr = vtn_value(b, w[6], vtn_value_type_pointer)->pointer;
-      struct vtn_ssa_value *whole = vtn_create_ssa_value(b, i_ptr->type->pointed->type);
+      struct vtn_ssa_value *whole = vtn_create_ssa_value(b, i_ptr->type->pointed);
       whole->def = nir_ior(nb, signed_zero, nir_ffloor(nb, abs));
       vtn_variable_store(b, whole, i_ptr, 0);
       break;
@@ -565,9 +565,9 @@ handle_glsl450_modf_frexp(struct vtn_builder *b, enum GLSLstd450 opcode,
       dest->def = nir_frexp_sig(nb, src);
 
       struct vtn_pointer *i_ptr = vtn_value(b, w[6], vtn_value_type_pointer)->pointer;
-      struct vtn_ssa_value *exp = vtn_create_ssa_value(b, i_ptr->type->pointed->type);
+      struct vtn_ssa_value *exp = vtn_create_ssa_value(b, i_ptr->type->pointed);
       exp->def = nir_i2iN(nb, nir_frexp_exp(nb, src),
-                          glsl_get_bit_size(exp->type));
+                          glsl_get_bit_size(exp->type->type));
       vtn_variable_store(b, exp, i_ptr, 0);
       break;
    }
@@ -576,7 +576,7 @@ handle_glsl450_modf_frexp(struct vtn_builder *b, enum GLSLstd450 opcode,
       vtn_assert(glsl_type_is_struct_or_ifc(dest_type));
       dest->elems[0]->def = nir_frexp_sig(nb, src);
       dest->elems[1]->def = nir_i2iN(nb, nir_frexp_exp(nb, src),
-                                     glsl_get_bit_size(dest->elems[1]->type));
+                                     glsl_get_bit_size(dest->elems[1]->type->type));
       break;
    }
 
@@ -591,7 +591,7 @@ static void
 handle_glsl450_packing_ops(struct vtn_builder *b, enum GLSLstd450 opcode,
                            const uint32_t *w, unsigned count)
 {
-   const struct glsl_type *dest_type = vtn_get_type(b, w[1])->type;
+   const struct vtn_type *dest_type = vtn_get_type(b, w[1]);
 
    /* Asking for relaxed precision snorm 4x8 pack results (for example)
     * doesn't even make sense.  The NIR opcodes have a fixed output size, so
