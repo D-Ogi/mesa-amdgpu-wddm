@@ -138,8 +138,8 @@ vtn_copy_value(struct vtn_builder *b, uint32_t src_value_id,
                "Result Type must equal Operand type");
 
    if (src->value_type == vtn_value_type_ssa && src->ssa->is_variable) {
-      nir_variable *dst_var =
-         nir_local_variable_create(b->nb.impl, src->ssa->type, "var_copy");
+      nir_variable *dst_var = nir_local_variable_create(
+         b->nb.impl, src->ssa->type->type, "var_copy");
       nir_deref_instr *dst_deref = nir_build_deref_var(&b->nb, dst_var);
       nir_deref_instr *src_deref = vtn_get_deref_for_ssa_value(b, src->ssa);
 
@@ -617,11 +617,11 @@ vtn_local_load(struct vtn_builder *b, nir_deref_instr *src,
                enum gl_access_qualifier access)
 {
    nir_deref_instr *src_tail = get_deref_tail(src);
-   struct vtn_ssa_value *val = vtn_create_ssa_value(b, src_tail->type);
+   struct vtn_ssa_value *val = vtn_create_ssa_value(b, vtn_type_from_glsl(b, src_tail->type));
    _vtn_local_load_store(b, true, src_tail, val, access);
 
    if (src_tail != src) {
-      val->type = src->type;
+      val->type = vtn_type_from_glsl(b, glsl_get_bare_type(src->type));
 
       if (glsl_type_is_cmat(src_tail->type)) {
          assert(val->is_variable);
@@ -647,7 +647,8 @@ vtn_local_store(struct vtn_builder *b, struct vtn_ssa_value *src,
    nir_deref_instr *dest_tail = get_deref_tail(dest);
 
    if (dest_tail != dest) {
-      struct vtn_ssa_value *val = vtn_create_ssa_value(b, dest_tail->type);
+      struct vtn_ssa_value *val = vtn_create_ssa_value(
+         b, vtn_type_from_glsl(b, dest_tail->type));
       _vtn_local_load_store(b, true, dest_tail, val, access);
 
       if (glsl_type_is_cmat(dest_tail->type)) {
@@ -788,7 +789,7 @@ struct vtn_ssa_value *
 vtn_variable_load(struct vtn_builder *b, struct vtn_pointer *src,
                   enum gl_access_qualifier access)
 {
-   struct vtn_ssa_value *val = vtn_create_ssa_value(b, src->type->pointed->type);
+   struct vtn_ssa_value *val = vtn_create_ssa_value(b, src->type->pointed);
    _vtn_variable_load_store(b, true, src, src->access | access, &val);
    return val;
 }
@@ -3134,7 +3135,7 @@ vtn_handle_variables(struct vtn_builder *b, SpvOp opcode,
                   "OpTypeBool.  Doing an implicit conversion to work around "
                   "the problem.");
          struct vtn_ssa_value *bool_ssa =
-            vtn_create_ssa_value(b, dest->type->pointed->type);
+            vtn_create_ssa_value(b, dest->type->pointed);
          bool_ssa->def = nir_i2b(&b->nb, vtn_ssa_value(b, w[2])->def);
          vtn_variable_store(b, bool_ssa, dest, 0);
          break;

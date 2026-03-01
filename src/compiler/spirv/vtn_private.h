@@ -261,7 +261,7 @@ struct vtn_ssa_value {
     */
    struct vtn_ssa_value *transposed;
 
-   const struct glsl_type *type;
+   struct vtn_type *type;
 };
 
 enum vtn_base_type {
@@ -743,7 +743,7 @@ vtn_pointer_from_ssa(struct vtn_builder *b, nir_def *ssa,
 
 struct vtn_ssa_value *
 vtn_const_ssa_value(struct vtn_builder *b, nir_constant *constant,
-                    const struct glsl_type *type);
+                    const struct vtn_type *type);
 
 static inline struct vtn_value *
 vtn_untyped_value(struct vtn_builder *b, uint32_t value_id)
@@ -823,7 +823,7 @@ vtn_value_to_pointer(struct vtn_builder *b, struct vtn_value *value)
    if (value->is_null_constant) {
       vtn_assert(glsl_type_is_vector_or_scalar(value->type->type));
       nir_def *const_ssa =
-         vtn_const_ssa_value(b, value->constant, value->type->type)->def;
+         vtn_const_ssa_value(b, value->constant, value->type)->def;
       return vtn_pointer_from_ssa(b, const_ssa, value->type);
    }
    vtn_assert(value->value_type == vtn_value_type_pointer);
@@ -925,8 +925,11 @@ void
 vtn_copy_value(struct vtn_builder *b, uint32_t src_value_id,
                uint32_t dst_value_id);
 
+struct vtn_type *vtn_type_from_glsl(struct vtn_builder *b,
+                                    const struct glsl_type *type);
+
 struct vtn_ssa_value *vtn_create_ssa_value(struct vtn_builder *b,
-                                           const struct glsl_type *type);
+                                           const struct vtn_type *type);
 void vtn_set_ssa_value_var(struct vtn_builder *b, struct vtn_ssa_value *ssa, nir_variable *var);
 
 struct vtn_ssa_value *vtn_ssa_transpose(struct vtn_builder *b,
