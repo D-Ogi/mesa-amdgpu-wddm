@@ -21,11 +21,11 @@ wrap_matrix(struct vtn_builder *b, struct vtn_ssa_value *val)
    if (val == NULL)
       return NULL;
 
-   if (glsl_type_is_matrix(val->type))
+   if (glsl_type_is_matrix(val->type->type))
       return val;
 
    struct vtn_ssa_value *dest = vtn_zalloc(b, struct vtn_ssa_value);
-   dest->type = glsl_get_bare_type(val->type);
+   dest->type = val->type;
    dest->elems = vtn_alloc_array(b, struct vtn_ssa_value *, 1);
    dest->elems[0] = val;
 
@@ -35,7 +35,7 @@ wrap_matrix(struct vtn_builder *b, struct vtn_ssa_value *val)
 static struct vtn_ssa_value *
 unwrap_matrix(struct vtn_ssa_value *val)
 {
-   if (glsl_type_is_matrix(val->type))
+   if (glsl_type_is_matrix(val->type->type))
          return val;
 
    return val->elems[0];
@@ -51,18 +51,18 @@ matrix_multiply(struct vtn_builder *b,
    struct vtn_ssa_value *src0_transpose = wrap_matrix(b, _src0->transposed);
    struct vtn_ssa_value *src1_transpose = wrap_matrix(b, _src1->transposed);
 
-   unsigned src0_rows = glsl_get_vector_elements(src0->type);
-   unsigned src0_columns = glsl_get_matrix_columns(src0->type);
-   unsigned src1_columns = glsl_get_matrix_columns(src1->type);
+   unsigned src0_rows = glsl_get_vector_elements(src0->type->type);
+   unsigned src0_columns = glsl_get_matrix_columns(src0->type->type);
+   unsigned src1_columns = glsl_get_matrix_columns(src1->type->type);
 
    const struct glsl_type *dest_type;
    if (src1_columns > 1) {
-      dest_type = glsl_matrix_type(glsl_get_base_type(src0->type),
+      dest_type = glsl_matrix_type(glsl_get_base_type(src0->type->type),
                                    src0_rows, src1_columns);
    } else {
-      dest_type = glsl_vector_type(glsl_get_base_type(src0->type), src0_rows);
+      dest_type = glsl_vector_type(glsl_get_base_type(src0->type->type), src0_rows);
    }
-   struct vtn_ssa_value *dest = vtn_create_ssa_value(b, dest_type);
+   struct vtn_ssa_value *dest = vtn_create_ssa_value(b, vtn_type_from_glsl(b, dest_type));
 
    dest = wrap_matrix(b, dest);
 
@@ -103,8 +103,8 @@ mat_times_scalar(struct vtn_builder *b,
                  nir_def *scalar)
 {
    struct vtn_ssa_value *dest = vtn_create_ssa_value(b, mat->type);
-   for (unsigned i = 0; i < glsl_get_matrix_columns(mat->type); i++) {
-      if (glsl_base_type_is_integer(glsl_get_base_type(mat->type)))
+   for (unsigned i = 0; i < glsl_get_matrix_columns(mat->type->type); i++) {
+      if (glsl_base_type_is_integer(glsl_get_base_type(mat->type->type)))
          dest->elems[i]->def = nir_imul(&b->nb, mat->elems[i]->def, scalar);
       else
          dest->elems[i]->def = nir_fmul(&b->nb, mat->elems[i]->def, scalar);
@@ -166,13 +166,13 @@ vtn_mediump_downconvert_value(struct vtn_builder *b, struct vtn_ssa_value *src)
       return vtn_ssa_transpose(b, transposed);
    } else {
       struct vtn_ssa_value *srcmp = vtn_create_ssa_value(b, src->type);
-      enum glsl_base_type base_type = glsl_get_base_type(src->type);
+      enum glsl_base_type base_type = glsl_get_base_type(src->type->type);
 
-      if (glsl_type_is_vector_or_scalar(src->type)) {
+      if (glsl_type_is_vector_or_scalar(src->type->type)) {
          srcmp->def = vtn_mediump_downconvert(b, base_type, src->def);
       } else {
-         assert(glsl_get_base_type(src->type) == GLSL_TYPE_FLOAT);
-         for (int i = 0; i < glsl_get_matrix_columns(src->type); i++)
+         assert(base_type == GLSL_TYPE_FLOAT);
+         for (int i = 0; i < glsl_get_matrix_columns(src->type->type); i++)
             srcmp->elems[i]->def = vtn_mediump_downconvert(b, base_type, src->elems[i]->def);
       }
       return srcmp;
@@ -186,7 +186,7 @@ vtn_handle_matrix_alu(struct vtn_builder *b, SpvOp opcode,
    switch (opcode) {
    case SpvOpFNegate: {
       struct vtn_ssa_value *dest = vtn_create_ssa_value(b, src0->type);
-      unsigned cols = glsl_get_matrix_columns(src0->type);
+      unsigned cols = glsl_get_matrix_columns(src0->type->type);
       for (unsigned i = 0; i < cols; i++)
          dest->elems[i]->def = nir_fneg(&b->nb, src0->elems[i]->def);
       return dest;
@@ -194,7 +194,7 @@ vtn_handle_matrix_alu(struct vtn_builder *b, SpvOp opcode,
 
    case SpvOpFAdd: {
       struct vtn_ssa_value *dest = vtn_create_ssa_value(b, src0->type);
-      unsigned cols = glsl_get_matrix_columns(src0->type);
+      unsigned cols = glsl_get_matrix_columns(src0->type->type);
       for (unsigned i = 0; i < cols; i++)
          dest->elems[i]->def =
             nir_fadd(&b->nb, src0->elems[i]->def, src1->elems[i]->def);
@@ -203,7 +203,7 @@ vtn_handle_matrix_alu(struct vtn_builder *b, SpvOp opcode,
 
    case SpvOpFSub: {
       struct vtn_ssa_value *dest = vtn_create_ssa_value(b, src0->type);
-      unsigned cols = glsl_get_matrix_columns(src0->type);
+      unsigned cols = glsl_get_matrix_columns(src0->type->type);
       for (unsigned i = 0; i < cols; i++)
          dest->elems[i]->def =
             nir_fsub(&b->nb, src0->elems[i]->def, src1->elems[i]->def);
@@ -590,7 +590,7 @@ vtn_mediump_upconvert(struct vtn_builder *b, enum glsl_base_type base_type, nir_
 struct vtn_ssa_value *
 vtn_mediump_upconvert_value(struct vtn_builder *b, struct vtn_ssa_value *value)
 {
-   enum glsl_base_type base_type = glsl_get_base_type(value->type);
+   enum glsl_base_type base_type = glsl_get_base_type(value->type->type);
 
    if (value->transposed) {
       struct vtn_ssa_value *transposed =
@@ -599,10 +599,10 @@ vtn_mediump_upconvert_value(struct vtn_builder *b, struct vtn_ssa_value *value)
    }
 
    struct vtn_ssa_value *value_full = vtn_create_ssa_value(b, value->type);
-   if (glsl_type_is_vector_or_scalar(value->type)) {
+   if (glsl_type_is_vector_or_scalar(value->type->type)) {
       value_full->def = vtn_mediump_upconvert(b, base_type, value->def);
    } else {
-      for (int i = 0; i < glsl_get_matrix_columns(value->type); i++)
+      for (int i = 0; i < glsl_get_matrix_columns(value->type->type); i++)
          value_full->elems[i]->def = vtn_mediump_upconvert(b, base_type, value->elems[i]->def);
    }
 
@@ -786,8 +786,8 @@ vtn_handle_alu(struct vtn_builder *b, SpvOp opcode,
    if (mediump_16bit)
       vtn_downconvert_ssa_sources(b, vtn_src, num_inputs);
 
-   if (glsl_type_is_matrix(vtn_src[0]->type) ||
-       (num_inputs >= 2 && glsl_type_is_matrix(vtn_src[1]->type))) {
+   if (glsl_type_is_matrix(vtn_src[0]->type->type) ||
+       (num_inputs >= 2 && glsl_type_is_matrix(vtn_src[1]->type->type))) {
       struct vtn_ssa_value *dest = vtn_handle_matrix_alu(b, opcode, vtn_src[0], vtn_src[1]);
 
       if (mediump_16bit)
@@ -798,10 +798,10 @@ vtn_handle_alu(struct vtn_builder *b, SpvOp opcode,
       return;
    }
 
-   struct vtn_ssa_value *dest = vtn_create_ssa_value(b, dest_type);
+   struct vtn_ssa_value *dest = vtn_create_ssa_value(b, vtn_get_type(b, w[1]));
    nir_def *src[4] = { NULL, };
    for (unsigned i = 0; i < num_inputs; i++) {
-      vtn_assert(glsl_type_is_vector_or_scalar(vtn_src[i]->type));
+      vtn_assert(glsl_type_is_vector_or_scalar(vtn_src[i]->type->type));
       src[i] = vtn_src[i]->def;
    }
 
@@ -1022,7 +1022,7 @@ vtn_handle_alu(struct vtn_builder *b, SpvOp opcode,
    case SpvOpSatConvertSToU:
    case SpvOpSatConvertUToS:
       dest->def = vtn_handle_convert(b, opcode, dest_val, dest_type,
-                                     vtn_src[0]->type, src[0]);
+                                     vtn_src[0]->type->type, src[0]);
       break;
 
    case SpvOpBitFieldInsert:
@@ -1088,50 +1088,50 @@ vtn_handle_alu(struct vtn_builder *b, SpvOp opcode,
       UNREACHABLE("Should have called vtn_handle_integer_dot instead.");
 
    case SpvOpFDot2MixAcc32VALVE: {
-      vtn_assert(glsl_get_base_type(vtn_src[2]->type) == GLSL_TYPE_FLOAT);
-      if (glsl_get_base_type(vtn_src[0]->type) == GLSL_TYPE_FLOAT16) {
-         vtn_assert(glsl_get_base_type(vtn_src[1]->type) == GLSL_TYPE_FLOAT16);
+      vtn_assert(glsl_get_base_type(vtn_src[2]->type->type) == GLSL_TYPE_FLOAT);
+      if (glsl_get_base_type(vtn_src[0]->type->type) == GLSL_TYPE_FLOAT16) {
+         vtn_assert(glsl_get_base_type(vtn_src[1]->type->type) == GLSL_TYPE_FLOAT16);
          dest->def = nir_f16dot2_fadd(&b->nb, src[0], src[1], src[2]);
       } else {
-         vtn_assert(glsl_get_base_type(vtn_src[0]->type) == GLSL_TYPE_BFLOAT16);
-         vtn_assert(glsl_get_base_type(vtn_src[1]->type) == GLSL_TYPE_BFLOAT16);
+         vtn_assert(glsl_get_base_type(vtn_src[0]->type->type) == GLSL_TYPE_BFLOAT16);
+         vtn_assert(glsl_get_base_type(vtn_src[1]->type->type) == GLSL_TYPE_BFLOAT16);
          dest->def = nir_bfdot2_fadd(&b->nb, src[0], src[1], src[2]);
       }
       break;
    }
 
    case SpvOpFDot2MixAcc16VALVE: {
-      if (glsl_get_base_type(vtn_src[0]->type) == GLSL_TYPE_FLOAT16) {
-         vtn_assert(glsl_get_base_type(vtn_src[1]->type) == GLSL_TYPE_FLOAT16);
-         vtn_assert(glsl_get_base_type(vtn_src[2]->type) == GLSL_TYPE_FLOAT16);
+      if (glsl_get_base_type(vtn_src[0]->type->type) == GLSL_TYPE_FLOAT16) {
+         vtn_assert(glsl_get_base_type(vtn_src[1]->type->type) == GLSL_TYPE_FLOAT16);
+         vtn_assert(glsl_get_base_type(vtn_src[2]->type->type) == GLSL_TYPE_FLOAT16);
          dest->def = nir_f16dot2_fadd(&b->nb, src[0], src[1], src[2]);
       } else {
-         vtn_assert(glsl_get_base_type(vtn_src[0]->type) == GLSL_TYPE_BFLOAT16);
-         vtn_assert(glsl_get_base_type(vtn_src[1]->type) == GLSL_TYPE_BFLOAT16);
-         vtn_assert(glsl_get_base_type(vtn_src[2]->type) == GLSL_TYPE_BFLOAT16);
+         vtn_assert(glsl_get_base_type(vtn_src[0]->type->type) == GLSL_TYPE_BFLOAT16);
+         vtn_assert(glsl_get_base_type(vtn_src[1]->type->type) == GLSL_TYPE_BFLOAT16);
+         vtn_assert(glsl_get_base_type(vtn_src[2]->type->type) == GLSL_TYPE_BFLOAT16);
          dest->def = nir_bfdot2_bfadd(&b->nb, src[0], src[1], src[2]);
       }
       break;
    }
 
    case SpvOpFDot4MixAcc32VALVE: {
-      vtn_assert(glsl_get_base_type(vtn_src[2]->type) == GLSL_TYPE_FLOAT);
+      vtn_assert(glsl_get_base_type(vtn_src[2]->type->type) == GLSL_TYPE_FLOAT);
       src[0] = nir_pack_32_4x8(&b->nb, src[0]);
       src[1] = nir_pack_32_4x8(&b->nb, src[1]);
 
-      if (glsl_get_base_type(vtn_src[0]->type) == GLSL_TYPE_FLOAT_E4M3FN) {
-         if (glsl_get_base_type(vtn_src[1]->type) == GLSL_TYPE_FLOAT_E4M3FN) {
+      if (glsl_get_base_type(vtn_src[0]->type->type) == GLSL_TYPE_FLOAT_E4M3FN) {
+         if (glsl_get_base_type(vtn_src[1]->type->type) == GLSL_TYPE_FLOAT_E4M3FN) {
             dest->def = nir_e4m3fn_dot4_fadd(&b->nb, src[0], src[1], src[2]);
          } else {
-            vtn_assert(glsl_get_base_type(vtn_src[1]->type) == GLSL_TYPE_FLOAT_E5M2);
+            vtn_assert(glsl_get_base_type(vtn_src[1]->type->type) == GLSL_TYPE_FLOAT_E5M2);
             dest->def = nir_e4m3fn_e5m2_dot4_fadd(&b->nb, src[0], src[1], src[2]);
          }
       } else {
-         vtn_assert(glsl_get_base_type(vtn_src[0]->type) == GLSL_TYPE_FLOAT_E5M2);
-         if (glsl_get_base_type(vtn_src[1]->type) == GLSL_TYPE_FLOAT_E4M3FN) {
+         vtn_assert(glsl_get_base_type(vtn_src[0]->type->type) == GLSL_TYPE_FLOAT_E5M2);
+         if (glsl_get_base_type(vtn_src[1]->type->type) == GLSL_TYPE_FLOAT_E4M3FN) {
             dest->def = nir_e4m3fn_e5m2_dot4_fadd(&b->nb, src[1], src[0], src[2]);
          } else {
-            vtn_assert(glsl_get_base_type(vtn_src[1]->type) == GLSL_TYPE_FLOAT_E5M2);
+            vtn_assert(glsl_get_base_type(vtn_src[1]->type->type) == GLSL_TYPE_FLOAT_E5M2);
             dest->def = nir_e5m2_dot4_fadd(&b->nb, src[0], src[1], src[2]);
          }
       }
@@ -1222,7 +1222,7 @@ vtn_handle_integer_dot(struct vtn_builder *b, SpvOp opcode,
       vtn_src[i] = vtn_ssa_value(b, w[i + 3]);
       src[i] = vtn_src[i]->def;
 
-      vtn_assert(glsl_type_is_vector_or_scalar(vtn_src[i]->type));
+      vtn_assert(glsl_type_is_vector_or_scalar(vtn_src[i]->type->type));
    }
 
    /* For all of the opcodes *except* SpvOpSUDotKHR and SpvOpSUDotAccSatKHR,
@@ -1233,10 +1233,10 @@ vtn_handle_integer_dot(struct vtn_builder *b, SpvOp opcode,
     * The practical requirement is the same bit-size and the same number of
     * components.
     */
-   vtn_fail_if(glsl_get_bit_size(vtn_src[0]->type) !=
-               glsl_get_bit_size(vtn_src[1]->type) ||
-               glsl_get_vector_elements(vtn_src[0]->type) !=
-               glsl_get_vector_elements(vtn_src[1]->type),
+   vtn_fail_if(glsl_get_bit_size(vtn_src[0]->type->type) !=
+               glsl_get_bit_size(vtn_src[1]->type->type) ||
+               glsl_get_vector_elements(vtn_src[0]->type->type) !=
+               glsl_get_vector_elements(vtn_src[1]->type->type),
                "Vector 1 and vector 2 source of opcode %s must have the same "
                "type",
                spirv_op_to_string(opcode));
@@ -1249,25 +1249,25 @@ vtn_handle_integer_dot(struct vtn_builder *b, SpvOp opcode,
        * The handling of SpvOpSDotAccSatKHR and friends with the packed 4x8
        * types (far below) assumes these types have the same size.
        */
-      vtn_fail_if(dest_type != vtn_src[2]->type,
+      vtn_fail_if(dest_type != vtn_src[2]->type->type,
                   "Accumulator type must be the same as Result Type for "
                   "opcode %s",
                   spirv_op_to_string(opcode));
    }
 
    unsigned packed_bit_size = 8;
-   if (glsl_type_is_vector(vtn_src[0]->type)) {
+   if (glsl_type_is_vector(vtn_src[0]->type->type)) {
       /* FINISHME: Is this actually as good or better for platforms that don't
        * have the special instructions (i.e., one or both of has_dot_4x8 or
        * has_sudot_4x8 is false)?
        */
-      if (glsl_get_vector_elements(vtn_src[0]->type) == 4 &&
-          glsl_get_bit_size(vtn_src[0]->type) == 8 &&
+      if (glsl_get_vector_elements(vtn_src[0]->type->type) == 4 &&
+          glsl_get_bit_size(vtn_src[0]->type->type) == 8 &&
           glsl_get_bit_size(dest_type) <= 32) {
          src[0] = nir_pack_32_4x8(&b->nb, src[0]);
          src[1] = nir_pack_32_4x8(&b->nb, src[1]);
-      } else if (glsl_get_vector_elements(vtn_src[0]->type) == 2 &&
-                 glsl_get_bit_size(vtn_src[0]->type) == 16 &&
+      } else if (glsl_get_vector_elements(vtn_src[0]->type->type) == 2 &&
+                 glsl_get_bit_size(vtn_src[0]->type->type) == 16 &&
                  glsl_get_bit_size(dest_type) <= 32 &&
                  opcode != SpvOpSUDotKHR &&
                  opcode != SpvOpSUDotAccSatKHR) {
@@ -1275,8 +1275,8 @@ vtn_handle_integer_dot(struct vtn_builder *b, SpvOp opcode,
          src[1] = nir_pack_32_2x16(&b->nb, src[1]);
          packed_bit_size = 16;
       }
-   } else if (glsl_type_is_scalar(vtn_src[0]->type) &&
-              glsl_type_is_32bit(vtn_src[0]->type)) {
+   } else if (glsl_type_is_scalar(vtn_src[0]->type->type) &&
+              glsl_type_is_32bit(vtn_src[0]->type->type)) {
       /* The SPV_KHR_integer_dot_product spec says:
        *
        *    When _Vector 1_ and _Vector 2_ are scalar integer types, _Packed
@@ -1334,7 +1334,7 @@ vtn_handle_integer_dot(struct vtn_builder *b, SpvOp opcode,
        *    computed with enough precision to avoid overflow and underflow.
        */
       const unsigned vector_components =
-         glsl_get_vector_elements(vtn_src[0]->type);
+         glsl_get_vector_elements(vtn_src[0]->type->type);
 
       for (unsigned i = 0; i < vector_components; i++) {
          nir_def *const src0 =
