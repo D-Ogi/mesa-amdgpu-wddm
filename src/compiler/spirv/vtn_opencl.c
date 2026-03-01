@@ -440,17 +440,6 @@ static const char *remap_clc_opcode(enum OpenCLstd_Entrypoints opcode)
 }
 
 static struct vtn_type *
-get_vtn_type_for_glsl_type(struct vtn_builder *b, const struct glsl_type *type)
-{
-   struct vtn_type *ret = vtn_zalloc(b, struct vtn_type);
-   assert(glsl_type_is_vector_or_scalar(type));
-   ret->type = type;
-   ret->length = glsl_get_vector_elements(type);
-   ret->base_type = glsl_type_is_vector(type) ? vtn_base_type_vector : vtn_base_type_scalar;
-   return ret;
-}
-
-static struct vtn_type *
 get_pointer_type(struct vtn_builder *b, struct vtn_type *t, SpvStorageClass storage_class)
 {
    struct vtn_type *ret = vtn_zalloc(b, struct vtn_type);
@@ -469,7 +458,7 @@ get_signed_type(struct vtn_builder *b, struct vtn_type *t)
    if (t->base_type == vtn_base_type_pointer) {
       return get_pointer_type(b, get_signed_type(b, t->pointed), t->storage_class);
    }
-   return get_vtn_type_for_glsl_type(
+   return vtn_type_from_glsl(
       b, glsl_vector_type(glsl_signed_base_type_of(glsl_get_base_type(t->type)),
                           glsl_get_vector_elements(t->type)));
 }
@@ -817,7 +806,7 @@ handle_core(struct vtn_builder *b, uint32_t opcode,
              src_types[i]->pointed->length == 3) {
             src_types[i] =
                get_pointer_type(b,
-                                get_vtn_type_for_glsl_type(b, glsl_replace_vector_type(src_types[i]->pointed->type, 4)),
+                                vtn_type_from_glsl(b, glsl_replace_vector_type(src_types[i]->pointed->type, 4)),
                                 src_types[i]->storage_class);
          }
       }
@@ -904,7 +893,7 @@ _handle_v_load_store(struct vtn_builder *b, enum OpenCLstd_Entrypoints opcode,
                                  glsl_base_type_get_bit_size(base_type));
          }
       } else {
-         struct vtn_ssa_value *ssa = vtn_create_ssa_value(b, glsl_scalar_type(base_type));
+         struct vtn_ssa_value *ssa = vtn_create_ssa_value(b, vtn_type_from_glsl(b, glsl_scalar_type(base_type)));
          struct vtn_ssa_value *val = vtn_ssa_value(b, w[5]);
          ssa->def = nir_channel(&b->nb, val->def, i);
          if (base_type != ptr_base_type) {

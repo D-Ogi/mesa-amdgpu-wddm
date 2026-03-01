@@ -494,31 +494,141 @@ void _vtn_fail_value_not_pointer(struct vtn_builder *b,
             val->is_null_constant ? "null constant" : "not null constant");
 }
 
+static struct vtn_type **
+vtn_type_get_members(const struct vtn_type *type)
+{
+   switch (type->base_type) {
+   case vtn_base_type_struct:
+      return type->members;
+   case vtn_base_type_tensor_layout:
+      return type->tensor_layout_members;
+   case vtn_base_type_tensor_view:
+      return type->tensor_view_members;
+   default:
+      UNREACHABLE("Not a struct-backed VTN type");
+   }
+}
+
+static struct vtn_type *
+vtn_get_bare_type(struct vtn_builder *b, const struct vtn_type *type)
+{
+   vtn_assert(type->type != NULL);
+
+   struct vtn_type *ssa_type = vtn_zalloc(b, struct vtn_type);
+   *ssa_type = *type;
+   ssa_type->type = glsl_get_bare_type(type->type);
+
+   switch (type->base_type) {
+   case vtn_base_type_vector:
+   case vtn_base_type_matrix:
+   case vtn_base_type_array:
+      if (type->array_element)
+         ssa_type->array_element = vtn_get_bare_type(b, type->array_element);
+      break;
+
+   case vtn_base_type_struct:
+   case vtn_base_type_tensor_layout:
+   case vtn_base_type_tensor_view: {
+      struct vtn_type **members = vtn_alloc_array(b, struct vtn_type *, type->length);
+      for (unsigned i = 0; i < type->length; i++)
+         members[i] = vtn_get_bare_type(b, vtn_type_get_members(type)[i]);
+
+      switch (type->base_type) {
+      case vtn_base_type_struct:
+         ssa_type->members = members;
+         break;
+      case vtn_base_type_tensor_layout:
+         ssa_type->tensor_layout_members = members;
+         break;
+      case vtn_base_type_tensor_view:
+         ssa_type->tensor_view_members = members;
+         break;
+      default:
+         UNREACHABLE("Not a struct-backed VTN type");
+      }
+      break;
+   }
+
+   case vtn_base_type_cooperative_matrix:
+      ssa_type->component_type = vtn_get_bare_type(b, type->component_type);
+      break;
+
+   default:
+      break;
+   }
+
+   return ssa_type;
+}
+
 static struct vtn_ssa_value *
-vtn_undef_ssa_value(struct vtn_builder *b, const struct glsl_type *type)
+vtn_undef_ssa_value_bare(struct vtn_builder *b, struct vtn_type *type)
 {
    struct vtn_ssa_value *val = vtn_zalloc(b, struct vtn_ssa_value);
-   val->type = glsl_get_bare_type(type);
+   val->type = type;
 
-   if (glsl_type_is_cmat(type)) {
-      nir_deref_instr *mat = vtn_create_cmat_temporary(b, type, "cmat_undef");
+   const struct glsl_type *glsl_type = val->type->type;
+   if (glsl_type_is_cmat(glsl_type)) {
+      nir_deref_instr *mat = vtn_create_cmat_temporary(b, glsl_type, "cmat_undef");
       vtn_set_ssa_value_var(b, val, mat->var);
-   } else if (glsl_type_is_vector_or_scalar(type)) {
-      unsigned num_components = glsl_get_vector_elements(val->type);
-      unsigned bit_size = glsl_get_bit_size(val->type);
+   } else if (glsl_type_is_vector_or_scalar(glsl_type)) {
+      unsigned num_components = glsl_get_vector_elements(glsl_type);
+      unsigned bit_size = glsl_get_bit_size(glsl_type);
       val->def = nir_undef(&b->nb, num_components, bit_size);
    } else {
-      unsigned elems = glsl_get_length(val->type);
+      unsigned elems = glsl_get_length(glsl_type);
       val->elems = vtn_alloc_array(b, struct vtn_ssa_value *, elems);
-      if (glsl_type_is_array_or_matrix(type)) {
-         const struct glsl_type *elem_type = glsl_get_array_element(type);
+      if (glsl_type_is_array_or_matrix(glsl_type)) {
          for (unsigned i = 0; i < elems; i++)
-            val->elems[i] = vtn_undef_ssa_value(b, elem_type);
+            val->elems[i] = vtn_undef_ssa_value_bare(b, type->array_element);
       } else {
-         vtn_assert(glsl_type_is_struct_or_ifc(type));
+         vtn_assert(glsl_type_is_struct_or_ifc(glsl_type));
+         for (unsigned i = 0; i < elems; i++)
+            val->elems[i] = vtn_undef_ssa_value_bare(b, vtn_type_get_members(type)[i]);
+      }
+   }
+
+   return val;
+}
+
+static struct vtn_ssa_value *
+vtn_undef_ssa_value(struct vtn_builder *b, const struct vtn_type *type)
+{
+   return vtn_undef_ssa_value_bare(b, vtn_get_bare_type(b, type));
+}
+
+static struct vtn_ssa_value *
+vtn_const_ssa_value_bare(struct vtn_builder *b, nir_constant *constant,
+                         struct vtn_type *type)
+{
+   struct vtn_ssa_value *val = vtn_zalloc(b, struct vtn_ssa_value);
+   val->type = type;
+
+   const struct glsl_type *glsl_type = val->type->type;
+   if (glsl_type_is_cmat(glsl_type)) {
+      const struct glsl_type *element_type = glsl_get_cmat_element(glsl_type);
+
+      nir_deref_instr *mat = vtn_create_cmat_temporary(b, glsl_type, "cmat_constant");
+      nir_cmat_construct(&b->nb, &mat->def,
+                         nir_build_imm(&b->nb, 1, glsl_get_bit_size(element_type),
+                                       constant->values));
+      vtn_set_ssa_value_var(b, val, mat->var);
+   } else if (glsl_type_is_vector_or_scalar(glsl_type)) {
+      val->def = nir_build_imm(&b->nb, glsl_get_vector_elements(glsl_type),
+                               glsl_get_bit_size(glsl_type),
+                               constant->values);
+   } else {
+      unsigned elems = glsl_get_length(glsl_type);
+      val->elems = vtn_alloc_array(b, struct vtn_ssa_value *, elems);
+      if (glsl_type_is_array_or_matrix(glsl_type)) {
          for (unsigned i = 0; i < elems; i++) {
-            const struct glsl_type *elem_type = glsl_get_struct_field(type, i);
-            val->elems[i] = vtn_undef_ssa_value(b, elem_type);
+            val->elems[i] = vtn_const_ssa_value_bare(b, constant->elements[i],
+                                                     type->array_element);
+         }
+      } else {
+         vtn_assert(glsl_type_is_struct_or_ifc(glsl_type));
+         for (unsigned i = 0; i < elems; i++) {
+            val->elems[i] = vtn_const_ssa_value_bare(b, constant->elements[i],
+                                                     vtn_type_get_members(type)[i]);
          }
       }
    }
@@ -528,43 +638,9 @@ vtn_undef_ssa_value(struct vtn_builder *b, const struct glsl_type *type)
 
 struct vtn_ssa_value *
 vtn_const_ssa_value(struct vtn_builder *b, nir_constant *constant,
-                    const struct glsl_type *type)
+                    const struct vtn_type *type)
 {
-   struct vtn_ssa_value *val = vtn_zalloc(b, struct vtn_ssa_value);
-   val->type = glsl_get_bare_type(type);
-
-   if (glsl_type_is_cmat(type)) {
-      const struct glsl_type *element_type = glsl_get_cmat_element(type);
-
-      nir_deref_instr *mat = vtn_create_cmat_temporary(b, type, "cmat_constant");
-      nir_cmat_construct(&b->nb, &mat->def,
-                         nir_build_imm(&b->nb, 1, glsl_get_bit_size(element_type),
-                                       constant->values));
-      vtn_set_ssa_value_var(b, val, mat->var);
-   } else if (glsl_type_is_vector_or_scalar(type)) {
-      val->def = nir_build_imm(&b->nb, glsl_get_vector_elements(val->type),
-                               glsl_get_bit_size(val->type),
-                               constant->values);
-   } else {
-      unsigned elems = glsl_get_length(val->type);
-      val->elems = vtn_alloc_array(b, struct vtn_ssa_value *, elems);
-      if (glsl_type_is_array_or_matrix(type)) {
-         const struct glsl_type *elem_type = glsl_get_array_element(type);
-         for (unsigned i = 0; i < elems; i++) {
-            val->elems[i] = vtn_const_ssa_value(b, constant->elements[i],
-                                                elem_type);
-         }
-      } else {
-         vtn_assert(glsl_type_is_struct_or_ifc(type));
-         for (unsigned i = 0; i < elems; i++) {
-            const struct glsl_type *elem_type = glsl_get_struct_field(type, i);
-            val->elems[i] = vtn_const_ssa_value(b, constant->elements[i],
-                                                elem_type);
-         }
-      }
-   }
-
-   return val;
+   return vtn_const_ssa_value_bare(b, constant, vtn_get_bare_type(b, type));
 }
 
 struct vtn_ssa_value *
@@ -573,10 +649,10 @@ vtn_ssa_value(struct vtn_builder *b, uint32_t value_id)
    struct vtn_value *val = vtn_untyped_value(b, value_id);
    switch (val->value_type) {
    case vtn_value_type_undef:
-      return vtn_undef_ssa_value(b, val->type->type);
+      return vtn_undef_ssa_value(b, val->type);
 
    case vtn_value_type_constant:
-      return vtn_const_ssa_value(b, val->constant, val->type->type);
+      return vtn_const_ssa_value(b, val->constant, val->type);
 
    case vtn_value_type_ssa:
       return val->ssa;
@@ -584,7 +660,7 @@ vtn_ssa_value(struct vtn_builder *b, uint32_t value_id)
    case vtn_value_type_pointer:
       vtn_assert(val->pointer->type && val->pointer->type->type);
       struct vtn_ssa_value *ssa =
-         vtn_create_ssa_value(b, val->pointer->type->type);
+         vtn_create_ssa_value(b, val->pointer->type);
       ssa->def = vtn_pointer_to_ssa(b, val->pointer);
       return ssa;
 
@@ -600,7 +676,7 @@ vtn_push_ssa_value(struct vtn_builder *b, uint32_t value_id,
    struct vtn_type *type = vtn_get_value_type(b, value_id);
 
    /* See vtn_create_ssa_value */
-   vtn_fail_if(ssa->type != glsl_get_bare_type(type->type),
+   vtn_fail_if(ssa->type->type != glsl_get_bare_type(type->type),
                "Type mismatch for SPIR-V value %%%u", value_id);
 
    struct vtn_value *val;
@@ -620,7 +696,7 @@ nir_def *
 vtn_get_nir_ssa(struct vtn_builder *b, uint32_t value_id)
 {
    struct vtn_ssa_value *ssa = vtn_ssa_value(b, value_id);
-   vtn_fail_if(!glsl_type_is_vector_or_scalar(ssa->type),
+   vtn_fail_if(!glsl_type_is_vector_or_scalar(ssa->type->type),
                "Expected a vector or scalar type");
    return ssa->def;
 }
@@ -635,7 +711,7 @@ vtn_push_nir_ssa(struct vtn_builder *b, uint32_t value_id, nir_def *def)
    vtn_fail_if(def->num_components != glsl_get_vector_elements(type->type) ||
                def->bit_size != glsl_get_bit_size(type->type),
                "Mismatch between NIR and SPIR-V type.");
-   struct vtn_ssa_value *ssa = vtn_create_ssa_value(b, type->type);
+   struct vtn_ssa_value *ssa = vtn_create_ssa_value(b, type);
    ssa->def = def;
    return vtn_push_ssa_value(b, value_id, ssa);
 }
@@ -656,7 +732,8 @@ vtn_get_deref_for_ssa_value(struct vtn_builder *b, struct vtn_ssa_value *ssa)
 struct vtn_value *
 vtn_push_var_ssa(struct vtn_builder *b, uint32_t value_id, nir_variable *var)
 {
-   struct vtn_ssa_value *ssa = vtn_create_ssa_value(b, var->type);
+   struct vtn_ssa_value *ssa =
+      vtn_create_ssa_value(b, vtn_get_value_type(b, value_id));
    vtn_set_ssa_value_var(b, ssa, var);
    return vtn_push_ssa_value(b, value_id, ssa);
 }
@@ -2866,8 +2943,86 @@ vtn_emit_memory_barrier(struct vtn_builder *b, SpvScope scope,
                        .memory_modes=modes);
 }
 
+struct vtn_type *
+vtn_type_from_glsl(struct vtn_builder *b, const struct glsl_type *type)
+{
+   struct vtn_type *ret = vtn_zalloc(b, struct vtn_type);
+   ret->type = type;
+
+   switch (glsl_get_base_type(type)) {
+   case GLSL_TYPE_COOPERATIVE_MATRIX:
+      ret->base_type = vtn_base_type_cooperative_matrix;
+      ret->length = 1;
+      ret->desc = *glsl_get_cmat_description(type);
+      ret->component_type =
+         vtn_type_from_glsl(b, glsl_get_cmat_element(type));
+      break;
+
+   case GLSL_TYPE_ARRAY:
+      ret->base_type = vtn_base_type_array;
+      ret->length = glsl_get_length(type);
+      ret->array_element =
+         vtn_type_from_glsl(b, glsl_get_array_element(type));
+      break;
+
+   case GLSL_TYPE_STRUCT:
+   case GLSL_TYPE_INTERFACE:
+      ret->base_type = vtn_base_type_struct;
+      ret->length = glsl_get_length(type);
+      ret->members = vtn_alloc_array(b, struct vtn_type *, ret->length);
+      for (unsigned i = 0; i < ret->length; i++)
+         ret->members[i] =
+            vtn_type_from_glsl(b, glsl_get_struct_field(type, i));
+      break;
+
+   default:
+      if (glsl_type_is_scalar(type)) {
+         ret->base_type = vtn_base_type_scalar;
+         ret->length = 1;
+      } else if (glsl_type_is_vector(type)) {
+         ret->base_type = vtn_base_type_vector;
+         ret->length = glsl_get_vector_elements(type);
+      } else if (glsl_type_is_matrix(type)) {
+         ret->base_type = vtn_base_type_matrix;
+         ret->length = glsl_get_matrix_columns(type);
+         ret->array_element =
+            vtn_type_from_glsl(b, glsl_get_column_type(type));
+      } else {
+         vtn_fail("Unsupported GLSL type for internal VTN type");
+      }
+      break;
+   }
+
+   return ret;
+}
+
+static struct vtn_ssa_value *
+vtn_create_ssa_value_bare(struct vtn_builder *b, struct vtn_type *type)
+{
+   struct vtn_ssa_value *val = vtn_zalloc(b, struct vtn_ssa_value);
+   val->type = type;
+
+   const struct glsl_type *glsl_type = val->type->type;
+
+   if (!glsl_type_is_vector_or_scalar(glsl_type) &&
+       !glsl_type_is_cmat(glsl_type)) {
+      unsigned elems = glsl_get_length(glsl_type);
+      val->elems = vtn_alloc_array(b, struct vtn_ssa_value *, elems);
+      if (glsl_type_is_array_or_matrix(glsl_type)) {
+         for (unsigned i = 0; i < elems; i++)
+            val->elems[i] = vtn_create_ssa_value_bare(b, type->array_element);
+      } else {
+         vtn_assert(glsl_type_is_struct_or_ifc(glsl_type));
+         for (unsigned i = 0; i < elems; i++)
+            val->elems[i] = vtn_create_ssa_value_bare(b, vtn_type_get_members(type)[i]);
+      }
+   }
+
+   return val;
+}
+
 struct vtn_ssa_value *
-vtn_create_ssa_value(struct vtn_builder *b, const struct glsl_type *type)
+vtn_create_ssa_value(struct vtn_builder *b, const struct vtn_type *type)
 {
    /* Always use bare types for SSA values for a couple of reasons:
     *
@@ -2879,35 +3034,14 @@ vtn_create_ssa_value(struct vtn_builder *b, const struct glsl_type *type)
     *     to a SPIR-V value has the right type.  Using bare types everywhere
     *     ensures that we can pointer-compare.
     */
-   struct vtn_ssa_value *val = vtn_zalloc(b, struct vtn_ssa_value);
-   val->type = glsl_get_bare_type(type);
-
-
-   if (!glsl_type_is_vector_or_scalar(type) &&
-       !glsl_type_is_cmat(type)) {
-      unsigned elems = glsl_get_length(val->type);
-      val->elems = vtn_alloc_array(b, struct vtn_ssa_value *, elems);
-      if (glsl_type_is_array_or_matrix(type)) {
-         const struct glsl_type *elem_type = glsl_get_array_element(type);
-         for (unsigned i = 0; i < elems; i++)
-            val->elems[i] = vtn_create_ssa_value(b, elem_type);
-      } else {
-         vtn_assert(glsl_type_is_struct_or_ifc(type));
-         for (unsigned i = 0; i < elems; i++) {
-            const struct glsl_type *elem_type = glsl_get_struct_field(type, i);
-            val->elems[i] = vtn_create_ssa_value(b, elem_type);
-         }
-      }
-   }
-
-   return val;
+   return vtn_create_ssa_value_bare(b, vtn_get_bare_type(b, type));
 }
 
 void
 vtn_set_ssa_value_var(struct vtn_builder *b, struct vtn_ssa_value *ssa, nir_variable *var)
 {
    vtn_assert(glsl_type_is_cmat(var->type));
-   vtn_assert(var->type == ssa->type);
+   vtn_assert(var->type == ssa->type->type);
    ssa->is_variable = true;
    ssa->var = var;
 }
@@ -3300,7 +3434,7 @@ vtn_handle_texture(struct vtn_builder *b, SpvOp opcode,
       p->src = nir_src_for_ssa(nir_trim_vector(&b->nb, coord, coord_components));
 
       /* OpenCL allows integer sampling coordinates */
-      if (glsl_type_is_integer(coord_val->type) &&
+      if (glsl_type_is_integer(coord_val->type->type) &&
           opcode == SpvOpImageSampleExplicitLod) {
          vtn_fail_if(b->shader->info.stage != MESA_SHADER_KERNEL,
                      "Unless the Kernel capability is being used, the coordinate parameter "
@@ -3640,7 +3774,7 @@ vtn_handle_texture(struct vtn_builder *b, SpvOp opcode,
    }
 
    if (is_sparse) {
-      struct vtn_ssa_value *dest = vtn_create_ssa_value(b, struct_type->type);
+      struct vtn_ssa_value *dest = vtn_create_ssa_value(b, struct_type);
       unsigned result_size = glsl_get_vector_elements(ret_type->type);
       dest->elems[0]->def = nir_channel(&b->nb, def, result_size);
       dest->elems[1]->def = nir_trim_vector(&b->nb, def,
@@ -4110,7 +4244,7 @@ vtn_handle_image(struct vtn_builder *b, SpvOp opcode,
       intrin->src[4] = nir_src_for_ssa(image.lod);
 
       nir_alu_type src_type =
-         get_image_type(b, nir_get_nir_type_for_glsl_type(value->type), operands);
+         get_image_type(b, nir_get_nir_type_for_glsl_type(value->type->type), operands);
       nir_intrinsic_set_src_type(intrin, src_type);
       break;
    }
@@ -4183,7 +4317,7 @@ vtn_handle_image(struct vtn_builder *b, SpvOp opcode,
          result = nir_u2uN(&b->nb, result, glsl_get_bit_size(type->type));
 
       if (opcode == SpvOpImageSparseRead) {
-         struct vtn_ssa_value *dest = vtn_create_ssa_value(b, struct_type->type);
+         struct vtn_ssa_value *dest = vtn_create_ssa_value(b, struct_type);
          unsigned res_type_size = glsl_get_vector_elements(type->type);
          dest->elems[0]->def = nir_channel(&b->nb, result, res_type_size);
          if (intrin->def.bit_size != 32)
@@ -4477,14 +4611,15 @@ vtn_ssa_transpose(struct vtn_builder *b, struct vtn_ssa_value *src)
    if (src->transposed)
       return src->transposed;
 
+   const struct glsl_type *glsl_type = src->type->type;
    struct vtn_ssa_value *dest =
-      vtn_create_ssa_value(b, glsl_transposed_type(src->type));
+      vtn_create_ssa_value(b, vtn_type_from_glsl(b, glsl_transposed_type(glsl_type)));
 
-   for (unsigned i = 0; i < glsl_get_matrix_columns(dest->type); i++) {
-      if (glsl_type_is_vector_or_scalar(src->type)) {
+   for (unsigned i = 0; i < glsl_get_matrix_columns(dest->type->type); i++) {
+      if (glsl_type_is_vector_or_scalar(glsl_type)) {
          dest->elems[i]->def = nir_channel(&b->nb, src->def, i);
       } else {
-         unsigned cols = glsl_get_matrix_columns(src->type);
+         unsigned cols = glsl_get_matrix_columns(glsl_type);
          nir_scalar srcs[NIR_MAX_MATRIX_COLUMNS];
          for (unsigned j = 0; j < cols; j++) {
             srcs[j] = nir_get_scalar(src->elems[j]->def, i);
@@ -4568,16 +4703,14 @@ vtn_vector_construct(struct vtn_builder *b, unsigned num_components,
    return &vec->def;
 }
 
-/*
- * Creates a copy of `src`, reinterpreting it as `dest_type`.
- */
-struct vtn_ssa_value *
-vtn_composite_copy_logical(struct vtn_builder *b, struct vtn_ssa_value *src, struct vtn_type* dest_type)
+static struct vtn_ssa_value *
+vtn_composite_copy_logical_bare(struct vtn_builder *b, struct vtn_ssa_value *src,
+                                struct vtn_type *dest_type)
 {
    assert(!src->is_variable);
 
    struct vtn_ssa_value *dest = vtn_zalloc(b, struct vtn_ssa_value);
-   dest->type = glsl_get_bare_type(dest_type->type);
+   dest->type = dest_type;
 
    if (glsl_type_is_vector_or_scalar(dest_type->type)) {
       dest->def = src->def;
@@ -4587,14 +4720,23 @@ vtn_composite_copy_logical(struct vtn_builder *b, struct vtn_ssa_value *src, str
 
       if (glsl_type_is_struct(dest_type->type) || glsl_type_is_interface(dest_type->type)) {
          for (unsigned i = 0; i < elems; i++)
-            dest->elems[i] = vtn_composite_copy_logical(b, src->elems[i], dest_type->members[i]);
+            dest->elems[i] = vtn_composite_copy_logical_bare(b, src->elems[i], vtn_type_get_members(dest_type)[i]);
       } else {
          for (unsigned i = 0; i < elems; i++)
-            dest->elems[i] = vtn_composite_copy_logical(b, src->elems[i], dest_type->array_element);
+            dest->elems[i] = vtn_composite_copy_logical_bare(b, src->elems[i], dest_type->array_element);
       }
    }
 
    return dest;
+}
+
+/*
+ * Creates a copy of `src`, reinterpreting it as `dest_type`.
+ */
+struct vtn_ssa_value *
+vtn_composite_copy_logical(struct vtn_builder *b, struct vtn_ssa_value *src, struct vtn_type* dest_type)
+{
+   return vtn_composite_copy_logical_bare(b, src, vtn_get_bare_type(b, dest_type));
 }
 
 struct vtn_ssa_value *
@@ -4602,7 +4744,7 @@ vtn_composite_insert(struct vtn_builder *b, struct vtn_ssa_value *src,
                      struct vtn_type *src_type, struct vtn_ssa_value *insert,
                      const uint32_t *indices, unsigned num_indices)
 {
-   if (glsl_type_is_cmat(src->type))
+   if (glsl_type_is_cmat(src->type->type))
       return vtn_cooperative_matrix_insert(b, src, insert, indices, num_indices);
 
    /* Straight copy, use the source type as the destination type. */
@@ -4614,15 +4756,15 @@ vtn_composite_insert(struct vtn_builder *b, struct vtn_ssa_value *src,
       /* If we got a vector here, that means the next index will be trying to
        * dereference a scalar.
        */
-      vtn_fail_if(glsl_type_is_vector_or_scalar(cur->type),
+      vtn_fail_if(glsl_type_is_vector_or_scalar(cur->type->type),
                   "OpCompositeInsert has too many indices.");
-      vtn_fail_if(indices[i] >= glsl_get_length(cur->type),
+      vtn_fail_if(indices[i] >= glsl_get_length(cur->type->type),
                   "All indices in an OpCompositeInsert must be in-bounds");
       cur = cur->elems[indices[i]];
    }
 
-   if (glsl_type_is_vector_or_scalar(cur->type)) {
-      vtn_fail_if(indices[i] >= glsl_get_vector_elements(cur->type),
+   if (glsl_type_is_vector_or_scalar(cur->type->type)) {
+      vtn_fail_if(indices[i] >= glsl_get_vector_elements(cur->type->type),
                   "All indices in an OpCompositeInsert must be in-bounds");
 
       /* According to the SPIR-V spec, OpCompositeInsert may work down to
@@ -4632,7 +4774,7 @@ vtn_composite_insert(struct vtn_builder *b, struct vtn_ssa_value *src,
 
       cur->def = nir_vector_insert_imm(&b->nb, cur->def, insert->def, indices[i]);
    } else {
-      vtn_fail_if(indices[i] >= glsl_get_length(cur->type),
+      vtn_fail_if(indices[i] >= glsl_get_length(cur->type->type),
                   "All indices in an OpCompositeInsert must be in-bounds");
       cur->elems[indices[i]] = insert;
    }
@@ -4644,14 +4786,14 @@ struct vtn_ssa_value *
 vtn_composite_extract(struct vtn_builder *b, struct vtn_ssa_value *src,
                       const uint32_t *indices, unsigned num_indices)
 {
-   if (glsl_type_is_cmat(src->type))
+   if (glsl_type_is_cmat(src->type->type))
       return vtn_cooperative_matrix_extract(b, src, indices, num_indices);
 
    struct vtn_ssa_value *cur = src;
    for (unsigned i = 0; i < num_indices; i++) {
-      if (glsl_type_is_vector_or_scalar(cur->type)) {
+      if (glsl_type_is_vector_or_scalar(cur->type->type)) {
          vtn_assert(i == num_indices - 1);
-         vtn_fail_if(indices[i] >= glsl_get_vector_elements(cur->type),
+         vtn_fail_if(indices[i] >= glsl_get_vector_elements(cur->type->type),
                      "All indices in an OpCompositeExtract must be in-bounds");
 
          /* According to the SPIR-V spec, OpCompositeExtract may work down to
@@ -4660,12 +4802,13 @@ vtn_composite_extract(struct vtn_builder *b, struct vtn_ssa_value *src,
           */
 
          const struct glsl_type *scalar_type =
-            glsl_scalar_type(glsl_get_base_type(cur->type));
-         struct vtn_ssa_value *ret = vtn_create_ssa_value(b, scalar_type);
+            glsl_scalar_type(glsl_get_base_type(cur->type->type));
+         struct vtn_ssa_value *ret =
+            vtn_create_ssa_value(b, vtn_type_from_glsl(b, scalar_type));
          ret->def = nir_channel(&b->nb, cur->def, indices[i]);
          return ret;
       } else {
-         vtn_fail_if(indices[i] >= glsl_get_length(cur->type),
+         vtn_fail_if(indices[i] >= glsl_get_length(cur->type->type),
                      "All indices in an OpCompositeExtract must be in-bounds");
          cur = cur->elems[indices[i]];
       }
@@ -4679,7 +4822,7 @@ vtn_handle_composite(struct vtn_builder *b, SpvOp opcode,
                      const uint32_t *w, unsigned count)
 {
    struct vtn_type *type = vtn_get_type(b, w[1]);
-   struct vtn_ssa_value *ssa = vtn_create_ssa_value(b, type->type);
+   struct vtn_ssa_value *ssa = vtn_create_ssa_value(b, type);
 
    switch (opcode) {
    case SpvOpVectorExtractDynamic:
@@ -5837,8 +5980,8 @@ vtn_nir_select(struct vtn_builder *b, struct vtn_ssa_value *src0,
    if (src1->is_variable || src2->is_variable) {
       vtn_assert(src1->is_variable && src2->is_variable);
 
-      nir_variable *dest_var =
-         nir_local_variable_create(b->nb.impl, dest->type, "var_select");
+      nir_variable *dest_var = nir_local_variable_create(
+         b->nb.impl, dest->type->type, "var_select");
       nir_deref_instr *dest_deref = nir_build_deref_var(&b->nb, dest_var);
 
       nir_push_if(&b->nb, src0->def);
@@ -5854,10 +5997,10 @@ vtn_nir_select(struct vtn_builder *b, struct vtn_ssa_value *src0,
       nir_pop_if(&b->nb, NULL);
 
       vtn_set_ssa_value_var(b, dest, dest_var);
-   } else if (glsl_type_is_vector_or_scalar(src1->type)) {
+   } else if (glsl_type_is_vector_or_scalar(src1->type->type)) {
       dest->def = nir_bcsel(&b->nb, src0->def, src1->def, src2->def);
    } else {
-      unsigned elems = glsl_get_length(src1->type);
+      unsigned elems = glsl_get_length(src1->type->type);
 
       dest->elems = vtn_alloc_array(b, struct vtn_ssa_value *, elems);
       for (unsigned i = 0; i < elems; i++) {
@@ -6174,10 +6317,15 @@ ray_query_load_intrinsic_create(struct vtn_builder *b, SpvOp opcode,
       spirv_to_nir_type_ray_query_intrinsic(b, opcode);
 
    if (glsl_type_is_array_or_matrix(value.glsl_type)) {
+      const struct vtn_type *type = vtn_get_type(b, w[1]);
+      vtn_fail_if(glsl_get_bare_type(type->type) !=
+                  glsl_get_bare_type(value.glsl_type),
+                  "Type mismatch for SPIR-V value %%%u", w[2]);
+
       const struct glsl_type *elem_type = glsl_get_array_element(value.glsl_type);
       const unsigned elems = glsl_get_length(value.glsl_type);
 
-      struct vtn_ssa_value *ssa = vtn_create_ssa_value(b, value.glsl_type);
+      struct vtn_ssa_value *ssa = vtn_create_ssa_value(b, type);
       for (unsigned i = 0; i < elems; i++) {
          ssa->elems[i]->def =
             nir_rq_load(&b->nb,
@@ -7571,7 +7719,7 @@ vtn_print_value(struct vtn_builder *b, struct vtn_value *val, FILE *f)
    switch (val->value_type) {
    case vtn_value_type_ssa: {
       struct vtn_ssa_value *ssa = val->ssa;
-      fprintf(f,  " glsl_type=%s", glsl_get_type_name(ssa->type));
+      fprintf(f,  " glsl_type=%s", glsl_get_type_name(ssa->type->type));
       break;
    }
 

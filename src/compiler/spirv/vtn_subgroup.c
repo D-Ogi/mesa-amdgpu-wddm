@@ -23,14 +23,14 @@ vtn_build_subgroup_instr(struct vtn_builder *b,
 
    struct vtn_ssa_value *dst = vtn_create_ssa_value(b, src0->type);
 
-   vtn_assert(dst->type == src0->type);
-   vtn_assert(glsl_type_is_vector_or_scalar(dst->type));
+   vtn_assert(dst->type->type == src0->type->type);
+   vtn_assert(glsl_type_is_vector_or_scalar(dst->type->type));
    if (src1)
-      vtn_assert(src1->type == src0->type);
+      vtn_assert(src1->type->type == src0->type->type);
 
    nir_intrinsic_instr *intrin =
       nir_intrinsic_instr_create(b->nb.shader, nir_op);
-   nir_def_init_for_type(&intrin->instr, &intrin->def, dst->type);
+   nir_def_init_for_type(&intrin->instr, &intrin->def, dst->type->type);
    intrin->num_components = intrin->def.num_components;
 
    intrin->src[0] = nir_src_for_ssa(src0->def);
@@ -187,7 +187,7 @@ vtn_handle_subgroup(struct vtn_builder *b, SpvOp opcode,
          op = nir_intrinsic_vote_ieq;
          break;
       case SpvOpGroupNonUniformAllEqual:
-         switch (glsl_get_base_type(vtn_ssa_value(b, w[4])->type)) {
+         switch (glsl_get_base_type(vtn_ssa_value(b, w[4])->type->type)) {
          case GLSL_TYPE_FLOAT:
          case GLSL_TYPE_FLOAT16:
          case GLSL_TYPE_DOUBLE:
