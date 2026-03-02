@@ -79,7 +79,7 @@ build_det(nir_builder *b, nir_def **col, unsigned size)
 static nir_def *
 build_mat_det(struct vtn_builder *b, struct vtn_ssa_value *src)
 {
-   unsigned size = glsl_get_vector_elements(src->type->type);
+   unsigned size = vtn_type_get_matrix_columns(src->type);
 
    nir_def *cols[4];
    for (unsigned i = 0; i < size; i++)
@@ -92,7 +92,7 @@ static struct vtn_ssa_value *
 matrix_inverse(struct vtn_builder *b, struct vtn_ssa_value *src)
 {
    nir_def *adj_col[4];
-   unsigned size = glsl_get_vector_elements(src->type->type);
+   unsigned size = vtn_type_get_matrix_columns(src->type);
 
    nir_def *cols[4];
    for (unsigned i = 0; i < size; i++)
