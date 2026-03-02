@@ -21,11 +21,17 @@ wrap_matrix(struct vtn_builder *b, struct vtn_ssa_value *val)
    if (val == NULL)
       return NULL;
 
-   if (glsl_type_is_matrix(val->type->type))
+   if (val->type->base_type == vtn_base_type_matrix)
       return val;
 
+   struct vtn_type *mat_type = vtn_zalloc(b, struct vtn_type);
+   mat_type->base_type = vtn_base_type_matrix;
+   mat_type->type = val->type->type;
+   mat_type->length = 1;
+   mat_type->array_element = val->type;
+
    struct vtn_ssa_value *dest = vtn_zalloc(b, struct vtn_ssa_value);
-   dest->type = val->type;
+   dest->type = mat_type;
    dest->elems = vtn_alloc_array(b, struct vtn_ssa_value *, 1);
    dest->elems[0] = val;
 
@@ -36,7 +42,7 @@ static struct vtn_ssa_value *
 unwrap_matrix(struct vtn_ssa_value *val)
 {
    if (glsl_type_is_matrix(val->type->type))
-         return val;
+      return val;
 
    return val->elems[0];
 }
@@ -51,9 +57,9 @@ matrix_multiply(struct vtn_builder *b,
    struct vtn_ssa_value *src0_transpose = wrap_matrix(b, _src0->transposed);
    struct vtn_ssa_value *src1_transpose = wrap_matrix(b, _src1->transposed);
 
-   unsigned src0_rows = glsl_get_vector_elements(src0->type->type);
-   unsigned src0_columns = glsl_get_matrix_columns(src0->type->type);
-   unsigned src1_columns = glsl_get_matrix_columns(src1->type->type);
+   unsigned src0_rows = vtn_type_get_matrix_rows(src0->type);
+   unsigned src0_columns = vtn_type_get_matrix_columns(src0->type);
+   unsigned src1_columns = vtn_type_get_matrix_columns(src1->type);
 
    const struct glsl_type *dest_type;
    if (src1_columns > 1) {
@@ -103,7 +109,7 @@ mat_times_scalar(struct vtn_builder *b,
                  nir_def *scalar)
 {
    struct vtn_ssa_value *dest = vtn_create_ssa_value(b, mat->type);
-   for (unsigned i = 0; i < glsl_get_matrix_columns(mat->type->type); i++) {
+   for (unsigned i = 0; i < vtn_type_get_matrix_columns(mat->type); i++) {
       if (glsl_base_type_is_integer(glsl_get_base_type(mat->type->type)))
          dest->elems[i]->def = nir_imul(&b->nb, mat->elems[i]->def, scalar);
       else
@@ -172,7 +178,7 @@ vtn_mediump_downconvert_value(struct vtn_builder *b, struct vtn_ssa_value *src)
          srcmp->def = vtn_mediump_downconvert(b, base_type, src->def);
       } else {
          assert(base_type == GLSL_TYPE_FLOAT);
-         for (int i = 0; i < glsl_get_matrix_columns(src->type->type); i++)
+         for (int i = 0; i < vtn_type_get_matrix_columns(src->type); i++)
             srcmp->elems[i]->def = vtn_mediump_downconvert(b, base_type, src->elems[i]->def);
       }
       return srcmp;
@@ -186,7 +192,7 @@ vtn_handle_matrix_alu(struct vtn_builder *b, SpvOp opcode,
    switch (opcode) {
    case SpvOpFNegate: {
       struct vtn_ssa_value *dest = vtn_create_ssa_value(b, src0->type);
-      unsigned cols = glsl_get_matrix_columns(src0->type->type);
+      unsigned cols = vtn_type_get_matrix_columns(src0->type);
       for (unsigned i = 0; i < cols; i++)
          dest->elems[i]->def = nir_fneg(&b->nb, src0->elems[i]->def);
       return dest;
@@ -194,7 +200,7 @@ vtn_handle_matrix_alu(struct vtn_builder *b, SpvOp opcode,
 
    case SpvOpFAdd: {
       struct vtn_ssa_value *dest = vtn_create_ssa_value(b, src0->type);
-      unsigned cols = glsl_get_matrix_columns(src0->type->type);
+      unsigned cols = vtn_type_get_matrix_columns(src0->type);
       for (unsigned i = 0; i < cols; i++)
          dest->elems[i]->def =
             nir_fadd(&b->nb, src0->elems[i]->def, src1->elems[i]->def);
@@ -203,7 +209,7 @@ vtn_handle_matrix_alu(struct vtn_builder *b, SpvOp opcode,
 
    case SpvOpFSub: {
       struct vtn_ssa_value *dest = vtn_create_ssa_value(b, src0->type);
-      unsigned cols = glsl_get_matrix_columns(src0->type->type);
+      unsigned cols = vtn_type_get_matrix_columns(src0->type);
       for (unsigned i = 0; i < cols; i++)
          dest->elems[i]->def =
             nir_fsub(&b->nb, src0->elems[i]->def, src1->elems[i]->def);
@@ -602,7 +608,7 @@ vtn_mediump_upconvert_value(struct vtn_builder *b, struct vtn_ssa_value *value)
    if (glsl_type_is_vector_or_scalar(value->type->type)) {
       value_full->def = vtn_mediump_upconvert(b, base_type, value->def);
    } else {
-      for (int i = 0; i < glsl_get_matrix_columns(value->type->type); i++)
+      for (int i = 0; i < vtn_type_get_matrix_columns(value->type); i++)
          value_full->elems[i]->def = vtn_mediump_upconvert(b, base_type, value->elems[i]->def);
    }
 
@@ -1235,8 +1241,8 @@ vtn_handle_integer_dot(struct vtn_builder *b, SpvOp opcode,
     */
    vtn_fail_if(glsl_get_bit_size(vtn_src[0]->type->type) !=
                glsl_get_bit_size(vtn_src[1]->type->type) ||
-               glsl_get_vector_elements(vtn_src[0]->type->type) !=
-               glsl_get_vector_elements(vtn_src[1]->type->type),
+               vtn_type_num_elements(vtn_src[0]->type) !=
+               vtn_type_num_elements(vtn_src[1]->type),
                "Vector 1 and vector 2 source of opcode %s must have the same "
                "type",
                spirv_op_to_string(opcode));
@@ -1261,12 +1267,12 @@ vtn_handle_integer_dot(struct vtn_builder *b, SpvOp opcode,
        * have the special instructions (i.e., one or both of has_dot_4x8 or
        * has_sudot_4x8 is false)?
        */
-      if (glsl_get_vector_elements(vtn_src[0]->type->type) == 4 &&
+      if (vtn_type_num_elements(vtn_src[0]->type) == 4 &&
           glsl_get_bit_size(vtn_src[0]->type->type) == 8 &&
           glsl_get_bit_size(dest_type) <= 32) {
          src[0] = nir_pack_32_4x8(&b->nb, src[0]);
          src[1] = nir_pack_32_4x8(&b->nb, src[1]);
-      } else if (glsl_get_vector_elements(vtn_src[0]->type->type) == 2 &&
+      } else if (vtn_type_num_elements(vtn_src[0]->type) == 2 &&
                  glsl_get_bit_size(vtn_src[0]->type->type) == 16 &&
                  glsl_get_bit_size(dest_type) <= 32 &&
                  opcode != SpvOpSUDotKHR &&
@@ -1334,7 +1340,7 @@ vtn_handle_integer_dot(struct vtn_builder *b, SpvOp opcode,
        *    computed with enough precision to avoid overflow and underflow.
        */
       const unsigned vector_components =
-         glsl_get_vector_elements(vtn_src[0]->type->type);
+         vtn_type_num_elements(vtn_src[0]->type);
 
       for (unsigned i = 0; i < vector_components; i++) {
          nir_def *const src0 =

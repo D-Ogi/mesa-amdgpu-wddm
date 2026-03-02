@@ -446,6 +446,7 @@ get_pointer_type(struct vtn_builder *b, struct vtn_type *t, SpvStorageClass stor
    ret->type = nir_address_format_to_glsl_type(
             vtn_mode_to_address_format(
                b, vtn_storage_class_to_mode(b, storage_class, NULL, NULL)));
+   ret->length = glsl_get_vector_elements(ret->type);
    ret->base_type = vtn_base_type_pointer;
    ret->storage_class = storage_class;
    ret->pointed = t;
