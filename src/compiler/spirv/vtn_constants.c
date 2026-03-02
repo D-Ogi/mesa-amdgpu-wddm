@@ -170,8 +170,8 @@ vtn_handle_spec_constant_op(struct vtn_builder *b, struct vtn_value *val,
       vtn_assert(src->value_type == vtn_value_type_constant ||
                  src->value_type == vtn_value_type_undef);
 
-      unsigned src_len = glsl_get_vector_elements(src->type->type);
-      unsigned dst_len = glsl_get_vector_elements(val->type->type);
+      unsigned src_len = vtn_type_num_elements(src->type);
+      unsigned dst_len = vtn_type_num_elements(val->type);
 
       unsigned src_bit_size = glsl_get_bit_size(src->type->type);
       unsigned dst_bit_size = glsl_get_bit_size(val->type->type);
@@ -221,8 +221,8 @@ vtn_handle_spec_constant_op(struct vtn_builder *b, struct vtn_value *val,
       vtn_assert(v1->value_type == vtn_value_type_constant ||
                  v1->value_type == vtn_value_type_undef);
 
-      unsigned len0 = glsl_get_vector_elements(v0->type->type);
-      unsigned len1 = glsl_get_vector_elements(v1->type->type);
+      unsigned len0 = vtn_type_num_elements(v0->type);
+      unsigned len1 = vtn_type_num_elements(v1->type);
 
       vtn_assert(len0 + len1 < 16);
 
@@ -370,7 +370,7 @@ vtn_handle_spec_constant_op(struct vtn_builder *b, struct vtn_value *val,
       const glsl_type *dst_type = val->type->type;
 
       const bool saturate = vtn_has_decoration(b, val, SpvDecorationSaturatedToLargestFloat8NormalConversionEXT);
-      unsigned num_components = glsl_get_vector_elements(val->type->type);
+      unsigned num_components = vtn_type_num_elements(val->type);
 
       vtn_assert(count <= 7);
 

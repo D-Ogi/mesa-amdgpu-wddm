@@ -66,7 +66,7 @@ vtn_ssa_value_add_to_call_params(struct vtn_builder *b,
    } else if (glsl_type_is_vector_or_scalar(value->type->type)) {
       call->params[(*param_idx)++] = nir_src_for_ssa(value->def);
    } else {
-      unsigned elems = glsl_get_length(value->type->type);
+      unsigned elems = vtn_type_num_elements(value->type);
       for (unsigned i = 0; i < elems; i++) {
          vtn_ssa_value_add_to_call_params(b, value->elems[i],
                                           call, param_idx);
@@ -172,7 +172,7 @@ vtn_ssa_value_load_function_param(struct vtn_builder *b,
          value->def = nir_load_param(&b->nb, (*param_idx)++);
       }
    } else {
-      unsigned elems = glsl_get_length(value->type->type);
+      unsigned elems = vtn_type_num_elements(value->type);
       for (unsigned i = 0; i < elems; i++)
          vtn_ssa_value_load_function_param(b, value->elems[i], NULL, info, param_idx);
    }

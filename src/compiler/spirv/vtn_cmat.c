@@ -44,6 +44,7 @@ vtn_handle_cooperative_type(struct vtn_builder *b, struct vtn_value *val,
    enum glsl_cmat_use use = vtn_cooperative_matrix_use_to_glsl(vtn_constant_uint(b, w[6]));
 
    val->type->base_type = vtn_base_type_cooperative_matrix;
+   val->type->length = 1;
    vtn_fail_if(!glsl_type_is_numeric(component_type->type),
                "OpTypeCooperativeMatrixKHR "
                "Component Type must be a scalar numerical type.");
@@ -579,20 +580,17 @@ vtn_cooperative_matrix_insert(struct vtn_builder *b, struct vtn_ssa_value *mat,
 }
 
 static struct vtn_type *
-vtn_create_internal_uint_type(struct vtn_builder *b) {
-   struct vtn_type *t = vtn_zalloc(b, struct vtn_type);
-   t->base_type = vtn_base_type_scalar;
-   t->type = &glsl_type_builtin_uint;
-   return t;
+vtn_create_internal_uint_type(struct vtn_builder *b)
+{
+   return vtn_type_from_glsl(b, &glsl_type_builtin_uint);
 }
 
 static struct vtn_type *
 vtn_create_internal_tvec_type(struct vtn_builder *b, enum glsl_base_type base_type,
-                              int dim) {
-   struct vtn_type *t = vtn_zalloc(b, struct vtn_type);
-   t->base_type = vtn_base_type_vector;
-   t->type = glsl_vector_type(base_type, dim);
-   return t;
+                              int dim)
+{
+   return vtn_type_from_glsl(
+      b, glsl_vector_type(base_type, dim));
 }
 
 void
