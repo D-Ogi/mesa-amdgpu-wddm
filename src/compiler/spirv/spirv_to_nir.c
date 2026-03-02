@@ -2644,6 +2644,10 @@ vtn_handle_type(struct vtn_builder *b, SpvOp opcode,
       vtn_fail_with_opcode("Unhandled opcode", opcode);
    }
 
+   if (val->type->type != NULL &&
+       glsl_type_is_vector_or_scalar(val->type->type))
+      val->type->length = glsl_get_vector_elements(val->type->type);
+
    vtn_foreach_decoration(b, val, type_decoration_cb, NULL);
 
    if (val->type->base_type == vtn_base_type_struct &&
@@ -4615,11 +4619,11 @@ vtn_ssa_transpose(struct vtn_builder *b, struct vtn_ssa_value *src)
    struct vtn_ssa_value *dest =
       vtn_create_ssa_value(b, vtn_type_from_glsl(b, glsl_transposed_type(glsl_type)));
 
-   for (unsigned i = 0; i < glsl_get_matrix_columns(dest->type->type); i++) {
+   for (unsigned i = 0; i < vtn_type_get_matrix_columns(dest->type); i++) {
       if (glsl_type_is_vector_or_scalar(glsl_type)) {
          dest->elems[i]->def = nir_channel(&b->nb, src->def, i);
       } else {
-         unsigned cols = glsl_get_matrix_columns(glsl_type);
+         unsigned cols = vtn_type_get_matrix_columns(src->type);
          nir_scalar srcs[NIR_MAX_MATRIX_COLUMNS];
          for (unsigned j = 0; j < cols; j++) {
             srcs[j] = nir_get_scalar(src->elems[j]->def, i);
@@ -4758,13 +4762,13 @@ vtn_composite_insert(struct vtn_builder *b, struct vtn_ssa_value *src,
        */
       vtn_fail_if(glsl_type_is_vector_or_scalar(cur->type->type),
                   "OpCompositeInsert has too many indices.");
-      vtn_fail_if(indices[i] >= glsl_get_length(cur->type->type),
+      vtn_fail_if(indices[i] >= vtn_type_num_elements(cur->type),
                   "All indices in an OpCompositeInsert must be in-bounds");
       cur = cur->elems[indices[i]];
    }
 
    if (glsl_type_is_vector_or_scalar(cur->type->type)) {
-      vtn_fail_if(indices[i] >= glsl_get_vector_elements(cur->type->type),
+      vtn_fail_if(indices[i] >= vtn_type_num_elements(cur->type),
                   "All indices in an OpCompositeInsert must be in-bounds");
 
       /* According to the SPIR-V spec, OpCompositeInsert may work down to
@@ -4774,7 +4778,7 @@ vtn_composite_insert(struct vtn_builder *b, struct vtn_ssa_value *src,
 
       cur->def = nir_vector_insert_imm(&b->nb, cur->def, insert->def, indices[i]);
    } else {
-      vtn_fail_if(indices[i] >= glsl_get_length(cur->type->type),
+      vtn_fail_if(indices[i] >= vtn_type_num_elements(cur->type),
                   "All indices in an OpCompositeInsert must be in-bounds");
       cur->elems[indices[i]] = insert;
    }
@@ -4793,7 +4797,7 @@ vtn_composite_extract(struct vtn_builder *b, struct vtn_ssa_value *src,
    for (unsigned i = 0; i < num_indices; i++) {
       if (glsl_type_is_vector_or_scalar(cur->type->type)) {
          vtn_assert(i == num_indices - 1);
-         vtn_fail_if(indices[i] >= glsl_get_vector_elements(cur->type->type),
+         vtn_fail_if(indices[i] >= vtn_type_num_elements(cur->type),
                      "All indices in an OpCompositeExtract must be in-bounds");
 
          /* According to the SPIR-V spec, OpCompositeExtract may work down to
@@ -4808,7 +4812,7 @@ vtn_composite_extract(struct vtn_builder *b, struct vtn_ssa_value *src,
          ret->def = nir_channel(&b->nb, cur->def, indices[i]);
          return ret;
       } else {
-         vtn_fail_if(indices[i] >= glsl_get_length(cur->type->type),
+         vtn_fail_if(indices[i] >= vtn_type_num_elements(cur->type),
                      "All indices in an OpCompositeExtract must be in-bounds");
          cur = cur->elems[indices[i]];
       }
@@ -6000,7 +6004,7 @@ vtn_nir_select(struct vtn_builder *b, struct vtn_ssa_value *src0,
    } else if (glsl_type_is_vector_or_scalar(src1->type->type)) {
       dest->def = nir_bcsel(&b->nb, src0->def, src1->def, src2->def);
    } else {
-      unsigned elems = glsl_get_length(src1->type->type);
+      unsigned elems = vtn_type_num_elements(src1->type);
 
       dest->elems = vtn_alloc_array(b, struct vtn_ssa_value *, elems);
       for (unsigned i = 0; i < elems; i++) {

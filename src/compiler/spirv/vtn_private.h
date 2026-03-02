@@ -293,9 +293,11 @@ struct vtn_type {
    /* The SPIR-V id of the given type. */
    uint32_t id;
 
-   /* Specifies the length of complex types.
-    *
-    * For Workgroup pointers, this is the size of the referenced type.
+   /* Number of top-level elements represented by this type.  This is the
+    * component count for scalar, vector, pointer, and buffer address
+    * representations; the column count for matrices; and the member count for
+    * aggregates and function types.  Runtime arrays and types with no elements
+    * use zero.
     */
    unsigned length;
 
@@ -927,6 +929,26 @@ vtn_copy_value(struct vtn_builder *b, uint32_t src_value_id,
 
 struct vtn_type *vtn_type_from_glsl(struct vtn_builder *b,
                                     const struct glsl_type *type);
+
+static inline unsigned
+vtn_type_num_elements(const struct vtn_type *type)
+{
+   return type->length;
+}
+
+static inline unsigned
+vtn_type_get_matrix_columns(const struct vtn_type *type)
+{
+   assert(type->base_type == vtn_base_type_matrix);
+   return vtn_type_num_elements(type);
+}
+
+static inline unsigned
+vtn_type_get_matrix_rows(const struct vtn_type *type)
+{
+   assert(type->base_type == vtn_base_type_matrix);
+   return vtn_type_num_elements(type->array_element);
+}
 
 struct vtn_ssa_value *vtn_create_ssa_value(struct vtn_builder *b,
                                            const struct vtn_type *type);

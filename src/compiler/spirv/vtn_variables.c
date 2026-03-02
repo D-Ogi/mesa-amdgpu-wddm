@@ -322,6 +322,7 @@ vtn_create_internal_pointer_type(struct vtn_builder *b,
    t->pointed = pointed;
    t->storage_class = original->storage_class;
    t->type = original->type;
+   t->length = original->length;
    t->stride = original->stride;
    return t;
 }
@@ -2860,6 +2861,7 @@ vtn_handle_variables(struct vtn_builder *b, SpvOp opcode,
 
       ptr_type->type = nir_address_format_to_glsl_type(
          vtn_mode_to_address_format(b, vtn_variable_mode_function));
+      ptr_type->length = glsl_get_vector_elements(ptr_type->type);
 
       vtn_create_variable(b, val, ptr_type, sampler_type, ptr_type->storage_class, NULL);
 
@@ -3093,6 +3095,7 @@ vtn_handle_variables(struct vtn_builder *b, SpvOp opcode,
       buffer_type->base_type = vtn_base_type_buffer;
       buffer_type->storage_class = res_type->storage_class;
       buffer_type->type = nir_address_format_to_glsl_type(addr_format);
+      buffer_type->length = glsl_get_vector_elements(buffer_type->type);
 
       /* buffer is always an untyped pointer */
       src = vtn_cast_pointer(b, src, buffer_type);
