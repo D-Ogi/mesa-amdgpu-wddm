@@ -552,6 +552,8 @@ fp_math_ctrl_for_type(struct vtn_builder *b, struct vtn_type *type)
    } else if (glsl_type_is_cmat(type->type)) {
       struct glsl_cmat_description desc = *glsl_get_cmat_description(type->type);
       base_type = desc.element_type;
+   } else if (type->base_type == vtn_base_type_long_vector) {
+      base_type = glsl_get_base_type(glsl_get_scalar_type(type->type));
    } else {
       base_type = glsl_get_base_type(type->type);
    }
@@ -835,26 +837,24 @@ vtn_handle_alu(struct vtn_builder *b, SpvOp opcode,
       return;
    }
 
-   const unsigned num_inputs = count - 3;
-   if (vtn_has_matrix_operand(b, dest_type, &w[3], num_inputs)) {
+   const unsigned num_srcs = count - 3;
+   if (vtn_has_matrix_operand(b, dest_type, &w[3], num_srcs)) {
       vtn_handle_matrix_alu(b, opcode, w, count);
       return;
    }
 
-   struct vtn_ssa_value *vtn_src[4] = { NULL, };
-   vtn_collect_ssa_sources(b, &w[3], vtn_src, num_inputs);
+   struct vtn_handler_ctx h = {0};
+   vtn_handler_prepare(b, &h, w[1], w[2], &w[3], num_srcs);
 
-   vtn_handle_fp_fast_math(b, dest_val, vtn_untyped_value(b, w[3]));
+   vtn_handle_fp_fast_math(b, h.dest_val, vtn_untyped_value(b, w[3]));
 
-   const bool mediump_16bit = vtn_alu_op_mediump_16bit(b, opcode, dest_val);
-   if (mediump_16bit)
-      vtn_downconvert_ssa_sources(b, vtn_src, num_inputs);
+   h.mediump_16bit = vtn_alu_op_mediump_16bit(b, opcode, h.dest_val);
+   vtn_handler_start(b, &h);
 
-   struct vtn_ssa_value *dest = vtn_create_ssa_value(b, dest_type);
-   nir_def *src[4] = { NULL, };
-   for (unsigned i = 0; i < num_inputs; i++) {
-      vtn_assert(glsl_type_is_vector_or_scalar(vtn_src[i]->type->type));
-      src[i] = vtn_src[i]->def;
+   nir_def *src[4] = {0};
+   for (unsigned i = 0; i < h.num_srcs; i++) {
+      vtn_assert(glsl_type_is_vector_or_scalar(h.srcs[i]->type->type));
+      src[i] = h.srcs[i]->def;
    }
 
    nir_def *def = NULL;
@@ -1039,7 +1039,8 @@ vtn_handle_alu(struct vtn_builder *b, SpvOp opcode,
       /* bit_count always returns int32, but the SPIR-V opcode just says the return
        * value needs to be big enough to store the number of bits.
        */
-      def = nir_u2uN(&b->nb, nir_bit_count(&b->nb, src[0]), glsl_get_bit_size(dest_type->type));
+      def = nir_u2uN(&b->nb, nir_bit_count(&b->nb, src[0]),
+                     glsl_get_bit_size(h.dest->type->type));
       break;
    }
 
@@ -1093,8 +1094,8 @@ vtn_handle_alu(struct vtn_builder *b, SpvOp opcode,
    case SpvOpSNegate: {
       nir_alu_instr *alu = nir_def_as_alu(def);
       if (alu) {
-         alu->no_signed_wrap |= vtn_has_decoration(b, dest_val, SpvDecorationNoSignedWrap);
-         alu->no_unsigned_wrap |= vtn_has_decoration(b, dest_val, SpvDecorationNoUnsignedWrap);
+         alu->no_signed_wrap |= vtn_has_decoration(b, h.dest_val, SpvDecorationNoSignedWrap);
+         alu->no_unsigned_wrap |= vtn_has_decoration(b, h.dest_val, SpvDecorationNoUnsignedWrap);
       }
       break;
    }
@@ -1103,11 +1104,8 @@ vtn_handle_alu(struct vtn_builder *b, SpvOp opcode,
       break;
    }
 
-   dest->def = def;
-
-   if (mediump_16bit)
-      dest = vtn_mediump_upconvert_value(b, dest);
-   vtn_push_ssa_value(b, w[2], dest);
+   h.dest->def = def;
+   vtn_push_ssa_value(b, w[2], vtn_handler_finish_value(b, &h));
 
    b->nb.fp_math_ctrl = nir_fp_fast_math;
 }
@@ -1335,8 +1333,12 @@ vtn_handle_integer_dot(struct vtn_builder *b, SpvOp opcode,
                   spirv_op_to_string(opcode));
    }
 
+   /* One-component SPIR-V vectors are scalar-backed in NIR, so track
+    * explicit packing independently from the NIR component count.
+    */
+   bool packed_operands = false;
    unsigned packed_bit_size = 8;
-   if (glsl_type_is_vector(vtn_src[0]->type->type)) {
+   if (vtn_src[0]->type->base_type == vtn_base_type_vector) {
       /* FINISHME: Is this actually as good or better for platforms that don't
        * have the special instructions (i.e., one or both of has_dot_4x8 or
        * has_sudot_4x8 is false)?
@@ -1346,6 +1348,7 @@ vtn_handle_integer_dot(struct vtn_builder *b, SpvOp opcode,
           glsl_get_bit_size(dest_type) <= 32) {
          src[0] = nir_pack_32_4x8(&b->nb, src[0]);
          src[1] = nir_pack_32_4x8(&b->nb, src[1]);
+         packed_operands = true;
       } else if (vtn_type_num_elements(vtn_src[0]->type) == 2 &&
                  glsl_get_bit_size(vtn_src[0]->type->type) == 16 &&
                  glsl_get_bit_size(dest_type) <= 32 &&
@@ -1353,9 +1356,10 @@ vtn_handle_integer_dot(struct vtn_builder *b, SpvOp opcode,
                  opcode != SpvOpSUDotAccSatKHR) {
          src[0] = nir_pack_32_2x16(&b->nb, src[0]);
          src[1] = nir_pack_32_2x16(&b->nb, src[1]);
+         packed_operands = true;
          packed_bit_size = 16;
       }
-   } else if (glsl_type_is_scalar(vtn_src[0]->type->type) &&
+   } else if (vtn_src[0]->type->base_type == vtn_base_type_scalar &&
               glsl_type_is_32bit(vtn_src[0]->type->type)) {
       /* The SPV_KHR_integer_dot_product spec says:
        *
@@ -1365,6 +1369,7 @@ vtn_handle_integer_dot(struct vtn_builder *b, SpvOp opcode,
        *
        * The "Packed Vector Format" value follows the last input.
        */
+      packed_operands = true;
       vtn_assert(count == (num_inputs + 4));
       const SpvPackedVectorFormat pack_format = w[num_inputs + 3];
       vtn_fail_if(pack_format != SpvPackedVectorFormatPackedVectorFormat4x8BitKHR,
@@ -1376,7 +1381,7 @@ vtn_handle_integer_dot(struct vtn_builder *b, SpvOp opcode,
 
    nir_def *dest = NULL;
 
-   if (src[0]->num_components > 1) {
+   if (!packed_operands) {
       nir_def *(*src0_conversion)(nir_builder *, nir_def *, unsigned);
       nir_def *(*src1_conversion)(nir_builder *, nir_def *, unsigned);
 

@@ -283,6 +283,7 @@ enum vtn_base_type {
    vtn_base_type_tensor_layout,
    vtn_base_type_tensor_view,
    vtn_base_type_buffer,
+   vtn_base_type_long_vector,
 };
 
 struct vtn_type {
@@ -953,6 +954,43 @@ vtn_type_get_matrix_rows(const struct vtn_type *type)
 struct vtn_ssa_value *vtn_create_ssa_value(struct vtn_builder *b,
                                            const struct vtn_type *type);
 void vtn_set_ssa_value_var(struct vtn_builder *b, struct vtn_ssa_value *ssa, nir_variable *var);
+
+struct vtn_handler_ctx {
+   struct vtn_value *dest_val;
+   const struct vtn_type *dest_type;
+   struct vtn_ssa_value *dest;
+
+   unsigned num_srcs;
+   struct vtn_ssa_value *srcs[4];
+
+   bool mediump_16bit;
+
+   /* Long vector. */
+   struct {
+      unsigned length;
+      struct vtn_ssa_value *dest;
+      struct vtn_ssa_value *srcs[4];
+      nir_loop *loop;
+      nir_variable *idx_var;
+      nir_def *idx;
+   } lv;
+};
+
+void vtn_handler_prepare(struct vtn_builder *b,
+                         struct vtn_handler_ctx *h,
+                         uint32_t result_type_id,
+                         uint32_t result_id,
+                         const uint32_t *src_ids,
+                         unsigned num_srcs);
+void vtn_handler_prepare_type(struct vtn_builder *b,
+                              struct vtn_handler_ctx *h,
+                              const struct vtn_type *dest_type,
+                              struct vtn_ssa_value *const *srcs,
+                              unsigned num_srcs);
+void vtn_handler_start(struct vtn_builder *b,
+                       struct vtn_handler_ctx *h);
+struct vtn_ssa_value *vtn_handler_finish_value(struct vtn_builder *b,
+                                               struct vtn_handler_ctx *h);
 
 struct vtn_ssa_value *vtn_ssa_transpose(struct vtn_builder *b,
                                         struct vtn_ssa_value *src);

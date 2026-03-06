@@ -159,6 +159,19 @@ struct spirv_to_nir_options {
     * vkd3d-proton
     */
    bool store_dxbc_dxil_hashes;
+
+   /* When using LongVectorEXT, this is the bitmask of additional vector
+    * component sizes that are kept as native NIR vectors.  Sizes 2, 3, and 4
+    * are always native, and single-component vectors are represented as
+    * scalars.  Other sizes will be lowered to arrays.
+    */
+   uint32_t native_vector_sizes_mask;
+
+   /* When using LongVectorEXT, this is the maximum vector component count
+    * supported by the target.  VK_EXT_shader_long_vector requires this to be
+    * set to at least 1024.
+    */
+   uint32_t max_vector_components;
 };
 
 enum spirv_verify_result {
