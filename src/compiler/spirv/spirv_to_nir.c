@@ -131,6 +131,7 @@ static const struct spirv_capabilities implemented_capabilities = {
    .Kernel = true,
    .Linkage = true,
    .LiteralSampler = true,
+   .LongVectorEXT = true,
    .Matrix = true,
    .MeshShadingEXT = true,
    .MeshShadingNV = true,
@@ -463,6 +464,7 @@ vtn_base_type_to_string(enum vtn_base_type t)
    CASE(tensor_layout);
    CASE(tensor_view);
    CASE(buffer);
+   CASE(long_vector);
    }
 #undef CASE
    UNREACHABLE("unknown base type");
@@ -732,8 +734,9 @@ vtn_get_deref_for_ssa_value(struct vtn_builder *b, struct vtn_ssa_value *ssa)
 struct vtn_value *
 vtn_push_var_ssa(struct vtn_builder *b, uint32_t value_id, nir_variable *var)
 {
-   struct vtn_ssa_value *ssa =
-      vtn_create_ssa_value(b, vtn_get_value_type(b, value_id));
+   struct vtn_ssa_value *ssa = vtn_zalloc(b, struct vtn_ssa_value);
+   ssa->type = vtn_get_bare_type(
+      b, vtn_get_value_type(b, value_id));
    vtn_set_ssa_value_var(b, ssa, var);
    return vtn_push_ssa_value(b, value_id, ssa);
 }
@@ -1381,6 +1384,7 @@ vtn_types_compatible(struct vtn_builder *b,
    case vtn_base_type_buffer:
       return t1->storage_class == t2->storage_class;
 
+   case vtn_base_type_long_vector:
    case vtn_base_type_array:
       return t1->length == t2->length &&
              vtn_types_compatible(b, t1->array_element, t2->array_element);
@@ -1471,6 +1475,7 @@ vtn_type_copy(struct vtn_builder *b, struct vtn_type *src)
    case vtn_base_type_ray_query:
    case vtn_base_type_cooperative_matrix:
    case vtn_base_type_buffer:
+   case vtn_base_type_long_vector:
       /* Nothing more to do */
       break;
 
@@ -2194,21 +2199,59 @@ vtn_handle_type(struct vtn_builder *b, SpvOp opcode,
       break;
    }
 
-   case SpvOpTypeVector: {
+   case SpvOpTypeVector:
+   case SpvOpTypeVectorIdEXT: {
+      const bool long_vector_enabled =
+         b->enabled_capabilities.LongVectorEXT;
+
       struct vtn_type *base = vtn_get_type(b, w[2]);
-      unsigned elems = w[3];
+      vtn_fail_if(opcode == SpvOpTypeVectorIdEXT &&
+                  !glsl_type_is_integer_32(vtn_get_value_type(b, w[3])->type),
+                  "Component Count for OpTypeVectorIdEXT must be a "
+                  "32-bit integer constant");
+      unsigned elems =
+         opcode == SpvOpTypeVector ? w[3] : vtn_constant_uint(b, w[3]);
+
+      const uint32_t max_components = b->options->max_vector_components;
+      vtn_fail_if(long_vector_enabled && elems > max_components,
+                  "Vector component count %u exceeds the target maximum %u",
+                  elems, max_components);
+
+      const bool legacy_component_count =
+         elems == 2 || elems == 3 || elems == 4 ||
+         (b->options->environment == NIR_SPIRV_OPENCL &&
+          b->enabled_capabilities.Vector16 &&
+          (elems == 8 || elems == 16));
 
       vtn_fail_if(base->base_type != vtn_base_type_scalar,
-                  "Base type for OpTypeVector must be a scalar");
-      vtn_fail_if((elems < 2 || elems > 4) && (elems != 8) && (elems != 16),
-                  "Invalid component count for OpTypeVector");
+                  "Base type for vector type must be a scalar");
+      vtn_fail_if(elems == 0 ||
+                  (opcode == SpvOpTypeVectorIdEXT && !long_vector_enabled) ||
+                  (!long_vector_enabled && !legacy_component_count),
+                  "Invalid component count for vector type");
 
-      val->type->base_type = vtn_base_type_vector;
-      val->type->type = glsl_vector_type(glsl_get_base_type(base->type), elems);
+      const uint32_t mask = b->options->native_vector_sizes_mask |
+                            BITFIELD_BIT(2) |
+                            BITFIELD_BIT(3) |
+                            BITFIELD_BIT(4);
+      const bool is_native = elems == 1 ||
+                             (elems >= 2 && elems <= NIR_MAX_VEC_COMPONENTS &&
+                              mask & BITFIELD_BIT(elems));
+
+      const unsigned stride = glsl_type_is_boolean(base->type)
+            ? 4 : glsl_get_bit_size(base->type) / 8;
+
+      if (long_vector_enabled && !is_native) {
+         val->type->base_type = vtn_base_type_long_vector;
+         val->type->type = glsl_array_type(base->type, elems, stride);
+      } else {
+         val->type->base_type = vtn_base_type_vector;
+         val->type->type = glsl_vector_type(glsl_get_base_type(base->type), elems);
+      }
       val->type->length = elems;
-      val->type->stride = glsl_type_is_boolean(val->type->type)
-         ? 4 : glsl_get_bit_size(base->type) / 8;
+      val->type->stride = stride;
       val->type->array_element = base;
+
       break;
    }
 
@@ -3006,6 +3049,13 @@ vtn_create_ssa_value_bare(struct vtn_builder *b, struct vtn_type *type)
    struct vtn_ssa_value *val = vtn_zalloc(b, struct vtn_ssa_value);
    val->type = type;
 
+   if (type->base_type == vtn_base_type_long_vector) {
+      nir_variable *var = nir_local_variable_create(
+         b->nb.impl, val->type->type, "lv");
+      vtn_set_ssa_value_var(b, val, var);
+      return val;
+   }
+
    const struct glsl_type *glsl_type = val->type->type;
 
    if (!glsl_type_is_vector_or_scalar(glsl_type) &&
@@ -3044,10 +3094,117 @@ vtn_create_ssa_value(struct vtn_builder *b, const struct vtn_type *type)
 void
 vtn_set_ssa_value_var(struct vtn_builder *b, struct vtn_ssa_value *ssa, nir_variable *var)
 {
-   vtn_assert(glsl_type_is_cmat(var->type));
+   vtn_assert(glsl_type_is_cmat(var->type) ||
+              glsl_type_is_array(var->type));
    vtn_assert(var->type == ssa->type->type);
    ssa->is_variable = true;
    ssa->var = var;
+}
+
+void
+vtn_handler_prepare_type(struct vtn_builder *b,
+                         struct vtn_handler_ctx *h,
+                         const struct vtn_type *dest_type,
+                         struct vtn_ssa_value *const *srcs,
+                         unsigned num_srcs)
+{
+   h->dest_type = dest_type;
+
+   h->lv.length = h->dest_type->base_type == vtn_base_type_long_vector ?
+                  h->dest_type->length : 0;
+   vtn_fail_if(num_srcs > ARRAY_SIZE(h->srcs),
+               "Handler supports at most %zu source operands",
+               ARRAY_SIZE(h->srcs));
+   h->num_srcs = num_srcs;
+
+   for (unsigned i = 0; i < num_srcs; i++) {
+      struct vtn_ssa_value *src = srcs[i];
+      h->srcs[i] = src;
+      if (src->type->base_type == vtn_base_type_long_vector) {
+         vtn_fail_if(h->lv.length && h->lv.length != src->type->length,
+                     "Long-vector operands have mismatched component counts: "
+                     "%u and %u", h->lv.length, src->type->length);
+         h->lv.length = src->type->length;
+      }
+   }
+
+   h->dest = vtn_create_ssa_value(b, h->dest_type);
+}
+
+void
+vtn_handler_prepare(struct vtn_builder *b,
+                    struct vtn_handler_ctx *h,
+                    uint32_t result_type_id,
+                    uint32_t result_id,
+                    const uint32_t *src_ids,
+                    unsigned num_srcs)
+{
+   h->dest_val = vtn_untyped_value(b, result_id);
+
+   struct vtn_ssa_value *srcs[ARRAY_SIZE(h->srcs)];
+   vtn_fail_if(num_srcs > ARRAY_SIZE(srcs),
+               "Handler supports at most %zu source operands",
+               ARRAY_SIZE(srcs));
+   vtn_collect_ssa_sources(b, src_ids, srcs, num_srcs);
+   vtn_handler_prepare_type(b, h, vtn_get_type(b, result_type_id), srcs,
+                            num_srcs);
+}
+
+void
+vtn_handler_start(struct vtn_builder *b,
+                  struct vtn_handler_ctx *h)
+{
+   if (h->lv.length > 0) {
+      h->lv.idx_var = nir_local_variable_create(
+         b->nb.impl, glsl_uint_type(), "long_vector_idx");
+      nir_store_var(&b->nb, h->lv.idx_var, nir_imm_int(&b->nb, 0), 1);
+
+      /* TODO: Emit long-vector loops with gotos for unstructured NIR. */
+      vtn_fail_if(!b->nb.impl->structured,
+                  "Long-vector loops require structured control flow");
+      h->lv.loop = nir_push_loop(&b->nb);
+      h->lv.idx = nir_load_var(&b->nb, h->lv.idx_var);
+      nir_break_if(&b->nb, nir_uge_imm(&b->nb, h->lv.idx, h->lv.length));
+
+      h->lv.dest = h->dest;
+      if (h->dest->type->base_type == vtn_base_type_long_vector) {
+         vtn_assert(h->dest->is_variable);
+         h->dest = vtn_create_ssa_value(b, h->dest->type->array_element);
+      }
+
+      for (unsigned i = 0; i < h->num_srcs; i++) {
+         const struct vtn_ssa_value *lv_src = h->lv.srcs[i] = h->srcs[i];
+         if (lv_src->type->base_type == vtn_base_type_long_vector) {
+            vtn_assert(lv_src->is_variable);
+            h->srcs[i] = vtn_create_ssa_value(b, lv_src->type->array_element);
+            h->srcs[i]->def = nir_load_array_var(&b->nb, lv_src->var, h->lv.idx);
+         }
+      }
+   }
+
+   if (h->mediump_16bit)
+      vtn_downconvert_ssa_sources(b, h->srcs, h->num_srcs);
+}
+
+struct vtn_ssa_value *
+vtn_handler_finish_value(struct vtn_builder *b,
+                         struct vtn_handler_ctx *h)
+{
+   if (h->mediump_16bit)
+      h->dest = vtn_mediump_upconvert_value(b, h->dest);
+
+   if (h->lv.length > 0) {
+      if (h->dest != h->lv.dest) {
+         nir_store_array_var(&b->nb, h->lv.dest->var, h->lv.idx, h->dest->def, 1);
+      }
+
+      nir_store_var(&b->nb, h->lv.idx_var,
+                    nir_iadd_imm(&b->nb, h->lv.idx, 1), 1);
+      nir_pop_loop(&b->nb, h->lv.loop);
+      return h->lv.dest;
+   }
+
+   return h->dest;
 }
 
 static nir_tex_src
@@ -4677,12 +4834,11 @@ vtn_vector_construct(struct vtn_builder *b, unsigned num_components,
 {
    nir_alu_instr *vec = create_vec(b, num_components, srcs[0]->bit_size);
 
-   /* From the SPIR-V 1.1 spec for OpCompositeConstruct:
-    *
-    *    "When constructing a vector, there must be at least two Constituent
-    *    operands."
+   /* SPV_EXT_long_vector removes the requirement that vector construction
+    * has at least two constituents.  This is needed for one-component
+    * vectors, which use a scalar NIR definition.
     */
-   vtn_assert(num_srcs >= 2);
+   vtn_assert(num_srcs >= 2 || b->enabled_capabilities.LongVectorEXT);
 
    unsigned dest_idx = 0;
    for (unsigned i = 0; i < num_srcs; i++) {
@@ -5181,6 +5337,15 @@ vtn_handle_preamble_instruction(struct vtn_builder *b, SpvOp opcode,
           */
          vtn_warn("Not fully supported capability: %s",
                   spirv_capability_to_string(cap));
+         break;
+
+      case SpvCapabilityLongVectorEXT:
+         vtn_fail_if(b->options->environment != NIR_SPIRV_VULKAN,
+                     "LongVectorEXT is only supported in the Vulkan "
+                     "environment");
+         vtn_fail_if(b->options->max_vector_components < 1024,
+                     "VK_EXT_shader_long_vector requires "
+                     "max_vector_components to be at least 1024");
          break;
 
       case SpvCapabilityOptNoneEXT:
@@ -5902,6 +6067,7 @@ vtn_handle_variable_or_type_instruction(struct vtn_builder *b, SpvOp opcode,
    case SpvOpTypeInt:
    case SpvOpTypeFloat:
    case SpvOpTypeVector:
+   case SpvOpTypeVectorIdEXT:
    case SpvOpTypeMatrix:
    case SpvOpTypeImage:
    case SpvOpTypeSampler:
@@ -7131,6 +7297,10 @@ vtn_create_builder(const uint32_t *words, size_t word_count,
 
    spirv_capabilities_set(&b->supported_capabilities, SpvCapabilityLinkage,
                           b->options->create_library);
+
+   /* Mesa currently exposes LongVectorEXT only through Vulkan. */
+   if (b->options->environment != NIR_SPIRV_VULKAN)
+      b->supported_capabilities.LongVectorEXT = false;
 
    /* In GLSLang commit 8297936dd6eb3, their handling of barrier() was fixed
     * to provide correct memory semantics on compute shader barrier()

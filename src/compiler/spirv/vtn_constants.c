@@ -645,7 +645,7 @@ vtn_handle_constants(struct vtn_builder *b, SpvOp opcode,
 
       switch (val->type->base_type) {
       case vtn_base_type_vector: {
-         assert(glsl_type_is_vector(val->type->type));
+         assert(glsl_type_is_vector_or_scalar(val->type->type));
          for (unsigned i = 0; i < elem_count; i++)
             val->constant->values[i] = elems[i]->values[0];
          break;
