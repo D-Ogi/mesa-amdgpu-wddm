@@ -495,6 +495,13 @@ vtn_pointer_dereference(struct vtn_builder *b,
          unsigned field = deref_chain->link[idx].id;
          tail = nir_build_deref_struct(&b->nb, tail, field);
          type = type->members[field];
+      } else if (type->base_type == vtn_base_type_vector &&
+                 type->length == 1) {
+         /* One-component vectors retain their SPIR-V vector type in VTN but
+          * use the scalar element type in NIR.  Component zero therefore has
+          * the same address as the vector itself.
+          */
+         type = type->array_element;
       } else {
          nir_def *arr_index =
             vtn_access_link_as_ssa(b, deref_chain->link[idx], 1,
@@ -552,6 +559,13 @@ _vtn_local_load_store(struct vtn_builder *b, bool load, nir_deref_instr *deref,
       } else {
          nir_deref_instr *src_deref = vtn_get_deref_for_ssa_value(b, inout);
          nir_cmat_copy(&b->nb, &deref->def, &src_deref->def);
+      }
+   } else if (glsl_type_is_array(deref->type) && inout->is_variable) {
+      nir_deref_instr *var_deref = vtn_get_deref_for_ssa_value(b, inout);
+      if (load) {
+         nir_copy_deref(&b->nb, var_deref, deref);
+      } else {
+         nir_copy_deref(&b->nb, deref, var_deref);
       }
    } else if (glsl_type_is_vector_or_scalar(deref->type)) {
       if (load) {
@@ -708,6 +722,21 @@ _vtn_variable_load_store(struct vtn_builder *b, bool load,
    } else if (ptr->mode == vtn_variable_mode_accel_struct) {
       vtn_assert(load);
       (*inout)->def = vtn_pointer_to_descriptor(b, ptr);
+      return;
+   }
+
+   if (ptr->type->pointed->base_type == vtn_base_type_long_vector &&
+       (load || (*inout)->is_variable)) {
+      nir_deref_instr *deref = vtn_pointer_to_deref(b, ptr);
+      nir_deref_instr *var_deref = vtn_get_deref_for_ssa_value(b, *inout);
+
+      if (load) {
+         nir_copy_deref_with_access(&b->nb, var_deref, deref,
+                                    0, ptr->type->pointed->access | access);
+      } else {
+         nir_copy_deref_with_access(&b->nb, deref, var_deref,
+                                    ptr->type->pointed->access | access, 0);
+      }
       return;
    }
 
@@ -2143,6 +2172,27 @@ vtn_type_is_ray_query(struct vtn_type *type)
    return vtn_type_without_array(type)->base_type == vtn_base_type_ray_query;
 }
 
+static bool
+vtn_type_contains_storage_class_restricted_vector(const struct vtn_type *type)
+{
+   switch (type->base_type) {
+   case vtn_base_type_vector:
+   case vtn_base_type_long_vector:
+      return type->length > 4;
+   case vtn_base_type_array:
+   case vtn_base_type_matrix:
+      return vtn_type_contains_storage_class_restricted_vector(type->array_element);
+   case vtn_base_type_struct:
+      for (unsigned i = 0; i < type->length; i++) {
+         if (vtn_type_contains_storage_class_restricted_vector(type->members[i]))
+            return true;
+      }
+      return false;
+   default:
+      return false;
+   }
+}
+
 static void
 vtn_create_variable(struct vtn_builder *b, struct vtn_value *val,
                     struct vtn_type *ptr_type, struct vtn_type *data_type,
@@ -2154,6 +2204,30 @@ vtn_create_variable(struct vtn_builder *b, struct vtn_value *val,
    enum vtn_variable_mode mode;
    nir_variable_mode nir_mode;
    mode = vtn_storage_class_to_mode(b, storage_class, without_array, &nir_mode);
+
+   switch (mode) {
+   case vtn_variable_mode_function:
+   case vtn_variable_mode_private:
+   case vtn_variable_mode_ubo:
+   case vtn_variable_mode_ssbo:
+   case vtn_variable_mode_phys_ssbo:
+   case vtn_variable_mode_workgroup:
+   case vtn_variable_mode_push_constant:
+   case vtn_variable_mode_shader_record:
+   case vtn_variable_mode_cross_workgroup:
+   case vtn_variable_mode_generic:
+      break;
+   default:
+      vtn_fail_if(b->enabled_capabilities.LongVectorEXT &&
+                  vtn_type_contains_storage_class_restricted_vector(data_type),
+                  "Vector types with more than four components (or types "
+                  "containing them) can only be allocated in the Function, "
+                  "Private, Uniform, Workgroup, StorageBuffer, "
+                  "PhysicalStorageBuffer, PushConstant, "
+                  "ShaderRecordBufferKHR, CrossWorkgroup, and Generic "
+                  "storage classes");
+      break;
+   }
 
    switch (mode) {
    case vtn_variable_mode_ubo:
