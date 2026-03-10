@@ -242,16 +242,6 @@ handle_glsl450_alu(struct vtn_builder *b, enum GLSLstd450 entrypoint,
       break;
    }
 
-   case GLSLstd450Length:
-      dest->def = nir_fast_length(nb, src[0]);
-      break;
-   case GLSLstd450Distance:
-      dest->def = nir_fast_distance(nb, src[0], src[1]);
-      break;
-   case GLSLstd450Normalize:
-      dest->def = nir_fast_normalize(nb, src[0]);
-      break;
-
    case GLSLstd450Exp:
       dest->def = nir_fexp(nb, src[0]);
       break;
@@ -291,61 +281,8 @@ handle_glsl450_alu(struct vtn_builder *b, enum GLSLstd450 entrypoint,
       dest->def = nir_iclamp(nb, src[0], src[1], src[2]);
       break;
 
-   case GLSLstd450Cross: {
-      dest->def = nir_cross3(nb, src[0], src[1]);
-      break;
-   }
-
    case GLSLstd450SmoothStep: {
       dest->def = nir_smoothstep(nb, src[0], src[1], src[2]);
-      break;
-   }
-
-   case GLSLstd450FaceForward:
-      dest->def =
-         nir_bcsel(nb, nir_flt(nb, nir_fdot(nb, src[2], src[1]),
-                                   NIR_IMM_FP(nb, 0.0)),
-                       src[0], nir_fneg(nb, src[0]));
-      break;
-
-   case GLSLstd450Reflect:
-      /* I - 2 * dot(N, I) * N */
-      dest->def =
-         nir_a_minus_bc(nb, src[0],
-                            src[1],
-                            nir_fmul(nb, nir_fdot(nb, src[0], src[1]),
-                                         NIR_IMM_FP(nb, 2.0)));
-      break;
-
-   case GLSLstd450Refract: {
-      nir_def *I = src[0];
-      nir_def *N = src[1];
-      nir_def *eta = src[2];
-      nir_def *n_dot_i = nir_fdot(nb, N, I);
-      nir_def *one = NIR_IMM_FP(nb, 1.0);
-      nir_def *zero = NIR_IMM_FP(nb, 0.0);
-      /* According to the SPIR-V and GLSL specs, eta is always a float
-       * regardless of the type of the other operands. However in practice it
-       * seems that if you try to pass it a float then glslang will just
-       * promote it to a double and generate invalid SPIR-V. In order to
-       * support a hypothetical fixed version of glslang we’ll promote eta to
-       * double if the other operands are double also.
-       */
-      if (I->bit_size != eta->bit_size) {
-         eta = nir_type_convert(nb, eta, nir_type_float,
-                                nir_type_float | I->bit_size,
-                                nir_rounding_mode_undef);
-      }
-      /* k = 1.0 - eta * eta * (1.0 - dot(N, I) * dot(N, I)) */
-      nir_def *k =
-         nir_a_minus_bc(nb, one, eta,
-                            nir_fmul(nb, eta, nir_a_minus_bc(nb, one, n_dot_i, n_dot_i)));
-      nir_def *result =
-         nir_a_minus_bc(nb, nir_fmul(nb, eta, I),
-                            nir_ffma_weak(nb, eta, n_dot_i, nir_fsqrt(nb, k)),
-                            N);
-      /* XXX: bcsel, or if statement? */
-      dest->def = nir_bcsel(nb, nir_flt(nb, k, zero), zero, result);
       break;
    }
 
@@ -625,6 +562,103 @@ handle_glsl450_packing_ops(struct vtn_builder *b, enum GLSLstd450 opcode,
    vtn_push_ssa_value(b, w[2], dest);
 }
 
+static void
+handle_glsl450_vector_ops(struct vtn_builder *b, enum GLSLstd450 opcode,
+                          const uint32_t *w, unsigned count)
+{
+   struct nir_builder *nb = &b->nb;
+   const struct vtn_type *dest_type = vtn_get_type(b, w[1]);
+
+   unsigned num_inputs = count - 5;
+   struct vtn_ssa_value *vtn_src[3] = {0};
+   vtn_collect_ssa_sources(b, &w[5], vtn_src, num_inputs);
+
+   const bool mediump_16bit =
+      vtn_value_needs_mediump_16bit(b, vtn_untyped_value(b, w[2]));
+   if (mediump_16bit)
+      vtn_downconvert_ssa_sources(b, vtn_src, num_inputs);
+
+   nir_def *src[3] = { NULL, };
+   for (unsigned i = 0; i < num_inputs; i++)
+      src[i] = vtn_src[i]->def;
+
+   struct vtn_ssa_value *dest = vtn_create_ssa_value(b, dest_type);
+
+   switch (opcode) {
+   case GLSLstd450Length:
+      dest->def = nir_fast_length(nb, src[0]);
+      break;
+
+   case GLSLstd450Distance:
+      dest->def = nir_fast_distance(nb, src[0], src[1]);
+      break;
+
+   case GLSLstd450Normalize:
+      dest->def = nir_fast_normalize(nb, src[0]);
+      break;
+
+   case GLSLstd450Cross:
+      dest->def = nir_cross3(nb, src[0], src[1]);
+      break;
+
+   case GLSLstd450FaceForward:
+      dest->def =
+         nir_bcsel(nb, nir_flt(nb, nir_fdot(nb, src[2], src[1]),
+                                   NIR_IMM_FP(nb, 0.0)),
+                       src[0], nir_fneg(nb, src[0]));
+      break;
+
+   case GLSLstd450Reflect:
+      /* I - 2 * dot(N, I) * N */
+      dest->def =
+         nir_a_minus_bc(nb, src[0],
+                            src[1],
+                            nir_fmul(nb, nir_fdot(nb, src[0], src[1]),
+                                         NIR_IMM_FP(nb, 2.0)));
+      break;
+
+   case GLSLstd450Refract: {
+      nir_def *I = src[0];
+      nir_def *N = src[1];
+      nir_def *eta = src[2];
+      nir_def *n_dot_i = nir_fdot(nb, N, I);
+      nir_def *one = NIR_IMM_FP(nb, 1.0);
+      nir_def *zero = NIR_IMM_FP(nb, 0.0);
+      /* According to the SPIR-V and GLSL specs, eta is always a float
+       * regardless of the type of the other operands. However in practice it
+       * seems that if you try to pass it a float then glslang will just
+       * promote it to a double and generate invalid SPIR-V. In order to
+       * support a hypothetical fixed version of glslang we’ll promote eta to
+       * double if the other operands are double also.
+       */
+      if (I->bit_size != eta->bit_size) {
+         eta = nir_type_convert(nb, eta, nir_type_float,
+                                nir_type_float | I->bit_size,
+                                nir_rounding_mode_undef);
+      }
+      /* k = 1.0 - eta * eta * (1.0 - dot(N, I) * dot(N, I)) */
+      nir_def *k =
+         nir_a_minus_bc(nb, one, eta,
+                            nir_fmul(nb, eta, nir_a_minus_bc(nb, one, n_dot_i, n_dot_i)));
+      nir_def *result =
+         nir_a_minus_bc(nb, nir_fmul(nb, eta, I),
+                            nir_ffma_weak(nb, eta, n_dot_i, nir_fsqrt(nb, k)),
+                            N);
+      /* XXX: bcsel, or if statement? */
+      dest->def = nir_bcsel(nb, nir_flt(nb, k, zero), zero, result);
+      break;
+   }
+
+   default:
+      UNREACHABLE("invalid vector opcode");
+   }
+
+   if (mediump_16bit)
+      dest = vtn_mediump_upconvert_value(b, dest);
+
+   vtn_push_ssa_value(b, w[2], dest);
+}
+
 bool
 vtn_handle_glsl450_instruction(struct vtn_builder *b, SpvOp ext_opcode,
                                const uint32_t *w, unsigned count)
@@ -667,6 +701,16 @@ vtn_handle_glsl450_instruction(struct vtn_builder *b, SpvOp ext_opcode,
    case GLSLstd450UnpackHalf2x16:
    case GLSLstd450UnpackDouble2x32:
       handle_glsl450_packing_ops(b, (enum GLSLstd450)ext_opcode, w, count);
+      break;
+
+   case GLSLstd450Length:
+   case GLSLstd450Distance:
+   case GLSLstd450Normalize:
+   case GLSLstd450Cross:
+   case GLSLstd450FaceForward:
+   case GLSLstd450Reflect:
+   case GLSLstd450Refract:
+      handle_glsl450_vector_ops(b, (enum GLSLstd450)ext_opcode, w, count);
       break;
 
    default:
