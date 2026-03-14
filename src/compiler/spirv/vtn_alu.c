@@ -616,7 +616,7 @@ vtn_mediump_upconvert_value(struct vtn_builder *b, struct vtn_ssa_value *value)
 }
 
 static nir_def *
-vtn_handle_deriv(struct vtn_builder *b, SpvOp opcode, nir_def *src)
+vtn_build_deriv(struct vtn_builder *b, SpvOp opcode, nir_def *src)
 {
    /* SPV_NV_compute_shader_derivatives:
     * In the GLCompute Execution Model:
@@ -861,18 +861,6 @@ vtn_handle_alu(struct vtn_builder *b, SpvOp opcode,
       }
       break;
    }
-
-   case SpvOpDPdx:
-   case SpvOpDPdxFine:
-   case SpvOpDPdxCoarse:
-   case SpvOpDPdy:
-   case SpvOpDPdyFine:
-   case SpvOpDPdyCoarse:
-   case SpvOpFwidth:
-   case SpvOpFwidthFine:
-   case SpvOpFwidthCoarse:
-      dest->def = vtn_handle_deriv(b, opcode, src[0]);
-      break;
 
    case SpvOpVectorTimesScalar:
       /* The builder will take care of splatting for us. */
@@ -1130,6 +1118,33 @@ vtn_handle_alu(struct vtn_builder *b, SpvOp opcode,
       /* Do nothing. */
       break;
    }
+
+   if (mediump_16bit)
+      dest = vtn_mediump_upconvert_value(b, dest);
+   vtn_push_ssa_value(b, w[2], dest);
+
+   b->nb.fp_math_ctrl = nir_fp_fast_math;
+}
+
+void
+vtn_handle_derivative(struct vtn_builder *b, SpvOp opcode,
+                      const uint32_t *w, unsigned count)
+{
+   vtn_assert(count == 4);
+
+   struct vtn_value *dest_val = vtn_untyped_value(b, w[2]);
+   const struct vtn_type *dest_type = vtn_get_type(b, w[1]);
+   struct vtn_ssa_value *vtn_src[1] = { NULL, };
+   vtn_collect_ssa_sources(b, &w[3], vtn_src, ARRAY_SIZE(vtn_src));
+
+   vtn_handle_fp_fast_math(b, dest_val, vtn_untyped_value(b, w[3]));
+
+   const bool mediump_16bit = vtn_alu_op_mediump_16bit(b, opcode, dest_val);
+   if (mediump_16bit)
+      vtn_downconvert_ssa_sources(b, vtn_src, ARRAY_SIZE(vtn_src));
+
+   struct vtn_ssa_value *dest = vtn_create_ssa_value(b, dest_type);
+   dest->def = vtn_build_deriv(b, opcode, vtn_src[0]->def);
 
    if (mediump_16bit)
       dest = vtn_mediump_upconvert_value(b, dest);
