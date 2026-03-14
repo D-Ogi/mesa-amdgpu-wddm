@@ -812,14 +812,6 @@ vtn_handle_alu(struct vtn_builder *b, SpvOp opcode,
    }
 
    switch (opcode) {
-   case SpvOpAny:
-      dest->def = nir_bany(&b->nb, src[0]);
-      break;
-
-   case SpvOpAll:
-      dest->def = nir_ball(&b->nb, src[0]);
-      break;
-
    case SpvOpOuterProduct: {
       for (unsigned i = 0; i < src[1]->num_components; i++) {
          dest->elems[i]->def =
@@ -1144,6 +1136,35 @@ vtn_handle_alu(struct vtn_builder *b, SpvOp opcode,
    vtn_push_ssa_value(b, w[2], dest);
 
    b->nb.fp_math_ctrl = nir_fp_fast_math;
+}
+
+void
+vtn_handle_alu_vote(struct vtn_builder *b, SpvOp opcode,
+                    const uint32_t *w, unsigned count)
+{
+   vtn_assert(count == 4);
+
+   const struct vtn_type *dest_type = vtn_get_type(b, w[1]);
+   struct vtn_ssa_value *vtn_src[1] = { NULL, };
+   vtn_collect_ssa_sources(b, &w[3], vtn_src, ARRAY_SIZE(vtn_src));
+
+   struct vtn_ssa_value *dest = vtn_create_ssa_value(b, dest_type);
+   nir_def *src = vtn_src[0]->def;
+
+   switch (opcode) {
+   case SpvOpAny:
+      dest->def = nir_bany(&b->nb, src);
+      break;
+
+   case SpvOpAll:
+      dest->def = nir_ball(&b->nb, src);
+      break;
+
+   default:
+      UNREACHABLE("invalid vote opcode");
+   }
+
+   vtn_push_ssa_value(b, w[2], dest);
 }
 
 void
