@@ -820,48 +820,6 @@ vtn_handle_alu(struct vtn_builder *b, SpvOp opcode,
       break;
    }
 
-   case SpvOpIAddCarry:
-      vtn_assert(glsl_type_is_struct_or_ifc(dest_type));
-      dest->elems[0]->def = nir_iadd(&b->nb, src[0], src[1]);
-      dest->elems[1]->def = nir_b2iN(&b->nb,
-                                     nir_ult(&b->nb, dest->elems[0]->def, src[0]),
-                                     src[0]->bit_size);
-      break;
-
-   case SpvOpISubBorrow:
-      vtn_assert(glsl_type_is_struct_or_ifc(dest_type));
-      dest->elems[0]->def = nir_isub(&b->nb, src[0], src[1]);
-      dest->elems[1]->def = nir_b2iN(&b->nb,
-                                     nir_ult(&b->nb, src[0], src[1]),
-                                     src[0]->bit_size);
-      break;
-
-   case SpvOpUMulExtended: {
-      vtn_assert(glsl_type_is_struct_or_ifc(dest_type));
-      if (src[0]->bit_size == 32) {
-         nir_def *umul = nir_umul_2x32_64(&b->nb, src[0], src[1]);
-         dest->elems[0]->def = nir_unpack_64_2x32_split_x(&b->nb, umul);
-         dest->elems[1]->def = nir_unpack_64_2x32_split_y(&b->nb, umul);
-      } else {
-         dest->elems[0]->def = nir_imul(&b->nb, src[0], src[1]);
-         dest->elems[1]->def = nir_umul_high(&b->nb, src[0], src[1]);
-      }
-      break;
-   }
-
-   case SpvOpSMulExtended: {
-      vtn_assert(glsl_type_is_struct_or_ifc(dest_type));
-      if (src[0]->bit_size == 32) {
-         nir_def *umul = nir_imul_2x32_64(&b->nb, src[0], src[1]);
-         dest->elems[0]->def = nir_unpack_64_2x32_split_x(&b->nb, umul);
-         dest->elems[1]->def = nir_unpack_64_2x32_split_y(&b->nb, umul);
-      } else {
-         dest->elems[0]->def = nir_imul(&b->nb, src[0], src[1]);
-         dest->elems[1]->def = nir_imul_high(&b->nb, src[0], src[1]);
-      }
-      break;
-   }
-
    case SpvOpVectorTimesScalar:
       /* The builder will take care of splatting for us. */
       dest->def = nir_fmul(&b->nb, src[0], src[1]);
@@ -1169,6 +1127,78 @@ vtn_handle_conversion(struct vtn_builder *b, SpvOp opcode,
    struct vtn_ssa_value *dest = vtn_create_ssa_value(b, vtn_get_type(b, w[1]));
    dest->def = vtn_build_convert(b, opcode, dest_val, dest_type,
                                  vtn_src[0]->type->type, vtn_src[0]->def);
+
+   if (mediump_16bit)
+      dest = vtn_mediump_upconvert_value(b, dest);
+   vtn_push_ssa_value(b, w[2], dest);
+
+   b->nb.fp_math_ctrl = nir_fp_fast_math;
+}
+
+void
+vtn_handle_alu_multi_result(struct vtn_builder *b, SpvOp opcode,
+                            const uint32_t *w, unsigned count)
+{
+   vtn_assert(count == 5);
+
+   struct vtn_value *dest_val = vtn_untyped_value(b, w[2]);
+   const struct glsl_type *dest_type = vtn_get_type(b, w[1])->type;
+   struct vtn_ssa_value *vtn_src[2] = { NULL, };
+   vtn_collect_ssa_sources(b, &w[3], vtn_src, ARRAY_SIZE(vtn_src));
+
+   vtn_handle_fp_fast_math(b, dest_val, vtn_untyped_value(b, w[3]));
+
+   const bool mediump_16bit = vtn_alu_op_mediump_16bit(b, opcode, dest_val);
+   if (mediump_16bit)
+      vtn_downconvert_ssa_sources(b, vtn_src, ARRAY_SIZE(vtn_src));
+
+   struct vtn_ssa_value *dest = vtn_create_ssa_value(b, vtn_get_type(b, w[1]));
+   nir_def *src[2] = { vtn_src[0]->def, vtn_src[1]->def };
+
+   vtn_assert(glsl_type_is_struct_or_ifc(dest_type));
+
+   switch (opcode) {
+   case SpvOpIAddCarry:
+      dest->elems[0]->def = nir_iadd(&b->nb, src[0], src[1]);
+      dest->elems[1]->def = nir_b2iN(&b->nb,
+                                     nir_ult(&b->nb, dest->elems[0]->def, src[0]),
+                                     src[0]->bit_size);
+      break;
+
+   case SpvOpISubBorrow:
+      dest->elems[0]->def = nir_isub(&b->nb, src[0], src[1]);
+      dest->elems[1]->def = nir_b2iN(&b->nb,
+                                     nir_ult(&b->nb, src[0], src[1]),
+                                     src[0]->bit_size);
+      break;
+
+   case SpvOpUMulExtended: {
+      if (src[0]->bit_size == 32) {
+         nir_def *umul = nir_umul_2x32_64(&b->nb, src[0], src[1]);
+         dest->elems[0]->def = nir_unpack_64_2x32_split_x(&b->nb, umul);
+         dest->elems[1]->def = nir_unpack_64_2x32_split_y(&b->nb, umul);
+      } else {
+         dest->elems[0]->def = nir_imul(&b->nb, src[0], src[1]);
+         dest->elems[1]->def = nir_umul_high(&b->nb, src[0], src[1]);
+      }
+      break;
+   }
+
+   case SpvOpSMulExtended: {
+      if (src[0]->bit_size == 32) {
+         nir_def *umul = nir_imul_2x32_64(&b->nb, src[0], src[1]);
+         dest->elems[0]->def = nir_unpack_64_2x32_split_x(&b->nb, umul);
+         dest->elems[1]->def = nir_unpack_64_2x32_split_y(&b->nb, umul);
+      } else {
+         dest->elems[0]->def = nir_imul(&b->nb, src[0], src[1]);
+         dest->elems[1]->def = nir_imul_high(&b->nb, src[0], src[1]);
+      }
+      break;
+   }
+
+   default:
+      UNREACHABLE("invalid multi-result opcode");
+   }
 
    if (mediump_16bit)
       dest = vtn_mediump_upconvert_value(b, dest);

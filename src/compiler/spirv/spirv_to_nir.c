@@ -6674,10 +6674,6 @@ vtn_handle_body_instruction(struct vtn_builder *b, SpvOp opcode,
    case SpvOpFRem:
    case SpvOpFMod:
    case SpvOpVectorTimesScalar:
-   case SpvOpIAddCarry:
-   case SpvOpISubBorrow:
-   case SpvOpUMulExtended:
-   case SpvOpSMulExtended:
    case SpvOpShiftRightLogical:
    case SpvOpShiftRightArithmetic:
    case SpvOpShiftLeftLogical:
@@ -6766,6 +6762,13 @@ vtn_handle_body_instruction(struct vtn_builder *b, SpvOp opcode,
    case SpvOpSatConvertSToU:
    case SpvOpSatConvertUToS:
       vtn_handle_conversion(b, opcode, w, count);
+      break;
+
+   case SpvOpIAddCarry:
+   case SpvOpISubBorrow:
+   case SpvOpUMulExtended:
+   case SpvOpSMulExtended:
+      vtn_handle_alu_multi_result(b, opcode, w, count);
       break;
 
    case SpvOpSDotKHR:
