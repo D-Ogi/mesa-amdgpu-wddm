@@ -6647,8 +6647,6 @@ vtn_handle_body_instruction(struct vtn_builder *b, SpvOp opcode,
    case SpvOpSNegate:
    case SpvOpFNegate:
    case SpvOpNot:
-   case SpvOpAny:
-   case SpvOpAll:
    case SpvOpConvertFToU:
    case SpvOpConvertFToS:
    case SpvOpConvertSToF:
@@ -6757,6 +6755,11 @@ vtn_handle_body_instruction(struct vtn_builder *b, SpvOp opcode,
    case SpvOpIMul32x16INTEL:
    case SpvOpUMul32x16INTEL:
       vtn_handle_alu(b, opcode, w, count);
+      break;
+
+   case SpvOpAny:
+   case SpvOpAll:
+      vtn_handle_alu_vote(b, opcode, w, count);
       break;
 
    case SpvOpSDotKHR:

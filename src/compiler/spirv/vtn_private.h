@@ -1023,6 +1023,9 @@ nir_op vtn_nir_alu_op_for_spirv_opcode(struct vtn_builder *b,
 void vtn_handle_alu(struct vtn_builder *b, SpvOp opcode,
                     const uint32_t *w, unsigned count);
 
+void vtn_handle_alu_vote(struct vtn_builder *b, SpvOp opcode,
+                         const uint32_t *w, unsigned count);
+
 void vtn_handle_integer_dot(struct vtn_builder *b, SpvOp opcode,
                             const uint32_t *w, unsigned count);
 
