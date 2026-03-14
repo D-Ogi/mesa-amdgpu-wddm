@@ -6720,15 +6720,6 @@ vtn_handle_body_instruction(struct vtn_builder *b, SpvOp opcode,
    case SpvOpSGreaterThanEqual:
    case SpvOpFOrdGreaterThanEqual:
    case SpvOpFUnordGreaterThanEqual:
-   case SpvOpDPdx:
-   case SpvOpDPdy:
-   case SpvOpFwidth:
-   case SpvOpDPdxFine:
-   case SpvOpDPdyFine:
-   case SpvOpFwidthFine:
-   case SpvOpDPdxCoarse:
-   case SpvOpDPdyCoarse:
-   case SpvOpFwidthCoarse:
    case SpvOpBitFieldInsert:
    case SpvOpBitFieldSExtract:
    case SpvOpBitFieldUExtract:
@@ -6760,6 +6751,18 @@ vtn_handle_body_instruction(struct vtn_builder *b, SpvOp opcode,
    case SpvOpAny:
    case SpvOpAll:
       vtn_handle_alu_vote(b, opcode, w, count);
+      break;
+
+   case SpvOpDPdx:
+   case SpvOpDPdy:
+   case SpvOpFwidth:
+   case SpvOpDPdxFine:
+   case SpvOpDPdyFine:
+   case SpvOpFwidthFine:
+   case SpvOpDPdxCoarse:
+   case SpvOpDPdyCoarse:
+   case SpvOpFwidthCoarse:
+      vtn_handle_derivative(b, opcode, w, count);
       break;
 
    case SpvOpSDotKHR:

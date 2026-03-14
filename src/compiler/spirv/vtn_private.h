@@ -1026,6 +1026,9 @@ void vtn_handle_alu(struct vtn_builder *b, SpvOp opcode,
 void vtn_handle_alu_vote(struct vtn_builder *b, SpvOp opcode,
                          const uint32_t *w, unsigned count);
 
+void vtn_handle_derivative(struct vtn_builder *b, SpvOp opcode,
+                           const uint32_t *w, unsigned count);
+
 void vtn_handle_integer_dot(struct vtn_builder *b, SpvOp opcode,
                             const uint32_t *w, unsigned count);
 
