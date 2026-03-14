@@ -828,12 +828,6 @@ vtn_handle_alu(struct vtn_builder *b, SpvOp opcode,
       break;
    }
 
-   case SpvOpDot:
-      dest->def = glsl_type_is_bfloat_16(dest_type) ?
-         nir_bfdot(&b->nb, src[0], src[1]) :
-         nir_fdot(&b->nb, src[0], src[1]);
-      break;
-
    case SpvOpIAddCarry:
       vtn_assert(glsl_type_is_struct_or_ifc(dest_type));
       dest->elems[0]->def = nir_iadd(&b->nb, src[0], src[1]);
@@ -1092,57 +1086,6 @@ vtn_handle_alu(struct vtn_builder *b, SpvOp opcode,
    case SpvOpUDotAccSatKHR:
    case SpvOpSUDotAccSatKHR:
       UNREACHABLE("Should have called vtn_handle_integer_dot instead.");
-
-   case SpvOpFDot2MixAcc32VALVE: {
-      vtn_assert(glsl_get_base_type(vtn_src[2]->type->type) == GLSL_TYPE_FLOAT);
-      if (glsl_get_base_type(vtn_src[0]->type->type) == GLSL_TYPE_FLOAT16) {
-         vtn_assert(glsl_get_base_type(vtn_src[1]->type->type) == GLSL_TYPE_FLOAT16);
-         dest->def = nir_f16dot2_fadd(&b->nb, src[0], src[1], src[2]);
-      } else {
-         vtn_assert(glsl_get_base_type(vtn_src[0]->type->type) == GLSL_TYPE_BFLOAT16);
-         vtn_assert(glsl_get_base_type(vtn_src[1]->type->type) == GLSL_TYPE_BFLOAT16);
-         dest->def = nir_bfdot2_fadd(&b->nb, src[0], src[1], src[2]);
-      }
-      break;
-   }
-
-   case SpvOpFDot2MixAcc16VALVE: {
-      if (glsl_get_base_type(vtn_src[0]->type->type) == GLSL_TYPE_FLOAT16) {
-         vtn_assert(glsl_get_base_type(vtn_src[1]->type->type) == GLSL_TYPE_FLOAT16);
-         vtn_assert(glsl_get_base_type(vtn_src[2]->type->type) == GLSL_TYPE_FLOAT16);
-         dest->def = nir_f16dot2_fadd(&b->nb, src[0], src[1], src[2]);
-      } else {
-         vtn_assert(glsl_get_base_type(vtn_src[0]->type->type) == GLSL_TYPE_BFLOAT16);
-         vtn_assert(glsl_get_base_type(vtn_src[1]->type->type) == GLSL_TYPE_BFLOAT16);
-         vtn_assert(glsl_get_base_type(vtn_src[2]->type->type) == GLSL_TYPE_BFLOAT16);
-         dest->def = nir_bfdot2_bfadd(&b->nb, src[0], src[1], src[2]);
-      }
-      break;
-   }
-
-   case SpvOpFDot4MixAcc32VALVE: {
-      vtn_assert(glsl_get_base_type(vtn_src[2]->type->type) == GLSL_TYPE_FLOAT);
-      src[0] = nir_pack_32_4x8(&b->nb, src[0]);
-      src[1] = nir_pack_32_4x8(&b->nb, src[1]);
-
-      if (glsl_get_base_type(vtn_src[0]->type->type) == GLSL_TYPE_FLOAT_E4M3FN) {
-         if (glsl_get_base_type(vtn_src[1]->type->type) == GLSL_TYPE_FLOAT_E4M3FN) {
-            dest->def = nir_e4m3fn_dot4_fadd(&b->nb, src[0], src[1], src[2]);
-         } else {
-            vtn_assert(glsl_get_base_type(vtn_src[1]->type->type) == GLSL_TYPE_FLOAT_E5M2);
-            dest->def = nir_e4m3fn_e5m2_dot4_fadd(&b->nb, src[0], src[1], src[2]);
-         }
-      } else {
-         vtn_assert(glsl_get_base_type(vtn_src[0]->type->type) == GLSL_TYPE_FLOAT_E5M2);
-         if (glsl_get_base_type(vtn_src[1]->type->type) == GLSL_TYPE_FLOAT_E4M3FN) {
-            dest->def = nir_e4m3fn_e5m2_dot4_fadd(&b->nb, src[1], src[0], src[2]);
-         } else {
-            vtn_assert(glsl_get_base_type(vtn_src[1]->type->type) == GLSL_TYPE_FLOAT_E5M2);
-            dest->def = nir_e5m2_dot4_fadd(&b->nb, src[0], src[1], src[2]);
-         }
-      }
-      break;
-   }
 
    default: {
       bool swap;
@@ -1470,6 +1413,100 @@ vtn_handle_integer_dot(struct vtn_builder *b, SpvOp opcode,
    }
 
    vtn_push_nir_ssa(b, w[2], dest);
+}
+
+void
+vtn_handle_float_dot(struct vtn_builder *b, SpvOp opcode,
+                     const uint32_t *w, unsigned count)
+{
+   struct vtn_value *dest_val = vtn_untyped_value(b, w[2]);
+   const struct glsl_type *dest_type = vtn_get_type(b, w[1])->type;
+
+   vtn_handle_fp_fast_math(b, dest_val, vtn_untyped_value(b, w[3]));
+
+   const unsigned num_inputs = count - 3;
+   struct vtn_ssa_value *vtn_src[4] = { NULL, };
+
+   vtn_collect_ssa_sources(b, &w[3], vtn_src, num_inputs);
+
+   const bool mediump_16bit = vtn_alu_op_mediump_16bit(b, opcode, dest_val);
+   if (mediump_16bit)
+      vtn_downconvert_ssa_sources(b, vtn_src, num_inputs);
+
+   struct vtn_ssa_value *dest = vtn_create_ssa_value(b, vtn_get_type(b, w[1]));
+   nir_def *src[4] = { NULL, };
+   for (unsigned i = 0; i < num_inputs; i++) {
+      vtn_assert(glsl_type_is_vector_or_scalar(vtn_src[i]->type->type));
+      src[i] = vtn_src[i]->def;
+   }
+
+   switch (opcode) {
+   case SpvOpDot:
+      dest->def = glsl_type_is_bfloat_16(dest_type) ?
+         nir_bfdot(&b->nb, src[0], src[1]) :
+         nir_fdot(&b->nb, src[0], src[1]);
+      break;
+
+   case SpvOpFDot2MixAcc32VALVE: {
+      vtn_assert(glsl_get_base_type(vtn_src[2]->type->type) == GLSL_TYPE_FLOAT);
+      if (glsl_get_base_type(vtn_src[0]->type->type) == GLSL_TYPE_FLOAT16) {
+         vtn_assert(glsl_get_base_type(vtn_src[1]->type->type) == GLSL_TYPE_FLOAT16);
+         dest->def = nir_f16dot2_fadd(&b->nb, src[0], src[1], src[2]);
+      } else {
+         vtn_assert(glsl_get_base_type(vtn_src[0]->type->type) == GLSL_TYPE_BFLOAT16);
+         vtn_assert(glsl_get_base_type(vtn_src[1]->type->type) == GLSL_TYPE_BFLOAT16);
+         dest->def = nir_bfdot2_fadd(&b->nb, src[0], src[1], src[2]);
+      }
+      break;
+   }
+
+   case SpvOpFDot2MixAcc16VALVE: {
+      if (glsl_get_base_type(vtn_src[0]->type->type) == GLSL_TYPE_FLOAT16) {
+         vtn_assert(glsl_get_base_type(vtn_src[1]->type->type) == GLSL_TYPE_FLOAT16);
+         vtn_assert(glsl_get_base_type(vtn_src[2]->type->type) == GLSL_TYPE_FLOAT16);
+         dest->def = nir_f16dot2_fadd(&b->nb, src[0], src[1], src[2]);
+      } else {
+         vtn_assert(glsl_get_base_type(vtn_src[0]->type->type) == GLSL_TYPE_BFLOAT16);
+         vtn_assert(glsl_get_base_type(vtn_src[1]->type->type) == GLSL_TYPE_BFLOAT16);
+         vtn_assert(glsl_get_base_type(vtn_src[2]->type->type) == GLSL_TYPE_BFLOAT16);
+         dest->def = nir_bfdot2_bfadd(&b->nb, src[0], src[1], src[2]);
+      }
+      break;
+   }
+
+   case SpvOpFDot4MixAcc32VALVE: {
+      vtn_assert(glsl_get_base_type(vtn_src[2]->type->type) == GLSL_TYPE_FLOAT);
+      src[0] = nir_pack_32_4x8(&b->nb, src[0]);
+      src[1] = nir_pack_32_4x8(&b->nb, src[1]);
+
+      if (glsl_get_base_type(vtn_src[0]->type->type) == GLSL_TYPE_FLOAT_E4M3FN) {
+         if (glsl_get_base_type(vtn_src[1]->type->type) == GLSL_TYPE_FLOAT_E4M3FN) {
+            dest->def = nir_e4m3fn_dot4_fadd(&b->nb, src[0], src[1], src[2]);
+         } else {
+            vtn_assert(glsl_get_base_type(vtn_src[1]->type->type) == GLSL_TYPE_FLOAT_E5M2);
+            dest->def = nir_e4m3fn_e5m2_dot4_fadd(&b->nb, src[0], src[1], src[2]);
+         }
+      } else {
+         vtn_assert(glsl_get_base_type(vtn_src[0]->type->type) == GLSL_TYPE_FLOAT_E5M2);
+         if (glsl_get_base_type(vtn_src[1]->type->type) == GLSL_TYPE_FLOAT_E4M3FN) {
+            dest->def = nir_e4m3fn_e5m2_dot4_fadd(&b->nb, src[1], src[0], src[2]);
+         } else {
+            vtn_assert(glsl_get_base_type(vtn_src[1]->type->type) == GLSL_TYPE_FLOAT_E5M2);
+            dest->def = nir_e5m2_dot4_fadd(&b->nb, src[0], src[1], src[2]);
+         }
+      }
+      break;
+   }
+
+   default:
+      UNREACHABLE("invalid float dot opcode");
+   }
+
+   if (mediump_16bit)
+      dest = vtn_mediump_upconvert_value(b, dest);
+   vtn_push_ssa_value(b, w[2], dest);
+
+   b->nb.fp_math_ctrl = nir_fp_fast_math;
 }
 
 void
