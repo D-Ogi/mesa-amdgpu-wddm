@@ -6685,7 +6685,6 @@ vtn_handle_body_instruction(struct vtn_builder *b, SpvOp opcode,
    case SpvOpFRem:
    case SpvOpFMod:
    case SpvOpVectorTimesScalar:
-   case SpvOpDot:
    case SpvOpIAddCarry:
    case SpvOpISubBorrow:
    case SpvOpUMulExtended:
@@ -6757,9 +6756,6 @@ vtn_handle_body_instruction(struct vtn_builder *b, SpvOp opcode,
    case SpvOpUSubSatINTEL:
    case SpvOpIMul32x16INTEL:
    case SpvOpUMul32x16INTEL:
-   case SpvOpFDot2MixAcc32VALVE:
-   case SpvOpFDot2MixAcc16VALVE:
-   case SpvOpFDot4MixAcc32VALVE:
       vtn_handle_alu(b, opcode, w, count);
       break;
 
@@ -6770,6 +6766,13 @@ vtn_handle_body_instruction(struct vtn_builder *b, SpvOp opcode,
    case SpvOpUDotAccSatKHR:
    case SpvOpSUDotAccSatKHR:
       vtn_handle_integer_dot(b, opcode, w, count);
+      break;
+
+   case SpvOpDot:
+   case SpvOpFDot2MixAcc32VALVE:
+   case SpvOpFDot2MixAcc16VALVE:
+   case SpvOpFDot4MixAcc32VALVE:
+      vtn_handle_float_dot(b, opcode, w, count);
       break;
 
    case SpvOpBitcast:
