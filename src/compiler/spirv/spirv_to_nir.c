@@ -6647,16 +6647,7 @@ vtn_handle_body_instruction(struct vtn_builder *b, SpvOp opcode,
    case SpvOpSNegate:
    case SpvOpFNegate:
    case SpvOpNot:
-   case SpvOpConvertFToU:
-   case SpvOpConvertFToS:
-   case SpvOpConvertSToF:
-   case SpvOpConvertUToF:
-   case SpvOpUConvert:
-   case SpvOpSConvert:
-   case SpvOpFConvert:
    case SpvOpQuantizeToF16:
-   case SpvOpSatConvertSToU:
-   case SpvOpSatConvertUToS:
    case SpvOpPtrCastToGeneric:
    case SpvOpGenericCastToPtr:
    case SpvOpIsNan:
@@ -6763,6 +6754,18 @@ vtn_handle_body_instruction(struct vtn_builder *b, SpvOp opcode,
    case SpvOpDPdyCoarse:
    case SpvOpFwidthCoarse:
       vtn_handle_derivative(b, opcode, w, count);
+      break;
+
+   case SpvOpConvertFToU:
+   case SpvOpConvertFToS:
+   case SpvOpConvertSToF:
+   case SpvOpConvertUToF:
+   case SpvOpUConvert:
+   case SpvOpSConvert:
+   case SpvOpFConvert:
+   case SpvOpSatConvertSToU:
+   case SpvOpSatConvertUToS:
+      vtn_handle_conversion(b, opcode, w, count);
       break;
 
    case SpvOpSDotKHR:
