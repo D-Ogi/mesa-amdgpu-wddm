@@ -146,6 +146,8 @@ static const struct spirv_capabilities implemented_capabilities = {
    .RayQueryKHR = true,
    .RayQueryPositionFetchKHR = true,
    .RayTracingKHR = true,
+   .RayTracingOpacityMicromapKHR = true,
+   .RayTracingOpacityMicromapExecutionModeKHR = true,
    .RayTracingPositionFetchKHR = true,
    .RayTraversalPrimitiveCullingKHR = true,
    .ReplicatedCompositesEXT = true,
@@ -6267,6 +6269,7 @@ vtn_handle_execution_mode(struct vtn_builder *b, struct vtn_value *entry_point,
    case SpvExecutionModeStaticNumWorkgroupsAMDX:
    case SpvExecutionModeMaxNumWorkgroupsAMDX:
    case SpvExecutionModeShaderIndexAMDX:
+   case SpvExecutionModeOpacityMicromapIdKHR:
       /* Handled later by vtn_handle_execution_mode_id(). */
       break;
 
@@ -6435,6 +6438,10 @@ vtn_handle_execution_mode_id(struct vtn_builder *b, struct vtn_value *entry_poin
    case SpvExecutionModeShaderIndexAMDX:
       vtn_assert(b->shader->info.stage == MESA_SHADER_COMPUTE);
       b->shader->info.cs.shader_index = vtn_constant_uint(b, mode->operands[0]);
+      break;
+
+   case SpvExecutionModeOpacityMicromapIdKHR:
+      b->shader->info.ray_query_has_opacity_micromap = vtn_constant_bool(b, mode->operands[0]);
       break;
 
    default:
