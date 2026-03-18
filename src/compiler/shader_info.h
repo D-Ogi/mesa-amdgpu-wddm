@@ -389,6 +389,9 @@ typedef struct shader_info {
     */
    enum shader_info_hash_type hash_type:2;
 
+   /* Whether ray queries need to handle opacity micromaps. */
+   bool ray_query_has_opacity_micromap:1;
+
    union {
       struct {
          /* Which inputs are doubles */
