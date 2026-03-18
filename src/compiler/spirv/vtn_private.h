@@ -884,6 +884,18 @@ vtn_constant_int(struct vtn_builder *b, uint32_t value_id)
    }
 }
 
+static inline bool
+vtn_constant_bool(struct vtn_builder *b, uint32_t value_id)
+{
+   struct vtn_value *val = vtn_value(b, value_id, vtn_value_type_constant);
+
+   vtn_fail_if(val->type->base_type != vtn_base_type_scalar ||
+               !glsl_type_is_boolean(val->type->type),
+               "Expected id %u to be a boolean constant", value_id);
+
+   return val->constant->values[0].b;
+}
+
 static inline struct vtn_type *
 vtn_get_value_type(struct vtn_builder *b, uint32_t value_id)
 {
