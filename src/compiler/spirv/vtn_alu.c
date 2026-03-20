@@ -185,46 +185,106 @@ vtn_mediump_downconvert_value(struct vtn_builder *b, struct vtn_ssa_value *src)
    }
 }
 
-static struct vtn_ssa_value *
-vtn_handle_matrix_alu(struct vtn_builder *b, SpvOp opcode,
-                      struct vtn_ssa_value *src0, struct vtn_ssa_value *src1)
+static bool
+vtn_alu_op_mediump_16bit(struct vtn_builder *b, SpvOp opcode, struct vtn_value *dest_val)
 {
+   if (!vtn_value_needs_mediump_16bit(b, dest_val))
+      return false;
+
    switch (opcode) {
+   case SpvOpDPdx:
+   case SpvOpDPdy:
+   case SpvOpDPdxFine:
+   case SpvOpDPdyFine:
+   case SpvOpDPdxCoarse:
+   case SpvOpDPdyCoarse:
+   case SpvOpFwidth:
+   case SpvOpFwidthFine:
+   case SpvOpFwidthCoarse:
+      return b->options->mediump_16bit_derivatives;
+   case SpvOpBitFieldInsert:
+   case SpvOpBitFieldSExtract:
+   case SpvOpBitFieldUExtract:
+      return false;
+   /* These have struct results, which can't be RelaxedPrecision. */
+   case SpvOpIAddCarry:
+   case SpvOpISubBorrow:
+   case SpvOpUMulExtended:
+   case SpvOpSMulExtended:
+      return false;
+   default:
+      return true;
+   }
+}
+
+static void
+vtn_handle_matrix_alu(struct vtn_builder *b, SpvOp opcode,
+                      const uint32_t *w, unsigned count)
+{
+   struct vtn_value *dest_val = vtn_untyped_value(b, w[2]);
+   const struct vtn_type *dest_type = vtn_get_type(b, w[1]);
+
+   const unsigned num_srcs = count - 3;
+   vtn_assert(num_srcs <= 2);
+
+   struct vtn_ssa_value *vtn_src[4] = { NULL, };
+   vtn_collect_ssa_sources(b, &w[3], vtn_src, num_srcs);
+
+   vtn_handle_fp_fast_math(b, dest_val, vtn_untyped_value(b, w[3]));
+
+   const bool mediump_16bit = vtn_alu_op_mediump_16bit(b, opcode, dest_val);
+   if (mediump_16bit)
+      vtn_downconvert_ssa_sources(b, vtn_src, num_srcs);
+
+   struct vtn_ssa_value *src0 = vtn_src[0];
+   struct vtn_ssa_value *src1 = vtn_src[1];
+   struct vtn_ssa_value *dest = NULL;
+
+   switch (opcode) {
+   case SpvOpOuterProduct:
+      dest = vtn_create_ssa_value(b, dest_type);
+      for (unsigned i = 0; i < src1->def->num_components; i++) {
+         dest->elems[i]->def =
+            nir_fmul(&b->nb, src0->def, nir_channel(&b->nb, src1->def, i));
+      }
+      break;
+
    case SpvOpFNegate: {
-      struct vtn_ssa_value *dest = vtn_create_ssa_value(b, src0->type);
+      dest = vtn_create_ssa_value(b, src0->type);
       unsigned cols = vtn_type_get_matrix_columns(src0->type);
       for (unsigned i = 0; i < cols; i++)
          dest->elems[i]->def = nir_fneg(&b->nb, src0->elems[i]->def);
-      return dest;
+      break;
    }
 
    case SpvOpFAdd: {
-      struct vtn_ssa_value *dest = vtn_create_ssa_value(b, src0->type);
+      dest = vtn_create_ssa_value(b, src0->type);
       unsigned cols = vtn_type_get_matrix_columns(src0->type);
       for (unsigned i = 0; i < cols; i++)
          dest->elems[i]->def =
             nir_fadd(&b->nb, src0->elems[i]->def, src1->elems[i]->def);
-      return dest;
+      break;
    }
 
    case SpvOpFSub: {
-      struct vtn_ssa_value *dest = vtn_create_ssa_value(b, src0->type);
+      dest = vtn_create_ssa_value(b, src0->type);
       unsigned cols = vtn_type_get_matrix_columns(src0->type);
       for (unsigned i = 0; i < cols; i++)
          dest->elems[i]->def =
             nir_fsub(&b->nb, src0->elems[i]->def, src1->elems[i]->def);
-      return dest;
+      break;
    }
 
    case SpvOpTranspose:
-      return vtn_ssa_transpose(b, src0);
+      dest = vtn_ssa_transpose(b, src0);
+      break;
 
    case SpvOpMatrixTimesScalar:
       if (src0->transposed) {
-         return vtn_ssa_transpose(b, mat_times_scalar(b, src0->transposed,
-                                                         src1->def));
+         dest = vtn_ssa_transpose(b, mat_times_scalar(b, src0->transposed,
+                                                      src1->def));
       } else {
-         return mat_times_scalar(b, src0, src1->def);
+         dest = mat_times_scalar(b, src0, src1->def);
       }
       break;
 
@@ -232,14 +292,39 @@ vtn_handle_matrix_alu(struct vtn_builder *b, SpvOp opcode,
    case SpvOpMatrixTimesVector:
    case SpvOpMatrixTimesMatrix:
       if (opcode == SpvOpVectorTimesMatrix) {
-         return matrix_multiply(b, vtn_ssa_transpose(b, src1), src0);
+         dest = matrix_multiply(b, vtn_ssa_transpose(b, src1), src0);
       } else {
-         return matrix_multiply(b, src0, src1);
+         dest = matrix_multiply(b, src0, src1);
       }
       break;
 
    default: vtn_fail_with_opcode("unknown matrix opcode", opcode);
    }
+
+   if (mediump_16bit)
+      dest = vtn_mediump_upconvert_value(b, dest);
+
+   vtn_push_ssa_value(b, w[2], dest);
+
+   b->nb.fp_math_ctrl = nir_fp_fast_math;
+}
+
+static bool
+vtn_has_matrix_operand(struct vtn_builder *b,
+                       const struct vtn_type *dest_type,
+                       const uint32_t *w_src, unsigned num_srcs)
+{
+   /* Matrix operations have up to 2 sources. */
+   if (num_srcs > 2)
+      return false;
+
+   if (glsl_type_is_matrix(dest_type->type) ||
+       glsl_type_is_matrix(vtn_get_value_type(b, w_src[0])->type) ||
+       (num_srcs > 1 &&
+        glsl_type_is_matrix(vtn_get_value_type(b, w_src[1])->type)))
+      return true;
+
+   return false;
 }
 
 nir_alu_type
@@ -543,38 +628,6 @@ handle_conversion_opts(struct vtn_builder *b, UNUSED struct vtn_value *val,
    }
 }
 
-static bool
-vtn_alu_op_mediump_16bit(struct vtn_builder *b, SpvOp opcode, struct vtn_value *dest_val)
-{
-   if (!vtn_value_needs_mediump_16bit(b, dest_val))
-      return false;
-
-   switch (opcode) {
-   case SpvOpDPdx:
-   case SpvOpDPdy:
-   case SpvOpDPdxFine:
-   case SpvOpDPdyFine:
-   case SpvOpDPdxCoarse:
-   case SpvOpDPdyCoarse:
-   case SpvOpFwidth:
-   case SpvOpFwidthFine:
-   case SpvOpFwidthCoarse:
-      return b->options->mediump_16bit_derivatives;
-   case SpvOpBitFieldInsert:
-   case SpvOpBitFieldSExtract:
-   case SpvOpBitFieldUExtract:
-      return false;
-   /* These have struct results, which can't be RelaxedPrecision. */
-   case SpvOpIAddCarry:
-   case SpvOpISubBorrow:
-   case SpvOpUMulExtended:
-   case SpvOpSMulExtended:
-      return false;
-   default:
-      return true;
-   }
-}
-
 static nir_def *
 vtn_mediump_upconvert(struct vtn_builder *b, enum glsl_base_type base_type, nir_def *def)
 {
@@ -773,38 +826,31 @@ vtn_handle_alu(struct vtn_builder *b, SpvOp opcode,
                const uint32_t *w, unsigned count)
 {
    struct vtn_value *dest_val = vtn_untyped_value(b, w[2]);
-   const struct glsl_type *dest_type = vtn_get_type(b, w[1])->type;
+   const struct vtn_type *dest_type = vtn_get_type(b, w[1]);
 
-   vtn_handle_fp_fast_math(b, dest_val, vtn_untyped_value(b, w[3]));
-
-   if (glsl_type_is_cmat(dest_type)) {
-      vtn_handle_cooperative_alu(b, dest_val, dest_type, opcode, w, count);
+   if (glsl_type_is_cmat(dest_type->type)) {
+      vtn_handle_fp_fast_math(b, dest_val, vtn_untyped_value(b, w[3]));
+      vtn_handle_cooperative_alu(b, dest_val, dest_type->type, opcode, w, count);
       b->nb.fp_math_ctrl = nir_fp_fast_math;
       return;
    }
 
    const unsigned num_inputs = count - 3;
-   struct vtn_ssa_value *vtn_src[4] = { NULL, };
+   if (vtn_has_matrix_operand(b, dest_type, &w[3], num_inputs)) {
+      vtn_handle_matrix_alu(b, opcode, w, count);
+      return;
+   }
 
+   struct vtn_ssa_value *vtn_src[4] = { NULL, };
    vtn_collect_ssa_sources(b, &w[3], vtn_src, num_inputs);
+
+   vtn_handle_fp_fast_math(b, dest_val, vtn_untyped_value(b, w[3]));
 
    const bool mediump_16bit = vtn_alu_op_mediump_16bit(b, opcode, dest_val);
    if (mediump_16bit)
       vtn_downconvert_ssa_sources(b, vtn_src, num_inputs);
 
-   if (glsl_type_is_matrix(vtn_src[0]->type->type) ||
-       (num_inputs >= 2 && glsl_type_is_matrix(vtn_src[1]->type->type))) {
-      struct vtn_ssa_value *dest = vtn_handle_matrix_alu(b, opcode, vtn_src[0], vtn_src[1]);
-
-      if (mediump_16bit)
-         dest = vtn_mediump_upconvert_value(b, dest);
-
-      vtn_push_ssa_value(b, w[2], dest);
-      b->nb.fp_math_ctrl = nir_fp_fast_math;
-      return;
-   }
-
-   struct vtn_ssa_value *dest = vtn_create_ssa_value(b, vtn_get_type(b, w[1]));
+   struct vtn_ssa_value *dest = vtn_create_ssa_value(b, dest_type);
    nir_def *src[4] = { NULL, };
    for (unsigned i = 0; i < num_inputs; i++) {
       vtn_assert(glsl_type_is_vector_or_scalar(vtn_src[i]->type->type));
@@ -812,14 +858,6 @@ vtn_handle_alu(struct vtn_builder *b, SpvOp opcode,
    }
 
    switch (opcode) {
-   case SpvOpOuterProduct: {
-      for (unsigned i = 0; i < src[1]->num_components; i++) {
-         dest->elems[i]->def =
-            nir_fmul(&b->nb, src[0], nir_channel(&b->nb, src[1], i));
-      }
-      break;
-   }
-
    case SpvOpVectorTimesScalar:
       /* The builder will take care of splatting for us. */
       dest->def = nir_fmul(&b->nb, src[0], src[1]);
@@ -1000,7 +1038,7 @@ vtn_handle_alu(struct vtn_builder *b, SpvOp opcode,
       /* bit_count always returns int32, but the SPIR-V opcode just says the return
        * value needs to be big enough to store the number of bits.
        */
-      dest->def = nir_u2uN(&b->nb, nir_bit_count(&b->nb, src[0]), glsl_get_bit_size(dest_type));
+      dest->def = nir_u2uN(&b->nb, nir_bit_count(&b->nb, src[0]), glsl_get_bit_size(dest_type->type));
       break;
    }
 
