@@ -992,6 +992,44 @@ void vtn_handler_start(struct vtn_builder *b,
 struct vtn_ssa_value *vtn_handler_finish_value(struct vtn_builder *b,
                                                struct vtn_handler_ctx *h);
 
+struct vtn_reduction_ctx {
+   unsigned num_srcs;
+   struct vtn_ssa_value *inputs[4];
+   struct vtn_ssa_value *srcs[4];
+
+   bool mediump_16bit;
+   bool first_consumed;
+   unsigned length;
+   nir_loop *loop;
+   nir_variable *idx_var;
+   nir_variable *acc_var;
+   nir_def *idx;
+};
+
+void vtn_reduction_prepare(struct vtn_builder *b,
+                           struct vtn_reduction_ctx *r,
+                           struct vtn_ssa_value *const *srcs,
+                           unsigned num_srcs);
+void vtn_reduction_load_first(struct vtn_builder *b,
+                              struct vtn_reduction_ctx *r);
+void vtn_reduction_start(struct vtn_builder *b,
+                         struct vtn_reduction_ctx *r,
+                         const struct glsl_type *acc_type,
+                         nir_def *initial,
+                         const char *acc_name);
+nir_def *vtn_reduction_accumulator(struct vtn_builder *b,
+                                   struct vtn_reduction_ctx *r);
+void vtn_reduction_update(struct vtn_builder *b,
+                          struct vtn_reduction_ctx *r,
+                          nir_def *value);
+nir_def *vtn_reduction_finish(struct vtn_builder *b,
+                              struct vtn_reduction_ctx *r);
+struct vtn_ssa_value *
+vtn_reduction_result(struct vtn_builder *b,
+                     struct vtn_reduction_ctx *r,
+                     const struct vtn_type *type,
+                     nir_def *def);
+
 struct vtn_ssa_value *vtn_ssa_transpose(struct vtn_builder *b,
                                         struct vtn_ssa_value *src);
 

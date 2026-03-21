@@ -3229,6 +3229,133 @@ vtn_handler_finish_value(struct vtn_builder *b,
    return h->dest;
 }
 
+void
+vtn_reduction_prepare(struct vtn_builder *b,
+                      struct vtn_reduction_ctx *r,
+                      struct vtn_ssa_value *const *srcs,
+                      unsigned num_srcs)
+{
+   vtn_fail_if(num_srcs > ARRAY_SIZE(r->srcs),
+               "Reduction supports at most %zu source operands",
+               ARRAY_SIZE(r->srcs));
+   r->num_srcs = num_srcs;
+
+   for (unsigned i = 0; i < num_srcs; i++) {
+      r->inputs[i] = r->srcs[i] = srcs[i];
+      if (srcs[i]->type->base_type == vtn_base_type_long_vector) {
+         vtn_fail_if(r->length && r->length != srcs[i]->type->length,
+                     "Long-vector reduction operands have mismatched "
+                     "component counts: %u and %u",
+                     r->length, srcs[i]->type->length);
+         r->length = srcs[i]->type->length;
+      }
+   }
+
+   vtn_assert(r->length > 0);
+}
+
+static void
+vtn_reduction_load_sources(struct vtn_builder *b,
+                           struct vtn_reduction_ctx *r,
+                           nir_def *idx)
+{
+   for (unsigned i = 0; i < r->num_srcs; i++) {
+      const struct vtn_ssa_value *src = r->inputs[i];
+      r->srcs[i] = r->inputs[i];
+      if (src->type->base_type == vtn_base_type_long_vector) {
+         vtn_assert(src->is_variable);
+         r->srcs[i] = vtn_create_ssa_value(b, src->type->array_element);
+         r->srcs[i]->def = nir_load_array_var(&b->nb, src->var, idx);
+      }
+   }
+
+   if (r->mediump_16bit)
+      vtn_downconvert_ssa_sources(b, r->srcs, r->num_srcs);
+}
+
+void
+vtn_reduction_load_first(struct vtn_builder *b,
+                         struct vtn_reduction_ctx *r)
+{
+   vtn_assert(r->length > 0 && !r->loop && !r->first_consumed);
+
+   r->first_consumed = true;
+   vtn_reduction_load_sources(b, r, nir_imm_int(&b->nb, 0));
+}
+
+void
+vtn_reduction_start(struct vtn_builder *b,
+                    struct vtn_reduction_ctx *r,
+                    const struct glsl_type *acc_type,
+                    nir_def *initial,
+                    const char *acc_name)
+{
+   vtn_assert(r->length > 0 && !r->loop);
+
+   r->acc_var = nir_local_variable_create(b->nb.impl, acc_type, acc_name);
+   nir_store_var(&b->nb, r->acc_var, initial, 1);
+
+   r->idx_var =
+      nir_local_variable_create(b->nb.impl, glsl_uint_type(),
+                                "long_vector_reduction_idx");
+   nir_store_var(&b->nb, r->idx_var,
+                 nir_imm_int(&b->nb, r->first_consumed ? 1 : 0), 1);
+
+   vtn_fail_if(!b->nb.impl->structured,
+               "Long-vector loops require structured control flow");
+   r->loop = nir_push_loop(&b->nb);
+   r->idx = nir_load_var(&b->nb, r->idx_var);
+   nir_break_if(&b->nb, nir_uge_imm(&b->nb, r->idx, r->length));
+
+   vtn_reduction_load_sources(b, r, r->idx);
+}
+
+nir_def *
+vtn_reduction_accumulator(struct vtn_builder *b,
+                          struct vtn_reduction_ctx *r)
+{
+   vtn_assert(r->acc_var);
+   return nir_load_var(&b->nb, r->acc_var);
+}
+
+void
+vtn_reduction_update(struct vtn_builder *b,
+                     struct vtn_reduction_ctx *r,
+                     nir_def *value)
+{
+   vtn_assert(r->acc_var);
+   nir_store_var(&b->nb, r->acc_var, value, 1);
+}
+
+/* Finish the loop and return the accumulator in its computation precision. */
+nir_def *
+vtn_reduction_finish(struct vtn_builder *b,
+                     struct vtn_reduction_ctx *r)
+{
+   vtn_assert(r->loop && r->idx_var && r->acc_var);
+
+   nir_store_var(&b->nb, r->idx_var,
+                 nir_iadd_imm(&b->nb, r->idx, 1), 1);
+   nir_pop_loop(&b->nb, r->loop);
+   return nir_load_var(&b->nb, r->acc_var);
+}
+
+/* Wrap a reduction result and restore its declared precision if needed. */
+struct vtn_ssa_value *
+vtn_reduction_result(struct vtn_builder *b,
+                     struct vtn_reduction_ctx *r,
+                     const struct vtn_type *type,
+                     nir_def *def)
+{
+   struct vtn_ssa_value *result = vtn_create_ssa_value(b, type);
+   result->def = def;
+
+   if (r->mediump_16bit)
+      result = vtn_mediump_upconvert_value(b, result);
+
+   return result;
+}
+
 static nir_tex_src
 vtn_tex_src(struct vtn_builder *b, unsigned index, nir_tex_src_type type)
 {

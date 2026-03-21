@@ -1580,6 +1580,43 @@ vtn_handle_float_dot(struct vtn_builder *b, SpvOp opcode,
    vtn_collect_ssa_sources(b, &w[3], vtn_src, num_inputs);
 
    const bool mediump_16bit = vtn_alu_op_mediump_16bit(b, opcode, dest_val);
+
+   bool has_long_vector = false;
+   for (unsigned i = 0; i < num_inputs; i++)
+      has_long_vector |= vtn_src[i]->type->base_type == vtn_base_type_long_vector;
+
+   if (has_long_vector) {
+      vtn_fail_if(opcode != SpvOpDot,
+                  "%s with long vector is not supported", spirv_op_to_string(opcode));
+
+      struct vtn_reduction_ctx r = {0};
+      r.mediump_16bit = mediump_16bit;
+      vtn_reduction_prepare(b, &r, vtn_src, num_inputs);
+      vtn_reduction_load_first(b, &r);
+
+      const struct vtn_type *src_type = vtn_src[0]->type->array_element;
+      const struct glsl_type *acc_type = mediump_16bit ?
+         glsl_float16_type(src_type->type) : src_type->type;
+      const bool is_bfloat16 = glsl_type_is_bfloat_16(dest_type);
+      nir_def *initial = is_bfloat16 ?
+         nir_bfmul(&b->nb, r.srcs[0]->def, r.srcs[1]->def) :
+         nir_fmul(&b->nb, r.srcs[0]->def, r.srcs[1]->def);
+      vtn_reduction_start(b, &r, acc_type, initial, "long_vector_dot_acc");
+
+      nir_def *acc = vtn_reduction_accumulator(b, &r);
+      vtn_reduction_update(b, &r,
+         is_bfloat16 ?
+            nir_bffma(&b->nb, r.srcs[0]->def, r.srcs[1]->def, acc) :
+            nir_ffma_weak(&b->nb, r.srcs[0]->def, r.srcs[1]->def, acc));
+
+      nir_def *def = vtn_reduction_finish(b, &r);
+      struct vtn_ssa_value *result =
+         vtn_reduction_result(b, &r, vtn_get_type(b, w[1]), def);
+      vtn_push_ssa_value(b, w[2], result);
+      b->nb.fp_math_ctrl = nir_fp_fast_math;
+      return;
+   }
+
    if (mediump_16bit)
       vtn_downconvert_ssa_sources(b, vtn_src, num_inputs);
 
