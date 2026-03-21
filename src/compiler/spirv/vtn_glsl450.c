@@ -437,6 +437,52 @@ handle_glsl450_interpolation(struct vtn_builder *b, enum GLSLstd450 opcode,
 }
 
 static void
+vtn_glsl450_store_component(struct vtn_builder *b,
+                            struct vtn_pointer *ptr,
+                            nir_def *idx,
+                            nir_def *value)
+{
+   nir_deref_instr *deref = vtn_pointer_to_deref(b, ptr);
+   idx = nir_u2uN(&b->nb, idx, deref->def.bit_size);
+   nir_deref_instr *elem = nir_build_deref_array(&b->nb, deref, idx);
+
+   nir_store_deref_with_access(&b->nb, elem, value, 0x1,
+                               ptr->access | ptr->type->pointed->access);
+}
+
+static nir_def *
+vtn_glsl450_convert_frexp_exp(struct vtn_builder *b, nir_def *exp,
+                              const struct vtn_type *type)
+{
+   return nir_i2iN(&b->nb, exp,
+                   glsl_get_bit_size(glsl_get_scalar_type(type->type)));
+}
+
+static void
+vtn_glsl450_modf_parts(struct vtn_builder *b, nir_def *src,
+                       nir_def **frac_out, nir_def **whole_out)
+{
+   nir_def *inf = nir_imm_floatN_t(&b->nb, INFINITY, src->bit_size);
+   nir_def *sign_bit =
+      nir_imm_intN_t(&b->nb, (uint64_t)1 << (src->bit_size - 1),
+                     src->bit_size);
+   nir_def *signed_zero = nir_iand(&b->nb, src, sign_bit);
+   nir_def *abs = nir_fabs(&b->nb, src);
+
+   /* NaN input should produce a NaN results, and ±Inf input should provide
+    * ±0 result.  The fmul(sign(x), ffract(x)) calculation will already
+    * produce the expected NaN.  To get ±0, directly compare for equality
+    * with Inf instead of using fisfinite (which is false for NaN).
+    */
+   *frac_out = nir_bcsel(&b->nb,
+                         nir_ieq(&b->nb, abs, inf),
+                         signed_zero,
+                         nir_ior(&b->nb, signed_zero,
+                                 nir_ffract(&b->nb, abs)));
+   *whole_out = nir_ior(&b->nb, signed_zero, nir_ffloor(&b->nb, abs));
+}
+
+static void
 handle_glsl450_modf_frexp(struct vtn_builder *b, enum GLSLstd450 opcode,
                           const uint32_t *w, unsigned count)
 {
@@ -447,73 +493,90 @@ handle_glsl450_modf_frexp(struct vtn_builder *b, enum GLSLstd450 opcode,
     * destinations on these in vtn_upconvert_value().
     */
 
-   struct vtn_ssa_value *vtn_src = {0};
-   vtn_collect_ssa_sources(b, &w[5], &vtn_src, 1);
+   struct vtn_handler_ctx h = {0};
+   vtn_handler_prepare(b, &h, w[1], w[2], &w[5], 1);
+   vtn_handler_start(b, &h);
 
-   nir_def *src = vtn_src->def;
+   nir_def *src = h.srcs[0]->def;
 
-   struct vtn_ssa_value *dest = vtn_create_ssa_value(b, vtn_get_type(b, w[1]));
+   if (opcode == GLSLstd450Modf || opcode == GLSLstd450Frexp) {
+      nir_def *def;
+      nir_def *secondary;
+
+      switch (opcode) {
+      case GLSLstd450Modf:
+         vtn_glsl450_modf_parts(b, src, &def, &secondary);
+         break;
+
+      case GLSLstd450Frexp:
+         def = nir_frexp_sig(nb, src);
+         secondary = nir_frexp_exp(nb, src);
+         break;
+
+      default:
+         UNREACHABLE("not modf or frexp");
+      }
+
+      struct vtn_pointer *i_ptr = vtn_value(b, w[6], vtn_value_type_pointer)->pointer;
+      if (opcode == GLSLstd450Frexp) {
+         secondary = vtn_glsl450_convert_frexp_exp(b, secondary,
+                                                   i_ptr->type->pointed);
+      }
+
+      if (h.lv.length > 0) {
+         vtn_fail_if(i_ptr->type->pointed->base_type != vtn_base_type_long_vector ||
+                     i_ptr->type->pointed->length != h.lv.length,
+                     "The pointer operand of Modf/Frexp must point to the "
+                     "same type as the first operand");
+         vtn_glsl450_store_component(b, i_ptr, h.lv.idx, secondary);
+      } else {
+         struct vtn_ssa_value *out = vtn_create_ssa_value(b, i_ptr->type->pointed);
+         out->def = secondary;
+         vtn_variable_store(b, out, i_ptr, 0);
+      }
+
+      h.dest->def = def;
+      vtn_push_ssa_value(b, w[2], vtn_handler_finish_value(b, &h));
+      return;
+   }
+
+   struct vtn_ssa_value *dest = h.dest;
 
    switch (opcode) {
-   case GLSLstd450Modf: {
-      nir_def *inf = nir_imm_floatN_t(&b->nb, INFINITY, src->bit_size);
-      nir_def *sign_bit =
-         nir_imm_intN_t(&b->nb, (uint64_t)1 << (src->bit_size - 1),
-                        src->bit_size);
-      nir_def *signed_zero = nir_iand(nb, src, sign_bit);
-      nir_def *abs = nir_fabs(nb, src);
-
-      /* NaN input should produce a NaN results, and ±Inf input should provide
-       * ±0 result.  The fmul(sign(x), ffract(x)) calculation will already
-       * produce the expected NaN.  To get ±0, directly compare for equality
-       * with Inf instead of using fisfinite (which is false for NaN).
-       */
-      dest->def = nir_bcsel(nb,
-                            nir_ieq(nb, abs, inf),
-                            signed_zero,
-                            nir_ior(nb, signed_zero, nir_ffract(nb, abs)));
-
-      struct vtn_pointer *i_ptr = vtn_value(b, w[6], vtn_value_type_pointer)->pointer;
-      struct vtn_ssa_value *whole = vtn_create_ssa_value(b, i_ptr->type->pointed);
-      whole->def = nir_ior(nb, signed_zero, nir_ffloor(nb, abs));
-      vtn_variable_store(b, whole, i_ptr, 0);
-      break;
-   }
-
    case GLSLstd450ModfStruct: {
-      nir_def *inf = nir_imm_floatN_t(&b->nb, INFINITY, src->bit_size);
-      nir_def *sign_bit =
-         nir_imm_intN_t(&b->nb, (uint64_t)1 << (src->bit_size - 1),
-                        src->bit_size);
-      nir_def *signed_zero = nir_iand(nb, src, sign_bit);
-      nir_def *abs = nir_fabs(nb, src);
+      nir_def *frac, *whole;
       vtn_assert(glsl_type_is_struct_or_ifc(dest_type));
 
-      /* See GLSLstd450Modf for explanation of the Inf and NaN handling. */
-      dest->elems[0]->def = nir_bcsel(nb,
-                                      nir_ieq(nb, abs, inf),
-                                      signed_zero,
-                                      nir_ior(nb, signed_zero, nir_ffract(nb, abs)));
-      dest->elems[1]->def = nir_ior(nb, signed_zero, nir_ffloor(nb, abs));
-      break;
-   }
+      vtn_glsl450_modf_parts(b, src, &frac, &whole);
 
-   case GLSLstd450Frexp: {
-      dest->def = nir_frexp_sig(nb, src);
+      if (dest->elems[0]->type->base_type == vtn_base_type_long_vector)
+         nir_store_array_var(&b->nb, dest->elems[0]->var, h.lv.idx, frac, 1);
+      else
+         dest->elems[0]->def = frac;
 
-      struct vtn_pointer *i_ptr = vtn_value(b, w[6], vtn_value_type_pointer)->pointer;
-      struct vtn_ssa_value *exp = vtn_create_ssa_value(b, i_ptr->type->pointed);
-      exp->def = nir_i2iN(nb, nir_frexp_exp(nb, src),
-                          glsl_get_bit_size(exp->type->type));
-      vtn_variable_store(b, exp, i_ptr, 0);
+      if (dest->elems[1]->type->base_type == vtn_base_type_long_vector)
+         nir_store_array_var(&b->nb, dest->elems[1]->var, h.lv.idx, whole, 1);
+      else
+         dest->elems[1]->def = whole;
       break;
    }
 
    case GLSLstd450FrexpStruct: {
       vtn_assert(glsl_type_is_struct_or_ifc(dest_type));
-      dest->elems[0]->def = nir_frexp_sig(nb, src);
-      dest->elems[1]->def = nir_i2iN(nb, nir_frexp_exp(nb, src),
-                                     glsl_get_bit_size(dest->elems[1]->type->type));
+
+      nir_def *sig = nir_frexp_sig(nb, src);
+      nir_def *exp = nir_frexp_exp(nb, src);
+      exp = vtn_glsl450_convert_frexp_exp(b, exp, dest->elems[1]->type);
+
+      if (dest->elems[0]->type->base_type == vtn_base_type_long_vector)
+         nir_store_array_var(&b->nb, dest->elems[0]->var, h.lv.idx, sig, 1);
+      else
+         dest->elems[0]->def = sig;
+
+      if (dest->elems[1]->type->base_type == vtn_base_type_long_vector)
+         nir_store_array_var(&b->nb, dest->elems[1]->var, h.lv.idx, exp, 1);
+      else
+         dest->elems[1]->def = exp;
       break;
    }
 
@@ -521,7 +584,7 @@ handle_glsl450_modf_frexp(struct vtn_builder *b, enum GLSLstd450 opcode,
       UNREACHABLE("not modf or frexp");
    }
 
-   vtn_push_ssa_value(b, w[2], dest);
+   vtn_push_ssa_value(b, w[2], vtn_handler_finish_value(b, &h));
 }
 
 static void
