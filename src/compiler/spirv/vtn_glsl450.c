@@ -191,32 +191,34 @@ handle_glsl450_alu(struct vtn_builder *b, enum GLSLstd450 entrypoint,
                    const uint32_t *w, unsigned count)
 {
    struct nir_builder *nb = &b->nb;
-   const struct vtn_type *dest_type = vtn_get_type(b, w[1]);
+   struct vtn_handler_ctx h = {0};
 
    const bool mediump_16bit =
       vtn_value_needs_mediump_16bit(b, vtn_untyped_value(b, w[2]));
 
    unsigned num_inputs = count - 5;
-   struct vtn_ssa_value *vtn_src[3] = {0};
-   vtn_collect_ssa_sources(b, &w[5], vtn_src, num_inputs);
-   if (mediump_16bit)
-      vtn_downconvert_ssa_sources(b, vtn_src, num_inputs);
+   vtn_handler_prepare(b, &h, w[1], w[2], &w[5], num_inputs);
+   h.mediump_16bit = mediump_16bit;
+   vtn_handler_start(b, &h);
 
    nir_def *src[3] = { NULL, };
+   vtn_fail_if(num_inputs > ARRAY_SIZE(src),
+               "GLSL.std.450 instructions can have at most %zu operands",
+               ARRAY_SIZE(src));
    for (unsigned i = 0; i < num_inputs; i++)
-      src[i] = vtn_src[i]->def;
+      src[i] = h.srcs[i]->def;
 
-   struct vtn_ssa_value *dest = vtn_create_ssa_value(b, dest_type);
+   nir_def *def = NULL;
 
    switch (entrypoint) {
    case GLSLstd450Radians:
-      dest->def = nir_radians(nb, src[0]);
+      def = nir_radians(nb, src[0]);
       break;
    case GLSLstd450Degrees:
-      dest->def = nir_degrees(nb, src[0]);
+      def = nir_degrees(nb, src[0]);
       break;
    case GLSLstd450Tan:
-      dest->def = nir_ftan(nb, src[0]);
+      def = nir_ftan(nb, src[0]);
       break;
 
    case GLSLstd450Step: {
@@ -238,16 +240,16 @@ handle_glsl450_alu(struct vtn_builder *b, enum GLSLstd450 entrypoint,
       nir_def *cmp = nir_slt(nb, src[1], src[0]);
 
       nb->fp_math_ctrl = save_math_ctrl;
-      dest->def = nir_fsub_imm(nb, 1.0f, cmp);
+      def = nir_fsub_imm(nb, 1.0f, cmp);
       break;
    }
 
    case GLSLstd450Exp:
-      dest->def = nir_fexp(nb, src[0]);
+      def = nir_fexp(nb, src[0]);
       break;
 
    case GLSLstd450Log:
-      dest->def = nir_flog(nb, src[0]);
+      def = nir_flog(nb, src[0]);
       break;
 
    case GLSLstd450FClamp: {
@@ -260,7 +262,7 @@ handle_glsl450_alu(struct vtn_builder *b, enum GLSLstd450 entrypoint,
       if (b->options->workarounds.force_nan_preserve_min_max)
          b->nb.fp_math_ctrl |= nir_fp_preserve_nan;
 
-      dest->def = nir_fclamp(nb, src[0], src[1], src[2]);
+      def = nir_fclamp(nb, src[0], src[1], src[2]);
 
       nb->fp_math_ctrl = save_math_ctrl;
       break;
@@ -269,26 +271,26 @@ handle_glsl450_alu(struct vtn_builder *b, enum GLSLstd450 entrypoint,
       const unsigned save_math_ctrl = nb->fp_math_ctrl;
       nb->fp_math_ctrl |= nir_fp_preserve_nan | nir_fp_preserve_inf;
 
-      dest->def = nir_fclamp(nb, src[0], src[1], src[2]);
+      def = nir_fclamp(nb, src[0], src[1], src[2]);
 
       nb->fp_math_ctrl = save_math_ctrl;
       break;
    }
    case GLSLstd450UClamp:
-      dest->def = nir_uclamp(nb, src[0], src[1], src[2]);
+      def = nir_uclamp(nb, src[0], src[1], src[2]);
       break;
    case GLSLstd450SClamp:
-      dest->def = nir_iclamp(nb, src[0], src[1], src[2]);
+      def = nir_iclamp(nb, src[0], src[1], src[2]);
       break;
 
    case GLSLstd450SmoothStep: {
-      dest->def = nir_smoothstep(nb, src[0], src[1], src[2]);
+      def = nir_smoothstep(nb, src[0], src[1], src[2]);
       break;
    }
 
    case GLSLstd450Sinh:
       /* 0.5 * (e^x - e^(-x)) */
-      dest->def =
+      def =
          nir_fmul_imm(nb, nir_fsub(nb, nir_fexp(nb, src[0]),
                                        nir_fexp(nb, nir_fneg(nb, src[0]))),
                           0.5f);
@@ -296,30 +298,30 @@ handle_glsl450_alu(struct vtn_builder *b, enum GLSLstd450 entrypoint,
 
    case GLSLstd450Cosh:
       /* 0.5 * (e^x + e^(-x)) */
-      dest->def =
+      def =
          nir_fmul_imm(nb, nir_fadd(nb, nir_fexp(nb, src[0]),
                                        nir_fexp(nb, nir_fneg(nb, src[0]))),
                           0.5f);
       break;
 
    case GLSLstd450Tanh: {
-      dest->def = b->shader->options->has_tanh ?
-                     nir_ftanh(&b->nb, src[0]) :
-                     nir_tanh_emulated(nb, src[0]);
+      def = b->shader->options->has_tanh ?
+               nir_ftanh(nb, src[0]) :
+               nir_tanh_emulated(nb, src[0]);
       break;
    }
 
    case GLSLstd450Asinh:
-      dest->def = nir_fmul(nb, nir_fsign(nb, src[0]),
+      def = nir_fmul(nb, nir_fsign(nb, src[0]),
          nir_flog(nb, nir_fadd(nb, nir_fabs(nb, src[0]),
                       nir_fsqrt(nb, nir_ffma_weak_imm2(nb, src[0], src[0], 1.0f)))));
       break;
    case GLSLstd450Acosh:
-      dest->def = nir_flog(nb, nir_fadd(nb, src[0],
+      def = nir_flog(nb, nir_fadd(nb, src[0],
          nir_fsqrt(nb, nir_ffma_weak_imm2(nb, src[0], src[0], -1.0f))));
       break;
    case GLSLstd450Atanh: {
-      dest->def =
+      def =
          nir_fmul_imm(nb, nir_flog(nb, nir_fdiv(nb, nir_fadd_imm(nb, src[0], 1.0),
                                        nir_fsub_imm(nb, 1.0, src[0]))),
                           0.5f);
@@ -327,19 +329,19 @@ handle_glsl450_alu(struct vtn_builder *b, enum GLSLstd450 entrypoint,
    }
 
    case GLSLstd450Asin:
-      dest->def = nir_asin(nb, src[0]);
+      def = nir_asin(nb, src[0]);
       break;
 
    case GLSLstd450Acos:
-      dest->def = nir_acos(nb, src[0]);
+      def = nir_acos(nb, src[0]);
       break;
 
    case GLSLstd450Atan:
-      dest->def = nir_atan(nb, src[0]);
+      def = nir_atan(nb, src[0]);
       break;
 
    case GLSLstd450Atan2:
-      dest->def = nir_atan2(nb, src[0], src[1]);
+      def = nir_atan2(nb, src[0], src[1]);
       break;
 
    case GLSLstd450Ldexp: {
@@ -350,7 +352,7 @@ handle_glsl450_alu(struct vtn_builder *b, enum GLSLstd450 entrypoint,
                                    nir_imm_intN_t(nb, INT32_MAX, 64));
       }
 
-      dest->def = nir_ldexp(nb, src[0], nir_i2i32(nb, exp));
+      def = nir_ldexp(nb, src[0], nir_i2i32(nb, exp));
       break;
    }
 
@@ -360,15 +362,13 @@ handle_glsl450_alu(struct vtn_builder *b, enum GLSLstd450 entrypoint,
       unsigned extra_fp_math_ctrl;
       nir_op op = vtn_nir_alu_op_for_spirv_glsl_opcode(b, entrypoint, execution_mode, &extra_fp_math_ctrl);
       b->nb.fp_math_ctrl |= extra_fp_math_ctrl;
-      dest->def = nir_build_alu(&b->nb, op, src[0], src[1], src[2], NULL);
+      def = nir_build_alu(&b->nb, op, src[0], src[1], src[2], NULL);
       break;
    }
    }
 
-   if (mediump_16bit)
-      dest = vtn_mediump_upconvert_value(b, dest);
-
-   vtn_push_ssa_value(b, w[2], dest);
+   h.dest->def = def;
+   vtn_push_ssa_value(b, w[2], vtn_handler_finish_value(b, &h));
 }
 
 static void
