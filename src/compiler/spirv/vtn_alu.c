@@ -823,6 +823,21 @@ vtn_build_convert(struct vtn_builder *b, SpvOp opcode,
    return result;
 }
 
+static nir_def *
+vtn_alu_component_imm(struct vtn_builder *b, struct vtn_ssa_value *value,
+                      unsigned idx)
+{
+   if (value->type->base_type == vtn_base_type_long_vector)
+      return nir_load_array_var_imm(&b->nb, value->var, idx);
+
+   if (glsl_type_is_scalar(value->type->type)) {
+      vtn_assert(idx == 0);
+      return value->def;
+   }
+
+   return nir_channel(&b->nb, value->def, idx);
+}
+
 void
 vtn_handle_alu(struct vtn_builder *b, SpvOp opcode,
                const uint32_t *w, unsigned count)
@@ -1666,13 +1681,73 @@ vtn_handle_bitcast(struct vtn_builder *b, const uint32_t *w, unsigned count)
       return;
    }
 
-   struct nir_def *src = vtn_get_nir_ssa(b, w[3]);
+   struct vtn_ssa_value *src_ssa = vtn_ssa_value(b, w[3]);
+   const unsigned src_components = vtn_type_num_elements(src_ssa->type);
+   const unsigned dst_components = vtn_type_num_elements(type);
+   const unsigned src_bit_size = glsl_get_bit_size(glsl_get_scalar_type(src_ssa->type->type));
+   const unsigned dst_bit_size = glsl_get_bit_size(glsl_get_scalar_type(type->type));
 
-   vtn_fail_if(src->num_components * src->bit_size !=
-               glsl_get_vector_elements(type->type) * glsl_get_bit_size(type->type),
-               "Source (%%%u) and destination (%%%u) of OpBitcast must have the same "
-               "total number of bits", w[3], w[2]);
-   nir_def *val =
-      nir_bitcast_vector(&b->nb, src, glsl_get_bit_size(type->type));
-   vtn_push_nir_ssa(b, w[2], val);
+   vtn_fail_if(src_components * src_bit_size !=
+               dst_components * dst_bit_size,
+               "Source (%%%u) and destination (%%%u) of OpBitcast must "
+               "have the same total number of bits",
+               w[3], w[2]);
+
+   /* Each group covers one component of the wider type. */
+   const unsigned groups = MIN2(src_components, dst_components);
+   const unsigned src_group_size = MAX2(dst_bit_size / src_bit_size, 1);
+   const unsigned dst_group_size = MAX2(src_bit_size / dst_bit_size, 1);
+   vtn_fail_if(src_components != groups * src_group_size ||
+               dst_components != groups * dst_group_size,
+               "OpBitcast requires the larger component count to be an "
+               "integer multiple of the smaller count");
+
+   if (type->base_type != vtn_base_type_long_vector &&
+       src_ssa->type->base_type != vtn_base_type_long_vector) {
+      vtn_push_nir_ssa(b, w[2],
+                       nir_bitcast_vector(&b->nb, src_ssa->def, dst_bit_size));
+      return;
+   }
+
+   struct vtn_ssa_value *dest = vtn_create_ssa_value(b, type);
+
+   if (src_bit_size == dst_bit_size) {
+      assert(type->base_type == vtn_base_type_long_vector &&
+             src_ssa->type->base_type == vtn_base_type_long_vector);
+      for (unsigned i = 0; i < dst_components; i++) {
+         nir_def *comp = nir_load_array_var_imm(&b->nb, src_ssa->var, i);
+         nir_store_array_var_imm(&b->nb, dest->var, i, comp, 1);
+      }
+   } else {
+      nir_def *dst_defs[NIR_MAX_VEC_COMPONENTS] = { NULL, };
+      for (unsigned i = 0; i < groups; i++) {
+         nir_def *src_defs[NIR_MAX_VEC_COMPONENTS];
+         for (unsigned j = 0; j < src_group_size; j++) {
+            src_defs[j] =
+               vtn_alu_component_imm(b, src_ssa, i * src_group_size + j);
+         }
+
+         nir_def *comps =
+            nir_bitcast_vector(&b->nb, nir_vec(&b->nb, src_defs, src_group_size),
+                               dst_bit_size);
+         vtn_assert(comps->num_components == dst_group_size);
+
+         for (unsigned j = 0; j < dst_group_size; j++) {
+            nir_def *comp = nir_channel(&b->nb, comps, j);
+            const unsigned dst_idx = i * dst_group_size + j;
+            if (type->base_type == vtn_base_type_long_vector) {
+               nir_store_array_var_imm(&b->nb, dest->var, dst_idx, comp, 1);
+            } else {
+               dst_defs[dst_idx] = comp;
+            }
+         }
+      }
+
+      if (type->base_type != vtn_base_type_long_vector) {
+         dest->def = dst_components == 1 ? dst_defs[0] :
+            nir_vec(&b->nb, dst_defs, dst_components);
+      }
+   }
+
+   vtn_push_ssa_value(b, w[2], dest);
 }
