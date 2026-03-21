@@ -625,66 +625,71 @@ handle_glsl450_packing_ops(struct vtn_builder *b, enum GLSLstd450 opcode,
    vtn_push_ssa_value(b, w[2], dest);
 }
 
-static void
-handle_glsl450_vector_ops(struct vtn_builder *b, enum GLSLstd450 opcode,
-                          const uint32_t *w, unsigned count)
+static nir_def *
+build_glsl450_dot(struct vtn_builder *b,
+                  struct vtn_ssa_value *src0,
+                  struct vtn_ssa_value *src1,
+                  bool mediump_16bit)
 {
-   struct nir_builder *nb = &b->nb;
-   const struct vtn_type *dest_type = vtn_get_type(b, w[1]);
+   struct vtn_ssa_value *srcs[2] = { src0, src1 };
+   const unsigned num_srcs = src1 ? 2 : 1;
 
-   unsigned num_inputs = count - 5;
-   struct vtn_ssa_value *vtn_src[3] = {0};
-   vtn_collect_ssa_sources(b, &w[5], vtn_src, num_inputs);
+   if (src0->type->base_type != vtn_base_type_long_vector) {
+      if (mediump_16bit)
+         vtn_downconvert_ssa_sources(b, srcs, num_srcs);
 
-   const bool mediump_16bit =
-      vtn_value_needs_mediump_16bit(b, vtn_untyped_value(b, w[2]));
-   if (mediump_16bit)
-      vtn_downconvert_ssa_sources(b, vtn_src, num_inputs);
+      return nir_fdot(&b->nb, srcs[0]->def,
+                      src1 ? srcs[1]->def : srcs[0]->def);
+   }
 
-   nir_def *src[3] = { NULL, };
-   for (unsigned i = 0; i < num_inputs; i++)
-      src[i] = vtn_src[i]->def;
+   struct vtn_reduction_ctx r = {0};
+   r.mediump_16bit = mediump_16bit;
+   vtn_reduction_prepare(b, &r, srcs, num_srcs);
+   vtn_reduction_load_first(b, &r);
 
-   struct vtn_ssa_value *dest = vtn_create_ssa_value(b, dest_type);
+   nir_def *x = r.srcs[0]->def;
+   nir_def *y = src1 ? r.srcs[1]->def : x;
+   nir_def *initial = nir_fmul(&b->nb, x, y);
 
+   const struct glsl_type *src_type = glsl_get_scalar_type(src0->type->type);
+   const struct glsl_type *acc_type = mediump_16bit ?
+      glsl_float16_type(src_type) : src_type;
+   vtn_reduction_start(b, &r, acc_type, initial,
+                       "long_vector_glsl450_dot_acc");
+
+   x = r.srcs[0]->def;
+   y = src1 ? r.srcs[1]->def : x;
+   vtn_reduction_update(b, &r,
+                        nir_ffma_weak(&b->nb, x, y,
+                                      vtn_reduction_accumulator(b, &r)));
+
+   return vtn_reduction_finish(b, &r);
+}
+
+static nir_def *
+build_glsl450_dot_op(nir_builder *nb, enum GLSLstd450 opcode,
+                     nir_def *src[3], nir_def *dot)
+{
    switch (opcode) {
-   case GLSLstd450Length:
-      dest->def = nir_fast_length(nb, src[0]);
-      break;
-
-   case GLSLstd450Distance:
-      dest->def = nir_fast_distance(nb, src[0], src[1]);
-      break;
-
    case GLSLstd450Normalize:
-      dest->def = nir_fast_normalize(nb, src[0]);
-      break;
-
-   case GLSLstd450Cross:
-      dest->def = nir_cross3(nb, src[0], src[1]);
-      break;
+      return nir_fdiv(nb, src[0], nir_fsqrt(nb, dot));
 
    case GLSLstd450FaceForward:
-      dest->def =
-         nir_bcsel(nb, nir_flt(nb, nir_fdot(nb, src[2], src[1]),
-                                   NIR_IMM_FP(nb, 0.0)),
+      return nir_bcsel(nb, nir_flt(nb, dot, NIR_IMM_FP(nb, 0.0)),
                        src[0], nir_fneg(nb, src[0]));
-      break;
 
    case GLSLstd450Reflect:
       /* I - 2 * dot(N, I) * N */
-      dest->def =
-         nir_a_minus_bc(nb, src[0],
-                            src[1],
-                            nir_fmul(nb, nir_fdot(nb, src[0], src[1]),
-                                         NIR_IMM_FP(nb, 2.0)));
-      break;
+      return nir_a_minus_bc(nb, src[0],
+                                src[1],
+                                nir_fmul(nb, dot,
+                                             NIR_IMM_FP(nb, 2.0)));
 
    case GLSLstd450Refract: {
       nir_def *I = src[0];
       nir_def *N = src[1];
       nir_def *eta = src[2];
-      nir_def *n_dot_i = nir_fdot(nb, N, I);
+      nir_def *n_dot_i = dot;
       nir_def *one = NIR_IMM_FP(nb, 1.0);
       nir_def *zero = NIR_IMM_FP(nb, 0.0);
       /* According to the SPIR-V and GLSL specs, eta is always a float
@@ -708,7 +713,114 @@ handle_glsl450_vector_ops(struct vtn_builder *b, enum GLSLstd450 opcode,
                             nir_ffma_weak(nb, eta, n_dot_i, nir_fsqrt(nb, k)),
                             N);
       /* XXX: bcsel, or if statement? */
-      dest->def = nir_bcsel(nb, nir_flt(nb, k, zero), zero, result);
+      return nir_bcsel(nb, nir_flt(nb, k, zero), zero, result);
+   }
+
+   default:
+      UNREACHABLE("invalid dot vector opcode");
+   }
+}
+
+static void
+handle_glsl450_vector_ops(struct vtn_builder *b, enum GLSLstd450 opcode,
+                          const uint32_t *w, unsigned count)
+{
+   struct nir_builder *nb = &b->nb;
+   unsigned num_inputs = count - 5;
+   const bool mediump_16bit =
+      vtn_value_needs_mediump_16bit(b, vtn_untyped_value(b, w[2]));
+   struct vtn_handler_ctx h = {0};
+
+   vtn_handler_prepare(b, &h, w[1], w[2], &w[5], num_inputs);
+   h.mediump_16bit = mediump_16bit;
+
+   switch (opcode) {
+   case GLSLstd450Cross:
+      vtn_fail_if(h.lv.length > 0,
+                  "Long-vector GLSL450 Cross is not supported");
+      vtn_handler_start(b, &h);
+      h.dest->def = nir_cross3(nb, h.srcs[0]->def, h.srcs[1]->def);
+      break;
+
+   case GLSLstd450Length:
+   case GLSLstd450Distance: {
+      if (h.lv.length == 0) {
+         vtn_handler_start(b, &h);
+         h.dest->def = opcode == GLSLstd450Length ?
+            nir_fast_length(nb, h.srcs[0]->def) :
+            nir_fast_distance(nb, h.srcs[0]->def, h.srcs[1]->def);
+         break;
+      }
+
+      struct vtn_reduction_ctx r = {0};
+      r.mediump_16bit = mediump_16bit;
+      vtn_reduction_prepare(b, &r, h.srcs, num_inputs);
+      vtn_reduction_load_first(b, &r);
+
+      nir_def *x = r.srcs[0]->def;
+      if (opcode == GLSLstd450Distance)
+         x = nir_fsub(nb, r.srcs[0]->def, r.srcs[1]->def);
+      nir_def *initial = nir_fmul(nb, x, x);
+
+      const struct glsl_type *src_type =
+         glsl_get_scalar_type(h.srcs[0]->type->type);
+      const struct glsl_type *acc_type = r.mediump_16bit ?
+         glsl_float16_type(src_type) : src_type;
+      vtn_reduction_start(b, &r, acc_type, initial,
+                          "long_vector_glsl450_acc");
+
+      x = r.srcs[0]->def;
+      if (opcode == GLSLstd450Distance)
+         x = nir_fsub(nb, r.srcs[0]->def, r.srcs[1]->def);
+
+      vtn_reduction_update(b, &r,
+                           nir_ffma_weak(nb, x, x,
+                                         vtn_reduction_accumulator(b, &r)));
+
+      nir_def *def = nir_fsqrt(nb, vtn_reduction_finish(b, &r));
+      vtn_push_ssa_value(b, w[2],
+                         vtn_reduction_result(b, &r, h.dest_type, def));
+      return;
+   }
+
+   case GLSLstd450Normalize:
+   case GLSLstd450FaceForward:
+   case GLSLstd450Reflect:
+   case GLSLstd450Refract: {
+      unsigned dot_src0, dot_src1;
+      switch (opcode) {
+      case GLSLstd450Normalize:
+         dot_src0 = 0;
+         dot_src1 = UINT_MAX;
+         break;
+      case GLSLstd450FaceForward:
+         dot_src0 = 2;
+         dot_src1 = 1;
+         break;
+      case GLSLstd450Reflect:
+         dot_src0 = 0;
+         dot_src1 = 1;
+         break;
+      case GLSLstd450Refract:
+         dot_src0 = 1;
+         dot_src1 = 0;
+         break;
+      default:
+         UNREACHABLE("invalid vector opcode");
+      }
+
+      nir_def *dot =
+         build_glsl450_dot(b, h.srcs[dot_src0],
+                           dot_src1 == UINT_MAX ? NULL : h.srcs[dot_src1],
+                           mediump_16bit);
+
+      vtn_handler_start(b, &h);
+
+      nir_def *src[3] = { NULL, };
+      for (unsigned i = 0; i < num_inputs; i++)
+         src[i] = h.srcs[i]->def;
+
+      h.dest->def = build_glsl450_dot_op(nb, opcode, src, dot);
       break;
    }
 
@@ -716,10 +828,7 @@ handle_glsl450_vector_ops(struct vtn_builder *b, enum GLSLstd450 opcode,
       UNREACHABLE("invalid vector opcode");
    }
 
-   if (mediump_16bit)
-      dest = vtn_mediump_upconvert_value(b, dest);
-
-   vtn_push_ssa_value(b, w[2], dest);
+   vtn_push_ssa_value(b, w[2], vtn_handler_finish_value(b, &h));
 }
 
 bool
