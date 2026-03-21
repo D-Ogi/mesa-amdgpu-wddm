@@ -4817,6 +4817,16 @@ vtn_ssa_transpose(struct vtn_builder *b, struct vtn_ssa_value *src)
 }
 
 static nir_def *
+vtn_vector_component_imm(struct vtn_builder *b, struct vtn_ssa_value *vec,
+                         unsigned idx)
+{
+   if (vec->type->base_type == vtn_base_type_long_vector)
+      return nir_load_array_var_imm(&b->nb, vec->var, idx);
+
+   return nir_channel(&b->nb, vec->def, idx);
+}
+
+static nir_def *
 vtn_vector_shuffle(struct vtn_builder *b, unsigned num_components,
                    nir_def *src0, nir_def *src1,
                    const uint32_t *indices)
@@ -4973,6 +4983,19 @@ vtn_composite_extract(struct vtn_builder *b, struct vtn_ssa_value *src,
 
    struct vtn_ssa_value *cur = src;
    for (unsigned i = 0; i < num_indices; i++) {
+      if (cur->type->base_type == vtn_base_type_long_vector) {
+         vtn_fail_if(i != num_indices - 1,
+                     "OpCompositeExtract has too many indices.");
+         vtn_fail_if(indices[i] >= vtn_type_num_elements(cur->type),
+                     "All indices in an OpCompositeExtract must be "
+                     "in-bounds");
+
+         struct vtn_ssa_value *ret =
+            vtn_create_ssa_value(b, cur->type->array_element);
+         ret->def = nir_load_array_var_imm(&b->nb, cur->var, indices[i]);
+         return ret;
+      }
+
       if (glsl_type_is_vector_or_scalar(cur->type->type)) {
          vtn_assert(i == num_indices - 1);
          vtn_fail_if(indices[i] >= vtn_type_num_elements(cur->type),
@@ -5029,27 +5052,94 @@ vtn_handle_composite(struct vtn_builder *b, SpvOp opcode,
    case SpvOpCompositeConstructReplicateEXT: {
       unsigned elems = count - 3;
       assume(elems >= 1);
+      const bool is_vector = type->base_type == vtn_base_type_vector ||
+                             type->base_type == vtn_base_type_long_vector;
       if (type->base_type == vtn_base_type_cooperative_matrix) {
          vtn_assert(elems == 1);
          nir_deref_instr *mat = vtn_create_cmat_temporary(b, type->type, "cmat_construct");
          nir_cmat_construct(&b->nb, &mat->def, vtn_get_nir_ssa(b, w[3]));
          vtn_set_ssa_value_var(b, ssa, mat->var);
-      } else if (glsl_type_is_vector_or_scalar(type->type)) {
-         if (opcode == SpvOpCompositeConstructReplicateEXT) {
-            nir_def *src = vtn_get_nir_ssa(b, w[3]);
-            vtn_assert(glsl_get_bit_size(type->type) == src->bit_size);
-            unsigned swiz[NIR_MAX_VEC_COMPONENTS] = { 0, };
-            ssa->def = nir_swizzle(&b->nb, src, swiz,
-                                   glsl_get_vector_elements(type->type));
-         } else {
-            nir_def *srcs[NIR_MAX_VEC_COMPONENTS];
+      } else if (is_vector && opcode == SpvOpCompositeConstructReplicateEXT) {
+         struct vtn_handler_ctx h = {0};
+         vtn_handler_prepare(b, &h, w[1], w[2], &w[3], 1);
+         vtn_fail_if(!glsl_type_is_scalar(h.srcs[0]->type->type),
+                     "%s of a vector requires a scalar constituent",
+                     spirv_op_to_string(opcode));
+         vtn_handler_start(b, &h);
+
+         vtn_assert(glsl_get_bit_size(h.dest->type->type) ==
+                    h.srcs[0]->def->bit_size);
+         unsigned swiz[NIR_MAX_VEC_COMPONENTS] = {0};
+         h.dest->def = nir_swizzle(&b->nb, h.srcs[0]->def, swiz,
+                                   vtn_type_num_elements(h.dest->type));
+
+         ssa = vtn_handler_finish_value(b, &h);
+      } else if (is_vector) {
+         vtn_assert(opcode == SpvOpCompositeConstruct);
+         const unsigned dst_components = vtn_type_num_elements(type);
+         bool any_long_vector = false;
+         uint64_t total_components = 0;
+         for (unsigned i = 0; i < elems; i++) {
+            const struct vtn_type *src_type = vtn_get_value_type(b, w[3 + i]);
+            any_long_vector |= src_type->base_type == vtn_base_type_long_vector;
+            total_components += vtn_type_num_elements(src_type);
+         }
+         vtn_fail_if(total_components != dst_components,
+                     "%s has %" PRIu64 " components, expected %u",
+                     spirv_op_to_string(opcode), total_components, dst_components);
+
+         if (type->base_type == vtn_base_type_long_vector) {
+            unsigned dst_idx = 0;
+
             for (unsigned i = 0; i < elems; i++) {
-               srcs[i] = vtn_get_nir_ssa(b, w[3 + i]);
-               vtn_assert(glsl_get_bit_size(type->type) == srcs[i]->bit_size);
+               struct vtn_ssa_value *elem = vtn_ssa_value(b, w[3 + i]);
+               const unsigned num_components = vtn_type_num_elements(elem->type);
+
+               if (elem->type->base_type == vtn_base_type_long_vector) {
+                  for (unsigned j = 0; j < num_components; j++) {
+                     nir_store_array_var_imm(&b->nb, ssa->var, dst_idx++,
+                                             nir_load_array_var_imm(&b->nb, elem->var, j), 1);
+                  }
+               } else {
+                  vtn_fail_if(!glsl_type_is_vector_or_scalar(elem->type->type),
+                              "%s long-vector constituent must be a scalar or "
+                              "vector",
+                              spirv_op_to_string(opcode));
+
+                  for (unsigned j = 0; j < num_components; j++) {
+                     nir_def *comp = num_components == 1 ? elem->def :
+                        nir_channel(&b->nb, elem->def, j);
+                     nir_store_array_var_imm(&b->nb, ssa->var, dst_idx++, comp, 1);
+                  }
+               }
             }
-            ssa->def =
-               vtn_vector_construct(b, glsl_get_vector_elements(type->type),
-                                    elems, srcs);
+         } else {
+            if (any_long_vector) {
+               /* A long-vector constituent has no single nir_def, so gather
+                * the components one at a time.
+                */
+               nir_def *comps[NIR_MAX_VEC_COMPONENTS];
+               unsigned dst_idx = 0;
+
+               for (unsigned i = 0; i < elems; i++) {
+                  struct vtn_ssa_value *elem = vtn_ssa_value(b, w[3 + i]);
+                  const unsigned num_components = vtn_type_num_elements(elem->type);
+
+                  for (unsigned j = 0; j < num_components; j++) {
+                     comps[dst_idx++] = vtn_vector_component_imm(b, elem, j);
+                  }
+               }
+
+               ssa->def = dst_components == 1 ? comps[0] :
+                  nir_vec(&b->nb, comps, dst_components);
+            } else {
+               nir_def *srcs[NIR_MAX_VEC_COMPONENTS];
+               for (unsigned i = 0; i < elems; i++) {
+                  srcs[i] = vtn_get_nir_ssa(b, w[3 + i]);
+                  vtn_assert(glsl_get_bit_size(type->type) == srcs[i]->bit_size);
+               }
+               ssa->def = vtn_vector_construct(b, dst_components, elems, srcs);
+            }
          }
       } else {
          ssa->elems = vtn_alloc_array(b, struct vtn_ssa_value *, type->length);
