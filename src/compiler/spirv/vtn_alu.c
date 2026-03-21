@@ -857,17 +857,19 @@ vtn_handle_alu(struct vtn_builder *b, SpvOp opcode,
       src[i] = vtn_src[i]->def;
    }
 
+   nir_def *def = NULL;
+
    switch (opcode) {
    case SpvOpVectorTimesScalar:
       /* The builder will take care of splatting for us. */
-      dest->def = nir_fmul(&b->nb, src[0], src[1]);
+      def = nir_fmul(&b->nb, src[0], src[1]);
       break;
 
    case SpvOpIsNan:{
       const unsigned save_fp_math_ctrl = b->nb.fp_math_ctrl;
 
       b->nb.fp_math_ctrl |= nir_fp_preserve_nan | nir_fp_preserve_inf;
-      dest->def = nir_fneu(&b->nb, src[0], src[0]);
+      def = nir_fneu(&b->nb, src[0], src[0]);
       b->nb.fp_math_ctrl = save_fp_math_ctrl;
       break;
    }
@@ -876,8 +878,8 @@ vtn_handle_alu(struct vtn_builder *b, SpvOp opcode,
       const unsigned save_fp_math_ctrl = b->nb.fp_math_ctrl;
 
       b->nb.fp_math_ctrl |= nir_fp_preserve_nan | nir_fp_preserve_inf;
-      dest->def = nir_iand(&b->nb, nir_feq(&b->nb, src[0], src[0]),
-                                   nir_feq(&b->nb, src[1], src[1]));
+      def = nir_iand(&b->nb, nir_feq(&b->nb, src[0], src[0]),
+                             nir_feq(&b->nb, src[1], src[1]));
       b->nb.fp_math_ctrl = save_fp_math_ctrl;
       break;
    }
@@ -886,8 +888,8 @@ vtn_handle_alu(struct vtn_builder *b, SpvOp opcode,
       const unsigned save_fp_math_ctrl = b->nb.fp_math_ctrl;
 
       b->nb.fp_math_ctrl |= nir_fp_preserve_nan | nir_fp_preserve_inf;
-      dest->def = nir_ior(&b->nb, nir_fneu(&b->nb, src[0], src[0]),
-                                  nir_fneu(&b->nb, src[1], src[1]));
+      def = nir_ior(&b->nb, nir_fneu(&b->nb, src[0], src[0]),
+                            nir_fneu(&b->nb, src[1], src[1]));
       b->nb.fp_math_ctrl = save_fp_math_ctrl;
       break;
    }
@@ -897,7 +899,7 @@ vtn_handle_alu(struct vtn_builder *b, SpvOp opcode,
 
       b->nb.fp_math_ctrl = nir_fp_preserve_nan | nir_fp_preserve_inf;
       nir_def *inf = nir_imm_floatN_t(&b->nb, INFINITY, src[0]->bit_size);
-      dest->def = nir_feq(&b->nb, nir_fabs(&b->nb, src[0]), inf);
+      def = nir_feq(&b->nb, nir_fabs(&b->nb, src[0]), inf);
 
       b->nb.fp_math_ctrl = save_fp_math_ctrl;
       break;
@@ -915,7 +917,7 @@ vtn_handle_alu(struct vtn_builder *b, SpvOp opcode,
        * whatever is left to !(a < b || b < a).  Since some applications will
        * open-code this sequence, these optimizations are needed anyway.
        */
-      dest->def =
+      def =
          nir_ior(&b->nb,
                  nir_feq(&b->nb, src[0], src[1]),
                  nir_ior(&b->nb,
@@ -952,7 +954,7 @@ vtn_handle_alu(struct vtn_builder *b, SpvOp opcode,
       default: UNREACHABLE("Impossible opcode.");
       }
 
-      dest->def =
+      def =
          nir_inot(&b->nb,
                   nir_build_alu(&b->nb, op, src[0], src[1], NULL, NULL));
 
@@ -977,7 +979,7 @@ vtn_handle_alu(struct vtn_builder *b, SpvOp opcode,
        * whatever is left to (a < b || b < a).  Since some applications will
        * open-code this sequence, these optimizations are needed anyway.
        */
-      dest->def =
+      def =
          nir_iand(&b->nb,
                   nir_fneu(&b->nb, src[0], src[1]),
                   nir_iand(&b->nb,
@@ -1019,26 +1021,25 @@ vtn_handle_alu(struct vtn_builder *b, SpvOp opcode,
             src[i] = nir_u2u32(&b->nb, src[i]);
          }
       }
-      dest->def = nir_build_alu(&b->nb, op, src[0], src[1], src[2], src[3]);
+      def = nir_build_alu(&b->nb, op, src[0], src[1], src[2], src[3]);
       break;
    }
 
    case SpvOpSignBitSet:
-      dest->def = nir_i2b(&b->nb,
+      def = nir_i2b(&b->nb,
          nir_ushr(&b->nb, src[0], nir_imm_int(&b->nb, src[0]->bit_size - 1)));
       break;
 
    case SpvOpUCountTrailingZerosINTEL:
-      dest->def = nir_umin(&b->nb,
-                               nir_find_lsb(&b->nb, src[0]),
-                               nir_imm_int(&b->nb, 32u));
+      def = nir_umin(&b->nb, nir_find_lsb(&b->nb, src[0]),
+                             nir_imm_int(&b->nb, 32u));
       break;
 
    case SpvOpBitCount: {
       /* bit_count always returns int32, but the SPIR-V opcode just says the return
        * value needs to be big enough to store the number of bits.
        */
-      dest->def = nir_u2uN(&b->nb, nir_bit_count(&b->nb, src[0]), glsl_get_bit_size(dest_type->type));
+      def = nir_u2uN(&b->nb, nir_bit_count(&b->nb, src[0]), glsl_get_bit_size(dest_type->type));
       break;
    }
 
@@ -1077,7 +1078,7 @@ vtn_handle_alu(struct vtn_builder *b, SpvOp opcode,
 
       b->nb.fp_math_ctrl |= extra_fp_math_ctrl;
 
-      dest->def = nir_build_alu(&b->nb, op, src[0], src[1], src[2], src[3]);
+      def = nir_build_alu(&b->nb, op, src[0], src[1], src[2], src[3]);
 
       b->nb.fp_math_ctrl = save_fp_math_ctrl;
       break;
@@ -1090,7 +1091,7 @@ vtn_handle_alu(struct vtn_builder *b, SpvOp opcode,
    case SpvOpISub:
    case SpvOpShiftLeftLogical:
    case SpvOpSNegate: {
-      nir_alu_instr *alu = nir_def_as_alu(dest->def);
+      nir_alu_instr *alu = nir_def_as_alu(def);
       if (alu) {
          alu->no_signed_wrap |= vtn_has_decoration(b, dest_val, SpvDecorationNoSignedWrap);
          alu->no_unsigned_wrap |= vtn_has_decoration(b, dest_val, SpvDecorationNoUnsignedWrap);
@@ -1101,6 +1102,8 @@ vtn_handle_alu(struct vtn_builder *b, SpvOp opcode,
       /* Do nothing. */
       break;
    }
+
+   dest->def = def;
 
    if (mediump_16bit)
       dest = vtn_mediump_upconvert_value(b, dest);
