@@ -563,8 +563,20 @@ vtn_get_bare_type(struct vtn_builder *b, const struct vtn_type *type)
 }
 
 static struct vtn_ssa_value *
+vtn_create_ssa_value_bare(struct vtn_builder *b, struct vtn_type *type);
+
+static struct vtn_ssa_value *
 vtn_undef_ssa_value_bare(struct vtn_builder *b, struct vtn_type *type)
 {
+   if (type->base_type == vtn_base_type_long_vector) {
+      struct vtn_ssa_value *val = vtn_create_ssa_value_bare(b, type);
+      for (unsigned i = 0; i < type->length; i++) {
+         struct vtn_ssa_value *elem = vtn_undef_ssa_value_bare(b, type->array_element);
+         nir_store_array_var(&b->nb, val->var, nir_imm_int(&b->nb, i), elem->def, 1);
+      }
+      return val;
+   }
+
    struct vtn_ssa_value *val = vtn_zalloc(b, struct vtn_ssa_value);
    val->type = type;
 
@@ -602,6 +614,16 @@ static struct vtn_ssa_value *
 vtn_const_ssa_value_bare(struct vtn_builder *b, nir_constant *constant,
                          struct vtn_type *type)
 {
+   if (type->base_type == vtn_base_type_long_vector) {
+      struct vtn_ssa_value *val = vtn_create_ssa_value_bare(b, type);
+      for (unsigned i = 0; i < type->length; i++) {
+         struct vtn_ssa_value *elem =
+            vtn_const_ssa_value_bare(b, constant->elements[i], type->array_element);
+         nir_store_array_var(&b->nb, val->var, nir_imm_int(&b->nb, i), elem->def, 1);
+      }
+      return val;
+   }
+
    struct vtn_ssa_value *val = vtn_zalloc(b, struct vtn_ssa_value);
    val->type = type;
 
