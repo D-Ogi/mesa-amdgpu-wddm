@@ -4826,35 +4826,77 @@ vtn_vector_component_imm(struct vtn_builder *b, struct vtn_ssa_value *vec,
    return nir_channel(&b->nb, vec->def, idx);
 }
 
-static nir_def *
-vtn_vector_shuffle(struct vtn_builder *b, unsigned num_components,
-                   nir_def *src0, nir_def *src1,
-                   const uint32_t *indices)
+static void
+vtn_check_shuffle_index(struct vtn_builder *b, uint32_t index,
+                        unsigned total_components)
 {
-   nir_alu_instr *vec = create_vec(b, num_components, src0->bit_size);
+   vtn_fail_if(index != 0xffffffff && index >= total_components,
+               "OpVectorShuffle: All Component literals must "
+               "either be FFFFFFFF or in [0, N - 1] (inclusive)");
+}
 
-   for (unsigned i = 0; i < num_components; i++) {
-      uint32_t index = indices[i];
-      unsigned total_components = src0->num_components + src1->num_components;
-      vtn_fail_if(index != 0xffffffff && index >= total_components,
-                  "OpVectorShuffle: All Component literals must either be "
-                  "FFFFFFFF or in [0, N - 1] (inclusive)");
+static void
+vtn_vector_shuffle(struct vtn_builder *b, struct vtn_ssa_value *dest,
+                   struct vtn_ssa_value *src0, struct vtn_ssa_value *src1,
+                   const uint32_t *indices, UNUSED unsigned num_indices)
+{
+   const unsigned dst_components = vtn_type_num_elements(dest->type);
+   const unsigned src0_components = vtn_type_num_elements(src0->type);
+   const unsigned src1_components = vtn_type_num_elements(src1->type);
+   const unsigned total_components = src0_components + src1_components;
+   const bool dst_is_long_vector = dest->type->base_type == vtn_base_type_long_vector;
+   assert(num_indices == dst_components);
 
-      if (index == 0xffffffff) {
-         vec->src[i].src =
-            nir_src_for_ssa(nir_undef(&b->nb, 1, src0->bit_size));
-      } else if (index < src0->num_components) {
-         vec->src[i].src = nir_src_for_ssa(src0);
-         vec->src[i].swizzle[0] = index;
-      } else {
-         vec->src[i].src = nir_src_for_ssa(src1);
-         vec->src[i].swizzle[0] = index - src0->num_components;
+   if (dst_is_long_vector ||
+       src0->type->base_type == vtn_base_type_long_vector ||
+       src1->type->base_type == vtn_base_type_long_vector) {
+      unsigned bit_size =
+         glsl_get_bit_size(glsl_get_scalar_type(src0->type->type));
+
+      nir_def *components[NIR_MAX_VEC_COMPONENTS];
+      for (unsigned i = 0; i < dst_components; i++) {
+         uint32_t index = indices[i];
+         nir_def *comp;
+
+         vtn_check_shuffle_index(b, index, total_components);
+
+         if (index == 0xffffffff)
+            comp = nir_undef(&b->nb, 1, bit_size);
+         else if (index < src0_components)
+            comp = vtn_vector_component_imm(b, src0, index);
+         else
+            comp = vtn_vector_component_imm(b, src1, index - src0_components);
+
+         if (dst_is_long_vector)
+            nir_store_array_var_imm(&b->nb, dest->var, i, comp, 1);
+         else
+            components[i] = comp;
       }
+
+      if (!dst_is_long_vector)
+         dest->def = vtn_vector_construct(b, dst_components, dst_components,
+                                          components);
+   } else {
+      nir_alu_instr *vec = create_vec(b, dst_components, src0->def->bit_size);
+
+      for (unsigned i = 0; i < dst_components; i++) {
+         uint32_t index = indices[i];
+         vtn_check_shuffle_index(b, index, total_components);
+
+         if (index == 0xffffffff) {
+            vec->src[i].src = nir_src_for_ssa(nir_undef(&b->nb, 1, src0->def->bit_size));
+         } else if (index < src0_components) {
+            vec->src[i].src = nir_src_for_ssa(src0->def);
+            vec->src[i].swizzle[0] = index;
+         } else {
+            vec->src[i].src = nir_src_for_ssa(src1->def);
+            vec->src[i].swizzle[0] = index - src0_components;
+         }
+      }
+
+      nir_builder_instr_insert(&b->nb, &vec->instr);
+      dest->def = &vec->def;
    }
-
-   nir_builder_instr_insert(&b->nb, &vec->instr);
-
-   return &vec->def;
 }
 
 /*
@@ -4899,7 +4941,15 @@ static struct vtn_ssa_value *
 vtn_composite_copy_logical_bare(struct vtn_builder *b, struct vtn_ssa_value *src,
                                 struct vtn_type *dest_type)
 {
-   assert(!src->is_variable);
+   if (src->is_variable) {
+      struct vtn_ssa_value *dest = vtn_create_ssa_value_bare(b, dest_type);
+      vtn_fail_if(!dest->is_variable,
+                  "Cannot copy variable-backed SSA value into non-variable "
+                  "destination");
+      nir_copy_deref(&b->nb, nir_build_deref_var(&b->nb, dest->var),
+                     nir_build_deref_var(&b->nb, src->var));
+      return dest;
+   }
 
    struct vtn_ssa_value *dest = vtn_zalloc(b, struct vtn_ssa_value);
    dest->type = dest_type;
@@ -4945,6 +4995,9 @@ vtn_composite_insert(struct vtn_builder *b, struct vtn_ssa_value *src,
    struct vtn_ssa_value *cur = dest;
    unsigned i;
    for (i = 0; i < num_indices - 1; i++) {
+      if (cur->type->base_type == vtn_base_type_long_vector)
+         vtn_fail("OpCompositeInsert has too many indices.");
+
       /* If we got a vector here, that means the next index will be trying to
        * dereference a scalar.
        */
@@ -4955,7 +5008,11 @@ vtn_composite_insert(struct vtn_builder *b, struct vtn_ssa_value *src,
       cur = cur->elems[indices[i]];
    }
 
-   if (glsl_type_is_vector_or_scalar(cur->type->type)) {
+   if (cur->type->base_type == vtn_base_type_long_vector) {
+      vtn_fail_if(indices[i] >= vtn_type_num_elements(cur->type),
+                  "All indices in an OpCompositeInsert must be in-bounds");
+      nir_store_array_var_imm(&b->nb, cur->var, indices[i], insert->def, 1);
+   } else if (glsl_type_is_vector_or_scalar(cur->type->type)) {
       vtn_fail_if(indices[i] >= vtn_type_num_elements(cur->type),
                   "All indices in an OpCompositeInsert must be in-bounds");
 
@@ -5030,22 +5087,35 @@ vtn_handle_composite(struct vtn_builder *b, SpvOp opcode,
    struct vtn_ssa_value *ssa = vtn_create_ssa_value(b, type);
 
    switch (opcode) {
-   case SpvOpVectorExtractDynamic:
-      ssa->def = nir_vector_extract(&b->nb, vtn_get_nir_ssa(b, w[3]),
-                                    vtn_get_nir_ssa(b, w[4]));
-      break;
+   case SpvOpVectorExtractDynamic: {
+      struct vtn_ssa_value *vec = vtn_ssa_value(b, w[3]);
+      nir_def *idx = vtn_get_nir_ssa(b, w[4]);
 
-   case SpvOpVectorInsertDynamic:
-      ssa->def = nir_vector_insert(&b->nb, vtn_get_nir_ssa(b, w[3]),
-                                   vtn_get_nir_ssa(b, w[4]),
-                                   vtn_get_nir_ssa(b, w[5]));
+      if (vec->type->base_type == vtn_base_type_long_vector)
+         ssa->def = nir_load_array_var(&b->nb, vec->var, nir_u2u32(&b->nb, idx));
+      else
+         ssa->def = nir_vector_extract(&b->nb, vec->def, idx);
       break;
+   }
+
+   case SpvOpVectorInsertDynamic: {
+      struct vtn_ssa_value *vec = vtn_ssa_value(b, w[3]);
+      nir_def *insert = vtn_get_nir_ssa(b, w[4]);
+      nir_def *idx = vtn_get_nir_ssa(b, w[5]);
+
+      if (type->base_type == vtn_base_type_long_vector) {
+         ssa = vtn_composite_copy_logical(b, vec, type);
+         nir_store_array_var(&b->nb, ssa->var, nir_u2u32(&b->nb, idx),
+                             insert, 1);
+      } else {
+         ssa->def = nir_vector_insert(&b->nb, vec->def, insert, idx);
+      }
+      break;
+   }
 
    case SpvOpVectorShuffle:
-      ssa->def = vtn_vector_shuffle(b, glsl_get_vector_elements(type->type),
-                                    vtn_get_nir_ssa(b, w[3]),
-                                    vtn_get_nir_ssa(b, w[4]),
-                                    w + 5);
+      vtn_vector_shuffle(b, ssa, vtn_ssa_value(b, w[3]),
+                         vtn_ssa_value(b, w[4]), w + 5, count - 5);
       break;
 
    case SpvOpCompositeConstruct:
