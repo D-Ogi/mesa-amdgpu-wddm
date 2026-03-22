@@ -6453,11 +6453,13 @@ static struct vtn_ssa_value *
 vtn_nir_select(struct vtn_builder *b, struct vtn_ssa_value *src0,
                struct vtn_ssa_value *src1, struct vtn_ssa_value *src2)
 {
-   struct vtn_ssa_value *dest = vtn_zalloc(b, struct vtn_ssa_value);
-   dest->type = src1->type;
+   struct vtn_ssa_value *dest;
 
-   if (src1->is_variable || src2->is_variable) {
+   if (glsl_type_is_cmat(src1->type->type)) {
       vtn_assert(src1->is_variable && src2->is_variable);
+
+      dest = vtn_zalloc(b, struct vtn_ssa_value);
+      dest->type = src1->type;
 
       nir_variable *dest_var = nir_local_variable_create(
          b->nb.impl, dest->type->type, "var_select");
@@ -6478,9 +6480,20 @@ vtn_nir_select(struct vtn_builder *b, struct vtn_ssa_value *src0,
       nir_pop_if(&b->nb, NULL);
 
       vtn_set_ssa_value_var(b, dest, dest_var);
-   } else if (glsl_type_is_vector_or_scalar(src1->type->type)) {
-      dest->def = nir_bcsel(&b->nb, src0->def, src1->def, src2->def);
+   } else if (src1->type->base_type == vtn_base_type_long_vector ||
+              glsl_type_is_vector_or_scalar(src1->type->type)) {
+      struct vtn_ssa_value *srcs[] = { src0, src1, src2 };
+      struct vtn_handler_ctx h = {0};
+      vtn_handler_prepare_type(b, &h, src1->type, srcs, ARRAY_SIZE(srcs));
+      vtn_handler_start(b, &h);
+
+      h.dest->def = nir_bcsel(&b->nb, h.srcs[0]->def,
+                              h.srcs[1]->def, h.srcs[2]->def);
+      dest = vtn_handler_finish_value(b, &h);
    } else {
+      dest = vtn_zalloc(b, struct vtn_ssa_value);
+      dest->type = src1->type;
+
       unsigned elems = vtn_type_num_elements(src1->type);
 
       dest->elems = vtn_alloc_array(b, struct vtn_ssa_value *, elems);
@@ -6500,30 +6513,33 @@ vtn_handle_select(struct vtn_builder *b, SpvOp opcode,
    /* Handle OpSelect up-front here because it needs to be able to handle
     * pointers and not just regular vectors and scalars.
     */
-   struct vtn_value *res_val = vtn_untyped_value(b, w[2]);
-   struct vtn_value *cond_val = vtn_untyped_value(b, w[3]);
+   const struct vtn_type *res_type = vtn_get_value_type(b, w[2]);
+   const struct vtn_type *cond_type = vtn_get_value_type(b, w[3]);
    struct vtn_value *obj1_val = vtn_untyped_value(b, w[4]);
    struct vtn_value *obj2_val = vtn_untyped_value(b, w[5]);
 
-   vtn_fail_if(obj1_val->type != res_val->type ||
-               obj2_val->type != res_val->type,
+   vtn_fail_if(obj1_val->type != res_type ||
+               obj2_val->type != res_type,
                "Object types must match the result type in OpSelect (%%%u = %%%u ? %%%u : %%%u)", w[2], w[3], w[4], w[5]);
 
-   vtn_fail_if((cond_val->type->base_type != vtn_base_type_scalar &&
-                cond_val->type->base_type != vtn_base_type_vector) ||
-               !glsl_type_is_boolean(cond_val->type->type),
+   vtn_fail_if((cond_type->base_type != vtn_base_type_scalar &&
+                cond_type->base_type != vtn_base_type_vector &&
+                cond_type->base_type != vtn_base_type_long_vector) ||
+               !glsl_type_is_boolean(glsl_get_scalar_type(cond_type->type)),
                "OpSelect must have either a vector of booleans or "
                "a boolean as Condition type");
 
-   vtn_fail_if(cond_val->type->base_type == vtn_base_type_vector &&
-               (res_val->type->base_type != vtn_base_type_vector ||
-                res_val->type->length != cond_val->type->length),
+   vtn_fail_if((cond_type->base_type == vtn_base_type_vector ||
+                cond_type->base_type == vtn_base_type_long_vector) &&
+               (res_type->base_type != cond_type->base_type ||
+                res_type->length != cond_type->length),
                "When Condition type in OpSelect is a vector, the Result "
                "type must be a vector of the same length");
 
-   switch (res_val->type->base_type) {
+   switch (res_type->base_type) {
    case vtn_base_type_scalar:
    case vtn_base_type_vector:
+   case vtn_base_type_long_vector:
    case vtn_base_type_matrix:
    case vtn_base_type_array:
    case vtn_base_type_struct:
@@ -6531,7 +6547,7 @@ vtn_handle_select(struct vtn_builder *b, SpvOp opcode,
       break;
    case vtn_base_type_pointer:
       /* We need to have actual storage for pointer types. */
-      vtn_fail_if(res_val->type->type == NULL,
+      vtn_fail_if(res_type->type == NULL,
                   "Invalid pointer result type for OpSelect");
       break;
    default:
