@@ -1187,45 +1187,46 @@ vtn_handle_alu_multi_result(struct vtn_builder *b, SpvOp opcode,
 {
    vtn_assert(count == 5);
 
-   struct vtn_value *dest_val = vtn_untyped_value(b, w[2]);
-   const struct glsl_type *dest_type = vtn_get_type(b, w[1])->type;
-   struct vtn_ssa_value *vtn_src[2] = { NULL, };
-   vtn_collect_ssa_sources(b, &w[3], vtn_src, ARRAY_SIZE(vtn_src));
+   struct vtn_handler_ctx h = {0};
+   vtn_handler_prepare(b, &h, w[1], w[2], &w[3], 2);
 
-   vtn_handle_fp_fast_math(b, dest_val, vtn_untyped_value(b, w[3]));
+   vtn_handle_fp_fast_math(b, h.dest_val, vtn_untyped_value(b, w[3]));
+   h.mediump_16bit = vtn_alu_op_mediump_16bit(b, opcode, h.dest_val);
 
-   const bool mediump_16bit = vtn_alu_op_mediump_16bit(b, opcode, dest_val);
-   if (mediump_16bit)
-      vtn_downconvert_ssa_sources(b, vtn_src, ARRAY_SIZE(vtn_src));
+   if (h.lv.length) {
+      vtn_fail_if(h.srcs[0]->type->base_type != vtn_base_type_long_vector ||
+                  h.srcs[1]->type->base_type != vtn_base_type_long_vector,
+                  "%s currently requires both operands to be long vectors",
+                  spirv_op_to_string(opcode));
+   }
 
-   struct vtn_ssa_value *dest = vtn_create_ssa_value(b, vtn_get_type(b, w[1]));
-   nir_def *src[2] = { vtn_src[0]->def, vtn_src[1]->def };
+   vtn_handler_start(b, &h);
 
-   vtn_assert(glsl_type_is_struct_or_ifc(dest_type));
+   struct vtn_ssa_value *dest = h.dest;
+   nir_def *src[2] = { h.srcs[0]->def, h.srcs[1]->def };
 
+   vtn_assert(glsl_type_is_struct_or_ifc(dest->type->type));
+
+   nir_def *low, *high;
    switch (opcode) {
    case SpvOpIAddCarry:
-      dest->elems[0]->def = nir_iadd(&b->nb, src[0], src[1]);
-      dest->elems[1]->def = nir_b2iN(&b->nb,
-                                     nir_ult(&b->nb, dest->elems[0]->def, src[0]),
-                                     src[0]->bit_size);
+      low = nir_iadd(&b->nb, src[0], src[1]);
+      high = nir_b2iN(&b->nb, nir_ult(&b->nb, low, src[0]), src[0]->bit_size);
       break;
 
    case SpvOpISubBorrow:
-      dest->elems[0]->def = nir_isub(&b->nb, src[0], src[1]);
-      dest->elems[1]->def = nir_b2iN(&b->nb,
-                                     nir_ult(&b->nb, src[0], src[1]),
-                                     src[0]->bit_size);
+      low = nir_isub(&b->nb, src[0], src[1]);
+      high = nir_b2iN(&b->nb, nir_ult(&b->nb, src[0], src[1]), src[0]->bit_size);
       break;
 
    case SpvOpUMulExtended: {
       if (src[0]->bit_size == 32) {
          nir_def *umul = nir_umul_2x32_64(&b->nb, src[0], src[1]);
-         dest->elems[0]->def = nir_unpack_64_2x32_split_x(&b->nb, umul);
-         dest->elems[1]->def = nir_unpack_64_2x32_split_y(&b->nb, umul);
+         low = nir_unpack_64_2x32_split_x(&b->nb, umul);
+         high = nir_unpack_64_2x32_split_y(&b->nb, umul);
       } else {
-         dest->elems[0]->def = nir_imul(&b->nb, src[0], src[1]);
-         dest->elems[1]->def = nir_umul_high(&b->nb, src[0], src[1]);
+         low = nir_imul(&b->nb, src[0], src[1]);
+         high = nir_umul_high(&b->nb, src[0], src[1]);
       }
       break;
    }
@@ -1233,11 +1234,11 @@ vtn_handle_alu_multi_result(struct vtn_builder *b, SpvOp opcode,
    case SpvOpSMulExtended: {
       if (src[0]->bit_size == 32) {
          nir_def *umul = nir_imul_2x32_64(&b->nb, src[0], src[1]);
-         dest->elems[0]->def = nir_unpack_64_2x32_split_x(&b->nb, umul);
-         dest->elems[1]->def = nir_unpack_64_2x32_split_y(&b->nb, umul);
+         low = nir_unpack_64_2x32_split_x(&b->nb, umul);
+         high = nir_unpack_64_2x32_split_y(&b->nb, umul);
       } else {
-         dest->elems[0]->def = nir_imul(&b->nb, src[0], src[1]);
-         dest->elems[1]->def = nir_imul_high(&b->nb, src[0], src[1]);
+         low = nir_imul(&b->nb, src[0], src[1]);
+         high = nir_imul_high(&b->nb, src[0], src[1]);
       }
       break;
    }
@@ -1246,9 +1247,15 @@ vtn_handle_alu_multi_result(struct vtn_builder *b, SpvOp opcode,
       UNREACHABLE("invalid multi-result opcode");
    }
 
-   if (mediump_16bit)
-      dest = vtn_mediump_upconvert_value(b, dest);
-   vtn_push_ssa_value(b, w[2], dest);
+   if (h.lv.length) {
+      nir_store_array_var(&b->nb, dest->elems[0]->var, h.lv.idx, low, 1);
+      nir_store_array_var(&b->nb, dest->elems[1]->var, h.lv.idx, high, 1);
+   } else {
+      dest->elems[0]->def = low;
+      dest->elems[1]->def = high;
+   }
+
+   vtn_push_ssa_value(b, w[2], vtn_handler_finish_value(b, &h));
 
    b->nb.fp_math_ctrl = nir_fp_fast_math;
 }
