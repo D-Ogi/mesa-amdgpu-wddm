@@ -1116,23 +1116,17 @@ vtn_handle_derivative(struct vtn_builder *b, SpvOp opcode,
 {
    vtn_assert(count == 4);
 
-   struct vtn_value *dest_val = vtn_untyped_value(b, w[2]);
-   const struct vtn_type *dest_type = vtn_get_type(b, w[1]);
-   struct vtn_ssa_value *vtn_src[1] = { NULL, };
-   vtn_collect_ssa_sources(b, &w[3], vtn_src, ARRAY_SIZE(vtn_src));
+   struct vtn_handler_ctx h = {0};
+   vtn_handler_prepare(b, &h, w[1], w[2], &w[3], 1);
 
-   vtn_handle_fp_fast_math(b, dest_val, vtn_untyped_value(b, w[3]));
+   vtn_handle_fp_fast_math(b, h.dest_val, vtn_untyped_value(b, w[3]));
 
-   const bool mediump_16bit = vtn_alu_op_mediump_16bit(b, opcode, dest_val);
-   if (mediump_16bit)
-      vtn_downconvert_ssa_sources(b, vtn_src, ARRAY_SIZE(vtn_src));
+   h.mediump_16bit = vtn_alu_op_mediump_16bit(b, opcode, h.dest_val);
+   vtn_handler_start(b, &h);
 
-   struct vtn_ssa_value *dest = vtn_create_ssa_value(b, dest_type);
-   dest->def = vtn_build_deriv(b, opcode, vtn_src[0]->def);
+   h.dest->def = vtn_build_deriv(b, opcode, h.srcs[0]->def);
 
-   if (mediump_16bit)
-      dest = vtn_mediump_upconvert_value(b, dest);
-   vtn_push_ssa_value(b, w[2], dest);
+   vtn_push_ssa_value(b, w[2], vtn_handler_finish_value(b, &h));
 
    b->nb.fp_math_ctrl = nir_fp_fast_math;
 }
@@ -1144,32 +1138,30 @@ vtn_handle_conversion(struct vtn_builder *b, SpvOp opcode,
    vtn_assert(count == 4);
 
    struct vtn_value *dest_val = vtn_untyped_value(b, w[2]);
-   const struct glsl_type *dest_type = vtn_get_type(b, w[1])->type;
+   const struct vtn_type *dest_type = vtn_get_type(b, w[1]);
 
-   vtn_handle_fp_fast_math(b, dest_val, vtn_untyped_value(b, w[3]));
-
-   if (glsl_type_is_cmat(dest_type)) {
-      vtn_handle_cooperative_alu(b, dest_val, dest_type, opcode, w, count);
+   if (glsl_type_is_cmat(dest_type->type)) {
+      vtn_handle_fp_fast_math(b, dest_val, vtn_untyped_value(b, w[3]));
+      vtn_handle_cooperative_alu(b, dest_val, dest_type->type,
+                                 opcode, w, count);
       b->nb.fp_math_ctrl = nir_fp_fast_math;
       return;
    }
 
-   struct vtn_ssa_value *vtn_src[1] = { NULL, };
-   vtn_collect_ssa_sources(b, &w[3], vtn_src, ARRAY_SIZE(vtn_src));
+   struct vtn_handler_ctx h = {0};
+   vtn_handler_prepare(b, &h, w[1], w[2], &w[3], 1);
 
-   const bool mediump_16bit = vtn_alu_op_mediump_16bit(b, opcode, dest_val);
-   if (mediump_16bit)
-      vtn_downconvert_ssa_sources(b, vtn_src, ARRAY_SIZE(vtn_src));
+   vtn_handle_fp_fast_math(b, h.dest_val, vtn_untyped_value(b, w[3]));
 
-   vtn_assert(glsl_type_is_vector_or_scalar(vtn_src[0]->type->type));
+   h.mediump_16bit = vtn_alu_op_mediump_16bit(b, opcode, h.dest_val);
+   vtn_handler_start(b, &h);
 
-   struct vtn_ssa_value *dest = vtn_create_ssa_value(b, vtn_get_type(b, w[1]));
-   dest->def = vtn_build_convert(b, opcode, dest_val, dest_type,
-                                 vtn_src[0]->type->type, vtn_src[0]->def);
+   vtn_assert(glsl_type_is_vector_or_scalar(h.srcs[0]->type->type));
 
-   if (mediump_16bit)
-      dest = vtn_mediump_upconvert_value(b, dest);
-   vtn_push_ssa_value(b, w[2], dest);
+   h.dest->def = vtn_build_convert(b, opcode, h.dest_val, h.dest->type->type,
+                                   h.srcs[0]->type->type, h.srcs[0]->def);
+
+   vtn_push_ssa_value(b, w[2], vtn_handler_finish_value(b, &h));
 
    b->nb.fp_math_ctrl = nir_fp_fast_math;
 }
