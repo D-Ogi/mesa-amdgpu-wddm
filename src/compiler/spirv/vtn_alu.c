@@ -1266,27 +1266,71 @@ vtn_handle_alu_vote(struct vtn_builder *b, SpvOp opcode,
 {
    vtn_assert(count == 4);
 
+   struct vtn_ssa_value *src = vtn_ssa_value(b, w[3]);
    const struct vtn_type *dest_type = vtn_get_type(b, w[1]);
-   struct vtn_ssa_value *vtn_src[1] = { NULL, };
-   vtn_collect_ssa_sources(b, &w[3], vtn_src, ARRAY_SIZE(vtn_src));
 
-   struct vtn_ssa_value *dest = vtn_create_ssa_value(b, dest_type);
-   nir_def *src = vtn_src[0]->def;
+   if (src->type->base_type == vtn_base_type_long_vector) {
+      const bool all = opcode == SpvOpAll;
+      struct vtn_reduction_ctx r = {0};
+      vtn_reduction_prepare(b, &r, &src, 1);
+      vtn_reduction_start(b, &r, glsl_bool_type(), nir_imm_bool(&b->nb, all),
+                          all ? "long_vector_all_acc" : "long_vector_any_acc");
 
+      nir_def *acc = vtn_reduction_accumulator(b, &r);
+      vtn_reduction_update(b, &r,
+                           all ? nir_iand(&b->nb, acc, r.srcs[0]->def) :
+                                 nir_ior(&b->nb, acc, r.srcs[0]->def));
+
+      nir_def *def = vtn_reduction_finish(b, &r);
+      vtn_push_ssa_value(b, w[2],
+                         vtn_reduction_result(b, &r, dest_type, def));
+      return;
+   }
+
+   nir_def *def;
    switch (opcode) {
    case SpvOpAny:
-      dest->def = nir_bany(&b->nb, src);
+      def = nir_bany(&b->nb, src->def);
       break;
 
    case SpvOpAll:
-      dest->def = nir_ball(&b->nb, src);
+      def = nir_ball(&b->nb, src->def);
       break;
 
    default:
       UNREACHABLE("invalid vote opcode");
    }
 
-   vtn_push_ssa_value(b, w[2], dest);
+   vtn_push_nir_ssa(b, w[2], def);
+}
+
+static nir_def *
+vtn_build_integer_dot_term(struct vtn_builder *b, SpvOp opcode,
+                           nir_def *src0, nir_def *src1,
+                           unsigned dest_size)
+{
+   switch (opcode) {
+   case SpvOpSDotKHR:
+   case SpvOpSDotAccSatKHR:
+      return nir_imul(&b->nb,
+                      nir_i2iN(&b->nb, src0, dest_size),
+                      nir_i2iN(&b->nb, src1, dest_size));
+
+   case SpvOpUDotKHR:
+   case SpvOpUDotAccSatKHR:
+      return nir_imul(&b->nb,
+                      nir_u2uN(&b->nb, src0, dest_size),
+                      nir_u2uN(&b->nb, src1, dest_size));
+
+   case SpvOpSUDotKHR:
+   case SpvOpSUDotAccSatKHR:
+      return nir_imul(&b->nb,
+                      nir_i2iN(&b->nb, src0, dest_size),
+                      nir_u2uN(&b->nb, src1, dest_size));
+
+   default:
+      UNREACHABLE("Invalid opcode.");
+   }
 }
 
 void
@@ -1314,7 +1358,8 @@ vtn_handle_integer_dot(struct vtn_builder *b, SpvOp opcode,
       vtn_src[i] = vtn_ssa_value(b, w[i + 3]);
       src[i] = vtn_src[i]->def;
 
-      vtn_assert(glsl_type_is_vector_or_scalar(vtn_src[i]->type->type));
+      vtn_assert(vtn_src[i]->type->base_type == vtn_base_type_long_vector ||
+                 glsl_type_is_vector_or_scalar(vtn_src[i]->type->type));
    }
 
    /* For all of the opcodes *except* SpvOpSUDotKHR and SpvOpSUDotAccSatKHR,
@@ -1325,8 +1370,10 @@ vtn_handle_integer_dot(struct vtn_builder *b, SpvOp opcode,
     * The practical requirement is the same bit-size and the same number of
     * components.
     */
-   vtn_fail_if(glsl_get_bit_size(vtn_src[0]->type->type) !=
-               glsl_get_bit_size(vtn_src[1]->type->type) ||
+   vtn_fail_if(glsl_get_bit_size(
+                  glsl_get_scalar_type(vtn_src[0]->type->type)) !=
+               glsl_get_bit_size(
+                  glsl_get_scalar_type(vtn_src[1]->type->type)) ||
                vtn_type_num_elements(vtn_src[0]->type) !=
                vtn_type_num_elements(vtn_src[1]->type),
                "Vector 1 and vector 2 source of opcode %s must have the same "
@@ -1339,12 +1386,42 @@ vtn_handle_integer_dot(struct vtn_builder *b, SpvOp opcode,
        *    The type of Accumulator must be the same as Result Type.
        *
        * The handling of SpvOpSDotAccSatKHR and friends with the packed 4x8
-       * types (far below) assumes these types have the same size.
+       * types (far below) assumes these types have the same size.  The
+       * Result Type is a scalar, so this also rules out a long-vector
+       * accumulator whose ->def would be NULL.
        */
       vtn_fail_if(dest_type != vtn_src[2]->type->type,
                   "Accumulator type must be the same as Result Type for "
                   "opcode %s",
                   spirv_op_to_string(opcode));
+   }
+
+   if (vtn_src[0]->type->base_type == vtn_base_type_long_vector) {
+      struct vtn_reduction_ctx r = {0};
+      vtn_reduction_prepare(b, &r, vtn_src, num_inputs);
+      vtn_reduction_start(b, &r, dest_type,
+                          nir_imm_zero(&b->nb, 1, dest_size),
+                          "long_vector_integer_dot_acc");
+
+      nir_def *mul_result =
+         vtn_build_integer_dot_term(b, opcode, r.srcs[0]->def,
+                                    r.srcs[1]->def, dest_size);
+      vtn_reduction_update(b, &r,
+                           nir_iadd(&b->nb,
+                                    vtn_reduction_accumulator(b, &r),
+                                    mul_result));
+
+      nir_def *def = vtn_reduction_finish(b, &r);
+      if (num_inputs == 3) {
+         def = (opcode == SpvOpUDotAccSatKHR)
+            ? nir_uadd_sat(&b->nb, def, r.srcs[2]->def)
+            : nir_iadd_sat(&b->nb, def, r.srcs[2]->def);
+      }
+
+      vtn_push_ssa_value(b, w[2],
+                         vtn_reduction_result(b, &r,
+                                              vtn_get_type(b, w[1]), def));
+      return;
    }
 
    /* One-component SPIR-V vectors are scalar-backed in NIR, so track
@@ -1396,32 +1473,6 @@ vtn_handle_integer_dot(struct vtn_builder *b, SpvOp opcode,
    nir_def *dest = NULL;
 
    if (!packed_operands) {
-      nir_def *(*src0_conversion)(nir_builder *, nir_def *, unsigned);
-      nir_def *(*src1_conversion)(nir_builder *, nir_def *, unsigned);
-
-      switch (opcode) {
-      case SpvOpSDotKHR:
-      case SpvOpSDotAccSatKHR:
-         src0_conversion = nir_i2iN;
-         src1_conversion = nir_i2iN;
-         break;
-
-      case SpvOpUDotKHR:
-      case SpvOpUDotAccSatKHR:
-         src0_conversion = nir_u2uN;
-         src1_conversion = nir_u2uN;
-         break;
-
-      case SpvOpSUDotKHR:
-      case SpvOpSUDotAccSatKHR:
-         src0_conversion = nir_i2iN;
-         src1_conversion = nir_u2uN;
-         break;
-
-      default:
-         UNREACHABLE("Invalid opcode.");
-      }
-
       /* The SPV_KHR_integer_dot_product spec says:
        *
        *    All components of the input vectors are sign-extended to the bit
@@ -1436,13 +1487,11 @@ vtn_handle_integer_dot(struct vtn_builder *b, SpvOp opcode,
          vtn_type_num_elements(vtn_src[0]->type);
 
       for (unsigned i = 0; i < vector_components; i++) {
-         nir_def *const src0 =
-            src0_conversion(&b->nb, nir_channel(&b->nb, src[0], i), dest_size);
-
-         nir_def *const src1 =
-            src1_conversion(&b->nb, nir_channel(&b->nb, src[1], i), dest_size);
-
-         nir_def *const mul_result = nir_imul(&b->nb, src0, src1);
+         nir_def *const mul_result =
+            vtn_build_integer_dot_term(b, opcode,
+                                       nir_channel(&b->nb, src[0], i),
+                                       nir_channel(&b->nb, src[1], i),
+                                       dest_size);
 
          dest = (i == 0) ? mul_result : nir_iadd(&b->nb, dest, mul_result);
       }
