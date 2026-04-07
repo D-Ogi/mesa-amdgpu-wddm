@@ -763,6 +763,34 @@ vtn_push_var_ssa(struct vtn_builder *b, uint32_t value_id, nir_variable *var)
    return vtn_push_ssa_value(b, value_id, ssa);
 }
 
+static nir_def *
+vtn_ssa_value_to_nir_vector(struct vtn_builder *b,
+                            struct vtn_ssa_value *value,
+                            unsigned num_components)
+{
+   assert(num_components <= NIR_MAX_VEC_COMPONENTS);
+
+   if (value->type->base_type == vtn_base_type_long_vector) {
+      nir_scalar comps[NIR_MAX_VEC_COMPONENTS];
+      unsigned i = 0;
+      unsigned bit_size =
+         glsl_get_bit_size(glsl_get_scalar_type(value->type->type));
+
+      for (; i < MIN2(value->type->length, num_components); i++)
+         comps[i] = nir_get_scalar(nir_load_array_var_imm(&b->nb, value->var, i), 0);
+
+      nir_scalar undef = nir_get_scalar(nir_undef(&b->nb, 1, bit_size), 0);
+      for (; i < num_components; i++)
+         comps[i] = undef;
+
+      return nir_vec_scalars(&b->nb, comps, num_components);
+   }
+
+   vtn_fail_if(!glsl_type_is_vector_or_scalar(value->type->type),
+               "Expected a vector or scalar type");
+   return nir_resize_vector(&b->nb, value->def, num_components);
+}
+
 static enum gl_access_qualifier
 spirv_to_gl_access_qualifier(struct vtn_builder *b,
                              SpvAccessQualifier access_qualifier)
@@ -4173,12 +4201,12 @@ static nir_def *
 get_image_coord(struct vtn_builder *b, uint32_t value,
                 const struct glsl_type *image_type)
 {
-   nir_def *coord = vtn_get_nir_ssa(b, value);
    unsigned num_components =
       glsl_get_sampler_coordinate_components(image_type);
 
    /* Keep only the components used by the image target, then pad to vec4. */
-   coord = nir_trim_vector(&b->nb, coord, num_components);
+   nir_def *coord =
+      vtn_ssa_value_to_nir_vector(b, vtn_ssa_value(b, value), num_components);
    return nir_pad_vec4(&b->nb, coord);
 }
 
@@ -4545,7 +4573,8 @@ vtn_handle_image(struct vtn_builder *b, SpvOp opcode,
       assert(op == nir_intrinsic_image_deref_store ||
              op == nir_intrinsic_image_heap_store);
       intrin->num_components = 4;
-      intrin->src[3] = nir_src_for_ssa(nir_pad_vec4(&b->nb, value->def));
+      intrin->src[3] =
+         nir_src_for_ssa(vtn_ssa_value_to_nir_vector(b, value, 4));
       /* Only OpImageWrite can support a lod parameter if
        * SPV_AMD_shader_image_load_store_lod is used but the current NIR
        * intrinsics definition for atomics requires us to set it for
@@ -4553,8 +4582,9 @@ vtn_handle_image(struct vtn_builder *b, SpvOp opcode,
        */
       intrin->src[4] = nir_src_for_ssa(image.lod);
 
-      nir_alu_type src_type =
-         get_image_type(b, nir_get_nir_type_for_glsl_type(value->type->type), operands);
+      nir_alu_type src_type = get_image_type(
+         b, nir_get_nir_type_for_glsl_type(
+               glsl_get_scalar_type(value->type->type)), operands);
       nir_intrinsic_set_src_type(intrin, src_type);
       break;
    }
