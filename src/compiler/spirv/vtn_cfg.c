@@ -63,6 +63,11 @@ vtn_ssa_value_add_to_call_params(struct vtn_builder *b,
    if (glsl_type_is_cmat(value->type->type)) {
       nir_deref_instr *src_deref = vtn_get_deref_for_ssa_value(b, value);
       call->params[(*param_idx)++] = nir_src_for_ssa(&src_deref->def);
+   } else if (value->type->base_type == vtn_base_type_long_vector) {
+      for (unsigned i = 0; i < value->type->length; i++) {
+         nir_def *elem = nir_load_array_var_imm(&b->nb, value->var, i);
+         call->params[(*param_idx)++] = nir_src_for_ssa(elem);
+      }
    } else if (glsl_type_is_vector_or_scalar(value->type->type)) {
       call->params[(*param_idx)++] = nir_src_for_ssa(value->def);
    } else {
@@ -148,6 +153,11 @@ vtn_ssa_value_load_function_param(struct vtn_builder *b,
 
       value->is_variable = true;
       value->var = copy_var;
+   } else if (value->type->base_type == vtn_base_type_long_vector) {
+      for (unsigned i = 0; i < value->type->length; i++) {
+         nir_def *param = nir_load_param(&b->nb, (*param_idx)++);
+         nir_store_array_var_imm(&b->nb, value->var, i, param, 1);
+      }
    } else if (glsl_type_is_vector_or_scalar(value->type->type)) {
       /* if the parameter is passed by value, we need to create a local copy if it's a pointer */
       if (info->by_value && type && type->base_type == vtn_base_type_pointer) {
