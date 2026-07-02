@@ -151,21 +151,50 @@ lower_printf_intrin(nir_builder *b, nir_intrinsic_instr *prntf, void *_options)
       /* Write the format args */
       for (unsigned i = 0; i < glsl_get_length(args->type); ++i) {
          nir_deref_instr *arg_deref = nir_build_deref_struct(b, args, i);
-         nir_def *arg = nir_load_deref(b, arg_deref);
          const struct glsl_type *arg_type = arg_deref->type;
+
+         unsigned field_offset = glsl_get_struct_field_offset(args->type, i);
+         assert(field_offset % 4 == 0);
+
+         /* Long-vector arguments are packed as arrays of scalars.  Store
+          * them one element at a time.
+          */
+         if (glsl_type_is_array(arg_type)) {
+            const struct glsl_type *elem_type = glsl_get_array_element(arg_type);
+            const bool elem_is_boolean = glsl_type_is_boolean(elem_type);
+            const struct glsl_type *store_type =
+               elem_is_boolean ? glsl_uint_type() : elem_type;
+            const unsigned elem_size = glsl_get_bit_size(store_type) / 8;
+            for (unsigned e = 0; e < glsl_get_length(arg_type); ++e) {
+               nir_def *elem =
+                  nir_load_deref(b, nir_build_deref_array_imm(b, arg_deref, e));
+               if (elem_is_boolean)
+                  elem = nir_b2i32(b, elem);
+               nir_def *elem_offset =
+                  nir_iadd_imm(b, offset,
+                               fmt_str_id_size + field_offset + e * elem_size);
+               nir_deref_instr *dst_elem_deref =
+                  nir_build_deref_array(b, buffer, elem_offset);
+               dst_elem_deref = nir_build_deref_cast(b, &dst_elem_deref->def,
+                                                     nir_var_mem_global,
+                                                     store_type, 0);
+               dst_elem_deref->cast.align_mul = MIN2(4, elem_size);
+               nir_store_deref(b, dst_elem_deref, elem, ~0);
+            }
+            continue;
+         }
+
+         nir_def *arg = nir_load_deref(b, arg_deref);
          if (glsl_type_is_boolean(arg_type)) {
             arg = nir_b2i32(b, arg);
             arg_type = glsl_vector_type(GLSL_TYPE_UINT, arg->num_components);
          }
-
-         unsigned field_offset = glsl_get_struct_field_offset(args->type, i);
          nir_def *arg_offset =
             nir_iadd_imm(b, offset, fmt_str_id_size + field_offset);
          nir_deref_instr *dst_arg_deref =
             nir_build_deref_array(b, buffer, arg_offset);
          dst_arg_deref = nir_build_deref_cast(b, &dst_arg_deref->def,
                                            nir_var_mem_global, arg_type, 0);
-         assert(field_offset % 4 == 0);
          dst_arg_deref->cast.align_mul = 4;
          nir_store_deref(b, dst_arg_deref, arg, ~0);
       }
