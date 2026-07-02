@@ -993,21 +993,34 @@ vtn_handle_debug_printf(struct vtn_builder *b, SpvOp ext_opcode,
       for (uint32_t i = 0; i < argc; i++) {
          struct vtn_ssa_value *arg = vtn_ssa_value(b, w[6 + i]);
 
-         if (arg->def->bit_size == 1)
-            fields[i].type = glsl_bool_type();
-         else
-            fields[i].type = glsl_intN_t_type(arg->def->bit_size);
-         if (arg->def->num_components > 1)
-            fields[i].type = glsl_vector_type(fields[i].type->base_type, arg->def->num_components);
+         unsigned bit_size, num_components;
+         if (arg->type->base_type == vtn_base_type_long_vector) {
+            bit_size = glsl_get_bit_size(glsl_get_scalar_type(arg->type->type));
+            num_components = arg->type->length;
+            const struct glsl_type *elem_type =
+               bit_size == 1 ? glsl_bool_type() : glsl_intN_t_type(bit_size);
+            fields[i].type = glsl_array_type(elem_type, num_components, 0);
+         } else {
+            bit_size = arg->def->bit_size;
+            num_components = arg->def->num_components;
+            if (bit_size == 1)
+               fields[i].type = glsl_bool_type();
+            else
+               fields[i].type = glsl_intN_t_type(bit_size);
+            if (num_components > 1)
+               fields[i].type = glsl_vector_type(fields[i].type->base_type, num_components);
+         }
 
          fields[i].name = "";
          fields[i].offset = next_offset;
 
-         unsigned num_components =
-            arg->def->num_components == 3 ? 4 : arg->def->num_components;
+         unsigned size_components = num_components;
+         if (arg->type->base_type != vtn_base_type_long_vector &&
+             size_components == 3)
+            size_components = 4;
 
-         unsigned bit_size = arg->def->bit_size == 1 ? 32 : arg->def->bit_size;
-         int size = (int) bit_size * num_components / 8;
+         unsigned store_bit_size = bit_size == 1 ? 32 : bit_size;
+         int size = (int) store_bit_size * size_components / 8;
          info->arg_sizes[i] = size;
 
          /* Match u_printf_impl, which 4-aligns each argument as it reads. */
@@ -1021,7 +1034,17 @@ vtn_handle_debug_printf(struct vtn_builder *b, SpvOp ext_opcode,
       for (uint32_t i = 0; i < argc; i++) {
          struct vtn_ssa_value *arg = vtn_ssa_value(b, w[6 + i]);
          nir_deref_instr *arg_deref = nir_build_deref_struct(&b->nb, var_deref, i);
-         nir_store_deref(&b->nb, arg_deref, arg->def, BITFIELD_MASK(NIR_MAX_VEC_COMPONENTS));
+         if (arg->type->base_type == vtn_base_type_long_vector) {
+            for (unsigned c = 0; c < arg->type->length; c++) {
+               nir_deref_instr *elem_deref =
+                  nir_build_deref_array_imm(&b->nb, arg_deref, c);
+               nir_def *elem = nir_load_array_var_imm(&b->nb, arg->var, c);
+               nir_store_deref(&b->nb, elem_deref, elem, 1);
+            }
+         } else {
+            nir_store_deref(&b->nb, arg_deref, arg->def,
+                            BITFIELD_MASK(NIR_MAX_VEC_COMPONENTS));
+         }
       }
 
       nir_printf(&b->nb, &var_deref->def, .fmt_idx = info_index);
