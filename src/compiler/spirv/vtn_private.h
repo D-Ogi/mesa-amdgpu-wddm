@@ -718,6 +718,9 @@ struct vtn_builder {
 
    struct hash_table *strings;
 
+   /* Array-backed constant values materialized in the current SPIR-V block. */
+   struct hash_table *long_vector_constant_cache;
+
    /* Current function parameter index */
    unsigned func_param_idx;
 
@@ -901,6 +904,7 @@ vtn_block(struct vtn_builder *b, uint32_t value_id)
 }
 
 struct vtn_ssa_value *vtn_ssa_value(struct vtn_builder *b, uint32_t value_id);
+void vtn_reset_long_vector_constant_cache(struct vtn_builder *b);
 struct vtn_value *vtn_push_ssa_value(struct vtn_builder *b, uint32_t value_id,
                                      struct vtn_ssa_value *ssa);
 
