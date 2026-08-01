@@ -660,6 +660,33 @@ vtn_const_ssa_value_bare(struct vtn_builder *b, nir_constant *constant,
    return val;
 }
 
+static bool
+vtn_type_contains_array_backed_long_vector(const struct vtn_type *type)
+{
+   if (type->base_type == vtn_base_type_long_vector)
+      return true;
+
+   if (type->base_type == vtn_base_type_array ||
+       type->base_type == vtn_base_type_matrix)
+      return vtn_type_contains_array_backed_long_vector(type->array_element);
+
+   if (type->base_type == vtn_base_type_struct) {
+      for (unsigned i = 0; i < type->length; i++) {
+         if (vtn_type_contains_array_backed_long_vector(type->members[i]))
+            return true;
+      }
+   }
+
+   return false;
+}
+
+void
+vtn_reset_long_vector_constant_cache(struct vtn_builder *b)
+{
+   if (b->long_vector_constant_cache)
+      _mesa_hash_table_clear(b->long_vector_constant_cache, NULL);
+}
+
 struct vtn_ssa_value *
 vtn_const_ssa_value(struct vtn_builder *b, nir_constant *constant,
                     const struct vtn_type *type)
@@ -675,8 +702,24 @@ vtn_ssa_value(struct vtn_builder *b, uint32_t value_id)
    case vtn_value_type_undef:
       return vtn_undef_ssa_value(b, val->type);
 
-   case vtn_value_type_constant:
+   case vtn_value_type_constant: {
+      if (vtn_type_contains_array_backed_long_vector(val->type)) {
+         if (!b->long_vector_constant_cache)
+            b->long_vector_constant_cache = _mesa_pointer_hash_table_create(b);
+
+         struct hash_entry *entry =
+            _mesa_hash_table_search(b->long_vector_constant_cache, val);
+         if (entry)
+            return entry->data;
+
+         struct vtn_ssa_value *ssa =
+            vtn_const_ssa_value(b, val->constant, val->type);
+         _mesa_hash_table_insert(b->long_vector_constant_cache, val, ssa);
+         return ssa;
+      }
+
       return vtn_const_ssa_value(b, val->constant, val->type);
+   }
 
    case vtn_value_type_ssa:
       return val->ssa;

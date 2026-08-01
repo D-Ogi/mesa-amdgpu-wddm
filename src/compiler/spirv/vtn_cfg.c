@@ -602,6 +602,7 @@ vtn_handle_phi_second_pass(struct vtn_builder *b, SpvOp opcode,
 
       b->nb.cursor = nir_after_instr(&pred->end_nop->instr);
 
+      vtn_reset_long_vector_constant_cache(b);
       struct vtn_ssa_value *src = vtn_ssa_value(b, w[i]);
 
       vtn_local_store(b, src, nir_build_deref_var(&b->nb, phi_var), 0);
@@ -667,6 +668,7 @@ vtn_emit_cf_func_unstructured(struct vtn_builder *b, struct vtn_function *func,
       const uint32_t *block_start = block->label;
       const uint32_t *block_end = block->branch;
 
+      vtn_reset_long_vector_constant_cache(b);
       b->nb.cursor = nir_after_block(block->block);
       block_start = vtn_foreach_instruction(b, block_start, block_end,
                                             vtn_handle_phis_first_pass);

@@ -1347,6 +1347,7 @@ vtn_emit_block(struct vtn_builder *b, struct vtn_block *block,
    const uint32_t *block_end = block->merge ? block->merge :
                                               block->branch;
 
+   vtn_reset_long_vector_constant_cache(b);
    block_start = vtn_foreach_instruction(b, block_start, block_end,
                                          vtn_handle_phis_first_pass);
 
