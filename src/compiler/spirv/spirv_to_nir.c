@@ -3759,7 +3759,7 @@ vtn_handle_texture(struct vtn_builder *b, SpvOp opcode,
          coord_components++;
 
       struct vtn_ssa_value *coord_val = vtn_ssa_value(b, w[idx++]);
-      coord = coord_val->def;
+      unsigned coord_avail = vtn_type_num_elements(coord_val->type);
       /* From the SPIR-V spec verxion 1.5, rev. 5:
        *
        *    "Coordinate must be a scalar or vector of floating-point type. It
@@ -3767,8 +3767,10 @@ vtn_handle_texture(struct vtn_builder *b, SpvOp opcode,
        *    of Sampled Image. It may be a vector larger than needed, but all
        *    unused components appear after all used components."
        */
-      vtn_fail_if(coord->num_components < coord_components,
+      vtn_fail_if(coord_avail < coord_components,
                   "Coordinate value passed has fewer components than sampler dimensionality.");
+      coord = vtn_ssa_value_to_nir_vector(b, coord_val,
+                                          MIN2(coord_avail, coord_components + 1));
       p->src = nir_src_for_ssa(nir_trim_vector(&b->nb, coord, coord_components));
 
       /* OpenCL allows integer sampling coordinates */
