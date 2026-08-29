@@ -2285,6 +2285,7 @@ brw_nir_optimize(brw_pass_tracker *pt, bool run_code_motion)
          LOOP_OPT(nir_split_array_vars, nir_var_function_temp);
       LOOP_OPT(nir_shrink_vec_array_vars, nir_var_function_temp);
       LOOP_OPT(nir_lower_vars_to_ssa);
+      LOOP_OPT(nir_opt_loop_fuse);
       if (!nir->info.var_copies_lowered) {
          /* Only run this pass if nir_lower_var_copies was not called
           * yet. That would lower away any copy_deref instructions and we
@@ -2664,6 +2665,19 @@ brw_preprocess_nir(const struct brw_compiler *compiler, nir_shader *nir,
    if (OPT(nir_opt_memcpy))
       OPT(nir_split_var_copies);
 
+   const struct nir_lower_var_copies_options early_var_copies_options = {
+      .loop_array_copy_modes =
+         nir_var_all & ~brw_nir_no_indirect_mask(nir->info.stage),
+      .early_lowering = true,
+   };
+
+   /* Propagate aggregate copy sources before lowering, so intermediate arrays
+    * made redundant by copy chains can be removed during normal optimization.
+    * Then lower copies before array splitting can expand them.
+    */
+   OPT(nir_opt_copy_prop_vars);
+   OPT(nir_lower_var_copies_with_options, &early_var_copies_options);
+
    brw_nir_optimize(pt, true);
 
    if (devinfo->has_ray_tracing) {
@@ -2704,7 +2718,11 @@ brw_preprocess_nir(const struct brw_compiler *compiler, nir_shader *nir,
    OPT(nir_lower_bit_size, lower_bit_size_callback, (void *)devinfo);
 
    /* Lower a bunch of stuff */
-   OPT(nir_lower_var_copies);
+   const struct nir_lower_var_copies_options final_var_copies_options = {
+      .loop_array_copy_modes =
+         early_var_copies_options.loop_array_copy_modes,
+   };
+   OPT(nir_lower_var_copies_with_options, &final_var_copies_options);
 
    /* This needs to be run after the first optimization pass but before we
     * lower indirect derefs away
