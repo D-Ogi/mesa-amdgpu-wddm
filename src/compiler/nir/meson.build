@@ -284,6 +284,7 @@ else
   'nir_opt_load_skip_helpers.c',
   'nir_opt_load_store_vectorize.c',
   'nir_opt_loop.c',
+  'nir_opt_loop_fuse.c',
   'nir_opt_loop_unroll.c',
   'nir_opt_memcpy.c',
   'nir_opt_move.c',
