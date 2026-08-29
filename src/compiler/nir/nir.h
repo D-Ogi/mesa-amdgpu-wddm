@@ -7153,6 +7153,7 @@ typedef bool (*nir_opt_licm_filter_cb)(nir_instr *instr, nir_loop *loop,
 bool nir_opt_licm(nir_shader *shader,
                   nir_opt_licm_filter_cb filter);
 bool nir_opt_loop(nir_shader *shader);
+bool nir_opt_loop_fuse(nir_shader *shader);
 
 bool nir_opt_loop_unroll(nir_shader *shader);
 
