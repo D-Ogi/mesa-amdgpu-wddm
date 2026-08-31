@@ -269,6 +269,8 @@ int main(int argc, char **argv)
 
    if (entry_point.stage == MESA_SHADER_KERNEL)
       spirv_opts.environment = NIR_SPIRV_OPENCL;
+   else if (spirv_opts.environment == NIR_SPIRV_VULKAN)
+      spirv_opts.max_vector_components = 1024;
 
    nir_shader *nir = spirv_to_nir(map, word_count, NULL,
                                   entry_point.stage, entry_point.name,
