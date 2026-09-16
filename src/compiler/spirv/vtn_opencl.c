@@ -884,7 +884,8 @@ _handle_v_load_store(struct vtn_builder *b, enum OpenCLstd_Entrypoints opcode,
       nir_deref_instr *arr_deref = nir_build_deref_ptr_as_array(&b->nb, deref, coffset);
 
       if (load) {
-         comps[i] = vtn_local_load(b, arr_deref, p->type->access);
+         comps[i] = vtn_local_load(b, arr_deref, p->type->access,
+                                   p->pointer->type->pointed);
          ncomps[i] = comps[i]->def;
          if (base_type != ptr_base_type) {
             assert(ptr_base_type == GLSL_TYPE_FLOAT16 &&
