@@ -143,7 +143,8 @@ vtn_copy_value(struct vtn_builder *b, uint32_t src_value_id,
       nir_deref_instr *dst_deref = nir_build_deref_var(&b->nb, dst_var);
       nir_deref_instr *src_deref = vtn_get_deref_for_ssa_value(b, src->ssa);
 
-      vtn_local_store(b, vtn_local_load(b, src_deref, 0), dst_deref, 0);
+      vtn_local_store(b, vtn_local_load(b, src_deref, 0, src->ssa->type),
+                      dst_deref, 0);
 
       vtn_push_var_ssa(b, dst_value_id, dst_var);
       return;
@@ -615,27 +616,24 @@ get_deref_tail(nir_deref_instr *deref)
 
 struct vtn_ssa_value *
 vtn_local_load(struct vtn_builder *b, nir_deref_instr *src,
-               enum gl_access_qualifier access)
+               enum gl_access_qualifier access,
+               const struct vtn_type *value_type)
 {
+   assert(value_type);
+   struct vtn_ssa_value *val = vtn_create_ssa_value(b, value_type);
+
    nir_deref_instr *src_tail = get_deref_tail(src);
-   struct vtn_ssa_value *val = vtn_create_ssa_value(b, vtn_type_from_glsl(b, src_tail->type));
-   _vtn_local_load_store(b, true, src_tail, val, access);
-
-   if (src_tail != src) {
-      val->type = vtn_type_from_glsl(b, glsl_get_bare_type(src->type));
-
-      if (glsl_type_is_cmat(src_tail->type)) {
-         assert(val->is_variable);
-         nir_deref_instr *mat = vtn_get_deref_for_ssa_value(b, val);
-
-         /* Reset is_variable because we are repurposing val. */
-         val->is_variable = false;
-         val->def = nir_cmat_extract(&b->nb,
-                                     glsl_get_bit_size(src->type),
-                                     &mat->def, src->arr.index.ssa);
-      } else {
-         val->def = nir_vector_extract(&b->nb, val->def, src->arr.index.ssa);
-      }
+   if (src_tail == src) {
+      _vtn_local_load_store(b, true, src, val, access);
+   } else if (glsl_type_is_cmat(src_tail->type)) {
+      nir_deref_instr *mat =
+         vtn_create_cmat_temporary(b, src_tail->type, "cmat_ssa");
+      nir_cmat_copy(&b->nb, &mat->def, &src_tail->def);
+      val->def = nir_cmat_extract(&b->nb, glsl_get_bit_size(src->type),
+                                 &mat->def, src->arr.index.ssa);
+   } else {
+      nir_def *whole = nir_load_deref_with_access(&b->nb, src_tail, access);
+      val->def = nir_vector_extract(&b->nb, whole, src->arr.index.ssa);
    }
 
    return val;
@@ -753,7 +751,9 @@ _vtn_variable_load_store(struct vtn_builder *b, bool load,
             }
          } else {
             if (load) {
-               *inout = vtn_local_load(b, deref, ptr->type->pointed->access | access);
+               *inout = vtn_local_load(
+                  b, deref, ptr->type->pointed->access | access,
+                  ptr->type->pointed);
             } else {
                vtn_local_store(b, *inout, deref, ptr->type->pointed->access | access);
             }

@@ -214,7 +214,8 @@ vtn_handle_function_call(struct vtn_builder *b, SpvOp opcode,
    if (ret_type->base_type == vtn_base_type_void) {
       vtn_push_value(b, w[2], vtn_value_type_undef);
    } else {
-      vtn_push_ssa_value(b, w[2], vtn_local_load(b, ret_deref, 0));
+      vtn_push_ssa_value(b, w[2],
+                         vtn_local_load(b, ret_deref, 0, ret_type));
    }
 }
 
@@ -558,7 +559,7 @@ vtn_handle_phis_first_pass(struct vtn_builder *b, SpvOp opcode,
    _mesa_hash_table_insert(b->phi_table, w, phi_var);
 
    vtn_push_ssa_value(b, w[2],
-      vtn_local_load(b, nir_build_deref_var(&b->nb, phi_var), 0));
+      vtn_local_load(b, nir_build_deref_var(&b->nb, phi_var), 0, type));
 
    return true;
 }
