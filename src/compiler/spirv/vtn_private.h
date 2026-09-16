@@ -974,7 +974,8 @@ vtn_get_call_payload_for_location(struct vtn_builder *b, uint32_t location_id);
 
 struct vtn_ssa_value *
 vtn_local_load(struct vtn_builder *b, nir_deref_instr *src,
-               enum gl_access_qualifier access);
+               enum gl_access_qualifier access,
+               const struct vtn_type *value_type);
 
 void vtn_local_store(struct vtn_builder *b, struct vtn_ssa_value *src,
                      nir_deref_instr *dest,
