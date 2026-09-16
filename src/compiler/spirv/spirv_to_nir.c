@@ -5991,12 +5991,14 @@ vtn_nir_select(struct vtn_builder *b, struct vtn_ssa_value *src0,
       nir_push_if(&b->nb, src0->def);
       {
          nir_deref_instr *src1_deref = vtn_get_deref_for_ssa_value(b, src1);
-         vtn_local_store(b, vtn_local_load(b, src1_deref, 0), dest_deref, 0);
+         vtn_local_store(b, vtn_local_load(b, src1_deref, 0, src1->type),
+                         dest_deref, 0);
       }
       nir_push_else(&b->nb, NULL);
       {
          nir_deref_instr *src2_deref = vtn_get_deref_for_ssa_value(b, src2);
-         vtn_local_store(b, vtn_local_load(b, src2_deref, 0), dest_deref, 0);
+         vtn_local_store(b, vtn_local_load(b, src2_deref, 0, src2->type),
+                         dest_deref, 0);
       }
       nir_pop_if(&b->nb, NULL);
 
