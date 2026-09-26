@@ -900,6 +900,9 @@ radv_device_check_status(struct vk_device *_device)
 {
    struct radv_device *device = container_of(_device, struct radv_device, vk);
 
+   if (bc250_host_check_status(&device->vk.bc250_host)<0)
+      return vk_device_set_lost(&device->vk,"Hosted runtime reports device loss");
+
    /* VK_KHR_shader_abort requires the device to return VK_ERROR_DEVICE_LOST after any shader
     * execute OpAbortKHR.
     */

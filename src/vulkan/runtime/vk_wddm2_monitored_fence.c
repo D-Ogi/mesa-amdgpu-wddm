@@ -166,6 +166,8 @@ vk_wddm2_monitored_fence_signal(struct vk_device *device,
 {
    struct vk_wddm2_monitored_fence *fence = to_wddm2_monitored_fence(sync);
 
+   if (!bc250_host_fence_valid(&device->bc250_host,p_atomic_read(fence->value_map)))
+      return vk_device_set_lost(device,"Hosted fence lost before signal");
    assert(value > p_atomic_read(fence->value_map));
 
    const D3DKMT_SIGNALSYNCHRONIZATIONOBJECTFROMCPU signal = {
@@ -179,7 +181,6 @@ vk_wddm2_monitored_fence_signal(struct vk_device *device,
    };
    NTSTATUS status = BC250_WDDM_CALL(&device->bc250_host, SignalSynchronizationObjectFromCpu, &signal);
    if (unlikely(!NT_SUCCESS(status))) {
-      vk_wddm2_monitored_fence_finish(device, sync);
       return NTSTATUS_to_VkResult(device, status);
    }
 
@@ -193,6 +194,8 @@ vk_wddm2_monitored_fence_get_value(struct vk_device *device,
 {
    struct vk_wddm2_monitored_fence *fence = to_wddm2_monitored_fence(sync);
    *value = p_atomic_read(fence->value_map);
+   if (!bc250_host_fence_valid(&device->bc250_host,*value))
+      return vk_device_set_lost(device,"Hosted fence value invalid");
    return VK_SUCCESS;
 }
 
@@ -214,8 +217,10 @@ vk_wddm2_monitored_fence_wait_many(struct vk_device *device,
       struct vk_wddm2_monitored_fence *fence =
          to_wddm2_monitored_fence(waits[i].sync);
 
-      if (p_atomic_read(fence->value_map) >= waits[i].wait_value)
-         ready++;
+      uint64_t value=p_atomic_read(fence->value_map);
+      if (!bc250_host_fence_valid(&device->bc250_host,value))
+         return vk_device_set_lost(device,"Hosted fence lost while polling");
+      if (value >= waits[i].wait_value) ready++;
    }
    if (ready == wait_count || ((wait_flags & VK_SYNC_WAIT_ANY) && ready > 0))
       return VK_SUCCESS;
@@ -272,8 +277,16 @@ vk_wddm2_monitored_fence_wait_many(struct vk_device *device,
       /* Retry early/interrupted waits and timeouts capped by the OS API. */
    }
 
-   if (result == VK_SUCCESS)
-      result = vk_wddm2_check_device_status(device);
+   if (result == VK_SUCCESS) {
+      for (uint32_t i=0;i<wait_count;++i) {
+         struct vk_wddm2_monitored_fence *fence=to_wddm2_monitored_fence(waits[i].sync);
+         if (!bc250_host_fence_valid(&device->bc250_host,p_atomic_read(fence->value_map))) {
+            result=vk_device_set_lost(device,"Hosted fence lost after wake");
+            break;
+         }
+      }
+      if (result==VK_SUCCESS) result=vk_wddm2_check_device_status(device);
+   }
 
 fail_close_event:
    vk_async_event_close(async_event);
@@ -358,7 +371,8 @@ VkResult
 vk_wddm2_check_device_status(struct vk_device *device)
 {
    if (device->bc250_host.dispatch)
-      return VK_SUCCESS;
+      return bc250_host_check_status(&device->bc250_host)<0 ?
+         vk_device_set_lost(device,"Hosted runtime reports device loss") : VK_SUCCESS;
    NTSTATUS status;
 
    D3DKMT_GETDEVICESTATE get_state = {
@@ -456,6 +470,11 @@ vk_wddm2_monitored_fence_gpu_signal_many(struct vk_queue *queue,
       struct vk_wddm2_monitored_fence *fence =
          to_wddm2_monitored_fence(signals[i].sync);
 
+      if (!bc250_host_fence_valid(&queue->base.device->bc250_host,p_atomic_read(fence->value_map))) {
+         STACK_ARRAY_FINISH(handles);
+         STACK_ARRAY_FINISH(signal_values);
+         return vk_queue_set_lost(queue,"Hosted fence lost before GPU signal");
+      }
       assert(signals[i].signal_value > p_atomic_read(fence->value_map));
 
       handles[i] = fence->handle;
