@@ -12,6 +12,7 @@
 #define RADV_INSTANCE_H
 
 #include "util/bitset.h"
+#include "util/bc250_host_bootstrap.h"
 #include "util/macros.h"
 #include "util/simple_mtx.h"
 #include "radv_radeon_winsys.h"
@@ -165,6 +166,7 @@ enum radv_trace_mode {
 
 struct radv_instance {
    struct vk_instance vk;
+   struct bc250_host bc250_host;
 
    VkAllocationCallbacks alloc;
 
