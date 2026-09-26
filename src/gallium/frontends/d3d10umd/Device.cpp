@@ -48,6 +48,8 @@
 #include "util/u_framebuffer.h"
 
 
+extern "C" struct pipe_screen *d3d10_create_screen(void);
+
 static void APIENTRY DestroyDevice(D3D10DDI_HDEVICE hDevice);
 static void APIENTRY RelocateDeviceFuncs(D3D10DDI_HDEVICE hDevice,
                                 __in struct D3D10DDI_DEVICEFUNCS *pDeviceFunctions);
@@ -125,10 +127,15 @@ CreateDevice(D3D10DDI_HADAPTER hAdapter,                 // IN
       return E_FAIL;
    }
 
-   Adapter *pAdapter = CastAdapter(hAdapter);
+
 
    Device *pDevice = CastDevice(pCreateData->hDrvDevice);
    memset(pDevice, 0, sizeof *pDevice);
+   pDevice->hRTCoreLayer = pCreateData->hRTCoreLayer;
+   pDevice->hDevice = (HANDLE)pCreateData->hRTDevice.handle;
+   pDevice->KTCallbacks = *pCreateData->pKTCallbacks;
+   pDevice->UMCallbacks = *pCreateData->pUMCallbacks;
+   pDevice->pDXGIBaseCallbacks = pCreateData->DXGIBaseDDI.pDXGIBaseCallbacks;
 
    // This Zink-only diagnostic DLL is loaded through D3D_DRIVER_TYPE_SOFTWARE.
    // That runtime cannot service native WDDM presentation callbacks. RADV owns
@@ -152,11 +159,21 @@ CreateDevice(D3D10DDI_HADAPTER hAdapter,                 // IN
    }
 
    fprintf(stderr,"BC250 D3D device stage 2\n"); fflush(stderr);
-   struct pipe_screen *screen = pAdapter->screen;
+   // Adapter screen remains capability-only for this prototype. Rendering
+   // screens belong to one runtime device so future hosted callbacks cannot
+   // accidentally be inherited from a different D3D device.
+   pDevice->owned_screen = d3d10_create_screen();
+   if (!pDevice->owned_screen) return E_OUTOFMEMORY;
+   struct pipe_screen *screen = pDevice->owned_screen;
+   fprintf(stderr, "BC250 device screen=%p runtime=%p\n", screen, pDevice->hDevice);
    DebugPrintf("BC250 Renderer: %s\n", screen->get_name(screen));
    fprintf(stderr,"BC250 D3D device stage 3\n"); fflush(stderr);
    struct pipe_context *pipe = screen->context_create(screen, NULL, 0);
-   if (!pipe) return E_OUTOFMEMORY;
+   if (!pipe) {
+      screen->destroy(screen);
+      pDevice->owned_screen = NULL;
+      return E_OUTOFMEMORY;
+   }
    pDevice->pipe = pipe;
    static const float zero_vertex[4] = {0, 0, 0, 0};
    pDevice->zero_vertex_buffer = pipe_buffer_create_with_data(
@@ -182,11 +199,7 @@ CreateDevice(D3D10DDI_HADAPTER hAdapter,                 // IN
          screen->caps.max_dual_source_render_targets;
 
    fprintf(stderr,"BC250 D3D device stage 8\n"); fflush(stderr);
-   pDevice->hRTCoreLayer = pCreateData->hRTCoreLayer;
-   pDevice->hDevice = (HANDLE)pCreateData->hRTDevice.handle;
-   pDevice->KTCallbacks = *pCreateData->pKTCallbacks;
-   pDevice->UMCallbacks = *pCreateData->pUMCallbacks;
-   pDevice->pDXGIBaseCallbacks = pCreateData->DXGIBaseDDI.pDXGIBaseCallbacks;
+
 
    pDevice->draw_so_target = NULL;
 
@@ -402,6 +415,13 @@ DestroyDevice(D3D10DDI_HDEVICE hDevice)   // IN
                            PIPE_MAX_SHADER_SAMPLER_VIEWS, 0, sampler_views);
 
    fprintf(stderr,"D3D destroy stage 7\n"); fflush(stderr);
+   pipe->destroy(pipe);
+   pDevice->pipe = NULL;
+   if (pDevice->owned_screen) {
+      fprintf(stderr, "BC250 destroy device screen=%p runtime=%p\n", pDevice->owned_screen, pDevice->hDevice);
+      pDevice->owned_screen->destroy(pDevice->owned_screen);
+      pDevice->owned_screen = NULL;
+   }
    if (pDevice->hContext) {
       D3DDDICB_DESTROYCONTEXT destroy = {};
       destroy.hContext = pDevice->hContext;
@@ -413,7 +433,6 @@ DestroyDevice(D3D10DDI_HDEVICE hDevice)   // IN
       pDevice->KTCallbacks.pfnDestroyPagingQueueCb(pDevice->hDevice, &destroy);
    }
    fprintf(stderr,"D3D destroy stage 8\n"); fflush(stderr);
-   pipe->destroy(pipe);
 }
 
 

@@ -74,6 +74,7 @@ struct Device
    RenderTargetView *renderTargetViews;
    ShaderResourceView *shaderResourceViews;
    struct pipe_context *pipe;
+   struct pipe_screen *owned_screen; // per-runtime-device Zink lifetime
 
    struct cso_context *cso;
    struct pipe_framebuffer_state fb;
