@@ -54,6 +54,7 @@ struct radv_wddm2_bo {
 
    void *map;
    uint32_t handle;
+   uint32_t resource_handle; /* nonzero for an opened shared WDDM resource */
 
    struct radeon_bo_metadata md;
 };

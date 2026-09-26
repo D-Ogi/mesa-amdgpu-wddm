@@ -162,9 +162,10 @@ radv_alloc_memory(struct radv_device *device, const VkMemoryAllocateInfo *pAlloc
          result = radv_bo_from_handle(device, win32_import_info->handle, priority, mem, NULL);
          if (result != VK_SUCCESS) {
             goto fail;
-         } else {
-            CloseHandle(win32_import_info->handle);
          }
+         /* Vulkan Win32 import retains the payload, not ownership of the NT
+          * handle. The importing application remains responsible for closing it.
+          */
       }
    } else if (mem->vk.host_ptr) {
       result = radv_bo_from_ptr(device, mem->vk.host_ptr, pAllocateInfo->allocationSize, priority, mem);
