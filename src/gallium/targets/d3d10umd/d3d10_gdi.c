@@ -32,6 +32,11 @@
  * The bounded test supplies it from DXGI enumeration of the BC250 adapter.
  */
 #include <stdint.h>
+#include <stdio.h>
+#include <vulkan/vulkan_core.h>
+#include "util/u_dl.h"
+#include "util/os_misc.h"
+#include "util/bc250_host_bootstrap.h"
 #include <stdlib.h>
 #include <errno.h>
 #include "util/u_debug.h"
@@ -57,4 +62,40 @@ d3d10_create_screen(void)
       return NULL;
    debug_printf("BC250 D3D renderer: %s\n", screen->get_name(screen));
    return debug_screen_wrap(screen);
+}
+
+/* Enumeration-only hosted bootstrap. Keep its module until instance teardown. */
+bool
+d3d10_hosted_bootstrap(struct bc250_host *host)
+{
+   const char *luid = os_get_option("BC250_D3D_ZINK_LUID");
+   if (!luid) return false;
+   host->adapter_luid = strtoull(luid, NULL, 16);
+   const char *path = os_get_option("BC250_HOSTED_ICD");
+   if (!path) return false;
+   struct util_dl_library *lib = util_dl_open(path);
+   if (!lib) return false;
+   PFN_vkGetInstanceProcAddr gipa = (PFN_vkGetInstanceProcAddr)
+      util_dl_get_proc_address(lib, "vk_icdGetInstanceProcAddr");
+   if (!gipa) { util_dl_close(lib); return false; }
+   PFN_vkCreateInstance create = (PFN_vkCreateInstance)gipa(NULL, "vkCreateInstance");
+   VkApplicationInfo app = { .sType = VK_STRUCTURE_TYPE_APPLICATION_INFO,
+      .pApplicationName = "BC250 hosted bootstrap", .apiVersion = VK_API_VERSION_1_3 };
+   VkInstanceCreateInfo ci = { .sType = VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO,
+      .pNext = host, .pApplicationInfo = &app };
+   VkInstance instance = VK_NULL_HANDLE;
+   VkResult result = create(&ci, NULL, &instance);
+   fprintf(stderr, "BC250 hosted instance result=%d runtime=%p\n", result, host->identity);
+   bool ok = false;
+   if (result == VK_SUCCESS) {
+      PFN_vkEnumeratePhysicalDevices enumerate = (PFN_vkEnumeratePhysicalDevices)gipa(instance, "vkEnumeratePhysicalDevices");
+      PFN_vkDestroyInstance destroy = (PFN_vkDestroyInstance)gipa(instance, "vkDestroyInstance");
+      uint32_t count = 0;
+      result = enumerate(instance, &count, NULL);
+      fprintf(stderr, "BC250 hosted enumerate result=%d devices=%u\n", result, count);
+      ok = result == VK_SUCCESS && count == 1;
+      destroy(instance, NULL);
+   }
+   util_dl_close(lib);
+   return ok;
 }
