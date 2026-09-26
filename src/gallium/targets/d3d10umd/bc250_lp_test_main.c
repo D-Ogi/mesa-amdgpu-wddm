@@ -1,3 +1,8 @@
+/*
+ * Copyright (c) 2026 D-Ogi
+ * SPDX-License-Identifier: MIT
+ */
+
 #include <stdlib.h>
 #define main bc250_upstream_main
 #include "../../drivers/llvmpipe/lp_test_main.c"
