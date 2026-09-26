@@ -226,8 +226,10 @@ gdi_sw_displaytarget_from_handle(struct sw_winsys *winsys,
        templet->last_level || templet->array_size != 1 || templet->depth0 != 1)
       return NULL;
    unsigned cpp = util_format_get_blocksize(templet->format);
-   if (!cpp || whandle->stride < (uint64_t)templet->width0 * cpp ||
-       whandle->size < (uint64_t)whandle->stride * templet->height0)
+   if (!cpp || (whandle->stride & 15u) ||
+       ((uintptr_t)whandle->user_memory & 15u) ||
+       whandle->stride < (uint64_t)align(templet->width0, 4) * cpp ||
+       whandle->size < (uint64_t)whandle->stride * align(templet->height0, 4))
       return NULL;
    struct sw_displaytarget *dt = gdi_sw_displaytarget_create(winsys, templet->bind,
        templet->format, templet->width0, templet->height0, 64, NULL, stride);
@@ -237,7 +239,7 @@ gdi_sw_displaytarget_from_handle(struct sw_winsys *winsys,
    gdt->data = whandle->user_memory;
    gdt->external_memory = true;
    gdt->stride = whandle->stride;
-   gdt->size = whandle->stride * templet->height0;
+   gdt->size = whandle->stride * align(templet->height0, 4);
    gdt->bmi.bV5Width = whandle->stride / cpp;
    *stride = whandle->stride;
    return dt;

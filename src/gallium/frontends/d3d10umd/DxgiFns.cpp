@@ -81,7 +81,15 @@ HRESULT Bc250EnsureSurface(Device *device, Resource *resource)
    }
    struct SurfacePrivate { UINT magic, version, width, height, pitch, format; UINT64 size; };
    static_assert(sizeof(SurfacePrivate) == 32, "LB7A ABI");
-   SurfacePrivate data = {0x4137424c, 1, width, height, width*4, format, UINT64(width)*height*4};
+   const UINT pitchAlignment = resource->primary ? 256u : 64u;
+   const UINT pitch = resource->allocation ? resource->surfacePitch :
+      (width * 4 + pitchAlignment - 1) & ~(pitchAlignment - 1);
+   const UINT64 bytes = resource->allocation ? resource->surfaceBytes :
+      UINT64(pitch) * ((height + 3u) & ~3u);
+   if ((pitch & 15u) || pitch < ((width + 3u) & ~3u) * 4 ||
+       bytes < UINT64(pitch) * ((height + 3u) & ~3u))
+      return E_INVALIDARG;
+   SurfacePrivate data = {0x4137424c, 1, width, height, pitch, format, bytes};
    HRESULT hr;
    if (!resource->allocation) {
       D3DDDI_ALLOCATIONINFO2 info = {};
@@ -105,6 +113,8 @@ HRESULT Bc250EnsureSurface(Device *device, Resource *resource)
       DebugPrintf("BC250 Allocate %08lx format %u primary %u handle %x resource %x\n", hr, format, resource->primary, info.hAllocation, allocate.hKMResource);
       if (FAILED(hr)) return hr;
       resource->allocation = info.hAllocation;
+      resource->surfacePitch = pitch;
+      resource->surfaceBytes = bytes;
    }
    resource->gpuBytes = (data.size + 4095) & ~UINT64(4095);
    D3DDDI_MAPGPUVIRTUALADDRESS map = {};
@@ -135,7 +145,7 @@ HRESULT Bc250EnsureSurface(Device *device, Resource *resource)
    resource->cpuMapping = lock.pData;
    struct winsys_handle handle = {};
    handle.type = WINSYS_HANDLE_TYPE_USER_MEMORY;
-   handle.user_memory = lock.pData; handle.stride = width * 4;
+   handle.user_memory = lock.pData; handle.stride = data.pitch;
    handle.size = data.size;
    struct pipe_resource desc = *resource->resource;
    desc.bind |= PIPE_BIND_DISPLAY_TARGET | PIPE_BIND_SHARED;
@@ -377,6 +387,8 @@ _RotateResourceIdentities(DXGI_DDI_ARG_ROTATE_RESOURCE_IDENTITIES *args)
       r->allocation = next.allocation;
       r->gpuVa = next.gpuVa;
       r->gpuBytes = next.gpuBytes;
+      r->surfacePitch = next.surfacePitch;
+      r->surfaceBytes = next.surfaceBytes;
       r->cpuMapping = next.cpuMapping;
       r->presentReady = next.presentReady;
       // hRTResource and the logical resource/view descriptors stay in place.
