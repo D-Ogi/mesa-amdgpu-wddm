@@ -50,9 +50,28 @@
 
 
 extern "C" struct pipe_screen *d3d10_create_screen(void);
+extern "C" struct pipe_screen *d3d10_create_hosted_screen(struct bc250_host *host);
 
 
 #include <d3dkmthk.h>
+
+static thread_local Device *Bc250RuntimeDevice;
+struct Bc250RuntimeScope {
+   Device *previous;
+   explicit Bc250RuntimeScope(Device *device) : previous(Bc250RuntimeDevice) { Bc250RuntimeDevice=device; }
+   ~Bc250RuntimeScope() { Bc250RuntimeDevice=previous; }
+};
+
+static Device *Bc250EntryDevice(D3D10DDI_HDEVICE h) { return CastDevice(h); }
+template <typename A> static Device *Bc250EntryDevice(A *a) { return CastDevice(a->hDevice); }
+template <auto F> struct Bc250Entry;
+template <typename R, typename A, typename... Rest, R (APIENTRY *F)(A, Rest...)>
+struct Bc250Entry<F> {
+   static R APIENTRY Call(A a, Rest... rest) {
+      Bc250RuntimeScope scope(Bc250EntryDevice(a));
+      return F(a, rest...);
+   }
+};
 
 struct Bc250HostProbeState {
    Device *device;
@@ -219,13 +238,13 @@ static HRESULT Bc250HostOperation(Bc250HostProbeState *s, uint32_t op, void *arg
 static int32_t Bc250HostDispatch(void *userdata, uint32_t operation, void *argument)
 {
    auto *s=(Bc250HostProbeState *)userdata;
-   if (GetCurrentThreadId()!=s->thread) {
+   if (Bc250RuntimeDevice!=s->device) {
       fprintf(stderr,"BC250 hosted wrong-thread op=%u\n",operation);
       return (int32_t)0xc000000d;
    }
    HRESULT hr=Bc250HostOperation(s,operation,argument);
    unsigned count=operation<64 ? ++s->calls[operation] : 0;
-   if (count<=2 || FAILED(hr)) fprintf(stderr,"BC250 hosted op=%u count=%u hr=%08lx\n",operation,count,hr);
+   if (count<=2 || (FAILED(hr) && hr!=E_PENDING)) fprintf(stderr,"BC250 hosted op=%u count=%u hr=%08lx\n",operation,count,hr);
    if (hr==E_PENDING && (operation==BC250_HOST_MapGpuVirtualAddress || operation==BC250_HOST_MakeResident)) return 0x103;
    return SUCCEEDED(hr) ? 0 : hr==E_NOTIMPL ? (int32_t)0xc00000bb : (int32_t)0xc0000001;
 }
@@ -313,6 +332,7 @@ CreateDevice(D3D10DDI_HADAPTER hAdapter,                 // IN
 
    Device *pDevice = CastDevice(pCreateData->hDrvDevice);
    memset(pDevice, 0, sizeof *pDevice);
+   Bc250RuntimeScope runtimeScope(pDevice);
    pDevice->hRTCoreLayer = pCreateData->hRTCoreLayer;
    pDevice->hDevice = (HANDLE)pCreateData->hRTDevice.handle;
    pDevice->KTCallbacks = *pCreateData->pKTCallbacks;
@@ -344,7 +364,8 @@ CreateDevice(D3D10DDI_HADAPTER hAdapter,                 // IN
    // Adapter screen remains capability-only for this prototype. Rendering
    // screens belong to one runtime device so future hosted callbacks cannot
    // accidentally be inherited from a different D3D device.
-   if (GetEnvironmentVariableA("BC250_HOSTED_ICD", NULL, 0)) {
+   const bool hostedRender=GetEnvironmentVariableA("BC250_HOSTED_RENDER", NULL, 0)!=0;
+   if (!hostedRender && GetEnvironmentVariableA("BC250_HOSTED_ICD", NULL, 0)) {
       Bc250HostProbeState state = {pDevice, GetCurrentThreadId()};
       bc250_host host = {};
       host.sType = BC250_HOST_STYPE; host.version = BC250_HOST_VERSION;
@@ -352,7 +373,20 @@ CreateDevice(D3D10DDI_HADAPTER hAdapter,                 // IN
       host.userdata = &state; host.dispatch = Bc250HostDispatch;
       if (!d3d10_hosted_bootstrap(&host)) return E_FAIL;
    }
-   pDevice->owned_screen = d3d10_create_screen();
+   if (hostedRender) {
+      auto *state=new Bc250HostProbeState{};
+      state->device=pDevice;
+      state->thread=GetCurrentThreadId();
+      pDevice->hosted_state=state;
+      bc250_host host={};
+      host.sType=BC250_HOST_STYPE; host.version=BC250_HOST_VERSION;
+      host.size=sizeof(host); host.identity=pDevice->hDevice;
+      host.userdata=state; host.dispatch=Bc250HostDispatch;
+      pDevice->owned_screen=d3d10_create_hosted_screen(&host);
+      if (!pDevice->owned_screen) { delete state; pDevice->hosted_state=NULL; }
+   } else {
+      pDevice->owned_screen = d3d10_create_screen();
+   }
    if (!pDevice->owned_screen) return E_OUTOFMEMORY;
    struct pipe_screen *screen = pDevice->owned_screen;
    fprintf(stderr, "BC250 device screen=%p runtime=%p\n", screen, pDevice->hDevice);
@@ -403,137 +437,137 @@ CreateDevice(D3D10DDI_HADAPTER hAdapter,                 // IN
     * Fill in the D3D10 DDI functions
     */
    D3D10DDI_DEVICEFUNCS *pDeviceFuncs = pCreateData->pDeviceFuncs;
-   pDeviceFuncs->pfnDefaultConstantBufferUpdateSubresourceUP = ResourceUpdateSubResourceUP;
-   pDeviceFuncs->pfnVsSetConstantBuffers = VsSetConstantBuffers;
-   pDeviceFuncs->pfnPsSetShaderResources = PsSetShaderResources;
-   pDeviceFuncs->pfnPsSetShader = PsSetShader;
-   pDeviceFuncs->pfnPsSetSamplers = PsSetSamplers;
-   pDeviceFuncs->pfnVsSetShader = VsSetShader;
-   pDeviceFuncs->pfnDrawIndexed = DrawIndexed;
-   pDeviceFuncs->pfnDraw = Draw;
-   pDeviceFuncs->pfnDynamicIABufferMapNoOverwrite = ResourceMap;
-   pDeviceFuncs->pfnDynamicIABufferUnmap = ResourceUnmap;
-   pDeviceFuncs->pfnDynamicConstantBufferMapDiscard = ResourceMap;
-   pDeviceFuncs->pfnDynamicIABufferMapDiscard = ResourceMap;
-   pDeviceFuncs->pfnDynamicConstantBufferUnmap = ResourceUnmap;
-   pDeviceFuncs->pfnPsSetConstantBuffers = PsSetConstantBuffers;
-   pDeviceFuncs->pfnIaSetInputLayout = IaSetInputLayout;
-   pDeviceFuncs->pfnIaSetVertexBuffers = IaSetVertexBuffers;
-   pDeviceFuncs->pfnIaSetIndexBuffer = IaSetIndexBuffer;
-   pDeviceFuncs->pfnDrawIndexedInstanced = DrawIndexedInstanced;
-   pDeviceFuncs->pfnDrawInstanced = DrawInstanced;
-   pDeviceFuncs->pfnDynamicResourceMapDiscard = ResourceMap;
-   pDeviceFuncs->pfnDynamicResourceUnmap = ResourceUnmap;
-   pDeviceFuncs->pfnGsSetConstantBuffers = GsSetConstantBuffers;
-   pDeviceFuncs->pfnGsSetShader = GsSetShader;
-   pDeviceFuncs->pfnIaSetTopology = IaSetTopology;
-   pDeviceFuncs->pfnStagingResourceMap = ResourceMap;
-   pDeviceFuncs->pfnStagingResourceUnmap = ResourceUnmap;
-   pDeviceFuncs->pfnVsSetShaderResources = VsSetShaderResources;
-   pDeviceFuncs->pfnVsSetSamplers = VsSetSamplers;
-   pDeviceFuncs->pfnGsSetShaderResources = GsSetShaderResources;
-   pDeviceFuncs->pfnGsSetSamplers = GsSetSamplers;
-   pDeviceFuncs->pfnSetRenderTargets = SetRenderTargets;
-   pDeviceFuncs->pfnShaderResourceViewReadAfterWriteHazard = ShaderResourceViewReadAfterWriteHazard;
-   pDeviceFuncs->pfnResourceReadAfterWriteHazard = ResourceReadAfterWriteHazard;
-   pDeviceFuncs->pfnSetBlendState = SetBlendState;
-   pDeviceFuncs->pfnSetDepthStencilState = SetDepthStencilState;
-   pDeviceFuncs->pfnSetRasterizerState = SetRasterizerState;
-   pDeviceFuncs->pfnQueryEnd = QueryEnd;
-   pDeviceFuncs->pfnQueryBegin = QueryBegin;
-   pDeviceFuncs->pfnResourceCopyRegion = ResourceCopyRegion;
-   pDeviceFuncs->pfnResourceUpdateSubresourceUP = ResourceUpdateSubResourceUP;
-   pDeviceFuncs->pfnSoSetTargets = SoSetTargets;
-   pDeviceFuncs->pfnDrawAuto = DrawAuto;
-   pDeviceFuncs->pfnSetViewports = SetViewports;
-   pDeviceFuncs->pfnSetScissorRects = SetScissorRects;
-   pDeviceFuncs->pfnClearRenderTargetView = ClearRenderTargetView;
-   pDeviceFuncs->pfnClearDepthStencilView = ClearDepthStencilView;
-   pDeviceFuncs->pfnSetPredication = SetPredication;
-   pDeviceFuncs->pfnQueryGetData = QueryGetData;
-   pDeviceFuncs->pfnFlush = Flush;
-   pDeviceFuncs->pfnGenMips = GenMips;
-   pDeviceFuncs->pfnResourceCopy = ResourceCopy;
-   pDeviceFuncs->pfnResourceResolveSubresource = ResourceResolveSubResource;
-   pDeviceFuncs->pfnResourceMap = ResourceMap;
-   pDeviceFuncs->pfnResourceUnmap = ResourceUnmap;
-   pDeviceFuncs->pfnResourceIsStagingBusy = ResourceIsStagingBusy;
-   pDeviceFuncs->pfnRelocateDeviceFuncs = RelocateDeviceFuncs;
-   pDeviceFuncs->pfnCalcPrivateResourceSize = CalcPrivateResourceSize;
-   pDeviceFuncs->pfnCalcPrivateOpenedResourceSize = CalcPrivateOpenedResourceSize;
-   pDeviceFuncs->pfnCreateResource = CreateResource;
-   pDeviceFuncs->pfnOpenResource = OpenResource;
-   pDeviceFuncs->pfnDestroyResource = DestroyResource;
-   pDeviceFuncs->pfnCalcPrivateShaderResourceViewSize = CalcPrivateShaderResourceViewSize;
-   pDeviceFuncs->pfnCreateShaderResourceView = CreateShaderResourceView;
-   pDeviceFuncs->pfnDestroyShaderResourceView = DestroyShaderResourceView;
-   pDeviceFuncs->pfnCalcPrivateRenderTargetViewSize = CalcPrivateRenderTargetViewSize;
-   pDeviceFuncs->pfnCreateRenderTargetView = CreateRenderTargetView;
-   pDeviceFuncs->pfnDestroyRenderTargetView = DestroyRenderTargetView;
-   pDeviceFuncs->pfnCalcPrivateDepthStencilViewSize = CalcPrivateDepthStencilViewSize;
-   pDeviceFuncs->pfnCreateDepthStencilView = CreateDepthStencilView;
-   pDeviceFuncs->pfnDestroyDepthStencilView = DestroyDepthStencilView;
-   pDeviceFuncs->pfnCalcPrivateElementLayoutSize = CalcPrivateElementLayoutSize;
-   pDeviceFuncs->pfnCreateElementLayout = CreateElementLayout;
-   pDeviceFuncs->pfnDestroyElementLayout = DestroyElementLayout;
-   pDeviceFuncs->pfnCalcPrivateBlendStateSize = CalcPrivateBlendStateSize;
-   pDeviceFuncs->pfnCreateBlendState = CreateBlendState;
-   pDeviceFuncs->pfnDestroyBlendState = DestroyBlendState;
-   pDeviceFuncs->pfnCalcPrivateDepthStencilStateSize = CalcPrivateDepthStencilStateSize;
-   pDeviceFuncs->pfnCreateDepthStencilState = CreateDepthStencilState;
-   pDeviceFuncs->pfnDestroyDepthStencilState = DestroyDepthStencilState;
-   pDeviceFuncs->pfnCalcPrivateRasterizerStateSize = CalcPrivateRasterizerStateSize;
-   pDeviceFuncs->pfnCreateRasterizerState = CreateRasterizerState;
-   pDeviceFuncs->pfnDestroyRasterizerState = DestroyRasterizerState;
-   pDeviceFuncs->pfnCalcPrivateShaderSize = CalcPrivateShaderSize;
-   pDeviceFuncs->pfnCreateVertexShader = CreateVertexShader;
-   pDeviceFuncs->pfnCreateGeometryShader = CreateGeometryShader;
-   pDeviceFuncs->pfnCreatePixelShader = CreatePixelShader;
-   pDeviceFuncs->pfnCalcPrivateGeometryShaderWithStreamOutput = CalcPrivateGeometryShaderWithStreamOutput;
-   pDeviceFuncs->pfnCreateGeometryShaderWithStreamOutput = CreateGeometryShaderWithStreamOutput;
-   pDeviceFuncs->pfnDestroyShader = DestroyShader;
-   pDeviceFuncs->pfnCalcPrivateSamplerSize = CalcPrivateSamplerSize;
-   pDeviceFuncs->pfnCreateSampler = CreateSampler;
-   pDeviceFuncs->pfnDestroySampler = DestroySampler;
-   pDeviceFuncs->pfnCalcPrivateQuerySize = CalcPrivateQuerySize;
-   pDeviceFuncs->pfnCreateQuery = CreateQuery;
-   pDeviceFuncs->pfnDestroyQuery = DestroyQuery;
-   pDeviceFuncs->pfnCheckFormatSupport = CheckFormatSupport;
-   pDeviceFuncs->pfnCheckMultisampleQualityLevels = CheckMultisampleQualityLevels;
-   pDeviceFuncs->pfnCheckCounterInfo = CheckCounterInfo;
-   pDeviceFuncs->pfnCheckCounter = CheckCounter;
-   pDeviceFuncs->pfnDestroyDevice = DestroyDevice;
-   pDeviceFuncs->pfnSetTextFilterSize = SetTextFilterSize;
+   pDeviceFuncs->pfnDefaultConstantBufferUpdateSubresourceUP = Bc250Entry<ResourceUpdateSubResourceUP>::Call;
+   pDeviceFuncs->pfnVsSetConstantBuffers = Bc250Entry<VsSetConstantBuffers>::Call;
+   pDeviceFuncs->pfnPsSetShaderResources = Bc250Entry<PsSetShaderResources>::Call;
+   pDeviceFuncs->pfnPsSetShader = Bc250Entry<PsSetShader>::Call;
+   pDeviceFuncs->pfnPsSetSamplers = Bc250Entry<PsSetSamplers>::Call;
+   pDeviceFuncs->pfnVsSetShader = Bc250Entry<VsSetShader>::Call;
+   pDeviceFuncs->pfnDrawIndexed = Bc250Entry<DrawIndexed>::Call;
+   pDeviceFuncs->pfnDraw = Bc250Entry<Draw>::Call;
+   pDeviceFuncs->pfnDynamicIABufferMapNoOverwrite = Bc250Entry<ResourceMap>::Call;
+   pDeviceFuncs->pfnDynamicIABufferUnmap = Bc250Entry<ResourceUnmap>::Call;
+   pDeviceFuncs->pfnDynamicConstantBufferMapDiscard = Bc250Entry<ResourceMap>::Call;
+   pDeviceFuncs->pfnDynamicIABufferMapDiscard = Bc250Entry<ResourceMap>::Call;
+   pDeviceFuncs->pfnDynamicConstantBufferUnmap = Bc250Entry<ResourceUnmap>::Call;
+   pDeviceFuncs->pfnPsSetConstantBuffers = Bc250Entry<PsSetConstantBuffers>::Call;
+   pDeviceFuncs->pfnIaSetInputLayout = Bc250Entry<IaSetInputLayout>::Call;
+   pDeviceFuncs->pfnIaSetVertexBuffers = Bc250Entry<IaSetVertexBuffers>::Call;
+   pDeviceFuncs->pfnIaSetIndexBuffer = Bc250Entry<IaSetIndexBuffer>::Call;
+   pDeviceFuncs->pfnDrawIndexedInstanced = Bc250Entry<DrawIndexedInstanced>::Call;
+   pDeviceFuncs->pfnDrawInstanced = Bc250Entry<DrawInstanced>::Call;
+   pDeviceFuncs->pfnDynamicResourceMapDiscard = Bc250Entry<ResourceMap>::Call;
+   pDeviceFuncs->pfnDynamicResourceUnmap = Bc250Entry<ResourceUnmap>::Call;
+   pDeviceFuncs->pfnGsSetConstantBuffers = Bc250Entry<GsSetConstantBuffers>::Call;
+   pDeviceFuncs->pfnGsSetShader = Bc250Entry<GsSetShader>::Call;
+   pDeviceFuncs->pfnIaSetTopology = Bc250Entry<IaSetTopology>::Call;
+   pDeviceFuncs->pfnStagingResourceMap = Bc250Entry<ResourceMap>::Call;
+   pDeviceFuncs->pfnStagingResourceUnmap = Bc250Entry<ResourceUnmap>::Call;
+   pDeviceFuncs->pfnVsSetShaderResources = Bc250Entry<VsSetShaderResources>::Call;
+   pDeviceFuncs->pfnVsSetSamplers = Bc250Entry<VsSetSamplers>::Call;
+   pDeviceFuncs->pfnGsSetShaderResources = Bc250Entry<GsSetShaderResources>::Call;
+   pDeviceFuncs->pfnGsSetSamplers = Bc250Entry<GsSetSamplers>::Call;
+   pDeviceFuncs->pfnSetRenderTargets = Bc250Entry<SetRenderTargets>::Call;
+   pDeviceFuncs->pfnShaderResourceViewReadAfterWriteHazard = Bc250Entry<ShaderResourceViewReadAfterWriteHazard>::Call;
+   pDeviceFuncs->pfnResourceReadAfterWriteHazard = Bc250Entry<ResourceReadAfterWriteHazard>::Call;
+   pDeviceFuncs->pfnSetBlendState = Bc250Entry<SetBlendState>::Call;
+   pDeviceFuncs->pfnSetDepthStencilState = Bc250Entry<SetDepthStencilState>::Call;
+   pDeviceFuncs->pfnSetRasterizerState = Bc250Entry<SetRasterizerState>::Call;
+   pDeviceFuncs->pfnQueryEnd = Bc250Entry<QueryEnd>::Call;
+   pDeviceFuncs->pfnQueryBegin = Bc250Entry<QueryBegin>::Call;
+   pDeviceFuncs->pfnResourceCopyRegion = Bc250Entry<ResourceCopyRegion>::Call;
+   pDeviceFuncs->pfnResourceUpdateSubresourceUP = Bc250Entry<ResourceUpdateSubResourceUP>::Call;
+   pDeviceFuncs->pfnSoSetTargets = Bc250Entry<SoSetTargets>::Call;
+   pDeviceFuncs->pfnDrawAuto = Bc250Entry<DrawAuto>::Call;
+   pDeviceFuncs->pfnSetViewports = Bc250Entry<SetViewports>::Call;
+   pDeviceFuncs->pfnSetScissorRects = Bc250Entry<SetScissorRects>::Call;
+   pDeviceFuncs->pfnClearRenderTargetView = Bc250Entry<ClearRenderTargetView>::Call;
+   pDeviceFuncs->pfnClearDepthStencilView = Bc250Entry<ClearDepthStencilView>::Call;
+   pDeviceFuncs->pfnSetPredication = Bc250Entry<SetPredication>::Call;
+   pDeviceFuncs->pfnQueryGetData = Bc250Entry<QueryGetData>::Call;
+   pDeviceFuncs->pfnFlush = Bc250Entry<Flush>::Call;
+   pDeviceFuncs->pfnGenMips = Bc250Entry<GenMips>::Call;
+   pDeviceFuncs->pfnResourceCopy = Bc250Entry<ResourceCopy>::Call;
+   pDeviceFuncs->pfnResourceResolveSubresource = Bc250Entry<ResourceResolveSubResource>::Call;
+   pDeviceFuncs->pfnResourceMap = Bc250Entry<ResourceMap>::Call;
+   pDeviceFuncs->pfnResourceUnmap = Bc250Entry<ResourceUnmap>::Call;
+   pDeviceFuncs->pfnResourceIsStagingBusy = Bc250Entry<ResourceIsStagingBusy>::Call;
+   pDeviceFuncs->pfnRelocateDeviceFuncs = Bc250Entry<RelocateDeviceFuncs>::Call;
+   pDeviceFuncs->pfnCalcPrivateResourceSize = Bc250Entry<CalcPrivateResourceSize>::Call;
+   pDeviceFuncs->pfnCalcPrivateOpenedResourceSize = Bc250Entry<CalcPrivateOpenedResourceSize>::Call;
+   pDeviceFuncs->pfnCreateResource = Bc250Entry<CreateResource>::Call;
+   pDeviceFuncs->pfnOpenResource = Bc250Entry<OpenResource>::Call;
+   pDeviceFuncs->pfnDestroyResource = Bc250Entry<DestroyResource>::Call;
+   pDeviceFuncs->pfnCalcPrivateShaderResourceViewSize = Bc250Entry<CalcPrivateShaderResourceViewSize>::Call;
+   pDeviceFuncs->pfnCreateShaderResourceView = Bc250Entry<CreateShaderResourceView>::Call;
+   pDeviceFuncs->pfnDestroyShaderResourceView = Bc250Entry<DestroyShaderResourceView>::Call;
+   pDeviceFuncs->pfnCalcPrivateRenderTargetViewSize = Bc250Entry<CalcPrivateRenderTargetViewSize>::Call;
+   pDeviceFuncs->pfnCreateRenderTargetView = Bc250Entry<CreateRenderTargetView>::Call;
+   pDeviceFuncs->pfnDestroyRenderTargetView = Bc250Entry<DestroyRenderTargetView>::Call;
+   pDeviceFuncs->pfnCalcPrivateDepthStencilViewSize = Bc250Entry<CalcPrivateDepthStencilViewSize>::Call;
+   pDeviceFuncs->pfnCreateDepthStencilView = Bc250Entry<CreateDepthStencilView>::Call;
+   pDeviceFuncs->pfnDestroyDepthStencilView = Bc250Entry<DestroyDepthStencilView>::Call;
+   pDeviceFuncs->pfnCalcPrivateElementLayoutSize = Bc250Entry<CalcPrivateElementLayoutSize>::Call;
+   pDeviceFuncs->pfnCreateElementLayout = Bc250Entry<CreateElementLayout>::Call;
+   pDeviceFuncs->pfnDestroyElementLayout = Bc250Entry<DestroyElementLayout>::Call;
+   pDeviceFuncs->pfnCalcPrivateBlendStateSize = Bc250Entry<CalcPrivateBlendStateSize>::Call;
+   pDeviceFuncs->pfnCreateBlendState = Bc250Entry<CreateBlendState>::Call;
+   pDeviceFuncs->pfnDestroyBlendState = Bc250Entry<DestroyBlendState>::Call;
+   pDeviceFuncs->pfnCalcPrivateDepthStencilStateSize = Bc250Entry<CalcPrivateDepthStencilStateSize>::Call;
+   pDeviceFuncs->pfnCreateDepthStencilState = Bc250Entry<CreateDepthStencilState>::Call;
+   pDeviceFuncs->pfnDestroyDepthStencilState = Bc250Entry<DestroyDepthStencilState>::Call;
+   pDeviceFuncs->pfnCalcPrivateRasterizerStateSize = Bc250Entry<CalcPrivateRasterizerStateSize>::Call;
+   pDeviceFuncs->pfnCreateRasterizerState = Bc250Entry<CreateRasterizerState>::Call;
+   pDeviceFuncs->pfnDestroyRasterizerState = Bc250Entry<DestroyRasterizerState>::Call;
+   pDeviceFuncs->pfnCalcPrivateShaderSize = Bc250Entry<CalcPrivateShaderSize>::Call;
+   pDeviceFuncs->pfnCreateVertexShader = Bc250Entry<CreateVertexShader>::Call;
+   pDeviceFuncs->pfnCreateGeometryShader = Bc250Entry<CreateGeometryShader>::Call;
+   pDeviceFuncs->pfnCreatePixelShader = Bc250Entry<CreatePixelShader>::Call;
+   pDeviceFuncs->pfnCalcPrivateGeometryShaderWithStreamOutput = Bc250Entry<CalcPrivateGeometryShaderWithStreamOutput>::Call;
+   pDeviceFuncs->pfnCreateGeometryShaderWithStreamOutput = Bc250Entry<CreateGeometryShaderWithStreamOutput>::Call;
+   pDeviceFuncs->pfnDestroyShader = Bc250Entry<DestroyShader>::Call;
+   pDeviceFuncs->pfnCalcPrivateSamplerSize = Bc250Entry<CalcPrivateSamplerSize>::Call;
+   pDeviceFuncs->pfnCreateSampler = Bc250Entry<CreateSampler>::Call;
+   pDeviceFuncs->pfnDestroySampler = Bc250Entry<DestroySampler>::Call;
+   pDeviceFuncs->pfnCalcPrivateQuerySize = Bc250Entry<CalcPrivateQuerySize>::Call;
+   pDeviceFuncs->pfnCreateQuery = Bc250Entry<CreateQuery>::Call;
+   pDeviceFuncs->pfnDestroyQuery = Bc250Entry<DestroyQuery>::Call;
+   pDeviceFuncs->pfnCheckFormatSupport = Bc250Entry<CheckFormatSupport>::Call;
+   pDeviceFuncs->pfnCheckMultisampleQualityLevels = Bc250Entry<CheckMultisampleQualityLevels>::Call;
+   pDeviceFuncs->pfnCheckCounterInfo = Bc250Entry<CheckCounterInfo>::Call;
+   pDeviceFuncs->pfnCheckCounter = Bc250Entry<CheckCounter>::Call;
+   pDeviceFuncs->pfnDestroyDevice = Bc250Entry<DestroyDevice>::Call;
+   pDeviceFuncs->pfnSetTextFilterSize = Bc250Entry<SetTextFilterSize>::Call;
    if (pCreateData->Interface == D3D10_1_DDI_INTERFACE_VERSION ||
        pCreateData->Interface == D3D10_1_x_DDI_INTERFACE_VERSION ||
        pCreateData->Interface == D3D10_1_7_DDI_INTERFACE_VERSION) {
       D3D10_1DDI_DEVICEFUNCS *p10_1DeviceFuncs = pCreateData->p10_1DeviceFuncs;
-      p10_1DeviceFuncs->pfnRelocateDeviceFuncs = RelocateDeviceFuncs1;
-      p10_1DeviceFuncs->pfnCalcPrivateShaderResourceViewSize = CalcPrivateShaderResourceViewSize1;
-      p10_1DeviceFuncs->pfnCreateShaderResourceView = CreateShaderResourceView1;
-      p10_1DeviceFuncs->pfnCalcPrivateBlendStateSize = CalcPrivateBlendStateSize1;
-      p10_1DeviceFuncs->pfnCreateBlendState = CreateBlendState1;
-      p10_1DeviceFuncs->pfnResourceConvert = ResourceCopy;
-      p10_1DeviceFuncs->pfnResourceConvertRegion = ResourceCopyRegion;
+      p10_1DeviceFuncs->pfnRelocateDeviceFuncs = Bc250Entry<RelocateDeviceFuncs1>::Call;
+      p10_1DeviceFuncs->pfnCalcPrivateShaderResourceViewSize = Bc250Entry<CalcPrivateShaderResourceViewSize1>::Call;
+      p10_1DeviceFuncs->pfnCreateShaderResourceView = Bc250Entry<CreateShaderResourceView1>::Call;
+      p10_1DeviceFuncs->pfnCalcPrivateBlendStateSize = Bc250Entry<CalcPrivateBlendStateSize1>::Call;
+      p10_1DeviceFuncs->pfnCreateBlendState = Bc250Entry<CreateBlendState1>::Call;
+      p10_1DeviceFuncs->pfnResourceConvert = Bc250Entry<ResourceCopy>::Call;
+      p10_1DeviceFuncs->pfnResourceConvertRegion = Bc250Entry<ResourceCopyRegion>::Call;
    }
 
    /*
     * Fill in DXGI DDI functions
     */
    pCreateData->DXGIBaseDDI.pDXGIDDIBaseFunctions->pfnPresent =
-      _Present;
+      Bc250Entry<_Present>::Call;
    pCreateData->DXGIBaseDDI.pDXGIDDIBaseFunctions->pfnGetGammaCaps =
-      _GetGammaCaps;
+      Bc250Entry<_GetGammaCaps>::Call;
    pCreateData->DXGIBaseDDI.pDXGIDDIBaseFunctions->pfnSetDisplayMode =
-      _SetDisplayMode;
+      Bc250Entry<_SetDisplayMode>::Call;
    pCreateData->DXGIBaseDDI.pDXGIDDIBaseFunctions->pfnSetResourcePriority =
-      _SetResourcePriority;
+      Bc250Entry<_SetResourcePriority>::Call;
    pCreateData->DXGIBaseDDI.pDXGIDDIBaseFunctions->pfnQueryResourceResidency =
-      _QueryResourceResidency;
+      Bc250Entry<_QueryResourceResidency>::Call;
    pCreateData->DXGIBaseDDI.pDXGIDDIBaseFunctions->pfnRotateResourceIdentities =
-      _RotateResourceIdentities;
+      Bc250Entry<_RotateResourceIdentities>::Call;
    pCreateData->DXGIBaseDDI.pDXGIDDIBaseFunctions->pfnBlt =
-      _Blt;
+      Bc250Entry<_Blt>::Call;
 
    // E26: the linear shared-resource path is implemented for the tested formats.
    return S_OK;
@@ -622,6 +656,8 @@ DestroyDevice(D3D10DDI_HDEVICE hDevice)   // IN
       destroy.hPagingQueue = pDevice->pagingQueue;
       pDevice->KTCallbacks.pfnDestroyPagingQueueCb(pDevice->hDevice, &destroy);
    }
+   delete (Bc250HostProbeState *)pDevice->hosted_state;
+   pDevice->hosted_state=NULL;
    fprintf(stderr,"D3D destroy stage 8\n"); fflush(stderr);
 }
 

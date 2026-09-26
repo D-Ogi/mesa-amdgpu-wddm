@@ -182,3 +182,14 @@ d3d10_hosted_bootstrap(struct bc250_host *host)
    util_dl_close(lib);
    return ok;
 }
+
+struct pipe_screen *
+d3d10_create_hosted_screen(struct bc250_host *host)
+{
+   const char *luid=os_get_option("BC250_D3D_ZINK_LUID");
+   if (!luid) return NULL;
+   host->adapter_luid=strtoull(luid,NULL,16);
+   const char *path=os_get_option("BC250_HOSTED_ICD");
+   if (!host->adapter_luid || !path || !*path) return NULL;
+   return zink_win32_create_hosted_screen(host->adapter_luid,host);
+}

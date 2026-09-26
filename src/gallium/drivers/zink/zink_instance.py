@@ -184,12 +184,12 @@ zink_create_instance(struct zink_screen *screen, struct zink_instance_info *inst
     // Build up the layers from the reported ones
     uint32_t layer_count = 0;
 
-    if (vk_EnumerateInstanceLayerProperties(&layer_count, NULL) != VK_SUCCESS) {
+    if (!screen->bc250_host.dispatch && vk_EnumerateInstanceLayerProperties(&layer_count, NULL) != VK_SUCCESS) {
         if (!screen->driver_name_is_inferred)
            mesa_loge("ZINK: vkEnumerateInstanceLayerProperties failed");
     } else {
         VkLayerProperties *layer_props = malloc(layer_count * sizeof(VkLayerProperties));
-        if (layer_props) {
+        if (layer_props && !screen->bc250_host.dispatch) {
             if (vk_EnumerateInstanceLayerProperties(&layer_count, layer_props) != VK_SUCCESS) {
                 if (!screen->driver_name_is_inferred)
                     mesa_loge("ZINK: vkEnumerateInstanceLayerProperties failed");
@@ -274,6 +274,10 @@ zink_create_instance(struct zink_screen *screen, struct zink_instance_info *inst
        lsci.settingCount = 1;
        lsci.pSettings = &ds_layer;
        ici.pNext = &lsci;
+   }
+   if (screen->bc250_host.dispatch) {
+      screen->bc250_host.pNext=ici.pNext;
+      ici.pNext=&screen->bc250_host;
    }
    GET_PROC_ADDR_INSTANCE_LOCAL(screen, NULL, CreateInstance);
    assert(vk_CreateInstance);

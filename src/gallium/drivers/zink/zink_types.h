@@ -1,3 +1,4 @@
+#include "util/bc250_host_bootstrap.h"
 /*
  * Copyright © 2022 Valve Corporation
  *
@@ -1454,6 +1455,7 @@ struct zink_screen {
    uint64_t mapped_vram;
 
    VkInstance instance;
+   struct bc250_host bc250_host;
    bool owned_instance; /* Native D3D devices must not share callback ownership. */
    const struct zink_instance_info *instance_info;
 

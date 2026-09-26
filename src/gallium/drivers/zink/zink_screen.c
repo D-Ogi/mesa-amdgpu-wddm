@@ -3458,7 +3458,7 @@ zink_cl_cts_version(struct pipe_screen *pscreen)
 }
 
 static struct zink_screen *
-zink_internal_create_screen(const struct pipe_screen_config *config, int64_t dev_major, int64_t dev_minor, uint64_t adapter_luid, bool owned_instance)
+zink_internal_create_screen(const struct pipe_screen_config *config, int64_t dev_major, int64_t dev_minor, uint64_t adapter_luid, bool owned_instance, const struct bc250_host *host)
 {
    if (os_get_option("ZINK_USE_LAVAPIPE")) {
       mesa_loge("ZINK_USE_LAVAPIPE is obsolete. Use LIBGL_ALWAYS_SOFTWARE\n");
@@ -3475,6 +3475,7 @@ zink_internal_create_screen(const struct pipe_screen_config *config, int64_t dev
    screen->driver_name_is_inferred = config && config->driver_name_is_inferred;
    screen->drm_fd = -1;
    screen->owned_instance = owned_instance;
+   if (host) screen->bc250_host=*host;
 
    glsl_type_singleton_init_or_ref();
    zink_debug = debug_get_option_zink_debug();
@@ -3486,22 +3487,25 @@ zink_internal_create_screen(const struct pipe_screen_config *config, int64_t dev
       screen->threaded_submit = false;
    else
       screen->threaded_submit = screen->threaded;
+   if (host) { screen->threaded=false; screen->threaded_submit=false; }
    screen->abort_on_hang = debug_get_bool_option("ZINK_HANG_ABORT", false);
 
 
    u_trace_state_init();
 
-   screen->loader_lib = util_dl_open(VK_LIBNAME);
+   screen->loader_lib = util_dl_open(host ? os_get_option("BC250_HOSTED_ICD") : VK_LIBNAME);
    if (!screen->loader_lib) {
       if (!screen->driver_name_is_inferred)
          mesa_loge("ZINK: failed to load "VK_LIBNAME);
       goto fail;
    }
 
-   screen->vk_GetInstanceProcAddr = (PFN_vkGetInstanceProcAddr)util_dl_get_proc_address(screen->loader_lib, "vkGetInstanceProcAddr");
+   screen->vk_GetInstanceProcAddr = (PFN_vkGetInstanceProcAddr)util_dl_get_proc_address(screen->loader_lib, host ? "vk_icdGetInstanceProcAddr" : "vkGetInstanceProcAddr");
    screen->vk_GetDeviceProcAddr = (PFN_vkGetDeviceProcAddr)util_dl_get_proc_address(screen->loader_lib, "vkGetDeviceProcAddr");
+   if (host && screen->vk_GetInstanceProcAddr)
+      screen->vk_GetDeviceProcAddr=(PFN_vkGetDeviceProcAddr)screen->vk_GetInstanceProcAddr(NULL,"vkGetDeviceProcAddr");
    if (!screen->vk_GetInstanceProcAddr ||
-       !screen->vk_GetDeviceProcAddr) {
+       (!host && !screen->vk_GetDeviceProcAddr)) {
       if (!screen->driver_name_is_inferred)
          mesa_loge("ZINK: failed to get proc address");
       goto fail;
@@ -3555,6 +3559,7 @@ zink_internal_create_screen(const struct pipe_screen_config *config, int64_t dev
       }
    }
 
+   if (host) screen->vk_GetDeviceProcAddr=(PFN_vkGetDeviceProcAddr)screen->vk_GetInstanceProcAddr(screen->instance,"vkGetDeviceProcAddr");
    vk_instance_uncompacted_dispatch_table_load(&screen->vk.instance,
                                                 screen->vk_GetInstanceProcAddr,
                                                 screen->instance);
@@ -3957,7 +3962,7 @@ fail:
 struct pipe_screen *
 zink_create_screen(struct sw_winsys *winsys, const struct pipe_screen_config *config)
 {
-   struct zink_screen *ret = zink_internal_create_screen(config, -1, -1, 0, false);
+   struct zink_screen *ret = zink_internal_create_screen(config, -1, -1, 0, false, NULL);
    if (ret) {
       ret->drm_fd = -1;
    }
@@ -4009,7 +4014,7 @@ zink_drm_create_screen(int fd, const struct pipe_screen_config *config, struct r
    if (zink_render_rdev(fd, &dev_major, &dev_minor))
       return NULL;
 
-   ret = zink_internal_create_screen(config, dev_major, dev_minor, 0, false);
+   ret = zink_internal_create_screen(config, dev_major, dev_minor, 0, false, NULL);
    if (!ret)
       return NULL;
 
@@ -4044,7 +4049,7 @@ fail:
 struct pipe_screen *
 zink_win32_create_screen(uint64_t adapter_luid)
 {
-   struct zink_screen *ret = zink_internal_create_screen(NULL, -1, -1, adapter_luid, true);
+   struct zink_screen *ret = zink_internal_create_screen(NULL, -1, -1, adapter_luid, true, NULL);
    return ret ? &ret->base : NULL;
 }
 
@@ -4091,4 +4096,11 @@ zink_screen_debug_marker_end(struct zink_screen *screen, bool emitted)
 
    if (emitted)
       VKSCR(QueueEndDebugUtilsLabelEXT)(screen->queue);
+}
+
+struct pipe_screen *
+zink_win32_create_hosted_screen(uint64_t adapter_luid, const struct bc250_host *host)
+{
+   struct zink_screen *ret=zink_internal_create_screen(NULL,-1,-1,adapter_luid,true,host);
+   return ret ? &ret->base : NULL;
 }

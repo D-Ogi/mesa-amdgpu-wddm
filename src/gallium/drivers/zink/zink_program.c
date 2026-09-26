@@ -47,6 +47,21 @@
 #include "util/xxhash.h"
 
 static void
+bc250_zink_add_job(struct util_queue *queue, void *job, struct util_queue_fence *fence,
+                   util_queue_execute_func execute, util_queue_execute_func cleanup, size_t size)
+{
+   struct zink_screen *screen=queue->global_data;
+   if (!screen->bc250_host.dispatch) {
+      util_queue_add_job(queue,job,fence,execute,cleanup,size);
+      return;
+   }
+   if (fence) util_queue_fence_reset(fence);
+   execute(job,queue->global_data,0);
+   if (fence) util_queue_fence_signal(fence);
+   if (cleanup) cleanup(job,queue->global_data,0);
+}
+
+static void
 gfx_program_precompile_job(void *data, void *gdata, int thread_index);
 struct zink_gfx_program *
 create_gfx_program_separable(struct zink_context *ctx, struct zink_shader **stages, unsigned vertices_per_patch, bool is_mesh);
@@ -974,7 +989,7 @@ zink_gfx_program_compile_queue(struct zink_context *ctx, struct zink_gfx_pipelin
       else
          optimized_compile_job(pc_entry, screen, 0);
    } else {
-      util_queue_add_job(&screen->cache_get_thread, pc_entry, &pc_entry->fence,
+      bc250_zink_add_job(&screen->cache_get_thread, pc_entry, &pc_entry->fence,
                          pc_entry->prog->base.uses_shobj ? optimized_shobj_compile_job : optimized_compile_job, NULL, 0);
    }
 }
@@ -1549,7 +1564,7 @@ create_gfx_program_separable(struct zink_context *ctx, struct zink_shader **stag
    }
 
    if (!(zink_debug & ZINK_DEBUG_NOOPT))
-      util_queue_add_job(&screen->cache_get_thread, prog, &prog->base.cache_fence, create_linked_separable_job, NULL, 0);
+      bc250_zink_add_job(&screen->cache_get_thread, prog, &prog->base.cache_fence, create_linked_separable_job, NULL, 0);
 
    return prog;
 fail:
@@ -1751,7 +1766,7 @@ create_compute_program(struct zink_context *ctx, nir_shader *nir)
       precompile_compute_job(comp, screen, 0);
    } else {
       comp->base.precompile_done = false;
-      util_queue_add_job(&screen->cache_get_thread, comp, &comp->base.cache_fence,
+      bc250_zink_add_job(&screen->cache_get_thread, comp, &comp->base.cache_fence,
                         precompile_compute_job, NULL, 0);
    }
 
@@ -2576,7 +2591,7 @@ zink_link_gfx_shader(struct pipe_context *pctx, void **shaders)
          gfx_program_precompile_job(prog, pctx->screen, 0);
       } else {
          prog->base.precompile_done = false;
-         util_queue_add_job(&zink_screen(pctx->screen)->cache_get_thread, prog, &prog->base.cache_fence, gfx_program_precompile_job, NULL, 0);
+         bc250_zink_add_job(&zink_screen(pctx->screen)->cache_get_thread, prog, &prog->base.cache_fence, gfx_program_precompile_job, NULL, 0);
       }
    }
 }
@@ -2639,7 +2654,7 @@ zink_create_gfx_shader_state(struct pipe_context *pctx, const struct pipe_shader
    if (zink_debug & ZINK_DEBUG_NOBGC)
       gfx_shader_init_job(zs, screen, 0);
    else
-      util_queue_add_job(&screen->cache_get_thread, zs, &zs->precompile.fence, gfx_shader_init_job, NULL, 0);
+      bc250_zink_add_job(&screen->cache_get_thread, zs, &zs->precompile.fence, gfx_shader_init_job, NULL, 0);
 
    return zs;
 }
@@ -2747,7 +2762,7 @@ zink_driver_thread_add_job(struct pipe_screen *pscreen, void *data,
                            const size_t job_size)
 {
    struct zink_screen *screen = zink_screen(pscreen);
-   util_queue_add_job(&screen->cache_get_thread, data, fence, execute, cleanup, job_size);
+   bc250_zink_add_job(&screen->cache_get_thread, data, fence, execute, cleanup, job_size);
 }
 
 static bool
