@@ -4,7 +4,10 @@
  *
  * Private BC250 bootstrap contract, not a registered Vulkan extension.
  * Both endpoints are built together against the same WDK and x64 ABI.
- * Version 2 carries device-scoped runtime operations.
+ * Version 2 carries device-scoped runtime operations. Version 3 adds the
+ * private import of runtime-owned allocations. Version 4 adds queue progress
+ * fences that order hosted rendering against native Present. Version 5 adds
+ * the sticky device status and its loss report.
  */
 #ifndef BC250_HOST_BOOTSTRAP_H
 #define BC250_HOST_BOOTSTRAP_H
