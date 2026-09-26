@@ -1251,6 +1251,9 @@ CreateShaderResourceView(
    }
 
    pSRView->handle = pipe->create_sampler_view(pipe, resource, &desc);
+   Device *device = CastDevice(hDevice);
+   pSRView->next = device->shaderResourceViews;
+   device->shaderResourceViews = pSRView;
 }
 
 
@@ -1333,6 +1336,9 @@ CreateShaderResourceView1(
    }
 
    pSRView->handle = pipe->create_sampler_view(pipe, resource, &desc);
+   Device *device = CastDevice(hDevice);
+   pSRView->next = device->shaderResourceViews;
+   device->shaderResourceViews = pSRView;
 }
 
 
@@ -1360,6 +1366,9 @@ DestroyShaderResourceView(D3D10DDI_HDEVICE hDevice,                           //
    Device *pDevice = CastDevice(hDevice);
    struct pipe_context *pipe = pDevice->pipe;
 
+   ShaderResourceView **link = &pDevice->shaderResourceViews;
+   while (*link && *link != pSRView) link = &(*link)->next;
+   if (*link) *link = pSRView->next;
    pipe->sampler_view_release(pipe, pSRView->handle);
    pSRView->handle = NULL;
 }

@@ -43,6 +43,7 @@
 #include "util/u_math.h"
 #include "util/u_memory.h"
 #include "frontend/sw_winsys.h"
+#include "frontend/winsys_handle.h"
 #include "gdi_sw_winsys.h"
 #include "wgl/stw_gdishim.h"
 
@@ -57,6 +58,7 @@ struct gdi_sw_displaytarget
    unsigned size;
 
    void *data;
+   bool external_memory;
 
    BITMAPV5HEADER bmi;
 };
@@ -134,7 +136,7 @@ gdi_sw_displaytarget_destroy(struct sw_winsys *winsys,
 {
    struct gdi_sw_displaytarget *gdt = gdi_sw_displaytarget(dt);
 
-   align_free(gdt->data);
+   if (!gdt->external_memory) align_free(gdt->data);
    FREE(gdt);
 }
 
@@ -220,8 +222,25 @@ gdi_sw_displaytarget_from_handle(struct sw_winsys *winsys,
                                  struct winsys_handle *whandle,
                                  unsigned *stride)
 {
-   assert(0);
-   return NULL;
+   if (whandle->type != WINSYS_HANDLE_TYPE_USER_MEMORY || !whandle->user_memory ||
+       templet->last_level || templet->array_size != 1 || templet->depth0 != 1)
+      return NULL;
+   unsigned cpp = util_format_get_blocksize(templet->format);
+   if (!cpp || whandle->stride < (uint64_t)templet->width0 * cpp ||
+       whandle->size < (uint64_t)whandle->stride * templet->height0)
+      return NULL;
+   struct sw_displaytarget *dt = gdi_sw_displaytarget_create(winsys, templet->bind,
+       templet->format, templet->width0, templet->height0, 64, NULL, stride);
+   if (!dt) return NULL;
+   struct gdi_sw_displaytarget *gdt = gdi_sw_displaytarget(dt);
+   align_free(gdt->data);
+   gdt->data = whandle->user_memory;
+   gdt->external_memory = true;
+   gdt->stride = whandle->stride;
+   gdt->size = whandle->stride * templet->height0;
+   gdt->bmi.bV5Width = whandle->stride / cpp;
+   *stride = whandle->stride;
+   return dt;
 }
 
 
@@ -241,6 +260,27 @@ gdi_sw_display( struct sw_winsys *winsys,
                 HDC hDC )
 {
     struct gdi_sw_displaytarget *gdt = gdi_sw_displaytarget(dt);
+
+    /* E26 diagnostic: preserve frames before the GDI presentation boundary. */
+    static volatile LONG frame_count;
+    LONG frame = InterlockedIncrement(&frame_count);
+    if (frame == 1 || frame == 30) {
+       char path[MAX_PATH];
+       wsprintfA(path, "C:\\BC250\\e26\\umdlogs\\frame-%lu-%ld.bmp", GetCurrentProcessId(), frame);
+       HANDLE file = CreateFileA(path, GENERIC_WRITE, FILE_SHARE_READ, NULL,
+                                 CREATE_NEW, FILE_ATTRIBUTE_NORMAL, NULL);
+       if (file != INVALID_HANDLE_VALUE) {
+          BITMAPFILEHEADER header = {0};
+          DWORD written;
+          header.bfType = 0x4d42;
+          header.bfOffBits = sizeof(header) + sizeof(gdt->bmi);
+          header.bfSize = header.bfOffBits + gdt->size;
+          WriteFile(file, &header, sizeof(header), &written, NULL);
+          WriteFile(file, &gdt->bmi, sizeof(gdt->bmi), &written, NULL);
+          WriteFile(file, gdt->data, gdt->size, &written, NULL);
+          CloseHandle(file);
+       }
+    }
 
     StretchDIBits(hDC,
                   0, 0, gdt->width, gdt->height,

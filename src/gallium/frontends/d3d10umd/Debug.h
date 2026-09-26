@@ -60,7 +60,7 @@ AssertFail(const char *expr, const char *file, unsigned line, const char *functi
 #endif
 
 
-#if 0 && !defined(NDEBUG)
+#if 1
 #define LOG_ENTRYPOINT() DebugPrintf("%s\n", __func__)
 #else
 #define LOG_ENTRYPOINT() (void)0
