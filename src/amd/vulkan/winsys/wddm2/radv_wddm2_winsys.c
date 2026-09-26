@@ -639,7 +639,7 @@ radv_wddm2_winsys_destroy(struct radeon_winsys *_ws)
 
    simple_mtx_lock(&winsys_creation_mutex);
    if (!--ws->refcount) {
-      _mesa_hash_table_remove_key(winsyses, (void *) 1);
+      _mesa_hash_table_remove_key(winsyses, ws->cache_key);
 
       /* Clean the hashtable up if empty, though there is no
        * empty function. */
@@ -661,13 +661,19 @@ radv_wddm2_winsys_destroy(struct radeon_winsys *_ws)
    D3DDDI_DESTROYPAGINGQUEUE destroy_paging_queue = {
       .hPagingQueue = ws->paging_queue_h,
    };
-   status = WDDM2_DISPATCH(DestroyPagingQueue(&destroy_paging_queue));
+   if (ws->host.dispatch) {
+      struct bc250_host_paging paging = { .queue = ws->paging_queue_h };
+      status = ws->host.dispatch(ws->host.userdata, BC250_HOST_DESTROY_PAGING, &paging);
+      fprintf(stderr, "BC250 hosted paging destroy identity=%p queue=%x status=%08x\n", ws->host.identity, paging.queue, status);
+   } else {
+      status = WDDM2_DISPATCH(DestroyPagingQueue(&destroy_paging_queue));
+   }
    assert(NT_SUCCESS(status));
 
    D3DKMT_DESTROYDEVICE destroy_device = {
       .hDevice = ws->device_h,
    };
-   status = WDDM2_DISPATCH(DestroyDevice(&destroy_device));
+   status = ws->host.dispatch ? STATUS_SUCCESS : WDDM2_DISPATCH(DestroyDevice(&destroy_device));
    assert(NT_SUCCESS(status));
 
    D3DKMT_CLOSEADAPTER close_adapter = {
@@ -734,13 +740,16 @@ radv_wddm2_winsys_query_gpuvm_fault(struct radeon_winsys *rws, struct radv_winsy
 
 VkResult
 radv_wddm2_winsys_create(const struct vk_dx_adapter_info *adapter_info,
-                         const BITSET_WORD *debug_flags, struct radeon_winsys **winsys)
+                         const BITSET_WORD *debug_flags, const struct bc250_host *host, struct radeon_winsys **winsys)
 {
    VkResult result = VK_SUCCESS;
    struct radv_wddm2_winsys *ws = NULL;
    NTSTATUS status;
    fprintf(stderr, "radv_wddm2_winsys_create\n");
 
+   const void *key = host ? host->identity : (void *)1;
+   if (host && memcmp(&host->adapter_luid, &adapter_info->adapter_luid, sizeof(uint64_t)))
+      return VK_ERROR_INCOMPATIBLE_DRIVER;
    /* We have to keep this lock till insertion. */
    simple_mtx_lock(&winsys_creation_mutex);
    if (!winsyses)
@@ -751,7 +760,7 @@ radv_wddm2_winsys_create(const struct vk_dx_adapter_info *adapter_info,
       goto fail;
    }
 
-   struct hash_entry *entry = _mesa_hash_table_search(winsyses, (void *) 1);
+   struct hash_entry *entry = _mesa_hash_table_search(winsyses, key);
    if (entry) {
       ws = (struct radv_wddm2_winsys *)entry->data;
       ++ws->refcount;
@@ -770,6 +779,8 @@ radv_wddm2_winsys_create(const struct vk_dx_adapter_info *adapter_info,
    }
 
    ws->refcount = 1;
+   ws->cache_key = key;
+   if (host) ws->host = *host;
    ws->adapter_luid = adapter_info->adapter_luid;
    ws->chain_ib = !(BITSET_TEST(debug_flags, RADV_DEBUG_NO_IB_CHAINING));
    ws->debug_all_bos = !!(BITSET_TEST(debug_flags, RADV_DEBUG_ALL_BOS));
@@ -826,7 +837,7 @@ radv_wddm2_winsys_create(const struct vk_dx_adapter_info *adapter_info,
    D3DKMT_CREATEDEVICE create_device = {
       .hAdapter = ws->adapter_h,
    };
-   status = WDDM2_DISPATCH(CreateDevice(&create_device));
+   status = host ? STATUS_SUCCESS : WDDM2_DISPATCH(CreateDevice(&create_device));
    if (!NT_SUCCESS(status)) {
       fprintf(stderr, "Couldn't create device for adapter %i\n", ws->adapter_h);
       result = VK_ERROR_INITIALIZATION_FAILED;
@@ -842,7 +853,15 @@ radv_wddm2_winsys_create(const struct vk_dx_adapter_info *adapter_info,
    D3DKMT_CREATEPAGINGQUEUE create_paging_queue = {
       .hDevice = ws->device_h,
    };
-   status = WDDM2_DISPATCH(CreatePagingQueue(&create_paging_queue));
+   if (host) {
+      struct bc250_host_paging paging = {0};
+      status = host->dispatch(host->userdata, BC250_HOST_CREATE_PAGING, &paging);
+      create_paging_queue.hPagingQueue = paging.queue;
+      create_paging_queue.hSyncObject = paging.sync;
+      fprintf(stderr, "BC250 hosted paging create identity=%p queue=%x status=%08x\n", host->identity, paging.queue, status);
+   } else {
+      status = WDDM2_DISPATCH(CreatePagingQueue(&create_paging_queue));
+   }
    if (!NT_SUCCESS(status)) {
       fprintf(stderr, "Couldn't create paging queue\n");
       result = VK_ERROR_INITIALIZATION_FAILED;
@@ -876,7 +895,7 @@ radv_wddm2_winsys_create(const struct vk_dx_adapter_info *adapter_info,
    ws->sync_types[1] = &ws->sync_binary_type.sync;
    ws->sync_types[2] = NULL;
 
-   _mesa_hash_table_insert(winsyses, (void *) 1, ws);
+   _mesa_hash_table_insert(winsyses, key, ws);
    simple_mtx_unlock(&winsys_creation_mutex);
 
    *winsys = &ws->base;
@@ -884,7 +903,7 @@ radv_wddm2_winsys_create(const struct vk_dx_adapter_info *adapter_info,
    return result;
 
 error_create_device:
-   status = WDDM2_DISPATCH(DestroyDevice(&destroy_device));
+   status = ws->host.dispatch ? STATUS_SUCCESS : WDDM2_DISPATCH(DestroyDevice(&destroy_device));
    assert(NT_SUCCESS(status));
 
 error_open_adapter:

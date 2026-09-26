@@ -2744,7 +2744,8 @@ radv_physical_device_try_create(struct radv_instance *instance, drmDevicePtr drm
       goto fail;
    }
    pdev->wddm2_adapter = *wddm2_adapter;
-   result = radv_wddm2_winsys_create(wddm2_adapter, instance->debug_flags, &pdev->ws);
+   result = radv_wddm2_winsys_create(wddm2_adapter, instance->debug_flags,
+                                     instance->bc250_host.dispatch ? &instance->bc250_host : NULL, &pdev->ws);
    if (result != VK_SUCCESS)
       goto fail;
    pdev->info = *pdev->ws->query_info(pdev->ws);

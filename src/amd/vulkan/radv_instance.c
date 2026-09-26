@@ -273,6 +273,20 @@ radv_CreateInstance(const VkInstanceCreateInfo *pCreateInfo, const VkAllocationC
       return vk_error(NULL, result);
    }
 
+   for (const VkBaseInStructure *ext = pCreateInfo->pNext; ext; ext = ext->pNext) {
+      if ((uint32_t)ext->sType == BC250_HOST_STYPE) {
+         const struct bc250_host *host = (const void *)ext;
+         if (host->version != BC250_HOST_VERSION || host->size != sizeof(*host) ||
+             !host->identity || !host->dispatch || !host->adapter_luid) {
+            vk_instance_finish(&instance->vk);
+            vk_free(pAllocator, instance);
+            return VK_ERROR_INITIALIZATION_FAILED;
+         }
+         instance->bc250_host = *host;
+         instance->bc250_host.pNext = NULL;
+      }
+   }
+
    vk_instance_add_driver_trace_modes(&instance->vk, trace_options);
 
    simple_mtx_init(&instance->shader_dump_mtx, mtx_plain);

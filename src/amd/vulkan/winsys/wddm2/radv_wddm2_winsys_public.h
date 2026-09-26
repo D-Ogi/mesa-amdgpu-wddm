@@ -31,10 +31,11 @@
 #include <vulkan/vulkan_core.h>
 #include "util/bitset.h"
 
+struct bc250_host;
 struct radeon_winsys;
 struct vk_dx_adapter_info;
 
 VkResult radv_wddm2_winsys_create(const struct vk_dx_adapter_info *adapter_info,
-                                  const BITSET_WORD *debug_flags, struct radeon_winsys **winsys);
+                                  const BITSET_WORD *debug_flags, const struct bc250_host *host, struct radeon_winsys **winsys);
 
 #endif /* RADV_WDDM2_WINSYS_PUBLIC_H */

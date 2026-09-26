@@ -1463,6 +1463,11 @@ radv_CreateDevice(VkPhysicalDevice physicalDevice, const VkDeviceCreateInfo *pCr
    VkResult result;
    struct radv_device *device;
 
+   /* Bootstrap contract has no allocation/submission dispatch yet. Do not
+    * let any rendering path interpret a runtime token as a KMT device. */
+   if (instance->bc250_host.dispatch)
+      return VK_ERROR_FEATURE_NOT_PRESENT;
+
    bool overallocation_disallowed = false;
 
    vk_foreach_struct_const (sType, ext, pCreateInfo->pNext) {

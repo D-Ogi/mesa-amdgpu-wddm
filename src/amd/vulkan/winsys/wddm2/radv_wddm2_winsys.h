@@ -29,6 +29,7 @@
 #define RADV_WDDM2_WINSYS_H
 
 #include "util/list.h"
+#include "util/bc250_host_bootstrap.h"
 #include "util/simple_mtx.h"
 #include "util/vma.h"
 #include "vk_wddm2_dispatch_table.h"
@@ -44,6 +45,8 @@ struct radv_wddm2_winsys {
    struct radeon_winsys base;
 
    uint32_t refcount;
+   const void *cache_key;
+   struct bc250_host host;
 
    struct radeon_info gpu_info;
 
