@@ -845,6 +845,24 @@ static void parse_sdma_ib(FILE *f, struct ac_ib_parser *ib)
          }
          break;
       }
+      case SDMA_OPCODE_FENCE: {
+         fprintf(f, "FENCE\n");
+         uint32_t va_lo = ac_ib_get(ib);
+         fprintf(f, "    va lo = %08x\n", va_lo);
+         uint32_t va_hi = ac_ib_get(ib);
+         fprintf(f, "    va hi = %08x\n", va_hi);
+         uint32_t fence = ac_ib_get(ib);
+         fprintf(f, "    fence = %u\n", fence);
+         break;
+      }
+      case SDMA_OPCODE_SEMAPHORE: {
+         fprintf(f, "SEMAPHORE\n");
+         uint32_t va_lo = ac_ib_get(ib);
+         fprintf(f, "    va lo = %08x\n", va_lo);
+         uint32_t va_hi = ac_ib_get(ib);
+         fprintf(f, "    va hi = %08x\n", va_hi);
+         break;
+      }
       default:
          fprintf(f, " (unrecognized opcode)\n");
          break;

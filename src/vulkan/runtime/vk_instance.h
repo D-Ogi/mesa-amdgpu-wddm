@@ -63,6 +63,7 @@ struct vk_app_info {
 };
 
 struct _drmDevice;
+struct vk_dx_adapter_info;
 struct vk_physical_device;
 
 enum vk_trace_mode {
@@ -167,6 +168,18 @@ struct vk_instance {
       VkResult (*try_create_for_drm)(struct vk_instance *instance,
                                      struct _drmDevice *device,
                                      struct vk_physical_device **out);
+
+      /** Try to create a physical device for a DirectX adapter
+       *
+       * The returned value must be a valid return code of
+       * vkEnumeratePhysicalDevices, or VK_ERROR_INCOMPATIBLE_DRIVER. When
+       * VK_ERROR_INCOMPATIBLE_DRIVER is returned, the error and the drm
+       * device are silently ignored.
+       */
+      VkResult (*try_create_for_dx)(struct vk_instance *instance,
+                                    const struct vk_dx_adapter_info *info,
+                                    void *adapter,
+                                    struct vk_physical_device **out);
 
       /** Handle the destruction of a physical device
        *

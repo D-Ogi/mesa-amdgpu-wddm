@@ -65,9 +65,11 @@ vk_physical_device_features_gen = files('vk_physical_device_features_gen.py')
 vk_physical_device_properties_gen = files('vk_physical_device_properties_gen.py')
 vk_physical_device_spirv_caps_gen = files('vk_physical_device_spirv_caps_gen.py')
 vk_synchronization_helpers_gen = files('vk_synchronization_helpers_gen.py')
+vk_wddm2_dispatch_table_gen = files('vk_wddm2_dispatch_table_gen.py')
 
 files_vulkan_util = files(
   'vk_alloc.c',
+  'vk_async_event.c',
   'vk_format.c',
   'vk_util.c',
 )
@@ -125,7 +127,7 @@ libvulkan_util = static_library(
   'vulkan_util',
   [files_vulkan_util, vk_dispatch_table, vk_enum_to_str,
    vk_struct_type_cast, vk_extensions],
-  include_directories : [inc_include, inc_src],
+  include_directories : [inc_include, inc_src, '.'],
   dependencies : [vulkan_wsi_deps, idep_mesautil, idep_nir_headers],
   c_args : [c_msvc_compat_args, soong_compat_c_args],
   gnu_symbol_visibility : 'hidden',

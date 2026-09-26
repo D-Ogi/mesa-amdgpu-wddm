@@ -259,6 +259,7 @@ struct wsi_swapchain {
    struct {
       enum wsi_swapchain_blit_type type;
       VkSemaphore *semaphores;
+      uint64_t *timeline_values;
 
       /* If the driver wants to use a special queue to execute the buffer blit,
        * it'll implement the wsi_device::get_blit_queue callback.
@@ -361,6 +362,7 @@ wsi_swapchain_init(const struct wsi_device *wsi,
                    struct wsi_swapchain *chain,
                    VkDevice device,
                    const VkSwapchainCreateInfoKHR *pCreateInfo,
+                   uint32_t num_images,
                    const struct wsi_base_image_params *image_params,
                    const VkAllocationCallbacks *pAllocator);
 

@@ -208,6 +208,9 @@ static const struct vk_instance_extension_table radv_instance_extensions_support
 #ifdef VK_USE_PLATFORM_WAYLAND_KHR
    .KHR_wayland_surface = true,
 #endif
+#ifdef VK_USE_PLATFORM_WIN32_KHR
+   .KHR_win32_surface = true,
+#endif
 #ifdef VK_USE_PLATFORM_XCB_KHR
    .KHR_xcb_surface = true,
 #endif
@@ -320,6 +323,7 @@ radv_CreateInstance(const VkInstanceCreateInfo *pCreateInfo, const VkAllocationC
    }
 
    instance->vk.physical_devices.try_create_for_drm = create_drm_physical_device;
+   instance->vk.physical_devices.try_create_for_dx = create_dx_physical_device;
    instance->vk.physical_devices.destroy = radv_physical_device_destroy;
 
    if (RADV_DEBUG(instance, STARTUP))

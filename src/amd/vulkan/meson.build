@@ -63,6 +63,8 @@ radv_drirc = custom_target(
   ],
 )
 
+inc_radv_winsys_common = include_directories('winsys/common')
+
 libradv_files = files(
   'bvh/bvh_defines.h',
   'layers/radv_app_workarounds.c',
@@ -138,6 +140,7 @@ libradv_files = files(
   'tools/radv_spm.h',
   'tools/radv_sqtt.c',
   'tools/radv_sqtt.h',
+  'winsys/common/radv_winsys_bo.h',
   'radv_acceleration_structure.c',
   'radv_android.c',
   'radv_android.h',
@@ -229,6 +232,22 @@ if not with_platform_windows
   )
 endif
 
+radv_deps = []
+
+if with_vulkan_dx
+  libradv_files += files(
+    'winsys/wddm2/radv_wddm2_bo.c',
+    'winsys/wddm2/radv_wddm2_bo.h',
+    'winsys/wddm2/radv_wddm2_cs.c',
+    'winsys/wddm2/radv_wddm2_cs.h',
+    'winsys/wddm2/radv_wddm2_winsys.c',
+    'winsys/wddm2/radv_wddm2_winsys_public.h',
+    'winsys/wddm2/radv_wddm2_wsi.c',
+    'winsys/wddm2/radv_wddm2_wsi.h',
+  )
+  radv_deps += dep_dxheaders
+endif
+
 if amd_with_llvm
   libradv_files += files(
     'radv_llvm_helper.cpp',
@@ -242,7 +261,6 @@ subdir('bvh')
 
 subdir('layers')
 
-radv_deps = []
 radv_flags = cc.get_supported_arguments(['-Wimplicit-fallthrough', '-Wshadow'])
 
 if with_amdgpu_virtio
@@ -275,12 +293,17 @@ if radv_u_trace
   radv_flags += '-DRADV_U_TRACE=1'
 endif
 
+radv_link_args = [ld_args_build_id, ld_args_bsymbolic, ld_args_gc_sections, vulkan_icd_link_args]
+if cc.get_id() == 'msvc'
+  radv_link_args += ['/NODEFAULTLIB:libcmt.lib']
+endif
+
 libvulkan_radeon = shared_library(
   'vulkan_radeon',
   [libradv_files, radv_entrypoints, radv_drirc, sha1_h, bvh_spv, radv_annotate_layer],
   vs_module_defs : vulkan_api_def,
   include_directories : [
-    inc_include, inc_src, inc_amd, inc_amd_common, inc_amd_common_llvm,
+    inc_include, inc_src, inc_amd, inc_amd_common, inc_amd_common_llvm, inc_radv_winsys_common,
     inc_util, inc_virtio_gpu
   ],
   link_with : [
@@ -295,9 +318,7 @@ libvulkan_radeon = shared_library(
   ],
   c_args : [no_override_init_args, radv_flags, c_msvc_compat_args],
   cpp_args : [radv_flags, cpp_msvc_compat_args],
-  link_args : [
-    ld_args_build_id, ld_args_bsymbolic, ld_args_gc_sections, vulkan_icd_link_args,
-  ],
+  link_args : radv_link_args,
   link_depends : vulkan_icd_link_depends,
   gnu_symbol_visibility : 'hidden',
   name_prefix : host_machine.system() == 'windows' ? '' : [],

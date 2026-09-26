@@ -71,6 +71,80 @@ const char *ac_get_family_name(enum radeon_family family)
    }
 }
 
+uint32_t ac_get_pci_device_id(enum radeon_family family)
+{
+   switch (family) {
+   case CHIP_TAHITI:
+      return 0x6780;
+   case CHIP_PITCAIRN:
+      return 0x6800;
+   case CHIP_VERDE:
+      return 0x6820;
+   case CHIP_OLAND:
+      return 0x6060;
+   case CHIP_HAINAN:
+      return 0x6660;
+   case CHIP_BONAIRE:
+      return 0x6640;
+   case CHIP_KAVERI:
+      return 0x1304;
+   case CHIP_KABINI:
+      return 0x9830;
+   case CHIP_HAWAII:
+      return 0x67A0;
+   case CHIP_TONGA:
+      return 0x6920;
+   case CHIP_ICELAND:
+      return 0x6900;
+   case CHIP_CARRIZO:
+      return 0x9870;
+   case CHIP_FIJI:
+      return 0x7300;
+   case CHIP_STONEY:
+      return 0x98E4;
+   case CHIP_POLARIS10:
+      return 0x67C0;
+   case CHIP_POLARIS11:
+      return 0x67E0;
+   case CHIP_POLARIS12:
+      return 0x6980;
+   case CHIP_VEGAM:
+      return 0x694C;
+   case CHIP_VEGA10:
+      return 0x6860;
+   case CHIP_VEGA12:
+      return 0x69A0;
+   case CHIP_VEGA20:
+      return 0x66A0;
+   case CHIP_RAVEN:
+      return 0x15DD;
+   case CHIP_RENOIR:
+      return 0x1636;
+   case CHIP_MI100:
+      return 0x738C;
+   case CHIP_NAVI10:
+      return 0x7310;
+   case CHIP_NAVI12:
+      return 0x7360;
+   case CHIP_NAVI14:
+      return 0x7340;
+   case CHIP_NAVI21:
+      return 0x73A0;
+   case CHIP_VANGOGH:
+      return 0x163F;
+   case CHIP_NAVI22:
+      return 0x73C0;
+   case CHIP_NAVI23:
+      return 0x73E0;
+   case CHIP_NAVI31:
+      return 0x744C;
+   case CHIP_GFX1201:
+      return 0x7550;
+   default:
+      return 0xdead;
+   }
+}
+
 enum amd_gfx_level ac_get_gfx_level(enum radeon_family family)
 {
    if (family >= CHIP_GFX1210)

@@ -44,6 +44,7 @@
 #include "glsl_types.h"
 
 #include "dxil_validator.h"
+#include "dzn_dxcore.h"
 
 #include "git_sha1.h"
 
@@ -55,7 +56,6 @@
 #ifdef _WIN32
 #include <windows.h>
 #include <shlobj.h>
-#include "dzn_dxgi.h"
 #endif
 
 #define DZN_API_VERSION VK_MAKE_VERSION(1, 2, VK_HEADER_VERSION)
@@ -1100,7 +1100,8 @@ dzn_physical_device_get_properties(const struct dzn_physical_device *pdev,
 static VkResult
 dzn_physical_device_create(struct vk_instance *instance,
                            IUnknown *adapter,
-                           const struct dzn_physical_device_desc *desc)
+                           const struct vk_dx_adapter_info *desc,
+                           struct vk_physical_device **out)
 {
    struct dzn_physical_device *pdev =
       vk_zalloc(&instance->alloc, sizeof(*pdev), 8,
@@ -1129,7 +1130,6 @@ dzn_physical_device_create(struct vk_instance *instance,
    pdev->desc = *desc;
    pdev->adapter = adapter;
    IUnknown_AddRef(adapter);
-   list_addtail(&pdev->vk.link, &instance->physical_devices.list);
 
    vk_warn_non_conformant_implementation("dzn");
 
@@ -1150,7 +1150,6 @@ dzn_physical_device_create(struct vk_instance *instance,
                                    dzn_instance->factory,
                                    !dzn_instance->dxil_validator);
    if (!pdev->dev) {
-      list_del(&pdev->vk.link);
       dzn_physical_device_destroy(&pdev->vk);
       return vk_error(instance, VK_ERROR_INITIALIZATION_FAILED);
    }
@@ -1181,13 +1180,13 @@ dzn_physical_device_create(struct vk_instance *instance,
 
    result = dzn_wsi_init(pdev);
    if (result != VK_SUCCESS || !pdev->dev) {
-      list_del(&pdev->vk.link);
       dzn_physical_device_release(pdev);
       vk_physical_device_finish(&pdev->vk);
       vk_free(&instance->alloc, pdev);
       return result;
    }
 
+   *out = &pdev->vk;
    return VK_SUCCESS;
 }
 
@@ -1744,29 +1743,18 @@ dzn_GetPhysicalDeviceExternalBufferProperties(VkPhysicalDevice physicalDevice,
    }
 }
 
-VkResult
-dzn_instance_add_physical_device(struct vk_instance *instance,
-                                 IUnknown *adapter,
-                                 const struct dzn_physical_device_desc *desc)
+static VkResult
+dzn_try_create_for_dx(struct vk_instance *instance,
+                      const struct vk_dx_adapter_info *info,
+                      void *adapter,
+                      struct vk_physical_device **out)
 {
    struct dzn_instance *dzn_instance = container_of(instance, struct dzn_instance, vk);
    if ((dzn_instance->debug_flags & DZN_DEBUG_WARP) &&
-       !desc->is_warp)
-      return VK_SUCCESS;
+       !info->is_warp)
+      return VK_ERROR_INCOMPATIBLE_DRIVER;
 
-   return dzn_physical_device_create(instance, adapter, desc);
-}
-
-static VkResult
-dzn_enumerate_physical_devices(struct vk_instance *instance)
-{
-   VkResult result = dzn_enumerate_physical_devices_dxcore(instance);
-#ifdef _WIN32
-   if (result != VK_SUCCESS)
-      result = dzn_enumerate_physical_devices_dxgi(instance);
-#endif
-
-   return result;
+   return dzn_physical_device_create(instance, (IUnknown *)adapter, info, out);
 }
 
 static void
@@ -1810,7 +1798,7 @@ dzn_instance_create(const VkInstanceCreateInfo *pCreateInfo,
       return result;
    }
 
-   instance->vk.physical_devices.enumerate = dzn_enumerate_physical_devices;
+   instance->vk.physical_devices.try_create_for_dx = dzn_try_create_for_dx;
    instance->vk.physical_devices.destroy = dzn_physical_device_destroy;
    instance->debug_flags =
       parse_debug_string(os_get_option("DZN_DEBUG"), dzn_debug_options);

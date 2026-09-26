@@ -21,12 +21,10 @@
  * IN THE SOFTWARE.
  */
 
-#ifndef DZN_PHYSICAL_DEVICE_ENUM_H
-#define DZN_PHYSICAL_DEVICE_ENUM_H
+#ifndef VK_DXGI_H
+#define VK_DXGI_H
 
-#include <vulkan/vulkan_core.h>
-
-#include <wsl/winadapter.h>
+#include "vk_dx_adapter_info.h"
 
 #include <stdbool.h>
 
@@ -34,46 +32,18 @@
 extern "C" {
 #endif
 
-struct vk_instance;
+typedef VkResult (*vk_dxgi_adapter_cb)(const struct vk_dx_adapter_info *info,
+                                       void *adapter, void *user_data);
 
-struct dzn_physical_device_desc {
-   uint32_t vendor_id;
-   uint32_t device_id;
-   uint32_t subsys_id;
-   uint32_t revision;
-   uint64_t shared_system_memory;
-   uint64_t dedicated_system_memory;
-   uint64_t dedicated_video_memory;
-   LUID adapter_luid;
-   bool is_warp;
-   char description[128];
-};
+VkResult vk_dxgi_adapter_foreach(vk_dxgi_adapter_cb func, void *user_data);
 
-struct d3d12_memory_info {
-   uint64_t usage_local;
-   uint64_t budget_local;
-   uint64_t usage_nonlocal;
-   uint64_t budget_nonlocal;
-   uint64_t usage;    // local + nonlocal
-   uint64_t budget;   // local + nonlocal
-};
-
-VkResult
-dzn_enumerate_physical_devices_dxgi(struct vk_instance *instance);
-
-VkResult
-dzn_enumerate_physical_devices_dxcore(struct vk_instance *instance);
-
-void
-dzn_query_memory_info(IUnknown* unk, struct d3d12_memory_info* memory_info);
-
-VkResult
-dzn_instance_add_physical_device(struct vk_instance *instance,
-                                 IUnknown *adapter,
-                                 const struct dzn_physical_device_desc *desc);
+void *vk_dxgi_find_adapter(LUID adapter_luid);     /* IDXGIAdapter1* */
+void *vk_dxgi_create_d3d12_device(LUID adapter_luid); /* ID3D12Device* */
+void *vk_dxgi_create_command_queue(void *device);  /* ID3D12CommandQueue* */
+HANDLE vk_dxgi_share_device_resource(void *device, void *resource); /* ID3D12Device*, ID3D12Resource* */
 
 #ifdef __cplusplus
 }
 #endif
 
-#endif /* DZN_PHYSICAL_DEVICE_ENUM_H */
+#endif /* VK_DXGI_H */

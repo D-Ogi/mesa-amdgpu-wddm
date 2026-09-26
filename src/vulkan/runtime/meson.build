@@ -54,6 +54,11 @@ vulkan_lite_runtime_deps = [
   idep_vulkan_util,
 ]
 
+vulkan_lite_runtime_inc = [
+  inc_include,
+  inc_src,
+]
+
 if dep_libdrm.found()
   vulkan_lite_runtime_files += files('vk_drm_syncobj.c')
   vulkan_lite_runtime_deps += dep_libdrm
@@ -62,6 +67,35 @@ endif
 if with_platform_android
   vulkan_lite_runtime_files += files('vk_android.c')
   vulkan_lite_runtime_deps += [dep_android, idep_u_gralloc]
+endif
+
+vk_wddm2_dispatch_table = custom_target(
+  'vk_wddm2_dispatch_table',
+  input : [vk_wddm2_dispatch_table_gen],
+  output : ['vk_wddm2_dispatch_table.h', 'vk_wddm2_dispatch_table.c'],
+  command : [
+    prog_python, '@INPUT0@',
+    '--out-h', '@OUTPUT0@', '--out-c', '@OUTPUT1@'
+  ],
+)
+
+if with_vulkan_dx
+  if with_platform_windows
+    vulkan_lite_runtime_files += files('vk_dxgi.cpp')
+  endif
+  vulkan_lite_runtime_files += files(
+    'vk_dxcore.cpp',
+    'vk_wddm2_monitored_fence.c',
+    'vk_wddm2_monitored_fence.h',
+  )
+  vulkan_lite_runtime_files += vk_wddm2_dispatch_table
+
+  # Windows SDKs do not all ship wsl/winadapter.h. DirectX-Headers does, and its
+  # include directory does not shadow d3dkmthk.h.
+  vulkan_lite_runtime_deps += dep_dxheaders
+  if host_machine.system() != 'windows'
+    vulkan_lite_runtime_inc += '../../../include/winddk'
+  endif
 endif
 
 vk_common_entrypoints = custom_target(
@@ -201,7 +235,7 @@ vulkan_lite_runtime_deps += vulkan_lite_runtime_header_gen_deps
 libvulkan_lite_runtime = static_library(
   'vulkan_lite_runtime',
   vulkan_lite_runtime_files,
-  include_directories : [inc_include, inc_src],
+  include_directories : vulkan_lite_runtime_inc,
   dependencies : vulkan_lite_runtime_deps,
   c_args : [c_msvc_compat_args, soong_compat_c_args, '-DMESA_VK_LOG=@0@'.format(get_option('debug').to_int())],
   gnu_symbol_visibility : 'hidden',
@@ -211,7 +245,7 @@ libvulkan_lite_runtime = static_library(
 libvulkan_lite_instance = static_library(
   'vulkan_lite_instance',
   ['vk_instance.c'],
-  include_directories : [inc_include, inc_src],
+  include_directories : vulkan_lite_runtime_inc,
   dependencies : vulkan_lite_runtime_deps,
   c_args : ['-DVK_LITE_RUNTIME_INSTANCE=1', c_msvc_compat_args, soong_compat_c_args],
   gnu_symbol_visibility : 'hidden',
@@ -319,11 +353,13 @@ if get_option('backend').startswith('vs')
   idep_vulkan_runtime_body = declare_dependency(
     link_with : [libvulkan_lite_runtime, libvulkan_runtime, libvulkan_instance],
     dependencies : vulkan_runtime_deps,
+    include_directories: vulkan_lite_runtime_inc,
   )
 else
   idep_vulkan_runtime_body = declare_dependency(
     link_whole : [libvulkan_lite_runtime, libvulkan_runtime, libvulkan_instance],
     dependencies : vulkan_runtime_deps,
+    include_directories: vulkan_lite_runtime_inc,
   )
 endif
 

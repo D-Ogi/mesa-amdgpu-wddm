@@ -590,6 +590,7 @@ wsi_configure_native_image(const struct wsi_swapchain *chain,
    if (result != VK_SUCCESS)
       return result;
 
+   info->image_type = WSI_IMAGE_TYPE_DRM;
    info->explicit_sync = params->explicit_sync;
 
    if (params->num_modifier_lists == 0) {
@@ -892,6 +893,7 @@ wsi_configure_prime_image(UNUSED const struct wsi_swapchain *chain,
    if (result != VK_SUCCESS)
       return result;
 
+   info->image_type = WSI_IMAGE_TYPE_DRM;
    info->explicit_sync = params->explicit_sync;
 
    wsi_configure_buffer_image(chain, pCreateInfo,

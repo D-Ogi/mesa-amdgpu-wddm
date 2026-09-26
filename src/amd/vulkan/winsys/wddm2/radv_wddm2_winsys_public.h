@@ -1,5 +1,9 @@
 /*
- * Copyright © Microsoft Corporation
+ * Copyright © 2020 Valve Corporation
+ *
+ * based on amdgpu winsys.
+ * Copyright © 2016 Red Hat.
+ * Copyright © 2016 Bas Nieuwenhuizen
  *
  * Permission is hereby granted, free of charge, to any person obtaining a
  * copy of this software and associated documentation files (the "Software"),
@@ -14,21 +18,23 @@
  *
  * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
  * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.  IN NO EVENT SHALL
+ * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.  IN NO EVENT SHALL
  * THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
  * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
  * FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS
  * IN THE SOFTWARE.
  */
 
-#ifndef DZN_DXGI_H
-#define DZN_DXGI_H
+#ifndef RADV_WDDM2_WINSYS_PUBLIC_H
+#define RADV_WDDM2_WINSYS_PUBLIC_H
 
-#include <dxgi1_4.h>
+#include <vulkan/vulkan_core.h>
+#include "util/bitset.h"
 
-struct dzn_instance;
+struct radeon_winsys;
+struct vk_dx_adapter_info;
 
-IDXGIFactory4 *
-dxgi_get_factory(bool debug);
+VkResult radv_wddm2_winsys_create(const struct vk_dx_adapter_info *adapter_info,
+                                  const BITSET_WORD *debug_flags, struct radeon_winsys **winsys);
 
-#endif /* DZN_DXGI_H */
+#endif /* RADV_WDDM2_WINSYS_PUBLIC_H */

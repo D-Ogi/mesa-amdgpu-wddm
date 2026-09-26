@@ -403,10 +403,13 @@ radv_get_bo_metadata_word1(const struct radv_device *device)
 static bool
 radv_is_valid_opaque_metadata(const struct radv_device *device, const struct radeon_bo_metadata *md)
 {
-   if (md->metadata[0] != 1 || md->metadata[1] != radv_get_bo_metadata_word1(device))
+   if (md->metadata_type != RADEON_METADATA_TYPE_UMD)
       return false;
 
-   if (md->size_metadata < 40)
+   if (md->umd.metadata[0] != 1 || md->umd.metadata[1] != radv_get_bo_metadata_word1(device))
+      return false;
+
+   if (md->umd.size_metadata < 40)
       return false;
 
    return true;
@@ -469,11 +472,11 @@ radv_patch_image_dimensions(struct radv_device *device, struct radv_image *image
       const struct radeon_bo_metadata *md = create_info->bo_metadata;
 
       if (pdev->info.gfx_level >= GFX10) {
-         width = G_00A004_WIDTH_LO(md->metadata[3]) + (G_00A008_WIDTH_HI(md->metadata[4]) << 2) + 1;
-         height = G_00A008_HEIGHT(md->metadata[4]) + 1;
+         width = G_00A004_WIDTH_LO(md->umd.metadata[3]) + (G_00A008_WIDTH_HI(md->umd.metadata[4]) << 2) + 1;
+         height = G_00A008_HEIGHT(md->umd.metadata[4]) + 1;
       } else {
-         width = G_008F18_WIDTH(md->metadata[4]) + 1;
-         height = G_008F18_HEIGHT(md->metadata[4]) + 1;
+         width = G_008F18_WIDTH(md->umd.metadata[4]) + 1;
+         height = G_008F18_HEIGHT(md->umd.metadata[4]) + 1;
       }
    }
 
@@ -729,64 +732,68 @@ radv_compose_swizzle(const struct util_format_description *desc, const VkCompone
 }
 
 void
-radv_image_bo_set_metadata(struct radv_device *device, struct radv_image *image, struct radeon_winsys_bo *bo)
+radv_image_get_metadata(struct radv_device *device, struct radv_image *image,
+                        enum radeon_bo_metadata_type type, struct radeon_bo_metadata *md)
 {
    const struct radv_physical_device *pdev = radv_device_physical(device);
    const struct radv_instance *instance = radv_physical_device_instance(pdev);
-   static const VkComponentMapping fixedmapping;
    const uint32_t plane_id = 0; /* Always plane 0 to follow RadeonSI. */
-   const VkFormat plane_format = radv_image_get_plane_format(pdev, image, plane_id);
-   const unsigned plane_width = vk_format_get_plane_width(image->vk.format, plane_id, image->vk.extent.width);
-   const unsigned plane_height = vk_format_get_plane_height(image->vk.format, plane_id, image->vk.extent.height);
    const struct radeon_surf *surface = &image->planes[plane_id].surface;
-   const struct legacy_surf_level *base_level_info = pdev->info.gfx_level <= GFX8 ? &surface->u.legacy.level[0] : NULL;
-   struct radeon_bo_metadata md;
-   uint32_t desc[8];
 
-   memset(&md, 0, sizeof(md));
+   memset(md, 0, sizeof(md));
 
    if (pdev->info.gfx_level >= GFX12) {
-      md.u.gfx12.swizzle_mode = surface->u.gfx9.swizzle_mode;
-      md.u.gfx12.dcc_max_compressed_block = surface->u.gfx9.color.dcc.max_compressed_block_size;
-      md.u.gfx12.dcc_number_type = surface->u.gfx9.dcc_number_type;
-      md.u.gfx12.dcc_data_format = surface->u.gfx9.dcc_data_format;
-      md.u.gfx12.dcc_write_compress_disable = surface->u.gfx9.dcc_write_compress_disable;
-      md.u.gfx12.scanout = (surface->flags & RADEON_SURF_SCANOUT) != 0;
+      md->u.gfx12.swizzle_mode = surface->u.gfx9.swizzle_mode;
+      md->u.gfx12.dcc_max_compressed_block = surface->u.gfx9.color.dcc.max_compressed_block_size;
+      md->u.gfx12.dcc_number_type = surface->u.gfx9.dcc_number_type;
+      md->u.gfx12.dcc_data_format = surface->u.gfx9.dcc_data_format;
+      md->u.gfx12.dcc_write_compress_disable = surface->u.gfx9.dcc_write_compress_disable;
+      md->u.gfx12.scanout = (surface->flags & RADEON_SURF_SCANOUT) != 0;
    } else if (pdev->info.gfx_level >= GFX9) {
       const uint64_t dcc_offset = surface->display_dcc_offset ? surface->display_dcc_offset : surface->meta_offset;
-      md.u.gfx9.swizzle_mode = surface->u.gfx9.swizzle_mode;
-      md.u.gfx9.dcc_offset_256b = dcc_offset >> 8;
-      md.u.gfx9.dcc_pitch_max = surface->u.gfx9.color.display_dcc_pitch_max;
-      md.u.gfx9.dcc_independent_64b_blocks = surface->u.gfx9.color.dcc.independent_64B_blocks;
-      md.u.gfx9.dcc_independent_128b_blocks = surface->u.gfx9.color.dcc.independent_128B_blocks;
-      md.u.gfx9.dcc_max_compressed_block_size = surface->u.gfx9.color.dcc.max_compressed_block_size;
-      md.u.gfx9.scanout = (surface->flags & RADEON_SURF_SCANOUT) != 0;
+      md->u.gfx9.swizzle_mode = surface->u.gfx9.swizzle_mode;
+      md->u.gfx9.dcc_offset_256b = dcc_offset >> 8;
+      md->u.gfx9.dcc_pitch_max = surface->u.gfx9.color.display_dcc_pitch_max;
+      md->u.gfx9.dcc_independent_64b_blocks = surface->u.gfx9.color.dcc.independent_64B_blocks;
+      md->u.gfx9.dcc_independent_128b_blocks = surface->u.gfx9.color.dcc.independent_128B_blocks;
+      md->u.gfx9.dcc_max_compressed_block_size = surface->u.gfx9.color.dcc.max_compressed_block_size;
+      md->u.gfx9.scanout = (surface->flags & RADEON_SURF_SCANOUT) != 0;
    } else {
-      md.u.legacy.microtile =
+      md->u.legacy.microtile =
          surface->u.legacy.level[0].mode >= RADEON_SURF_MODE_1D ? RADEON_LAYOUT_TILED : RADEON_LAYOUT_LINEAR;
-      md.u.legacy.macrotile =
+      md->u.legacy.macrotile =
          surface->u.legacy.level[0].mode >= RADEON_SURF_MODE_2D ? RADEON_LAYOUT_TILED : RADEON_LAYOUT_LINEAR;
-      md.u.legacy.pipe_config = surface->u.legacy.pipe_config;
-      md.u.legacy.bankw = surface->u.legacy.bankw;
-      md.u.legacy.bankh = surface->u.legacy.bankh;
-      md.u.legacy.tile_split = surface->u.legacy.tile_split;
-      md.u.legacy.mtilea = surface->u.legacy.mtilea;
-      md.u.legacy.num_banks = surface->u.legacy.num_banks;
-      md.u.legacy.stride = surface->u.legacy.level[0].nblk_x * surface->bpe;
-      md.u.legacy.scanout = (surface->flags & RADEON_SURF_SCANOUT) != 0;
+      md->u.legacy.pipe_config = surface->u.legacy.pipe_config;
+      md->u.legacy.bankw = surface->u.legacy.bankw;
+      md->u.legacy.bankh = surface->u.legacy.bankh;
+      md->u.legacy.tile_split = surface->u.legacy.tile_split;
+      md->u.legacy.mtilea = surface->u.legacy.mtilea;
+      md->u.legacy.num_banks = surface->u.legacy.num_banks;
+      md->u.legacy.stride = surface->u.legacy.level[0].nblk_x * surface->bpe;
+      md->u.legacy.scanout = (surface->flags & RADEON_SURF_SCANOUT) != 0;
    }
 
-   radv_make_texture_descriptor(device, image, false, (VkImageViewType)image->vk.image_type, plane_format,
-                                &fixedmapping, 0, image->vk.mip_levels - 1, 0, image->vk.array_layers - 1, plane_width,
-                                plane_height, image->vk.extent.depth, 0.0f, desc, NULL, NULL, NULL);
+   md->metadata_type = type;
+   if (type == RADEON_METADATA_TYPE_UMD) {
+      const VkFormat plane_format = radv_image_get_plane_format(pdev, image, plane_id);
+      const unsigned plane_width = vk_format_get_plane_width(image->vk.format, plane_id, image->vk.extent.width);
+      const unsigned plane_height = vk_format_get_plane_height(image->vk.format, plane_id, image->vk.extent.height);
+      const struct legacy_surf_level *base_level_info = pdev->info.gfx_level <= GFX8 ? &surface->u.legacy.level[0] : NULL;
+      static const VkComponentMapping fixedmapping;
+      uint32_t desc[8];
 
-   radv_set_mutable_tex_desc_fields(device, image, base_level_info, plane_id, 0, 0, surface->blk_w, false, false, false,
-                                    false, desc, NULL, 0);
+      radv_make_texture_descriptor(device, image, false, (VkImageViewType)image->vk.image_type, plane_format,
+                                   &fixedmapping, 0, image->vk.mip_levels - 1, 0, image->vk.array_layers - 1, plane_width,
+                                   plane_height, image->vk.extent.depth, 0.0f, desc, NULL, NULL, NULL);
 
-   ac_surface_compute_umd_metadata(&pdev->info, surface, image->vk.mip_levels, desc, &md.size_metadata, md.metadata,
+      radv_set_mutable_tex_desc_fields(device, image, base_level_info, plane_id, 0, 0, surface->blk_w, false, false, false,
+                                       false, desc, NULL, 0);
+
+   ac_surface_compute_umd_metadata(&pdev->info, surface, image->vk.mip_levels, desc, &md->umd.size_metadata, md->umd.metadata,
                                    RADV_DEBUG(instance, EXTRA_MD));
+   } else if (type == RADEON_METADATA_TYPE_KMW) {
 
-   device->ws->buffer_set_metadata(device->ws, bo, &md);
+   }
 }
 
 void
@@ -1192,6 +1199,7 @@ radv_image_create_layout(struct radv_device *device, struct radv_image_create_in
    unsigned plane_count = radv_get_internal_plane_count(pdev, image->vk.format);
    for (unsigned plane = 0; plane < plane_count; ++plane) {
       struct ac_surf_info info = image_info;
+      const struct radeon_bo_metadata *md = create_info.bo_metadata;
       uint64_t offset;
       unsigned stride;
 
@@ -1225,11 +1233,57 @@ radv_image_create_layout(struct radv_device *device, struct radv_image_create_in
          image->planes[plane].surface.u.gfx9.dcc_write_compress_disable = false;
       }
 
-      if (create_info.bo_metadata && !mod_info &&
-          !ac_surface_apply_umd_metadata(&pdev->info, &image->planes[plane].surface, image->vk.samples,
-                                         image->vk.mip_levels, create_info.bo_metadata->size_metadata,
-                                         create_info.bo_metadata->metadata))
-         return VK_ERROR_INVALID_EXTERNAL_HANDLE;
+      if (create_info.bo_metadata && !mod_info) {
+         if (create_info.bo_metadata->metadata_type == RADEON_METADATA_TYPE_KMW) {
+            struct radeon_surf *surf = &image->planes[plane].surface;
+
+            surf->tile_swizzle = md->kmw.tile_swizzle;
+
+            if (md->kmw.pitch_bytes && pdev->info.gfx_level >= GFX9) {
+               unsigned pitch = md->kmw.pitch_bytes / surf->bpe;
+
+               if (pitch != surf->u.gfx9.surf_pitch) {
+                  unsigned slices = surf->surf_size / surf->u.gfx9.surf_slice_size;
+
+                  surf->u.gfx9.uses_custom_pitch = true;
+                  surf->u.gfx9.surf_pitch = pitch;
+                  surf->u.gfx9.epitch = pitch - 1;
+                  surf->u.gfx9.pitch[0] = pitch;
+                  surf->u.gfx9.surf_slice_size = (uint64_t)pitch * surf->u.gfx9.surf_height * surf->bpe;
+                  surf->total_size = surf->surf_size = surf->u.gfx9.surf_slice_size * slices;
+               }
+            }
+
+            if (surf->flags & RADEON_SURF_Z_OR_SBUFFER) {
+               surf->meta_offset = md->kmw.htile_offset;
+               if (pdev->info.gfx_level >= GFX12) {
+                  surf->u.gfx9.zs.hiz.offset = md->kmw.hi_z_offset;
+                  surf->u.gfx9.zs.hiz.swizzle_mode = md->kmw.hi_z_swizzle_mode;
+               }
+            } else {
+               surf->cmask_offset = md->kmw.cmask_offset;
+               surf->fmask_offset = md->kmw.fmask_offset;
+               surf->fmask_tile_swizzle = md->kmw.fmask_xor;
+               surf->u.gfx9.color.fmask_swizzle_mode = md->kmw.fmask_swizzle_mode;
+
+               if (md->kmw.dcc_offset) {
+                  surf->meta_offset = md->kmw.dcc_offset;
+                  surf->u.gfx9.color.dcc.pipe_aligned = md->kmw.dcc_pipe_aligned;
+                  surf->u.gfx9.color.dcc.rb_aligned = md->kmw.dcc_rb_aligned;
+                  surf->display_dcc_offset = md->kmw.display_dcc_offset;
+                  surf->num_meta_levels = image->vk.mip_levels;
+                  surf->flags &= ~RADEON_SURF_DISABLE_DCC;
+               } else {
+                  ac_surface_zero_dcc_fields(surf);
+               }
+            }
+         } else if (create_info.bo_metadata->metadata_type == RADEON_METADATA_TYPE_UMD) {
+            if (!ac_surface_apply_umd_metadata(&pdev->info, &image->planes[plane].surface, image->vk.samples,
+                                               image->vk.mip_levels, create_info.bo_metadata->umd.size_metadata,
+                                               create_info.bo_metadata->umd.metadata))
+               return VK_ERROR_INVALID_EXTERNAL_HANDLE;
+         }
+      }
 
       if (!create_info.no_metadata_planes && !create_info.bo_metadata && plane_count == 1 && !mod_info)
          radv_image_alloc_single_sample_cmask(device, image, &image->planes[plane].surface);
