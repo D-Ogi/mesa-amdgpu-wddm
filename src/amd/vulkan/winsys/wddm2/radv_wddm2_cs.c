@@ -1065,6 +1065,13 @@ radv_wddm2_cs_submit(struct radeon_winsys_ctx *_ctx,
       }
       slot->retire_value = next_value;
       queue->bc250_progress.wait_value = next_value;
+      if (ws->host.dispatch) {
+         struct bc250_host_progress progress = {queue->context_h, queue->bc250_progress.handle, next_value};
+         if (ws->host.dispatch(ws->host.userdata, BC250_HOST_PUBLISH_PROGRESS, &progress) < 0) {
+            queue->bc250_submit_failed = true;
+            return VK_ERROR_DEVICE_LOST;
+         }
+      }
       queue->bc250_gather_index = (queue->bc250_gather_index + 1u) % BC250_GATHER_SLOTS;
    } else if (submit->cs_count > 0) {
       struct radv_winsys_ib first_ib = {};
