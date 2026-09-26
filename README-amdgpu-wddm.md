@@ -20,7 +20,7 @@ mirror `intel-lgci-fdo-gitlab-mirror/mesa.mesa` of the upstream repository; the
 Identifiers in the code still carry the `bc250` prefix (`bc250_host_bootstrap.h`,
 `BC250_TRACE_SUBMITS`, the `bc250d3d` DLL names, the BC2A/BC2C/BC2S private data
 blocks). They are a shared contract with the kernel-mode driver and will be
-renamed on both sides together, before the branches are consolidated for
+renamed on both sides together, before the branches are prepared for
 upstream review.
 
 ## Branches
@@ -28,15 +28,22 @@ upstream review.
 Each branch starts at a pinned upstream Mesa commit and carries one commit per
 patch file from the `amdgpu-wddm` repository (local directory `bc250-win`), in
 the order the experiment notes prescribe. Every commit message names its origin
-file, that file's SHA-256, whether it matched the committed blob (HEAD 63a97b5)
-and any `git apply` flags. No flags were needed; patch files stored with CRLF
-line endings were converted to LF first.
+file, that file's SHA-256, whether it matched the committed blob (HEAD 63a97b5
+for the 2026-09-26 branches, 1f300d3 for the consolidated ones) and any
+`git apply` flags. No flags were needed; patch files stored with CRLF line
+endings were converted to LF first.
 
-The branches are snapshots of the patch files as of 2026-09-26. They sit on
-different upstream bases. Consolidating them onto one base is future work.
+The 2026-09-26 branches are snapshots of the patch files on different
+upstream bases. The two `-consolidated` branches of 2026-09-27 carry all of
+that work and the later E35 and hosted-runtime patches on one base,
+05e6c962: RADV and the ICD side on one branch, the D3D10 UMD on the other.
+Each ends with a commit for changes found in the scratch tree that no patch
+file records yet, and a header-only commit adding copyright/SPDX lines.
 
 | Branch | Base (upstream date) | Patch files (paths in the amdgpu-wddm repository) | Verification against the scratch source tree | Meson configuration |
 |---|---|---|---|---|
+| `amdgpu-wddm/radv-wddm2-consolidated` | 05e6c962 (2026-09-25) | the nine commits of `amdgpu-wddm/radv-wddm2`, then `evidence/windows/2026-09-26-E35-gfx-submit-pipeline/gather-pipeline.patch`, `experiments/E35-gfx-submit-pipeline/radv-prototype-contract.patch`, `experiments/E34-native-d3d-zink/hosted-runtime/icd.patch` (16 copyright hunks emptied, see below), `runtime-import-icd.patch`, `borrowed-residency.patch`, `present-icd.patch`, `loss-icd.patch`; in-flight commit (`radv_wddm2_bo.c`); header commit | `m12/mesa-current-src` frozen 2026-09-26T20:22Z: 77 of 86 paths identical; 6 differ only in the copyright sign the tree carries re-encoded, 3 only in the added header. Every intermediate state matches the patch manifests and the saved pre-patch copies | `radv`; `zink-gl` for the WGL increments |
+| `amdgpu-wddm/d3d10umd-consolidated` | 05e6c962 (2026-09-25) | the five `amdgpu-wddm/d3d10umd-llvmpipe` patches and its header commit, the six `amdgpu-wddm/d3d10umd-zink` patches (the first as file states, see below), then `experiments/E35-gfx-submit-pipeline/umd-analysis-fixes.patch`, `experiments/E34-native-d3d-zink/hosted-runtime/umd.patch`, `persistent-screen.patch`, `runtime-import-umd.patch`, `present-umd.patch`, `loss-umd.patch`; in-flight commit (four Zink/d3d10umd files); header commit | `m13-native-zink-src` frozen 2026-09-26T20:22Z: 30 of 36 paths identical; 5 hold llvmpipe-era E26 changes the Zink tree lacks, 1 only the added header. Every intermediate state matches the patch manifests and the saved pre-patch copies | `zink-umd` at the head; `llvmpipe-umd` up to the header commit of the llvmpipe series |
 | `amdgpu-wddm/radv-wddm2` | 05e6c962 (2026-09-25) | `experiments/E33-m12-applications/mesa05-wddm2.patch`, then eight increments: E33 `zink-wgl-zero-client`, `zink-wgl-front-back`, `zink-pbo-teardown`, `radv-scratch-canonical-va`, `zink-wgl-flush-validation`, `wsi-cpu-acquire-rotation`; E34 `radv-lb7a-import`, `hosted-paging-icd` | `m12/mesa-current-src`: 81 changed paths identical, 4 differ (in-flight E35 work, see below) | `radv`; `zink-gl` for the WGL increments |
 | `amdgpu-wddm/radv-wddm2-baseline-9c40083c` | f333dd6d (2026-09-24) | `experiments/E27-m9-inference/radv-main/mesa-main-wddm2-bc250.patch`, `experiments/E31-vulkan-wsi/wsi-cpu-fifo.patch` | `mesa-radv-main-20260924`: all 75 changed paths identical; that tree's build output is the deployed ICD 9C40083C | `radv` |
 | `amdgpu-wddm/radv-wddm2-lfrb-801c976` (local only) | lfrb/wddm2 801c9763 (2026-07-23) | `driver/icd/mesa-wddm2-bc250.patch`, `driver/icd/mesa-wddm2-cache-intent.patch` | `mesa-wddm2`: all 12 patched RADV files identical; 18 d3d10umd, TGSI and GDI files differ (earlier E26 desktop prototypes, not imported) | `radv` (historical, 26.2.0-devel) |
@@ -47,7 +54,8 @@ The meson configuration names are the ones in `tools/build/mesa-configs.json`
 and `docs/build.md` of the amdgpu-wddm repository.
 
 Tags `amdgpu-wddm-<branch name without the prefix>-2026-09-26` mark each
-branch head. `amdgpu-wddm-radv-wddm2-mesa05-2026-09-26` marks the first commit
+branch head of that day; `amdgpu-wddm-radv-wddm2-consolidated-2026-09-27` and
+`amdgpu-wddm-d3d10umd-consolidated-2026-09-27` mark the consolidated heads. `amdgpu-wddm-radv-wddm2-mesa05-2026-09-26` marks the first commit
 of `amdgpu-wddm/radv-wddm2`, which is `mesa05-wddm2.patch` alone: the source of
 the M12.1 candidate ICD (lab ICD 4D027149).
 
@@ -55,20 +63,60 @@ Verification compared each branch's files with the scratch tree it was built
 from, after normalising CRLF to LF. It covered every file named in the patch
 headers, 20 untouched files and a full scan of every path either side changes
 relative to the base. The reports are in the workspace under
-`scratch/mesa-fork-2026-09-26/verify-*.txt`.
+`scratch/mesa-fork-2026-09-26/verify-*.txt`. The consolidated branches were
+checked the same way against a frozen copy of each tree, plus each
+intermediate commit against the before/after hashes of the hosted-runtime
+patch manifests and the pre-patch file copies saved during that work
+(`scratch/mesa-fork-2026-09-27/verify-*-consolidated.txt`, `intermediate-*.txt`).
+
+### How the consolidated branches were assembled
+
+- `icd.patch` records that the M539 edit saved six UTF-8 files through
+  cp1250, turning the copyright sign on 16 lines into its re-encoded form.
+  The branch applies the patch with the UTF-8 sign on both sides of those
+  lines, so no copyright line changes; re-encoding them in the result
+  reproduces the manifest hashes. The scratch tree still has the re-encoded
+  signs.
+- `mesa-native-zink-prototype.patch` was generated against unmodified
+  05e6c962 and already contains the E26/E32 d3d10umd frontend changes, so it
+  does not apply after the llvmpipe commits. Its commit sets the 17 paths the
+  patch touches to their state in `amdgpu-wddm/d3d10umd-zink` (c3066143);
+  every other patch applied with `git apply --index` and no flags.
+- The E26/E32 patches were written for f9a2d34a; every upstream file they
+  touch has the same blob in 05e6c962, and the result equals the published
+  llvmpipe commits file for file.
 
 ## Known gaps at the snapshot
 
-- The head of `amdgpu-wddm/radv-wddm2` calls `radv_wddm2_winsys_create` from
-  `radv_device.c` with three arguments and without its public header, while the
-  function takes four. MSVC accepts the implicit declaration. The E35
-  `radv-prototype-contract.patch` corrects it and adds `/we4013`; it was still
-  being revised on 2026-09-26 and is not on this branch.
-- The E35 per-slot gather ring in `radv_wddm2_cs.c` and `radv_wddm2_cs.h` exists
-  only in the scratch tree, with no patch file yet.
-- `amdgpu-wddm/d3d10umd-zink` contains no RADV changes. The shared header
-  `src/util/bc250_host_bootstrap.h` has the same blob on this branch and on
-  `amdgpu-wddm/radv-wddm2`.
+- The consolidated branches have not been built. The component patches were
+  built and tested one by one in the lab (see the facts each commit names);
+  a clean build of either consolidated head is still to be done.
+- The in-flight commits contain scratch-tree edits that no patch file,
+  manifest or evidence directory records yet (a borrowed-BO map refusal in
+  RADV, a Zink helper that releases hosted runtime resources). They were
+  being edited while the branches were assembled and are not claimed as
+  built or tested.
+- `meson.build` differs between the two consolidated branches. The hunks do
+  not overlap (RADV: `with_vulkan_dx` and `HAVE_VULKAN_DX`; UMD: the d3d10umd
+  swrast-or-zink check), but both add `/we4013` with different comment text.
+  A combined build needs one merge of that file.
+- The E33 WGL/Zink increments (`zink_kopper.c`, `stw_*.c`,
+  `st_pbo_compute.c`) and the `dzn` changes are only on the RADV branch; the
+  UMD branch leaves those files at upstream.
+- The head of `amdgpu-wddm/d3d10umd-consolidated` keeps the E26 changes to
+  `tgsi_to_nir.c`, `tgsi_exec.c` and `gdi_sw_winsys.c` and the two
+  `bc250_*` test sources, which the Zink scratch tree does not have. The
+  `tgsi_to_nir.c` change (D3D10 SAMPLE opcodes, separate sampler views) is
+  on the Zink shader path, so the head differs in behaviour from the lab's
+  Zink UMD. The Zink prototype drops the two test executables from the target
+  `meson.build`, so their sources are no longer built, and the head builds
+  only the Zink UMD; the llvmpipe UMD builds from the llvmpipe part of the
+  series or from `amdgpu-wddm/d3d10umd-llvmpipe`.
+- The scratch tree `m12/mesa-current-src` carries the cp1250-re-encoded
+  copyright sign in six files; the branches use UTF-8.
+- The head of `amdgpu-wddm/radv-wddm2` still calls `radv_wddm2_winsys_create`
+  from `radv_device.c` with three arguments and without its public header;
+  the consolidated branch carries the E35 correction and makes C4013 fatal.
 - `src/amd/compiler/aco_disass.cpp` and `src/amd/vulkan/winsys/common/radv_winsys_cs.h`,
   carried over from the `lfrb/wddm2` port, have no SPDX header; the amdgpu-wddm
   sources do.
