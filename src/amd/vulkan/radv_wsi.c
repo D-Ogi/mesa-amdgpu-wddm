@@ -95,21 +95,28 @@ radv_init_wsi(struct radv_physical_device *pdev)
 {
    const struct radv_instance *instance = radv_physical_device_instance(pdev);
 
+   bool sw = false;
+
    VkResult result =
       wsi_device_init(&pdev->wsi_device, radv_physical_device_to_handle(pdev), radv_wsi_proc_addr, &instance->vk.alloc,
-                      pdev->wsi_master_fd, &pdev->drirc.options, &(struct wsi_device_options){.sw_device = false});
+                      pdev->wsi_master_fd, &pdev->drirc.options, &(struct wsi_device_options){.sw_device = sw});
    if (result != VK_SUCCESS)
       return result;
 
-   pdev->wsi_device.supports_modifiers = true;
+   pdev->wsi_device.supports_modifiers = pdev->info.is_amdgpu;
+#ifndef _WIN32
    pdev->wsi_device.set_memory_ownership = radv_wsi_set_memory_ownership;
    pdev->wsi_device.get_blit_queue = radv_wsi_get_prime_blit_queue;
+#endif
 
    for (uint32_t i = 0; i < ARRAY_SIZE(pdev->wsi_device.supports_protected); i++) {
       pdev->wsi_device.supports_protected[i] = radv_tmz_enabled(pdev);
    }
 
    wsi_device_setup_syncobj_fd(&pdev->wsi_device, pdev->wsi_syncobj_fd);
+
+   if (pdev->ws && pdev->ws->init_wsi)
+      pdev->ws->init_wsi(pdev->ws, &pdev->wsi_device);
 
    pdev->vk.wsi_device = &pdev->wsi_device;
 

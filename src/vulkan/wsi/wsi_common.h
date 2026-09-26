@@ -139,6 +139,7 @@ struct wsi_device {
    } x11;
 
    struct {
+      void *(*get_d3d12_device)(VkDevice device);
       void *(*get_d3d12_command_queue)(VkDevice device);
       /* Needs to be per VkDevice, not VkPhysicalDevice, depends on queue config */
       bool (*requires_blits)(VkDevice device);
@@ -207,6 +208,12 @@ struct wsi_device {
     */
    struct vk_queue *(*get_blit_queue)(VkDevice device);
 
+   /*
+    * If set, overrides the Vulkan image blit with a driver-provided
+    * implementation (e.g. to blit on a D3D12 queue).
+    */
+   VkResult (*blit)(struct wsi_swapchain *chain, uint32_t image_index);
+
 #define WSI_CB(cb) PFN_vk##cb cb
    WSI_CB(AllocateMemory);
    WSI_CB(AllocateCommandBuffers);
@@ -249,6 +256,7 @@ struct wsi_device {
    WSI_CB(GetPhysicalDeviceQueueFamilyProperties);
    WSI_CB(GetQueryPoolResults);
    WSI_CB(GetSemaphoreFdKHR);
+   WSI_CB(GetSemaphoreWin32HandleKHR);
    WSI_CB(ResetFences);
    WSI_CB(QueueSubmit2);
    WSI_CB(SetDebugUtilsObjectNameEXT);

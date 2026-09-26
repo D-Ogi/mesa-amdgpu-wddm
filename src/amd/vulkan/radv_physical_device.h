@@ -25,6 +25,7 @@
 #include "compiler/shader_enums.h"
 #include "nir_shader_compiler_options.h"
 
+#include "vk_dx_adapter_info.h"
 #include "vk_physical_device.h"
 #include "vk_sync.h"
 #include "vk_sync_timeline.h"
@@ -81,6 +82,8 @@ enum radv_drm_device_type {
 struct radv_physical_device {
    struct vk_physical_device vk;
 
+   struct vk_dx_adapter_info wddm2_adapter;
+   struct radeon_winsys *ws;
    struct radeon_info info;
    char name[VK_MAX_PHYSICAL_DEVICE_NAME_SIZE];
    char marketing_name[VK_MAX_PHYSICAL_DEVICE_NAME_SIZE];
@@ -277,6 +280,11 @@ bool radv_is_dcc_disabled(const struct radv_physical_device *pdev);
 
 VkResult create_drm_physical_device(struct vk_instance *vk_instance, struct _drmDevice *device,
                                     struct vk_physical_device **out);
+
+VkResult create_dx_physical_device(struct vk_instance *vk_instance,
+                                   const struct vk_dx_adapter_info *adapter,
+                                   void *unk_adapter,
+                                   struct vk_physical_device **out);
 
 void radv_physical_device_destroy(struct vk_physical_device *vk_pdev);
 

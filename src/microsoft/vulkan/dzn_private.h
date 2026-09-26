@@ -32,6 +32,7 @@
 #include "vk_debug_report.h"
 #include "vk_descriptor_set_layout.h"
 #include "vk_device.h"
+#include "vk_dx_adapter_info.h"
 #include "vk_image.h"
 #include "vk_log.h"
 #include "vk_physical_device.h"
@@ -54,7 +55,6 @@
 
 #include "dzn_entrypoints.h"
 #include "dzn_nir.h"
-#include "dzn_physical_device_enum.h"
 
 #include <vulkan/vulkan.h>
 #include <vulkan/vk_icd.h>
@@ -184,7 +184,7 @@ struct dzn_physical_device {
    struct vk_physical_device_dispatch_table dispatch;
 
    IUnknown *adapter;
-   struct dzn_physical_device_desc desc;
+   struct vk_dx_adapter_info desc;
 
    uint32_t queue_family_count;
    struct dzn_queue_family {

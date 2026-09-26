@@ -82,7 +82,10 @@ radv_alloc_memory(struct radv_device *device, const VkMemoryAllocateInfo *pAlloc
 
    assert(pAllocateInfo->sType == VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO);
 
-   const VkImportMemoryFdInfoKHR *import_info = vk_find_struct_const(pAllocateInfo->pNext, IMPORT_MEMORY_FD_INFO_KHR);
+   const VkImportMemoryFdInfoKHR *fd_import_info =
+      vk_find_struct_const(pAllocateInfo->pNext, IMPORT_MEMORY_FD_INFO_KHR);
+   const VkImportMemoryWin32HandleInfoKHR *win32_import_info =
+      vk_find_struct_const(pAllocateInfo->pNext, IMPORT_MEMORY_WIN32_HANDLE_INFO_KHR);
    const VkMemoryDedicatedAllocateInfo *dedicate_info =
       vk_find_struct_const(pAllocateInfo->pNext, MEMORY_DEDICATED_ALLOCATE_INFO);
    const VkExportMemoryAllocateInfo *export_info =
@@ -169,16 +172,28 @@ radv_alloc_memory(struct radv_device *device, const VkMemoryAllocateInfo *pAlloc
       if (result != VK_SUCCESS)
          goto fail;
       mem->export_handle_type = export_info->handleTypes;
-   } else if (import_info) {
-      assert(import_info->handleType == VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_FD_BIT ||
-             import_info->handleType == VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT);
-      result = radv_bo_from_fd(device, import_info->fd, priority, mem, NULL);
-      if (result != VK_SUCCESS) {
-         goto fail;
+   } else if (fd_import_info || win32_import_info) {
+      if (fd_import_info) {
+         assert(fd_import_info->handleType == VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_FD_BIT ||
+               fd_import_info->handleType == VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT);
+         result = radv_bo_from_fd(device, fd_import_info->fd, priority, mem, NULL);
+         if (result != VK_SUCCESS) {
+            goto fail;
+         } else {
+            close(fd_import_info->fd);
+         }
+         mem->import_handle_type = fd_import_info->handleType;
       } else {
-         close(import_info->fd);
+         assert(win32_import_info->handleType == VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_WIN32_BIT_KHR ||
+                win32_import_info->handleType == VK_EXTERNAL_MEMORY_HANDLE_TYPE_D3D12_RESOURCE_BIT_KHR);
+         result = radv_bo_from_handle(device, win32_import_info->handle, priority, mem, NULL);
+         if (result != VK_SUCCESS) {
+            goto fail;
+         } else {
+            CloseHandle(win32_import_info->handle);
+         }
+         mem->import_handle_type = win32_import_info->handleType;
       }
-      mem->import_handle_type = import_info->handleType;
    } else if (host_ptr_info) {
       assert(host_ptr_info->handleType == VK_EXTERNAL_MEMORY_HANDLE_TYPE_HOST_ALLOCATION_BIT_EXT);
       result = radv_bo_from_ptr(device, host_ptr_info->pHostPointer, pAllocateInfo->allocationSize, priority, mem);
@@ -206,7 +221,7 @@ radv_alloc_memory(struct radv_device *device, const VkMemoryAllocateInfo *pAlloc
           */
          if (domain == RADEON_DOMAIN_VRAM)
             flags |= RADEON_FLAG_GTT_WC;
-      } else if (!import_info) {
+      } else {
          /* neither export nor import */
          flags |= RADEON_FLAG_NO_INTERPROCESS_SHARING | RADEON_FLAG_PREFER_LOCAL_BO;
       }
@@ -246,8 +261,8 @@ radv_alloc_memory(struct radv_device *device, const VkMemoryAllocateInfo *pAlloc
          mtx_unlock(&device->overallocation_mutex);
       }
 
-      result = radv_bo_create(device, &mem->base, alloc_size, pdev->info.max_alignment, domain, flags, priority,
-                              replay_address, is_internal, &mem->bo);
+      result = radv_bo_create_for_image(device, &mem->base, alloc_size, pdev->info.max_alignment, domain, flags, priority,
+                                        replay_address, is_internal, mem->image, &mem->bo);
 
       if (result != VK_SUCCESS) {
          if (device->overallocation_disallowed) {
@@ -259,25 +274,24 @@ radv_alloc_memory(struct radv_device *device, const VkMemoryAllocateInfo *pAlloc
       }
 
       if (flags & RADEON_FLAG_GFX12_ALLOW_DCC) {
+         struct radeon_bo_metadata md = {0};
+
          if (mem->image) {
             /* Set BO metadata (including DCC tiling flags) for dedicated
-             * allocations because compressed writes are enabled and the kernel
-             * requires a DCC view for recompression.
-             */
-            radv_image_bo_set_metadata(device, mem->image, mem->bo);
+            * allocations because compressed writes are enabled and the kernel
+            * requires a DCC view for recompression.
+            */
+            radv_image_get_metadata(device, mem->image, RADEON_METADATA_TYPE_UMD, &md);
          } else {
             /* Otherwise, disable compressed writes to prevent recompression
-             * when the BO is moved back to VRAM because it's not yet possible
-             * to set DCC tiling flags per range for suballocations. The only
-             * problem is that we will loose DCC after migration but that
-             * should happen rarely.
-             */
-            struct radeon_bo_metadata md = {0};
-
+            * when the BO is moved back to VRAM because it's not yet possible
+            * to set DCC tiling flags per range for suballocations. The only
+            * problem is that we will loose DCC after migration but that
+            * should happen rarely.
+            */
             md.u.gfx12.dcc_write_compress_disable = true;
-
-            device->ws->buffer_set_metadata(device->ws, mem->bo, &md);
          }
+         device->ws->buffer_set_metadata(device->ws, mem->bo, &md);
       }
 
       mem->heap_index = heap_index;

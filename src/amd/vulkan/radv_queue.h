@@ -84,6 +84,7 @@ struct radv_queue_state {
 struct radv_queue {
    struct vk_queue vk;
    struct radeon_winsys_ctx *hw_ctx;
+   bool owns_hw_ctx; /* WDDM dedicated sparse queue owns an independent context. */
    enum radeon_ctx_priority priority;
    struct radv_queue_state state;
    struct radv_queue_state *follower_state;

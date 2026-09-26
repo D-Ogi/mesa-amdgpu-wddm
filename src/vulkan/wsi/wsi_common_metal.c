@@ -929,8 +929,8 @@ wsi_metal_surface_create_swapchain(VkIcdSurfaceBase *icd_surface,
    };
    struct wsi_base_image_params *params = is_sw_driver ? &cpu_params.base : &metal_params;
 
-   result = wsi_swapchain_init(wsi_device, &chain->base, device,
-                               pCreateInfo, params, pAllocator);
+   result = wsi_swapchain_init(wsi_device, &chain->base, device, pCreateInfo,
+                               num_images, params, pAllocator);
    if (result != VK_SUCCESS)
       goto fail_chain_alloc;
 
@@ -944,7 +944,6 @@ wsi_metal_surface_create_swapchain(VkIcdSurfaceBase *icd_surface,
    chain->base.wait_for_present2 = wsi_metal_swapchain_wait_for_present;
    chain->base.set_hdr_metadata = wsi_metal_swapchain_set_hdr_metadata;
    chain->base.present_mode = wsi_swapchain_get_present_mode(wsi_device, pCreateInfo);
-   chain->base.image_count = num_images;
    chain->extent = pCreateInfo->imageExtent;
    chain->vk_format = pCreateInfo->imageFormat;
    chain->surface = metal_surface;
@@ -1132,6 +1131,8 @@ wsi_metal_configure_image(const struct wsi_swapchain *chain,
       wsi_configure_image(chain, pCreateInfo, 0, info);
    if (result != VK_SUCCESS)
       return result;
+
+   info->image_type = WSI_IMAGE_TYPE_METAL;
 
    if (chain->blit.type != WSI_SWAPCHAIN_NO_BLIT) {
       info->create.usage |= VK_IMAGE_USAGE_TRANSFER_SRC_BIT;

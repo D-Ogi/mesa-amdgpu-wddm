@@ -3259,7 +3259,14 @@ radv_emit_compute_shader(const struct radv_physical_device *pdev, struct radv_cm
       gfx12_push_sh_reg(R_00B820_COMPUTE_NUM_THREAD_Y, shader->regs.cs.compute_num_thread_y);
       gfx12_push_sh_reg(R_00B824_COMPUTE_NUM_THREAD_Z, shader->regs.cs.compute_num_thread_z);
    } else {
-      radeon_set_sh_reg(shader->regs.pgm_lo, va >> 8);
+      /* The preamble's COMPUTE_PGM_HI is address32_hi >> 8. The caps blob still
+       * says 0xffff8000, so that register stays 0x80, and this used to rewrite
+       * only PGM_LO. A shader at 0x100040000 was then fetched from
+       * 0x800100040000, while DMA_DATA in the same IB used the real VA.
+       * Graphics already emits the high bits from the VA. */
+      radeon_set_sh_reg_seq(shader->regs.pgm_lo, 2);
+      radeon_emit(va >> 8);
+      radeon_emit(S_00B834_DATA(va >> 40));
       radeon_set_sh_reg_seq(shader->regs.pgm_rsrc1, 2);
       radeon_emit(shader->config.rsrc1);
       radeon_emit(shader->config.rsrc2);

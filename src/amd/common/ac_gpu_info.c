@@ -1383,6 +1383,81 @@ void ac_fill_hw_info(struct radeon_info *info, const struct drm_amdgpu_info_devi
    }
 }
 
+void
+ac_get_default_max_submitted_ibs(struct radeon_info *info)
+{
+   /* When the number of IBs can't be queried from the kernel, we choose a
+    * rough estimate that should work well (as of kernel 6.3).
+    */
+   for (unsigned i = 0; i < AMD_NUM_IP_TYPES; ++i)
+      info->max_submitted_ibs[i] = 50;
+
+   info->max_submitted_ibs[AMD_IP_GFX] = info->gfx_level >= GFX7 ? 192 : 144;
+   info->max_submitted_ibs[AMD_IP_COMPUTE] = 124;
+   info->max_submitted_ibs[AMD_IP_VCN_JPEG] = 16;
+   for (unsigned i = 0; i < AMD_NUM_IP_TYPES; ++i) {
+      /* Clear out max submitted IB count for IPs that have no queues. */
+      if (!info->ip[i].num_queues)
+         info->max_submitted_ibs[i] = 0;
+   }
+}
+
+void
+ac_fill_attribute_ring_info(struct radeon_info *info)
+{
+   if (info->gfx_level >= GFX11) {
+      unsigned num_prim_exports = 0, num_pos_exports = 0;
+
+      if (info->gfx_level >= GFX12) {
+         /* Navi48 results:
+          *
+          * Without NGG culling:
+          * - 1024 is the best for <=4 varyings, though longer GS waves may need more (see below).
+          * - 1400 is in between (a tiny bit slower for <=4 varyings, faster for >=6 varyings).
+          * - 1900 is the best for >=6 varyings because smaller sizes are throttled by not enough space.
+          *
+          * With NGG culling:
+          * - 1024 is the worst because NGG culling has longer GS waves, so it needs more space to
+          *   prevent getting throttled even if it doesn't end up using it. gs_alloc_req doesn't
+          *   deallocate the unused portion.
+          * - 1400 is the best for <=4 varyings.
+          * - 1900 is the best for >=6 varyings.
+          */
+         info->attribute_ring_size_per_se = 1400 * 1024;
+         num_prim_exports = 16368; /* also includes gs_alloc_req */
+         num_pos_exports = 16384;
+      } else if (info->l3_cache_size_mb) {
+         info->attribute_ring_size_per_se = 1400 * 1024;
+      } else {
+         assert(info->num_se == 1);
+
+         if (info->l2_cache_size >= 2 * 1024 * 1024)
+            info->attribute_ring_size_per_se = 768 * 1024;
+         else
+            info->attribute_ring_size_per_se = info->l2_cache_size / 2;
+      }
+
+      /* The size must be aligned to 64K per SE and must be at most 16M in total. */
+      info->attribute_ring_size_per_se = align(info->attribute_ring_size_per_se, 64 * 1024);
+      assert(info->attribute_ring_size_per_se * info->max_se <= 16 * 1024 * 1024);
+
+      /* Compute the pos and prim ring sizes and offsets. */
+      info->pos_ring_size_per_se = align(num_pos_exports * 16, 32);
+      info->prim_ring_size_per_se = align(num_prim_exports * 4, 32);
+      assert(info->gfx_level >= GFX12 ||
+             (!info->pos_ring_size_per_se && !info->prim_ring_size_per_se));
+
+      uint32_t max_se_squared = info->max_se * info->max_se;
+      uint32_t attribute_ring_size = info->attribute_ring_size_per_se * info->max_se;
+      uint32_t pos_ring_size = align(info->pos_ring_size_per_se * max_se_squared, 64 * 1024);
+      uint32_t prim_ring_size = align(info->prim_ring_size_per_se * max_se_squared, 64 * 1024);
+
+      info->pos_ring_offset = attribute_ring_size;
+      info->prim_ring_offset = info->pos_ring_offset + pos_ring_size;
+      info->total_attribute_pos_prim_ring_size = info->prim_ring_offset + prim_ring_size;
+   }
+}
+
 void ac_fill_tess_info(struct radeon_info *info)
 {
    /* This is the size of all TCS outputs in memory per workgroup.
@@ -1459,6 +1534,25 @@ void ac_fill_tess_info(struct radeon_info *info)
    info->total_tess_ring_size = info->tess_offchip_ring_size + info->tess_factor_ring_size;
 }
 
+void
+ac_fill_scratch_info(struct radeon_info *info)
+{
+   /* Compute the scratch WAVESIZE granularity in bytes. */
+   info->scratch_wavesize_granularity_shift = info->gfx_level >= GFX11 ? 8 : 10;
+   info->scratch_wavesize_granularity = BITFIELD_BIT(info->scratch_wavesize_granularity_shift);
+
+   /* The maximum number of scratch waves. The number is only a function of the number of CUs.
+    * It should be large enough to hold at least 1 threadgroup. Use the minimum per-SA CU count.
+    *
+    * We can decrease the number to make it fit into the infinity cache.
+    */
+   const unsigned max_waves_per_tg = 32; /* 1024 threads in Wave32 */
+   info->max_scratch_waves = MAX2(32 * info->max_good_cu_per_sa * info->max_sa_per_se * info->num_se,
+                                  max_waves_per_tg);
+   info->has_scratch_base_registers = info->gfx_level >= GFX11 ||
+                                      (!info->has_graphics && info->family >= CHIP_GFX940);
+}
+
 enum ac_query_gpu_info_result
 ac_query_gpu_info(int fd, void *dev_p, struct radeon_info *info,
                   bool require_pci_bus_info, bool compiler_compat_mode)
@@ -1491,7 +1585,6 @@ ac_query_gpu_info(int fd, void *dev_p, struct radeon_info *info,
    }
 
    assert(info->drm_major == 3);
-   info->is_amdgpu = true;
 
    if (info->drm_minor < 54) {
       fprintf(stderr, "amdgpu: DRM version is %u.%u.%u, but this driver is "
@@ -1636,26 +1729,14 @@ ac_query_gpu_info(int fd, void *dev_p, struct radeon_info *info,
 
    ac_fill_video_info(info, dev);
 
+   ac_fill_scratch_info(info);
+
    /* BIG_PAGE is supported since gfx10.3 and requires VRAM. VRAM is only guaranteed
     * with AMDGPU_GEM_CREATE_DISCARDABLE.
     */
    info->discardable_allows_big_page = info->gfx_level >= GFX10_3 && info->gfx_level < GFX12 &&
                                        info->has_dedicated_vram;
 
-   /* Compute the scratch WAVESIZE granularity in bytes. */
-   info->scratch_wavesize_granularity_shift = info->gfx_level >= GFX11 ? 8 : 10;
-   info->scratch_wavesize_granularity = BITFIELD_BIT(info->scratch_wavesize_granularity_shift);
-
-   /* The maximum number of scratch waves. The number is only a function of the number of CUs.
-    * It should be large enough to hold at least 1 threadgroup. Use the minimum per-SA CU count.
-    *
-    * We can decrease the number to make it fit into the infinity cache.
-    */
-   const unsigned max_waves_per_tg = 32; /* 1024 threads in Wave32 */
-   info->max_scratch_waves = MAX2(32 * info->max_good_cu_per_sa * info->max_sa_per_se * info->num_se,
-                                  max_waves_per_tg);
-   info->has_scratch_base_registers = info->gfx_level >= GFX11 ||
-                                      (!info->has_graphics && info->family >= CHIP_GFX940);
    info->max_gflops = (info->gfx_level >= GFX11 ? 256 : 128) * info->num_cu * info->max_gpu_freq_mhz / 1000;
    info->memory_bandwidth_gbps = DIV_ROUND_UP(info->memory_freq_mhz_effective * info->memory_bus_width / 8, 1000);
 
@@ -1697,74 +1778,10 @@ ac_query_gpu_info(int fd, void *dev_p, struct radeon_info *info,
     */
    r = ac_drm_query_info(dev, AMDGPU_INFO_MAX_IBS,
                          sizeof(info->max_submitted_ibs), info->max_submitted_ibs);
-   if (r) {
-      /* When the number of IBs can't be queried from the kernel, we choose a
-       * rough estimate that should work well (as of kernel 6.3).
-       */
-      for (unsigned i = 0; i < AMD_NUM_IP_TYPES; ++i)
-         info->max_submitted_ibs[i] = 50;
+   if (r)
+      ac_get_default_max_submitted_ibs(info);
 
-      info->max_submitted_ibs[AMD_IP_GFX] = info->gfx_level >= GFX7 ? 192 : 144;
-      info->max_submitted_ibs[AMD_IP_COMPUTE] = 124;
-      info->max_submitted_ibs[AMD_IP_VCN_JPEG] = 16;
-      for (unsigned i = 0; i < AMD_NUM_IP_TYPES; ++i) {
-         /* Clear out max submitted IB count for IPs that have no queues. */
-         if (!info->ip[i].num_queues)
-            info->max_submitted_ibs[i] = 0;
-      }
-   }
-
-   if (info->gfx_level >= GFX11) {
-      unsigned num_prim_exports = 0, num_pos_exports = 0;
-
-      if (info->gfx_level >= GFX12) {
-         /* Navi48 results:
-          *
-          * Without NGG culling:
-          * - 1024 is the best for <=4 varyings, though longer GS waves may need more (see below).
-          * - 1400 is in between (a tiny bit slower for <=4 varyings, faster for >=6 varyings).
-          * - 1900 is the best for >=6 varyings because smaller sizes are throttled by not enough space.
-          *
-          * With NGG culling:
-          * - 1024 is the worst because NGG culling has longer GS waves, so it needs more space to
-          *   prevent getting throttled even if it doesn't end up using it. gs_alloc_req doesn't
-          *   deallocate the unused portion.
-          * - 1400 is the best for <=4 varyings.
-          * - 1900 is the best for >=6 varyings.
-          */
-         info->attribute_ring_size_per_se = 1400 * 1024;
-         num_prim_exports = 16368; /* also includes gs_alloc_req */
-         num_pos_exports = 16384;
-      } else if (info->l3_cache_size_mb) {
-         info->attribute_ring_size_per_se = 1400 * 1024;
-      } else {
-         assert(info->num_se == 1);
-
-         if (info->l2_cache_size >= 2 * 1024 * 1024)
-            info->attribute_ring_size_per_se = 768 * 1024;
-         else
-            info->attribute_ring_size_per_se = info->l2_cache_size / 2;
-      }
-
-      /* The size must be aligned to 64K per SE and must be at most 16M in total. */
-      info->attribute_ring_size_per_se = align(info->attribute_ring_size_per_se, 64 * 1024);
-      assert(info->attribute_ring_size_per_se * info->max_se <= 16 * 1024 * 1024);
-
-      /* Compute the pos and prim ring sizes and offsets. */
-      info->pos_ring_size_per_se = align(num_pos_exports * 16, 32);
-      info->prim_ring_size_per_se = align(num_prim_exports * 4, 32);
-      assert(info->gfx_level >= GFX12 ||
-             (!info->pos_ring_size_per_se && !info->prim_ring_size_per_se));
-
-      uint32_t max_se_squared = info->max_se * info->max_se;
-      uint32_t attribute_ring_size = info->attribute_ring_size_per_se * info->max_se;
-      uint32_t pos_ring_size = align(info->pos_ring_size_per_se * max_se_squared, 64 * 1024);
-      uint32_t prim_ring_size = align(info->prim_ring_size_per_se * max_se_squared, 64 * 1024);
-
-      info->pos_ring_offset = attribute_ring_size;
-      info->prim_ring_offset = info->pos_ring_offset + pos_ring_size;
-      info->total_attribute_pos_prim_ring_size = info->prim_ring_offset + prim_ring_size;
-   }
+   ac_fill_attribute_ring_info(info);
 
    if (info->gfx_level >= GFX11 && (info->userq_ip_mask & (1 << AMD_IP_GFX))) {
       struct drm_amdgpu_info_uq_metadata fw_info;
@@ -1806,13 +1823,7 @@ ac_query_gpu_info(int fd, void *dev_p, struct radeon_info *info,
    }
 
    set_custom_cu_en_mask(info);
-
-   if (info->gfx_level >= GFX9) {
-      info->se_tile_repeat = 32 * info->max_se;
-   } else {
-      ac_get_raster_config(info, &info->pa_sc_raster_config,
-                           &info->pa_sc_raster_config_1, &info->se_tile_repeat);
-   }
+   ac_fill_raster_config(info);
 
    if (info->compiler_info.has_smem_with_null_prt_bug) {
       /* Query the PRT control bit that determines whether a VA is in the
@@ -1923,11 +1934,13 @@ void ac_print_gpu_info(FILE *f, const struct radeon_info *info, int fd)
    fprintf(f, "    name = %s\n", ac_get_family_name(info->family));
    fprintf(f, "    marketing_name = %s\n", info->marketing_name);
 
-   char proc_fd[32];
-   char dev_filename[32] = {0};
-   snprintf(proc_fd, sizeof(proc_fd), "/proc/self/fd/%u", fd);
-   if (readlink(proc_fd, dev_filename, sizeof(dev_filename) - 1) != -1)
-      fprintf(f, "    dev_filename = %s\n", dev_filename);
+   if (fd >= 0) {
+      char proc_fd[32];
+      char dev_filename[32] = {0};
+      snprintf(proc_fd, sizeof(proc_fd), "/proc/self/fd/%u", fd);
+      if (readlink(proc_fd, dev_filename, sizeof(dev_filename) - 1) != -1)
+         fprintf(f, "    dev_filename = %s\n", dev_filename);
+   }
 
    fprintf(f, "    num_se = %i\n", info->num_se);
    fprintf(f, "    num_rb = %i\n", info->num_rb);
@@ -2298,10 +2311,14 @@ int ac_get_gs_table_depth(enum amd_gfx_level gfx_level, enum radeon_family famil
    }
 }
 
-void ac_get_raster_config(const struct radeon_info *info, uint32_t *raster_config_p,
-                          uint32_t *raster_config_1_p, uint32_t *se_tile_repeat_p)
+void ac_fill_raster_config(struct radeon_info *info)
 {
    unsigned raster_config, raster_config_1, se_tile_repeat;
+
+   if (info->gfx_level >= GFX9) {
+      info->se_tile_repeat = 32 * info->max_se;
+      return;
+   }
 
    switch (info->family) {
    /* 1 SE / 1 RB */
@@ -2381,10 +2398,9 @@ void ac_get_raster_config(const struct radeon_info *info, uint32_t *raster_confi
    /* I don't know how to calculate this, though this is probably a good guess. */
    se_tile_repeat = MAX2(se_width, se_height) * info->max_se;
 
-   *raster_config_p = raster_config;
-   *raster_config_1_p = raster_config_1;
-   if (se_tile_repeat_p)
-      *se_tile_repeat_p = se_tile_repeat;
+   info->pa_sc_raster_config = raster_config;
+   info->pa_sc_raster_config_1 = raster_config_1;
+   info->se_tile_repeat = se_tile_repeat;
 }
 
 void ac_get_harvested_configs(const struct radeon_info *info, unsigned raster_config,

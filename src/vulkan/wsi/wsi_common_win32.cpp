@@ -37,10 +37,12 @@
 #include "wsi_common_private.h"
 
 #include <dxgi1_4.h>
+#include "util/u_win32_library.h"
 #include <directx/d3d12.h>
 #include <dxguids/dxguids.h>
 
 #include <dcomp.h>
+#include <dwmapi.h>
 
 #if defined(__GNUC__)
 #pragma GCC diagnostic ignored "-Wint-to-pointer-cast"      // warning: cast to pointer from integer of different size
@@ -73,9 +75,11 @@ struct wsi_win32_image {
    struct wsi_win32_swapchain *chain;
    struct {
       ID3D12Resource *swapchain_res;
+      ID3D12Resource *blit_res;
+      ID3D12CommandAllocator *cmd_alloc;
+      ID3D12GraphicsCommandList *cmd_list;
    } dxgi;
    struct {
-      HDC dc;
       HBITMAP bmp;
       int bmp_row_pitch;
       void *ppvBits;
@@ -105,10 +109,13 @@ struct wsi_win32_swapchain {
    mtx_t                      acquire_mutex;
    struct u_cnd_monotonic     acquire_cond;
    uint64_t                     flip_sequence;
+   uint64_t                     completed_present_id;
    VkResult                     status;
    VkExtent2D                 extent;
    HWND wnd;
-   HDC chain_dc;
+   VkFormat format;
+   bool retired;
+   ID3D12Fence              **d3d12_blit_fences;
    struct wsi_win32_image     images[0];
 };
 
@@ -201,20 +208,21 @@ wsi_win32_surface_get_capabilities(VkIcdSurfaceBase *surf,
       (uint32_t)win_rect.right - (uint32_t)win_rect.left,
       (uint32_t)win_rect.bottom - (uint32_t)win_rect.top
    };
-   caps->surfaceCapabilities.minImageExtent = { 1u, 1u };
-   caps->surfaceCapabilities.maxImageExtent = {
-      wsi_device->maxImageDimension2D,
-      wsi_device->maxImageDimension2D,
-   };
+   caps->surfaceCapabilities.minImageExtent =
+      caps->surfaceCapabilities.currentExtent;
+   caps->surfaceCapabilities.maxImageExtent =
+      caps->surfaceCapabilities.currentExtent;
 
    caps->surfaceCapabilities.supportedTransforms = VK_SURFACE_TRANSFORM_IDENTITY_BIT_KHR;
    caps->surfaceCapabilities.currentTransform = VK_SURFACE_TRANSFORM_IDENTITY_BIT_KHR;
    caps->surfaceCapabilities.maxImageArrayLayers = 1;
 
    caps->surfaceCapabilities.supportedCompositeAlpha =
-      VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR |
-      VK_COMPOSITE_ALPHA_PRE_MULTIPLIED_BIT_KHR |
-      VK_COMPOSITE_ALPHA_POST_MULTIPLIED_BIT_KHR;
+      VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR;
+   if (!wsi_device->sw && wsi_device->win32.get_d3d12_command_queue)
+      caps->surfaceCapabilities.supportedCompositeAlpha |=
+         VK_COMPOSITE_ALPHA_PRE_MULTIPLIED_BIT_KHR |
+         VK_COMPOSITE_ALPHA_POST_MULTIPLIED_BIT_KHR;
 
    VkImageUsageFlags image_usage = wsi_caps_get_image_usage();
 
@@ -285,6 +293,17 @@ wsi_win32_surface_get_capabilities2(VkIcdSurfaceBase *surface,
                                        "application bug.\n");
             compat->presentModeCount = 1;
          }
+         break;
+      }
+
+      case VK_STRUCTURE_TYPE_SURFACE_CAPABILITIES_PRESENT_ID_2_KHR: {
+         VkSurfaceCapabilitiesPresentId2KHR *caps = (VkSurfaceCapabilitiesPresentId2KHR *)ext;
+         caps->presentId2Supported = VK_TRUE;
+         break;
+      }
+      case VK_STRUCTURE_TYPE_SURFACE_CAPABILITIES_PRESENT_WAIT_2_KHR: {
+         VkSurfaceCapabilitiesPresentWait2KHR *caps = (VkSurfaceCapabilitiesPresentWait2KHR *)ext;
+         caps->presentWait2Supported = VK_TRUE;
          break;
       }
 
@@ -458,6 +477,178 @@ wsi_win32_surface_get_present_rectangles(VkIcdSurfaceBase *surface,
    return vk_outarray_status(&out);
 }
 
+static DXGI_FORMAT
+convert_to_dxgi_format(VkFormat vk_format)
+{
+   /* Only two formats available in wsi_common_win32 */
+   switch (vk_format) {
+   case VK_FORMAT_B8G8R8A8_SRGB:
+      return DXGI_FORMAT_B8G8R8A8_UNORM_SRGB;
+   case VK_FORMAT_B8G8R8A8_UNORM:
+      return DXGI_FORMAT_B8G8R8A8_UNORM;
+   default:
+      return DXGI_FORMAT_UNKNOWN;
+   }
+}
+
+static VkResult
+wsi_dxgi_create_d3d12_resource(struct wsi_win32_swapchain *chain,
+                               struct wsi_win32_image *win32_image,
+                               HANDLE *out_handle)
+{
+   struct wsi_device *wsi_device = chain->wsi->wsi;
+   ID3D12Device *d3d12_device;
+   HRESULT hr;
+
+   D3D12_HEAP_PROPERTIES heap_props = { 0 };
+   heap_props.Type = D3D12_HEAP_TYPE_DEFAULT;
+   heap_props.CPUPageProperty = D3D12_CPU_PAGE_PROPERTY_UNKNOWN;
+   heap_props.MemoryPoolPreference = D3D12_MEMORY_POOL_UNKNOWN;
+   heap_props.CreationNodeMask = 1;
+   heap_props.VisibleNodeMask = 1;
+
+   D3D12_RESOURCE_DESC desc = { 0 };
+   desc.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+   desc.Alignment = 0;
+   desc.Width = chain->extent.width;
+   desc.Height = chain->extent.height;
+   desc.DepthOrArraySize = 1;
+   desc.MipLevels = 1;
+   desc.Format = convert_to_dxgi_format(chain->base.image_info.create.format);
+   desc.SampleDesc = {1, 0};
+   desc.Layout = D3D12_TEXTURE_LAYOUT_UNKNOWN;
+   desc.Flags = D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET;
+
+   d3d12_device = (ID3D12Device *)wsi_device->win32.get_d3d12_device(chain->base.device);
+   hr = d3d12_device->CreateCommittedResource(&heap_props,
+                                              D3D12_HEAP_FLAG_SHARED,
+                                              &desc,
+                                              D3D12_RESOURCE_STATE_RENDER_TARGET,
+                                              NULL,
+                                              IID_PPV_ARGS(&win32_image->dxgi.blit_res));
+
+   if (hr != S_OK)
+      return VK_ERROR_OUT_OF_DEVICE_MEMORY;
+
+   if (out_handle) {
+      hr = d3d12_device->CreateSharedHandle((ID3D12DeviceChild *)win32_image->dxgi.blit_res,
+                                            NULL,
+                                            GENERIC_ALL,
+                                            NULL,
+                                            out_handle);
+      if (hr != S_OK) {
+         win32_image->dxgi.blit_res->Release();
+         return VK_ERROR_OUT_OF_DEVICE_MEMORY;
+      }
+   }
+
+   return VK_SUCCESS;
+}
+
+static VkResult
+wsi_dxgi_create_blit_context(struct wsi_win32_swapchain *chain,
+                             struct wsi_win32_image *win32_image)
+{
+   struct wsi_device *wsi_device = chain->wsi->wsi;
+   ID3D12Device *d3d12_device;
+   ID3D12Resource *src = win32_image->dxgi.blit_res;
+   ID3D12Resource *dst = win32_image->dxgi.swapchain_res;
+   HRESULT hr;
+   VkResult result;
+
+   d3d12_device = (ID3D12Device *)wsi_device->win32.get_d3d12_device(chain->base.device);
+   hr = d3d12_device->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT,
+                                             IID_PPV_ARGS(&win32_image->dxgi.cmd_alloc));
+   if (FAILED(hr))
+      return VK_ERROR_OUT_OF_DEVICE_MEMORY;
+
+   hr = d3d12_device->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT,
+                                        win32_image->dxgi.cmd_alloc, NULL,
+                                        IID_PPV_ARGS(&win32_image->dxgi.cmd_list));
+   if (FAILED(hr)) {
+      win32_image->dxgi.cmd_alloc->Release();
+      return VK_ERROR_OUT_OF_DEVICE_MEMORY;
+   }
+
+   ID3D12GraphicsCommandList *cmd_list = win32_image->dxgi.cmd_list;
+   D3D12_RESOURCE_BARRIER barrier = { 0 };
+   barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+   barrier.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+
+   barrier.Transition.pResource = dst;
+   barrier.Transition.StateBefore = D3D12_RESOURCE_STATE_PRESENT;
+   barrier.Transition.StateAfter = D3D12_RESOURCE_STATE_COPY_DEST;
+   cmd_list->ResourceBarrier(1, &barrier);
+
+   barrier.Transition.pResource = src;
+   barrier.Transition.StateBefore = D3D12_RESOURCE_STATE_RENDER_TARGET;
+   barrier.Transition.StateAfter = D3D12_RESOURCE_STATE_COPY_SOURCE;
+   cmd_list->ResourceBarrier(1, &barrier);
+
+   cmd_list->CopyResource(dst, src);
+
+   barrier.Transition.pResource = dst;
+   barrier.Transition.StateBefore = D3D12_RESOURCE_STATE_COPY_DEST;
+   barrier.Transition.StateAfter = D3D12_RESOURCE_STATE_PRESENT;
+   cmd_list->ResourceBarrier(1, &barrier);
+
+   barrier.Transition.pResource = src;
+   barrier.Transition.StateBefore = D3D12_RESOURCE_STATE_COPY_SOURCE;
+   barrier.Transition.StateAfter = D3D12_RESOURCE_STATE_RENDER_TARGET;
+   cmd_list->ResourceBarrier(1, &barrier);
+
+   cmd_list->Close();
+
+   return VK_SUCCESS;
+}
+
+static void
+wsi_dxgi_destroy_blit_context(struct wsi_win32_swapchain *chain,
+                              struct wsi_win32_image *win32_image)
+{
+   if (win32_image->dxgi.cmd_list)
+      win32_image->dxgi.cmd_list->Release();
+   if (win32_image->dxgi.cmd_alloc)
+      win32_image->dxgi.cmd_alloc->Release();
+}
+
+static VkResult
+wsi_dxgi_finish_create_image(const struct wsi_swapchain *chain,
+                             const struct wsi_image_info *info,
+                             struct wsi_image *image)
+{
+   struct wsi_win32_swapchain *win32_chain =
+      container_of(chain, struct wsi_win32_swapchain, base);
+   struct wsi_win32_image *win32_image =
+      container_of(image, struct wsi_win32_image, base);
+
+   return wsi_dxgi_create_blit_context(win32_chain, win32_image);
+}
+
+static VkResult
+wsi_dxgi_blit(struct wsi_swapchain *drv_chain, uint32_t image_index)
+{
+   struct wsi_win32_swapchain *chain = (struct wsi_win32_swapchain *)drv_chain;
+   struct wsi_win32_image *win32_image = &chain->images[image_index];
+   struct wsi_device *wsi_device = chain->wsi->wsi;
+
+   ID3D12CommandQueue *queue = (ID3D12CommandQueue *)
+      wsi_device->win32.get_d3d12_command_queue(chain->base.device);
+   if (!queue)
+      return VK_ERROR_OUT_OF_DEVICE_MEMORY;
+
+   uint64_t wait_value = chain->base.blit.timeline_values[image_index];
+   queue->Wait(chain->d3d12_blit_fences[image_index], wait_value);
+
+   ID3D12CommandList *cmd_lists[] = {(ID3D12CommandList *)win32_image->dxgi.cmd_list};
+   queue->ExecuteCommandLists(1, cmd_lists);
+
+   uint64_t signal_value = ++chain->base.blit.timeline_values[image_index];
+   queue->Signal(chain->d3d12_blit_fences[image_index], signal_value);
+
+   return VK_SUCCESS;
+}
+
 static VkResult
 wsi_create_dxgi_image_mem(const struct wsi_swapchain *drv_chain,
                           const struct wsi_image_info *info,
@@ -465,6 +656,14 @@ wsi_create_dxgi_image_mem(const struct wsi_swapchain *drv_chain,
 {
    struct wsi_win32_swapchain *chain = (struct wsi_win32_swapchain *)drv_chain;
    const struct wsi_device *wsi = chain->base.wsi;
+
+   VkImportMemoryWin32HandleInfoKHR import_memory_info = {
+      VK_STRUCTURE_TYPE_IMPORT_MEMORY_WIN32_HANDLE_INFO_KHR,
+      NULL,
+      VK_EXTERNAL_MEMORY_HANDLE_TYPE_D3D12_RESOURCE_BIT,
+      NULL,
+      NULL,
+   };
 
    assert(chain->base.blit.type != WSI_SWAPCHAIN_BUFFER_BLIT);
 
@@ -477,48 +676,58 @@ wsi_create_dxgi_image_mem(const struct wsi_swapchain *drv_chain,
                                      IID_PPV_ARGS(&win32_image->dxgi.swapchain_res))))
       return VK_ERROR_OUT_OF_DEVICE_MEMORY;
 
-   VkResult result =
-      wsi->win32.create_image_memory(chain->base.device,
-                                     win32_image->dxgi.swapchain_res,
-                                     &chain->base.alloc,
-                                     chain->base.blit.type == WSI_SWAPCHAIN_NO_BLIT ?
-                                     &image->memory : &image->blit.memory);
-   if (result != VK_SUCCESS)
-      return result;
+   if (wsi->win32.create_image_memory) {
+      VkResult result =
+         wsi->win32.create_image_memory(chain->base.device,
+                                        win32_image->dxgi.swapchain_res,
+                                        &chain->base.alloc,
+                                        chain->base.blit.type == WSI_SWAPCHAIN_NO_BLIT ?
+                                        &image->memory : &image->blit.memory);
+      if (result != VK_SUCCESS)
+         return result;
 
-   if (chain->base.blit.type == WSI_SWAPCHAIN_NO_BLIT)
-      return VK_SUCCESS;
+      if (chain->base.blit.type == WSI_SWAPCHAIN_NO_BLIT)
+         return VK_SUCCESS;
 
-   VkImageCreateInfo create = info->create;
+      VkImageCreateInfo create = info->create;
 
-   create.usage &= ~VK_IMAGE_USAGE_STORAGE_BIT;
-   create.initialLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
+      create.usage &= ~VK_IMAGE_USAGE_STORAGE_BIT;
+      create.initialLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
 
-   result = wsi->CreateImage(chain->base.device, &create,
-                             &chain->base.alloc, &image->blit.image);
-   if (result != VK_SUCCESS)
-      return result;
+      result = wsi->CreateImage(chain->base.device, &create,
+                                &chain->base.alloc, &image->blit.image);
+      if (result != VK_SUCCESS)
+         return result;
 
-   result = wsi->BindImageMemory(chain->base.device, image->blit.image,
-                                 image->blit.memory, 0);
-   if (result != VK_SUCCESS)
-      return result;
+      result = wsi->BindImageMemory(chain->base.device, image->blit.image,
+                                    image->blit.memory, 0);
+      if (result != VK_SUCCESS)
+         return result;
+   } else {
+      VkResult result = wsi_dxgi_create_d3d12_resource(chain, win32_image,
+                                                       &import_memory_info.handle);
+      if (result != VK_SUCCESS)
+         return result;
+   }
 
    VkMemoryRequirements reqs;
    wsi->GetImageMemoryRequirements(chain->base.device, image->image, &reqs);
 
-   const VkMemoryDedicatedAllocateInfo memory_dedicated_info = {
+   VkMemoryDedicatedAllocateInfo memory_dedicated_info = {
       VK_STRUCTURE_TYPE_MEMORY_DEDICATED_ALLOCATE_INFO,
       nullptr,
-      image->blit.image,
+      image->image,
       VK_NULL_HANDLE,
    };
-   const VkMemoryAllocateInfo memory_info = {
+   VkMemoryAllocateInfo memory_info = {
       VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,
       &memory_dedicated_info,
       reqs.size,
       info->select_image_memory_type(wsi, reqs.memoryTypeBits),
    };
+
+   if (!wsi->win32.create_image_memory)
+      __vk_append_struct(&memory_info, &import_memory_info);
 
    return wsi->AllocateMemory(chain->base.device, &memory_info,
                               &chain->base.alloc, &image->memory);
@@ -542,17 +751,21 @@ wsi_dxgi_configure_image(const struct wsi_swapchain *chain,
                          const struct wsi_dxgi_image_params *params,
                          struct wsi_image_info *info)
 {
+   const struct wsi_device *wsi = chain->wsi;
    VkResult result =
       wsi_configure_image(chain, pCreateInfo, 0, info);
    if (result != VK_SUCCESS)
       return result;
 
+   info->image_type = WSI_IMAGE_TYPE_DXGI;
    info->create_mem = wsi_create_dxgi_image_mem;
 
    if (chain->blit.type != WSI_SWAPCHAIN_NO_BLIT) {
       wsi_configure_image_blit_image(chain, info);
       info->select_image_memory_type = wsi_select_device_memory_type;
       info->select_blit_dst_memory_type = wsi_select_device_memory_type;
+      if (!wsi->win32.create_image_memory)
+         info->finish_create = wsi_dxgi_finish_create_image;
    }
 
    return VK_SUCCESS;
@@ -577,28 +790,22 @@ wsi_win32_image_init(VkDevice device_h,
    if (chain->dxgi)
       return VK_SUCCESS;
 
-   chain->chain_dc = GetDC(chain->wnd);
-   image->sw.dc = CreateCompatibleDC(chain->chain_dc);
-   HBITMAP bmp = NULL;
-
    BITMAPINFO info = { 0 };
-   info.bmiHeader.biSize = sizeof(BITMAPINFO);
+   info.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
    info.bmiHeader.biWidth = create_info->imageExtent.width;
-   info.bmiHeader.biHeight = -create_info->imageExtent.height;
+   info.bmiHeader.biHeight = -(LONG)create_info->imageExtent.height;
    info.bmiHeader.biPlanes = 1;
    info.bmiHeader.biBitCount = 32;
    info.bmiHeader.biCompression = BI_RGB;
 
-   bmp = CreateDIBSection(image->sw.dc, &info, DIB_RGB_COLORS, &image->sw.ppvBits, NULL, 0);
-   assert(bmp && image->sw.ppvBits);
-
-   SelectObject(image->sw.dc, bmp);
-
+   image->sw.bmp = CreateDIBSection(NULL, &info, DIB_RGB_COLORS,
+                                    &image->sw.ppvBits, NULL, 0);
+   if (!image->sw.bmp || !image->sw.ppvBits)
+      return VK_ERROR_OUT_OF_HOST_MEMORY;
    BITMAP header;
-   int status = GetObject(bmp, sizeof(BITMAP), &header);
-   (void)status;
+   if (GetObject(image->sw.bmp, sizeof(header), &header) != sizeof(header))
+      return VK_ERROR_OUT_OF_HOST_MEMORY;
    image->sw.bmp_row_pitch = header.bmWidthBytes;
-   image->sw.bmp = bmp;
 
    return VK_SUCCESS;
 }
@@ -611,8 +818,6 @@ wsi_win32_image_finish(struct wsi_win32_swapchain *chain,
    if (image->dxgi.swapchain_res)
       image->dxgi.swapchain_res->Release();
 
-   if (image->sw.dc)
-      DeleteDC(image->sw.dc);
    if(image->sw.bmp)
       DeleteObject(image->sw.bmp);
    wsi_destroy_image(&chain->base, &image->base);
@@ -628,13 +833,20 @@ wsi_win32_swapchain_destroy(struct wsi_swapchain *drv_chain,
    for (uint32_t i = 0; i < chain->base.image_count; i++)
       wsi_win32_image_finish(chain, allocator, &chain->images[i]);
 
-   DeleteDC(chain->chain_dc);
 
    if (chain->surface->current_swapchain == chain)
       chain->surface->current_swapchain = NULL;
 
    if (chain->dxgi)
       chain->dxgi->Release();
+
+   if (chain->d3d12_blit_fences) {
+      for (uint32_t i = 0; i < chain->base.image_count; i++) {
+         if (chain->d3d12_blit_fences[i])
+            chain->d3d12_blit_fences[i]->Release();
+      }
+      vk_free(allocator, chain->d3d12_blit_fences);
+   }
 
    wsi_swapchain_finish(&chain->base);
 
@@ -709,6 +921,10 @@ wsi_win32_acquire_idle_cpu_image_locked(struct wsi_win32_swapchain *chain,
                                         const VkAcquireNextImageInfoKHR *info,
                                         uint32_t *out_image_index)
 {
+   if (chain->retired)
+      return VK_ERROR_OUT_OF_DATE_KHR;
+   if (chain->status != VK_SUCCESS)
+      return chain->status;
    if (wsi_win32_find_idle_image(chain, out_image_index))
       return VK_SUCCESS;
 
@@ -721,6 +937,10 @@ wsi_win32_acquire_idle_cpu_image_locked(struct wsi_win32_swapchain *chain,
    do {
       int ret = u_cnd_monotonic_timedwait(
          &chain->acquire_cond, &chain->acquire_mutex, &abs_timespec);
+      if (chain->retired)
+         return VK_ERROR_OUT_OF_DATE_KHR;
+      if (chain->status != VK_SUCCESS)
+         return chain->status;
       if (ret == thrd_timedout)
          return VK_TIMEOUT;
       else if (ret != thrd_success)
@@ -750,13 +970,13 @@ wsi_win32_acquire_next_image(struct wsi_swapchain *drv_chain,
    struct wsi_win32_swapchain *chain =
       (struct wsi_win32_swapchain *)drv_chain;
 
-   /* Bail early if the swapchain is broken */
-   if (chain->status != VK_SUCCESS)
-      return chain->status;
-
    /* acquire timeout has to be explicitly handled for sw wsi */
    if (!chain->dxgi)
       return wsi_win32_acquire_idle_cpu_image(chain, info, image_index);
+
+   /* Bail early if the swapchain is broken */
+   if (chain->status != VK_SUCCESS)
+      return chain->status;
 
    if (wsi_win32_find_idle_image(chain, image_index))
       return VK_SUCCESS;
@@ -818,9 +1038,69 @@ wsi_win32_queue_present_dxgi(struct wsi_win32_swapchain *chain,
       chain->surface->current_swapchain = chain;
    }
 
-   /* Mark the other image idle */
-   chain->status = VK_SUCCESS;
+   /* The common completion path publishes status under acquire_mutex. */
    return VK_SUCCESS;
+}
+
+/* DwmFlush is the completion boundary for this composed Win32 path, not
+ * GPU submission or the return from BitBlt/Present1. Publish only afterwards.
+ */
+static VkResult
+wsi_win32_complete_present(struct wsi_win32_swapchain *chain,
+                           uint64_t present_id, VkResult result)
+{
+   mtx_lock(&chain->acquire_mutex);
+   chain->status = result;
+   if (result == VK_SUCCESS && present_id > chain->completed_present_id)
+      chain->completed_present_id = present_id;
+   u_cnd_monotonic_broadcast(&chain->acquire_cond);
+   mtx_unlock(&chain->acquire_mutex);
+   return result;
+}
+
+static VkResult
+wsi_win32_wait_for_present(struct wsi_swapchain *base,
+                           uint64_t present_id, uint64_t timeout)
+{
+   struct wsi_win32_swapchain *chain = (struct wsi_win32_swapchain *)base;
+   const uint64_t deadline = os_time_get_absolute_timeout(timeout);
+   struct timespec abs_time;
+   timespec_from_nsec(&abs_time, deadline);
+
+   /* Completion must also consume the application's present wait semaphores.
+    * Share one absolute deadline with the presentation-engine wait below.
+    */
+   VkResult result = wsi_swapchain_wait_for_present_semaphore(base, present_id, timeout);
+   if (result != VK_SUCCESS)
+      return result;
+
+   mtx_lock(&chain->acquire_mutex);
+   while (chain->completed_present_id < present_id) {
+      if (chain->status != VK_SUCCESS) {
+         result = chain->status;
+         break;
+      }
+      if (chain->retired) {
+         result = VK_ERROR_OUT_OF_DATE_KHR;
+         break;
+      }
+      if (!timeout) {
+         result = VK_TIMEOUT;
+         break;
+      }
+      int ret = u_cnd_monotonic_timedwait(&chain->acquire_cond,
+                                         &chain->acquire_mutex, &abs_time);
+      if (ret == thrd_timedout) {
+         result = chain->completed_present_id >= present_id ? VK_SUCCESS : VK_TIMEOUT;
+         break;
+      }
+      if (ret != thrd_success) {
+         result = VK_ERROR_DEVICE_LOST;
+         break;
+      }
+   }
+   mtx_unlock(&chain->acquire_mutex);
+   return result;
 }
 
 static VkResult
@@ -835,23 +1115,63 @@ wsi_win32_queue_present(struct wsi_swapchain *drv_chain,
 
    assert(image->state == WSI_IMAGE_DRAWING);
 
-   if (chain->dxgi)
-      return wsi_win32_queue_present_dxgi(chain, image, damage);
+   if (chain->dxgi) {
+      VkResult result = wsi_win32_queue_present_dxgi(chain, image, damage);
+      if (result == VK_SUCCESS && present_id && FAILED(DwmFlush()))
+         result = VK_ERROR_SURFACE_LOST_KHR;
+      return wsi_win32_complete_present(chain, present_id, result);
+   }
 
-   char *ptr = (char *)image->base.cpu_map;
-   char *dptr = (char *)image->sw.ppvBits;
+   RECT rect;
+   VkResult result = VK_SUCCESS;
+   if (!GetClientRect(chain->wnd, &rect))
+      result = VK_ERROR_SURFACE_LOST_KHR;
+   else if ((uint32_t)(rect.right - rect.left) != chain->extent.width ||
+            (uint32_t)(rect.bottom - rect.top) != chain->extent.height)
+      result = VK_ERROR_OUT_OF_DATE_KHR;
+   if (result != VK_SUCCESS) {
+      wsi_win32_set_image_idle(chain, image);
+      return wsi_win32_complete_present(chain, present_id, result);
+   }
 
+   const uint8_t *ptr = (const uint8_t *)image->base.cpu_map;
+   uint8_t *dptr = (uint8_t *)image->sw.ppvBits;
    for (unsigned h = 0; h < chain->extent.height; h++) {
-      memcpy(dptr, ptr, chain->extent.width * 4);
+      if (chain->format == VK_FORMAT_R8G8B8A8_UNORM) {
+         for (unsigned x = 0; x < chain->extent.width; x++) {
+            dptr[x * 4 + 0] = ptr[x * 4 + 2];
+            dptr[x * 4 + 1] = ptr[x * 4 + 1];
+            dptr[x * 4 + 2] = ptr[x * 4 + 0];
+            dptr[x * 4 + 3] = ptr[x * 4 + 3];
+         }
+      } else {
+         memcpy(dptr, ptr, chain->extent.width * 4);
+      }
       dptr += image->sw.bmp_row_pitch;
       ptr += image->base.row_pitches[0];
    }
-   if (!StretchBlt(chain->chain_dc, 0, 0, chain->extent.width, chain->extent.height, image->sw.dc, 0, 0, chain->extent.width, chain->extent.height, SRCCOPY))
-      chain->status = VK_ERROR_MEMORY_MAP_FAILED;
+
+   HDC window_dc = GetDC(chain->wnd);
+   HDC memory_dc = window_dc ? CreateCompatibleDC(window_dc) : NULL;
+   HGDIOBJ previous = memory_dc ? SelectObject(memory_dc, image->sw.bmp) : NULL;
+   if (!window_dc)
+      result = VK_ERROR_SURFACE_LOST_KHR;
+   else if (!memory_dc || !previous || previous == HGDI_ERROR)
+      result = VK_ERROR_OUT_OF_HOST_MEMORY;
+   else if (!BitBlt(window_dc, 0, 0, chain->extent.width, chain->extent.height,
+                    memory_dc, 0, 0, SRCCOPY) || !GdiFlush())
+      result = VK_ERROR_SURFACE_LOST_KHR;
+   if (previous && previous != HGDI_ERROR)
+      SelectObject(memory_dc, previous);
+   if (memory_dc)
+      DeleteDC(memory_dc);
+   if (window_dc)
+      ReleaseDC(chain->wnd, window_dc);
+   if (result == VK_SUCCESS && FAILED(DwmFlush()))
+      result = VK_ERROR_SURFACE_LOST_KHR;
 
    wsi_win32_set_image_idle(chain, image);
-
-   return chain->status;
+   return wsi_win32_complete_present(chain, present_id, result);
 }
 
 static VkResult
@@ -925,6 +1245,50 @@ wsi_win32_surface_create_swapchain_dxgi(
 
       surface->current_swapchain = chain;
    }
+
+   ID3D12Device *d3d12_device = (ID3D12Device *)wsi->wsi->win32.get_d3d12_device(device);
+   HRESULT hr;
+
+   chain->d3d12_blit_fences = (ID3D12Fence**)vk_zalloc(&chain->base.alloc,
+         create_info->minImageCount * sizeof(ID3D12Fence *),
+         8, VK_SYSTEM_ALLOCATION_SCOPE_OBJECT);
+   for (unsigned i = 0; i < create_info->minImageCount; i++) {
+      const VkSemaphoreTypeCreateInfo type_info = {
+         VK_STRUCTURE_TYPE_SEMAPHORE_TYPE_CREATE_INFO,
+         NULL,
+         VK_SEMAPHORE_TYPE_TIMELINE,
+      };
+      const VkExportSemaphoreCreateInfo export_info = {
+         VK_STRUCTURE_TYPE_EXPORT_SEMAPHORE_CREATE_INFO,
+         &type_info,
+         VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_D3D12_FENCE_BIT,
+      };
+      const VkSemaphoreCreateInfo sem_info = {
+         VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO,
+         &export_info,
+         0,
+      };
+
+      VkResult result = wsi->wsi->CreateSemaphore(device, &sem_info, &chain->base.alloc,
+                                                  &chain->base.blit.semaphores[i]);
+      if (result != VK_SUCCESS)
+         return result;
+
+      HANDLE handle = nullptr;
+      const VkSemaphoreGetWin32HandleInfoKHR get_info = {
+         VK_STRUCTURE_TYPE_SEMAPHORE_GET_WIN32_HANDLE_INFO_KHR,
+         NULL,
+         chain->base.blit.semaphores[i],
+         VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_D3D12_FENCE_BIT,
+      };
+      wsi->wsi->GetSemaphoreWin32HandleKHR(device, &get_info, &handle);
+      hr = d3d12_device->OpenSharedHandle(handle,
+                                          IID_PPV_ARGS(&chain->d3d12_blit_fences[i]));
+      CloseHandle(handle);
+      if (FAILED(hr))
+         return VK_ERROR_OUT_OF_DEVICE_MEMORY;
+   }
+
    return VK_SUCCESS;
 }
 
@@ -942,6 +1306,15 @@ wsi_win32_surface_create_swapchain(
       (struct wsi_win32 *) wsi_device->wsi[VK_ICD_WSI_PLATFORM_WIN32];
 
    assert(create_info->sType == VK_STRUCTURE_TYPE_SWAPCHAIN_CREATE_INFO_KHR);
+
+   if (create_info->oldSwapchain) {
+      struct wsi_win32_swapchain *old_chain =
+         (struct wsi_win32_swapchain *)create_info->oldSwapchain;
+      mtx_lock(&old_chain->acquire_mutex);
+      old_chain->retired = true;
+      u_cnd_monotonic_broadcast(&old_chain->acquire_cond);
+      mtx_unlock(&old_chain->acquire_mutex);
+   }
 
    const unsigned num_images = create_info->minImageCount;
    struct wsi_win32_swapchain *chain;
@@ -983,9 +1356,8 @@ wsi_win32_surface_create_swapchain(
    struct wsi_base_image_params *image_params = supports_dxgi ?
       &dxgi_image_params.base : &cpu_image_params.base;
 
-   VkResult result = wsi_swapchain_init(wsi_device, &chain->base, device,
-                                        create_info, image_params,
-                                        allocator);
+   VkResult result = wsi_swapchain_init(wsi_device, &chain->base, device, create_info,
+                                        num_images, image_params, allocator);
    if (result != VK_SUCCESS) {
       u_cnd_monotonic_destroy(&chain->acquire_cond);
       mtx_destroy(&chain->acquire_mutex);
@@ -998,8 +1370,11 @@ wsi_win32_surface_create_swapchain(
    chain->base.acquire_next_image = wsi_win32_acquire_next_image;
    chain->base.release_images = wsi_win32_release_images;
    chain->base.queue_present = wsi_win32_queue_present;
+   chain->base.wait_for_present = wsi_win32_wait_for_present;
+   chain->base.wait_for_present2 = wsi_win32_wait_for_present;
    chain->base.present_mode = wsi_swapchain_get_present_mode(wsi_device, create_info);
    chain->extent = create_info->imageExtent;
+   chain->format = create_info->imageFormat;
 
    chain->wsi = wsi;
    chain->status = VK_SUCCESS;
@@ -1018,8 +1393,6 @@ wsi_win32_surface_create_swapchain(
                                     &chain->images[image]);
       if (result != VK_SUCCESS)
          goto fail;
-
-      chain->base.image_count++;
    }
 
    *swapchain_out = &chain->base;
@@ -1039,7 +1412,7 @@ fail:
 static IDXGIFactory4 *
 dxgi_get_factory(bool debug)
 {
-   HMODULE dxgi_mod = LoadLibraryA("DXGI.DLL");
+   HMODULE dxgi_mod = util_load_system_library(L"DXGI.DLL");
    if (!dxgi_mod) {
       return NULL;
    }
@@ -1068,7 +1441,7 @@ dxgi_get_factory(bool debug)
 static IDCompositionDevice *
 dcomp_get_device()
 {
-   HMODULE dcomp_mod = LoadLibraryA("DComp.DLL");
+   HMODULE dcomp_mod = util_load_system_library(L"DComp.DLL");
    if (!dcomp_mod) {
       return NULL;
    }
@@ -1112,19 +1485,21 @@ wsi_win32_init_wsi(struct wsi_device *wsi_device,
    if (!wsi_device->sw) {
       wsi->dxgi.factory = dxgi_get_factory(WSI_DEBUG & WSI_DEBUG_DXGI);
       if (!wsi->dxgi.factory) {
-         vk_free(alloc, wsi);
-         result = VK_ERROR_INITIALIZATION_FAILED;
-         goto fail;
+         wsi_device->sw = true;
+         goto sw_fallback;
       }
       wsi->dxgi.dcomp = dcomp_get_device();
       if (!wsi->dxgi.dcomp) {
          wsi->dxgi.factory->Release();
-         vk_free(alloc, wsi);
-         result = VK_ERROR_INITIALIZATION_FAILED;
-         goto fail;
+         wsi->dxgi.factory = NULL;
+         wsi_device->sw = true;
       }
+
+      if (!wsi->wsi->win32.create_image_memory)
+         wsi_device->blit = wsi_dxgi_blit;
    }
 
+sw_fallback:
    wsi->base.get_support = wsi_win32_surface_get_support;
    wsi->base.get_capabilities2 = wsi_win32_surface_get_capabilities2;
    wsi->base.get_formats = wsi_win32_surface_get_formats;
