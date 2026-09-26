@@ -1366,7 +1366,10 @@ st_pbo_compute_deinit(struct st_context *st)
             util_queue_fence_destroy(&spec->fence);
             if (spec->created) {
                ralloc_free(spec->nir);
-               st->pipe->delete_compute_state(st->pipe, spec->cs);
+               /* The async job creates NIR; a later transfer creates the CS.
+                * Context destruction may happen between those two stages. */
+               if (spec->cs)
+                  st->pipe->delete_compute_state(st->pipe, spec->cs);
             }
             free(spec);
          }
