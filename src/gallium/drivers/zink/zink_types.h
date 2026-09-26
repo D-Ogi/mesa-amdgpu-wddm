@@ -1454,6 +1454,7 @@ struct zink_screen {
    uint64_t mapped_vram;
 
    VkInstance instance;
+   bool owned_instance; /* Native D3D devices must not share callback ownership. */
    const struct zink_instance_info *instance_info;
 
    struct hash_table *debug_mem_sizes;
