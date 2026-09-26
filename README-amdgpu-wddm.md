@@ -69,12 +69,9 @@ relative to the base. The reports are in the workspace under
 - `amdgpu-wddm/d3d10umd-zink` contains no RADV changes. The shared header
   `src/util/bc250_host_bootstrap.h` has the same blob on this branch and on
   `amdgpu-wddm/radv-wddm2`.
-- Four added source files carry no SPDX licence header yet:
-  `src/gallium/targets/d3d10umd/bc250_lp_test_main.c` and `bc250_ttn_control.c`
-  (amdgpu-wddm work, MIT as stated above), `src/amd/compiler/aco_disass.cpp` and
-  `src/amd/vulkan/winsys/common/radv_winsys_cs.h` (carried over from the
-  `lfrb/wddm2` port). Headers are to be added when the branches are
-  consolidated for upstream review.
+- `src/amd/compiler/aco_disass.cpp` and `src/amd/vulkan/winsys/common/radv_winsys_cs.h`,
+  carried over from the `lfrb/wddm2` port, have no SPDX header; the amdgpu-wddm
+  sources do.
 - `amdgpu-wddm/radv-wddm2-lfrb-801c976` is based on a commit that exists only in
   the `lfrb` fork on gitlab.freedesktop.org, so it is not published on GitHub
   until that history is fetched in full.
