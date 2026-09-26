@@ -719,7 +719,7 @@ radv_wddm2_winsys_query_gpuvm_fault(struct radeon_winsys *rws, struct radv_winsy
       .hDevice = ws->device_h,
       .StateType = D3DKMT_DEVICESTATE_PAGE_FAULT,
    };
-   status = WDDM2_DISPATCH(GetDeviceState(&get_state));
+   status = BC250_WDDM_CALL(&ws->host, GetDeviceState, &get_state);
    fprintf(stderr, "GetDeviceState: 0x%X\n", status);
    if (unlikely(!NT_SUCCESS(status)))
       return false;

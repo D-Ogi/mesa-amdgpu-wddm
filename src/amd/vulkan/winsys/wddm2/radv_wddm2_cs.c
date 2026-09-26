@@ -183,20 +183,21 @@ submit_pdd_writer_reserve(struct submit_pdd_writer *writer, unsigned size)
    return ptr;
 }
 
-static bool vk_wddm2_fence_wait(uint32_t device_h, struct vk_wddm2_fence *fence);
+static bool vk_wddm2_fence_wait(struct radv_wddm2_winsys *ws, struct vk_wddm2_fence *fence);
 
 static void
 radv_wddm2_queue_destroy(struct radv_wddm2_queue *queue)
 {
+   struct radv_wddm2_winsys *ws = queue->bc250_ws;
    radv_wddm2_sparse_groups_clear(queue);
    util_dynarray_fini(&queue->sparse_ops);
    if (queue->bc250_progress.handle) {
       if (queue->bc250_progress.wait_value)
-         vk_wddm2_fence_wait(queue->bc250_ws->device_h, &queue->bc250_progress);
+         vk_wddm2_fence_wait(queue->bc250_ws, &queue->bc250_progress);
       D3DKMT_DESTROYSYNCHRONIZATIONOBJECT destroy_progress = {
          .hSyncObject = queue->bc250_progress.handle,
       };
-      WDDM2_DISPATCH(DestroySynchronizationObject(&destroy_progress));
+      BC250_WDDM_CALL(&ws->host, DestroySynchronizationObject, &destroy_progress);
       queue->bc250_progress.handle = 0;
    }
    free(queue->bc250_ibs);
@@ -212,21 +213,21 @@ radv_wddm2_queue_destroy(struct radv_wddm2_queue *queue)
       D3DKMT_DESTROYSYNCHRONIZATIONOBJECT destroy_fence = {
          .hSyncObject = queue->vm_fence.handle,
       };
-      WDDM2_DISPATCH(DestroySynchronizationObject(&destroy_fence));
+      BC250_WDDM_CALL(&ws->host, DestroySynchronizationObject, &destroy_fence);
       queue->vm_fence.handle = 0;
    }
    if (queue->context_h) {
       D3DKMT_DESTROYCONTEXT context_destroy = {
          .hContext = queue->context_h,
       };
-      WDDM2_DISPATCH(DestroyContext(&context_destroy));
+      BC250_WDDM_CALL(&ws->host, DestroyContext, &context_destroy);
       queue->context_h = 0;
    }
    if (queue->handle) {
       D3DKMT_DESTROYHWQUEUE queue_destroy = {
          .hHwQueue = queue->handle,
       };
-      WDDM2_DISPATCH(DestroyHwQueue(&queue_destroy));
+      BC250_WDDM_CALL(&ws->host, DestroyHwQueue, &queue_destroy);
       queue->handle = 0;
    }
 }
@@ -294,12 +295,13 @@ radv_wddm2_queue_init(struct radv_wddm2_winsys *ws, enum amd_ip_type hw_ip,
       .ClientHint = D3DKMT_CLIENTHINT_VULKAN,
    };
 
-   status = WDDM2_DISPATCH(CreateContextVirtual(&create_context));
+   status = BC250_WDDM_CALL(&ws->host, CreateContextVirtual, &create_context);
    if (!NT_SUCCESS(status)) {
       fprintf(stderr, "Create context failed 0x%X for IP %i and device 0x%x\n", status, hw_ip, ws->device_h);
       return VK_ERROR_INITIALIZATION_FAILED;
    }
    queue->context_h = create_context.hContext;
+   queue->bc250_ws = ws;
 
    /* bc250kmd has no hardware-queue DDIs. SubmitCommand is the packet path. */
    if (ws->bc250) {
@@ -311,7 +313,7 @@ radv_wddm2_queue_init(struct radv_wddm2_winsys *ws, enum amd_ip_type hw_ip,
          },
       };
       queue->bc250_ws = ws;
-      status = WDDM2_DISPATCH(CreateSynchronizationObject2(&create_progress));
+      status = BC250_WDDM_CALL(&ws->host, CreateSynchronizationObject2, &create_progress);
       if (!NT_SUCCESS(status))
          goto failed;
       queue->bc250_progress.handle = create_progress.hSyncObject;
@@ -322,7 +324,7 @@ radv_wddm2_queue_init(struct radv_wddm2_winsys *ws, enum amd_ip_type hw_ip,
       create_progress.hSyncObject = 0;
       create_progress.Info.MonitoredFence.FenceValueCPUVirtualAddress = NULL;
       create_progress.Info.MonitoredFence.FenceValueGPUVirtualAddress = 0;
-      status = WDDM2_DISPATCH(CreateSynchronizationObject2(&create_progress));
+      status = BC250_WDDM_CALL(&ws->host, CreateSynchronizationObject2, &create_progress);
       if (!NT_SUCCESS(status))
          goto failed;
       queue->vm_fence.handle = create_progress.hSyncObject;
@@ -346,7 +348,7 @@ radv_wddm2_queue_init(struct radv_wddm2_winsys *ws, enum amd_ip_type hw_ip,
          .pPrivateDriverData = &create_queue_pdd,
          .PrivateDriverDataSize = sizeof(create_queue_pdd),
       };
-      status = WDDM2_DISPATCH(CreateHwQueue(&create_queue));
+      status = BC250_WDDM_CALL(&ws->host, CreateHwQueue, &create_queue);
       if (!NT_SUCCESS(status)) {
          fprintf(stderr, "Create queue failed 0x%X for IP %i and device 0x%x\n", status, hw_ip, ws->device_h);
          goto failed;
@@ -363,7 +365,7 @@ radv_wddm2_queue_init(struct radv_wddm2_winsys *ws, enum amd_ip_type hw_ip,
             },
          }
       };
-      status = WDDM2_DISPATCH(CreateSynchronizationObject2(&create_sync));
+      status = BC250_WDDM_CALL(&ws->host, CreateSynchronizationObject2, &create_sync);
       if (unlikely(!NT_SUCCESS(status))) {
          fprintf(stderr, "CreateSynchronizationObject2 failed with NTSTATUS 0x%x\n", status);
          goto failed;
@@ -423,7 +425,7 @@ radv_wddm2_ctx_destroy(struct radeon_winsys_ctx *rwctx)
 }
 
 static bool
-vk_wddm2_fence_wait(uint32_t device_h, struct vk_wddm2_fence *fence)
+vk_wddm2_fence_wait(struct radv_wddm2_winsys *ws, struct vk_wddm2_fence *fence)
 {
    VkResult result;
    NTSTATUS status;
@@ -440,13 +442,13 @@ vk_wddm2_fence_wait(uint32_t device_h, struct vk_wddm2_fence *fence)
       return false;
 
    const D3DKMT_WAITFORSYNCHRONIZATIONOBJECTFROMCPU wait = {
-      .hDevice = device_h,
+      .hDevice = ws->device_h,
       .ObjectCount = 1,
       .ObjectHandleArray = &fence->handle,
       .FenceValueArray = &fence->wait_value,
       .hAsyncEvent = async_event,
    };
-   status = WDDM2_DISPATCH(WaitForSynchronizationObjectFromCpu(&wait));
+   status = BC250_WDDM_CALL(&ws->host, WaitForSynchronizationObjectFromCpu, &wait);
 
    if (unlikely(!NT_SUCCESS(status))) {
       vk_async_event_close(async_event);
@@ -460,13 +462,13 @@ vk_wddm2_fence_wait(uint32_t device_h, struct vk_wddm2_fence *fence)
       fprintf(stderr, "async wait event: 0x%x\n", result);
 
    D3DKMT_GETDEVICESTATE get_state = {
-      .hDevice = device_h,
+      .hDevice = ws->device_h,
       .StateType = D3DKMT_DEVICESTATE_EXECUTION,
    };
 
    if (get_state.ExecutionState == D3DKMT_DEVICEEXECUTION_ERROR_DMAPAGEFAULT) {
       get_state.StateType = D3DKMT_DEVICESTATE_PAGE_FAULT;
-      status = WDDM2_DISPATCH(GetDeviceState(&get_state));
+      status = BC250_WDDM_CALL(&ws->host, GetDeviceState, &get_state);
       D3DKMT_DEVICEPAGEFAULT_STATE fault = get_state.PageFaultState;
 
       fprintf(stderr, "faulted VA: 0x%" PRIx64 ", error: 0x%x (vendor specific: %i), flags: %i, stage: %i\n",
@@ -485,7 +487,7 @@ radv_wddm2_ctx_wait_idle(struct radeon_winsys_ctx *rwctx, enum amd_ip_type ip_ty
    bool ret = true;
 
    if (ctx->per_ip[ip_type].last_submission.handle)
-      ret = vk_wddm2_fence_wait(ctx->ws->device_h, &ctx->per_ip[ip_type].last_submission);
+      ret = vk_wddm2_fence_wait(ctx->ws, &ctx->per_ip[ip_type].last_submission);
 
    return ret;
 }
@@ -922,7 +924,7 @@ radv_wddm2_bc250_submit(struct radv_wddm2_ctx *ctx, struct radv_wddm2_queue *que
     * too; this one makes the order obvious.
     */
    _mm_sfence();
-   status = WDDM2_DISPATCH(SubmitCommand(&cmd));
+   status = BC250_WDDM_CALL(&ws->host, SubmitCommand, &cmd);
    if (!NT_SUCCESS(status))
       fprintf(stderr, "bc250: SubmitCommand 0x%X (%u ibs packed, %u bytes)\n", status, n, bytes);
    else if (ws->bc250_trace_submits) {
@@ -976,6 +978,7 @@ radv_wddm2_cs_submit(struct radeon_winsys_ctx *_ctx,
                      uint32_t signal_count, const struct vk_sync_signal *signals)
 {
    struct radv_wddm2_ctx *ctx = radv_wddm2_ctx(_ctx);
+   struct radv_wddm2_winsys *ws = ctx->ws;
    struct radv_wddm2_queue *queue = &ctx->per_ip[submit->ip_type].queue;
    struct radv_wddm2_queue *ace_queue = &ctx->ace_queue;
    NTSTATUS status;
@@ -1005,7 +1008,7 @@ radv_wddm2_cs_submit(struct radeon_winsys_ctx *_ctx,
             .ObjectHandleArray = handles,
             .FenceValueArray = values,
          };
-         status = WDDM2_DISPATCH(SubmitWaitForSyncObjectsToHwQueue(&wait));
+         status = BC250_WDDM_CALL(&ws->host, SubmitWaitForSyncObjectsToHwQueue, &wait);
       } else {
          D3DKMT_WAITFORSYNCHRONIZATIONOBJECTFROMGPU wait = {
             .hContext = queue->context_h,
@@ -1013,7 +1016,7 @@ radv_wddm2_cs_submit(struct radeon_winsys_ctx *_ctx,
             .ObjectHandleArray = handles,
             .MonitoredFenceValueArray = values,
          };
-         status = WDDM2_DISPATCH(WaitForSynchronizationObjectFromGpu(&wait));
+         status = BC250_WDDM_CALL(&ws->host, WaitForSynchronizationObjectFromGpu, &wait);
       }
 
       STACK_ARRAY_FINISH(handles);
@@ -1040,7 +1043,7 @@ radv_wddm2_cs_submit(struct radeon_winsys_ctx *_ctx,
                          slot->retire_value, wait_count, signal_count);
       struct vk_wddm2_fence reuse = queue->bc250_progress;
       reuse.wait_value = slot->retire_value;
-      if (reuse.wait_value && !vk_wddm2_fence_wait(ctx->ws->device_h, &reuse))
+      if (reuse.wait_value && !vk_wddm2_fence_wait(ctx->ws, &reuse))
          return VK_ERROR_DEVICE_LOST;
       status = radv_wddm2_bc250_submit(ctx, queue, submit);
       if (!NT_SUCCESS(status)) {
@@ -1055,7 +1058,7 @@ radv_wddm2_cs_submit(struct radeon_winsys_ctx *_ctx,
          .BroadcastContextArray = &queue->context_h,
          .MonitoredFenceValueArray = &next_value,
       };
-      status = WDDM2_DISPATCH(SignalSynchronizationObjectFromGpu2(&progress_signal));
+      status = BC250_WDDM_CALL(&ws->host, SignalSynchronizationObjectFromGpu2, &progress_signal);
       if (!NT_SUCCESS(status)) {
          queue->bc250_submit_failed = true; // accepted IB has no retirement value: never reuse its slot
          return VK_ERROR_DEVICE_LOST;
@@ -1089,7 +1092,7 @@ radv_wddm2_cs_submit(struct radeon_winsys_ctx *_ctx,
             .pPrivateDriverData = pdd.buffer,
             .PrivateDriverDataSize = pdd.offset,
          };
-         status = WDDM2_DISPATCH(SubmitCommandToHwQueue(&wddm2_submit));
+         status = BC250_WDDM_CALL(&ws->host, SubmitCommandToHwQueue, &wddm2_submit);
       } else {
          D3DKMT_SUBMITCOMMAND wddm2_submit = {
             .Commands = first_ib.va,
@@ -1099,7 +1102,7 @@ radv_wddm2_cs_submit(struct radeon_winsys_ctx *_ctx,
             .BroadcastContextCount = 1,
             .BroadcastContext[0] = queue->context_h,
          };
-         status = WDDM2_DISPATCH(SubmitCommand(&wddm2_submit));          
+         status = BC250_WDDM_CALL(&ws->host, SubmitCommand, &wddm2_submit);          
       }
       if (!NT_SUCCESS(status)) {
          fprintf(stderr, "SubmitCommand: VK_ERROR_DEVICE_LOST\n");
@@ -1127,7 +1130,7 @@ radv_wddm2_cs_submit(struct radeon_winsys_ctx *_ctx,
             .ObjectHandleArray = handles,
             .FenceValueArray = values,
          };
-         status = WDDM2_DISPATCH(SubmitSignalSyncObjectsToHwQueue(&signal));
+         status = BC250_WDDM_CALL(&ws->host, SubmitSignalSyncObjectsToHwQueue, &signal);
       } else {
          D3DKMT_SIGNALSYNCHRONIZATIONOBJECTFROMGPU2 signal = {
             .ObjectCount = signal_count,
@@ -1136,7 +1139,7 @@ radv_wddm2_cs_submit(struct radeon_winsys_ctx *_ctx,
             .BroadcastContextArray = &queue->context_h,
             .MonitoredFenceValueArray = values,
          };
-         status = WDDM2_DISPATCH(SignalSynchronizationObjectFromGpu2(&signal));
+         status = BC250_WDDM_CALL(&ws->host, SignalSynchronizationObjectFromGpu2, &signal);
       }
 
       STACK_ARRAY_FINISH(handles);

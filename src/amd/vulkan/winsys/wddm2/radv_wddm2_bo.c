@@ -391,7 +391,7 @@ radv_wddm2_reserve_va_range(struct radv_wddm2_winsys *ws, struct radv_wddm2_bo *
       .MaximumAddress = max,
       .Size = reserved_size + (address ? 0 : alignment - granularity),
    };
-   status = WDDM2_DISPATCH(ReserveGpuVirtualAddress(&reserve));
+   status = BC250_WDDM_CALL(&ws->host, ReserveGpuVirtualAddress, &reserve);
    if (!NT_SUCCESS(status))
       return 0;
 
@@ -404,7 +404,7 @@ radv_wddm2_reserve_va_range(struct radv_wddm2_winsys *ws, struct radv_wddm2_bo *
          .Zero = 1,
       },
    };
-   status = WDDM2_DISPATCH(MapGpuVirtualAddress(&map));
+   status = BC250_WDDM_CALL(&ws->host, MapGpuVirtualAddress, &map);
    if (NT_SUCCESS(status)) {
       /* Initial zero mapping is asynchronous, just like physical BO mapping.
        * Do not return the BO before that paging operation has retired. */
@@ -414,7 +414,7 @@ radv_wddm2_reserve_va_range(struct radv_wddm2_winsys *ws, struct radv_wddm2_bo *
          .ObjectHandleArray = &ws->paging_fence_h,
          .FenceValueArray = &map.PagingFenceValue,
       };
-      status = WDDM2_DISPATCH(WaitForSynchronizationObjectFromCpu(&wait));
+      status = BC250_WDDM_CALL(&ws->host, WaitForSynchronizationObjectFromCpu, &wait);
    }
    if (!NT_SUCCESS(status)) {
       const D3DKMT_FREEGPUVIRTUALADDRESS release = {
@@ -422,7 +422,7 @@ radv_wddm2_reserve_va_range(struct radv_wddm2_winsys *ws, struct radv_wddm2_bo *
          .BaseAddress = reserve.VirtualAddress,
          .Size = reserve.Size,
       };
-      WDDM2_DISPATCH(FreeGpuVirtualAddress(&release));
+      BC250_WDDM_CALL(&ws->host, FreeGpuVirtualAddress, &release);
       return 0;
    }
 
@@ -476,7 +476,7 @@ radv_wddm2_init_sparse_alias(struct radv_wddm2_winsys *ws, struct radv_wddm2_bo 
       .BaseAddress = high,
       .Size = align64(bo->base.size, 65536),
    };
-   NTSTATUS status = WDDM2_DISPATCH(ReserveGpuVirtualAddress(&reserve));
+   NTSTATUS status = BC250_WDDM_CALL(&ws->host, ReserveGpuVirtualAddress, &reserve);
    if (!NT_SUCCESS(status))
       return false;
    bo->sparse_high_va = high;
@@ -487,7 +487,7 @@ radv_wddm2_init_sparse_alias(struct radv_wddm2_winsys *ws, struct radv_wddm2_bo 
       .SizeInPages = bo->base.size / 4096,
       .Protection.Zero = 1,
    };
-   status = WDDM2_DISPATCH(MapGpuVirtualAddress(&map));
+   status = BC250_WDDM_CALL(&ws->host, MapGpuVirtualAddress, &map);
    if (!NT_SUCCESS(status))
       return false;
 
@@ -501,7 +501,7 @@ radv_wddm2_init_sparse_alias(struct radv_wddm2_winsys *ws, struct radv_wddm2_bo 
          .SizeInPages = bytes / 4096,
          /* Read-only; every chunk aliases offset zero of the shared BO. */
       };
-      status = WDDM2_DISPATCH(MapGpuVirtualAddress(&map));
+      status = BC250_WDDM_CALL(&ws->host, MapGpuVirtualAddress, &map);
       if (!NT_SUCCESS(status))
          return false;
       fence = map.PagingFenceValue;
@@ -515,7 +515,7 @@ radv_wddm2_init_sparse_alias(struct radv_wddm2_winsys *ws, struct radv_wddm2_bo 
       .ObjectHandleArray = &ws->paging_fence_h,
       .FenceValueArray = &fence,
    };
-   status = WDDM2_DISPATCH(WaitForSynchronizationObjectFromCpu(&wait));
+   status = BC250_WDDM_CALL(&ws->host, WaitForSynchronizationObjectFromCpu, &wait);
    if (!NT_SUCCESS(status))
       return false;
    bo->base.va = high;
@@ -562,14 +562,14 @@ radv_wddm2_virtual_bo_create(struct radeon_winsys *_ws, uint64_t size, unsigned 
          .BaseAddress = bo->reserved_va,
          .Size = bo->reserved_size,
       };
-      WDDM2_DISPATCH(FreeGpuVirtualAddress(&low));
+      BC250_WDDM_CALL(&ws->host, FreeGpuVirtualAddress, &low);
       if (bo->sparse_high_va) {
          const D3DKMT_FREEGPUVIRTUALADDRESS high = {
             .hAdapter = ws->adapter_h,
             .BaseAddress = bo->sparse_high_va,
             .Size = align64(bo->base.size, 65536),
          };
-         WDDM2_DISPATCH(FreeGpuVirtualAddress(&high));
+         BC250_WDDM_CALL(&ws->host, FreeGpuVirtualAddress, &high);
       }
       result = VK_ERROR_OUT_OF_DEVICE_MEMORY;
       goto error_va_reserve;
@@ -705,7 +705,7 @@ radv_wddm2_bo_create_internal(struct radeon_winsys *_ws, uint64_t size, unsigned
       goto error_create;
    }*/
 
-   status = WDDM2_DISPATCH(CreateAllocation2(&create));
+   status = BC250_WDDM_CALL(&ws->host, CreateAllocation2, &create);
    if (!NT_SUCCESS(status)) {
       fprintf(stderr, "CreateAllocation2 failed 0x%X\n", status);
       result = VK_ERROR_OUT_OF_DEVICE_MEMORY;
@@ -740,7 +740,7 @@ radv_wddm2_bo_create_internal(struct radeon_winsys *_ws, uint64_t size, unsigned
          .Write = !(flags & RADEON_FLAG_READ_ONLY),
       },
    };
-   status = WDDM2_DISPATCH(MapGpuVirtualAddress(&map));
+   status = BC250_WDDM_CALL(&ws->host, MapGpuVirtualAddress, &map);
    if (!NT_SUCCESS(status)) {
       fprintf(stderr, "mapping 0x%" PRIx64 " failed: 0x%X\n", bo->base.va, status);
       result = VK_ERROR_OUT_OF_DEVICE_MEMORY;
@@ -759,7 +759,7 @@ radv_wddm2_bo_create_internal(struct radeon_winsys *_ws, uint64_t size, unsigned
             .MustSucceed = 1,
          },
       };
-      status = WDDM2_DISPATCH(MakeResident(&make_resident));
+      status = BC250_WDDM_CALL(&ws->host, MakeResident, &make_resident);
       if (!NT_SUCCESS(status)) {
          fprintf(stderr, "MakeResident failed\n");
          result = VK_ERROR_OUT_OF_DEVICE_MEMORY;
@@ -775,7 +775,7 @@ radv_wddm2_bo_create_internal(struct radeon_winsys *_ws, uint64_t size, unsigned
       .ObjectHandleArray = &ws->paging_fence_h,
       .FenceValueArray = &paging_fence_value,
    };
-   status = WDDM2_DISPATCH(WaitForSynchronizationObjectFromCpu(&wait));
+   status = BC250_WDDM_CALL(&ws->host, WaitForSynchronizationObjectFromCpu, &wait);
    if (!NT_SUCCESS(status)) {
       fprintf(stderr, "WaitForSynchronizationObjectFromCpu failed\n");
       result = VK_ERROR_OUT_OF_DEVICE_MEMORY;
@@ -794,7 +794,7 @@ error_va_alloc:
    //radv_wddm2_bo_va_free(ws, flags, bo->base.va, bo->base.size);
 
    fprintf(stderr, "destroy allocation\n");
-   status = WDDM2_DISPATCH(DestroyAllocation2(&destroy));
+   status = BC250_WDDM_CALL(&ws->host, DestroyAllocation2, &destroy);
    assert(NT_SUCCESS(status));
 
 error_ptr_alloc:
@@ -857,7 +857,7 @@ radv_wddm2_bo_from_handle(struct radeon_winsys *_ws, void *handle, unsigned prio
       .hDevice = ws->device_h,
       .hNtHandle = (HANDLE)handle,
    };
-   status = WDDM2_DISPATCH(QueryResourceInfoFromNtHandle(&query_info));
+   status = BC250_WDDM_CALL(&ws->host, QueryResourceInfoFromNtHandle, &query_info);
    if (!NT_SUCCESS(status)) {
       fprintf(stderr, "QueryResourceInfoFromNtHandle failed 0x%X\n", status);
       result = VK_ERROR_INVALID_EXTERNAL_HANDLE;
@@ -895,7 +895,7 @@ radv_wddm2_bo_from_handle(struct radeon_winsys *_ws, void *handle, unsigned prio
       .PrivateRuntimeDataSize = query_info.PrivateRuntimeDataSize,
       .pPrivateRuntimeData = runtime_data,
    };
-   status = WDDM2_DISPATCH(OpenResourceFromNtHandle(&open_resource));
+   status = BC250_WDDM_CALL(&ws->host, OpenResourceFromNtHandle, &open_resource);
    if (!NT_SUCCESS(status)) {
       result = VK_ERROR_INVALID_EXTERNAL_HANDLE;
       goto error_import;
@@ -952,7 +952,7 @@ radv_wddm2_bo_from_handle(struct radeon_winsys *_ws, void *handle, unsigned prio
          .Write = 1,
       },
    };
-   status = WDDM2_DISPATCH(MapGpuVirtualAddress(&map));
+   status = BC250_WDDM_CALL(&ws->host, MapGpuVirtualAddress, &map);
    if (!NT_SUCCESS(status)) {
       result = VK_ERROR_OUT_OF_DEVICE_MEMORY;
       goto error_import;
@@ -971,7 +971,7 @@ radv_wddm2_bo_from_handle(struct radeon_winsys *_ws, void *handle, unsigned prio
          .MustSucceed = 1,
       },
    };
-   status = WDDM2_DISPATCH(MakeResident(&make_resident));
+   status = BC250_WDDM_CALL(&ws->host, MakeResident, &make_resident);
    if (!NT_SUCCESS(status)) {
       result = VK_ERROR_OUT_OF_DEVICE_MEMORY;
       goto error_map;
@@ -984,7 +984,7 @@ radv_wddm2_bo_from_handle(struct radeon_winsys *_ws, void *handle, unsigned prio
       .ObjectHandleArray = &ws->paging_fence_h,
       .FenceValueArray = &make_resident.PagingFenceValue,
    };
-   status = WDDM2_DISPATCH(WaitForSynchronizationObjectFromCpu(&wait));
+   status = BC250_WDDM_CALL(&ws->host, WaitForSynchronizationObjectFromCpu, &wait);
    if (!NT_SUCCESS(status)) {
       result = VK_ERROR_OUT_OF_DEVICE_MEMORY;
       goto error_map;
@@ -1001,7 +1001,7 @@ error_map:
          .BaseAddress = bo->base.va,
          .Size = bo->base.size,
       };
-      WDDM2_DISPATCH(FreeGpuVirtualAddress(&unmap));
+      BC250_WDDM_CALL(&ws->host, FreeGpuVirtualAddress, &unmap);
    }
 error_import:
    if (bo->resource_handle) {
@@ -1009,7 +1009,7 @@ error_import:
          .hDevice = ws->device_h,
          .hResource = bo->resource_handle,
       };
-      WDDM2_DISPATCH(DestroyAllocation2(&destroy));
+      BC250_WDDM_CALL(&ws->host, DestroyAllocation2, &destroy);
    }
    free(pdata);
 error_alloc:
@@ -1056,7 +1056,7 @@ radv_wddm2_bo_map(struct radeon_winsys *_ws, struct radeon_winsys_bo *_bo,
       .hDevice = bo->ws->device_h,
       .hAllocation = bo->base.handle,
    };
-   status = WDDM2_DISPATCH(Lock2(&lock));
+   status = BC250_WDDM_CALL(&bo->ws->host, Lock2, &lock);
    if (!NT_SUCCESS(status))
       return NULL;
 
@@ -1078,7 +1078,7 @@ radv_wddm2_bo_unmap(struct radeon_winsys *_ws, struct radeon_winsys_bo *_bo, boo
       .hDevice = bo->ws->device_h,
       .hAllocation = bo->base.handle,
    };
-   status = WDDM2_DISPATCH(Unlock2(&unlock));
+   status = BC250_WDDM_CALL(&bo->ws->host, Unlock2, &unlock);
    assert(NT_SUCCESS(status));
    
    bo->map = NULL;
@@ -1125,7 +1125,7 @@ radv_wddm2_bo_make_resident(struct radeon_winsys *_ws, struct radeon_winsys_bo *
          .AllocationList = &bo->base.handle,
          .Flags.EvictOnlyIfNecessary = false,
       };
-      status = WDDM2_DISPATCH(Evict(&evict));
+      status = BC250_WDDM_CALL(&ws->host, Evict, &evict);
       if (!NT_SUCCESS(status))
          return VK_ERROR_OUT_OF_DEVICE_MEMORY;
    }
@@ -1147,7 +1147,7 @@ radv_wddm2_bo_destroy(struct radeon_winsys *_ws, struct radeon_winsys_bo *_bo)
          .AllocationList = &bo->base.handle,
          .Flags.EvictOnlyIfNecessary = false,
       };
-      status = WDDM2_DISPATCH(Evict(&evict));
+      status = BC250_WDDM_CALL(&ws->host, Evict, &evict);
       if (!NT_SUCCESS(status)) {
          fprintf(stderr, "*****  Evict failed\n");
          return;
@@ -1162,14 +1162,14 @@ radv_wddm2_bo_destroy(struct radeon_winsys *_ws, struct radeon_winsys_bo *_bo)
          .BaseAddress = bo->sparse_high_va,
          .Size = align64(bo->base.size, 65536),
       };
-      status = WDDM2_DISPATCH(FreeGpuVirtualAddress(&high));
+      status = BC250_WDDM_CALL(&ws->host, FreeGpuVirtualAddress, &high);
    }
    const D3DKMT_FREEGPUVIRTUALADDRESS unmap = {
       .hAdapter = ws->adapter_h,
       .BaseAddress = bo->reserved_va ? bo->reserved_va : bo->base.va,
       .Size = bo->reserved_size ? bo->reserved_size : bo->base.size,
    };
-   status = WDDM2_DISPATCH(FreeGpuVirtualAddress(&unmap));
+   status = BC250_WDDM_CALL(&ws->host, FreeGpuVirtualAddress, &unmap);
 
    if (!bo->base.is_virtual) {
       const D3DKMT_DESTROYALLOCATION2 destroy = {
@@ -1178,7 +1178,7 @@ radv_wddm2_bo_destroy(struct radeon_winsys *_ws, struct radeon_winsys_bo *_bo)
          .phAllocationList = bo->resource_handle ? NULL : &bo->base.handle,
          .AllocationCount = bo->resource_handle ? 0 : 1,
       };
-      status = WDDM2_DISPATCH(DestroyAllocation2(&destroy));
+      status = BC250_WDDM_CALL(&ws->host, DestroyAllocation2, &destroy);
       //assert(NT_SUCCESS(status));
 
       if (ws->debug_all_bos)
@@ -1300,7 +1300,7 @@ radv_wddm2_virtual_bind_end(struct radeon_winsys *_ws, struct radeon_winsys_ctx 
          .ObjectHandleArray = &queue->vm_fence.handle,
          .FenceValueArray = &boundary,
       };
-      status = WDDM2_DISPATCH(SubmitSignalSyncObjectsToHwQueue(&signal));
+      status = BC250_WDDM_CALL(&ws->host, SubmitSignalSyncObjectsToHwQueue, &signal);
    } else {
       const D3DKMT_SIGNALSYNCHRONIZATIONOBJECTFROMGPU2 signal = {
          .BroadcastContextCount = 1,
@@ -1309,7 +1309,7 @@ radv_wddm2_virtual_bind_end(struct radeon_winsys *_ws, struct radeon_winsys_ctx 
          .ObjectHandleArray = &queue->vm_fence.handle,
          .MonitoredFenceValueArray = &boundary,
       };
-      status = WDDM2_DISPATCH(SignalSynchronizationObjectFromGpu2(&signal));
+      status = BC250_WDDM_CALL(&ws->host, SignalSynchronizationObjectFromGpu2, &signal);
    }
    if (!NT_SUCCESS(status)) {
       result = VK_ERROR_DEVICE_LOST;
@@ -1331,7 +1331,7 @@ radv_wddm2_virtual_bind_end(struct radeon_winsys *_ws, struct radeon_winsys_ctx 
          .NumOperations =
             util_dynarray_num_elements(&group->operations, D3DDDI_UPDATEGPUVIRTUALADDRESS_OPERATION),
       };
-      status = WDDM2_DISPATCH(UpdateGpuVirtualAddress(&update));
+      status = BC250_WDDM_CALL(&ws->host, UpdateGpuVirtualAddress, &update);
       if (!NT_SUCCESS(status)) {
          result = VK_ERROR_DEVICE_LOST;
          goto done;
@@ -1345,7 +1345,7 @@ radv_wddm2_virtual_bind_end(struct radeon_winsys *_ws, struct radeon_winsys_ctx 
          .ObjectHandleArray = &queue->vm_fence.handle,
          .FenceValueArray = &completed,
       };
-      status = WDDM2_DISPATCH(SubmitWaitForSyncObjectsToHwQueue(&wait));
+      status = BC250_WDDM_CALL(&ws->host, SubmitWaitForSyncObjectsToHwQueue, &wait);
    } else {
       const D3DKMT_WAITFORSYNCHRONIZATIONOBJECTFROMGPU wait = {
          .hContext = queue->context_h,
@@ -1353,7 +1353,7 @@ radv_wddm2_virtual_bind_end(struct radeon_winsys *_ws, struct radeon_winsys_ctx 
          .ObjectHandleArray = &queue->vm_fence.handle,
          .MonitoredFenceValueArray = &completed,
       };
-      status = WDDM2_DISPATCH(WaitForSynchronizationObjectFromGpu(&wait));
+      status = BC250_WDDM_CALL(&ws->host, WaitForSynchronizationObjectFromGpu, &wait);
    }
    if (!NT_SUCCESS(status)) {
       result = VK_ERROR_DEVICE_LOST;
