@@ -41,6 +41,7 @@
 #include "util/u_math.h"
 #include "util/u_rect.h"
 #include "util/u_surface.h"
+#include "frontend/winsys_handle.h"
 
 
 /*
@@ -311,7 +312,29 @@ CreateResource(D3D10DDI_HDEVICE hDevice,                                // IN
       }
    }
 
-   pResource->resource = screen->resource_create(screen, &templat);
+   // E34 diagnostic import only: the app owns this NT handle. This bypasses
+   // runtime allocation creation and cannot establish the DWM sharing contract.
+   char probeHandle[32] = {};
+   DWORD probeLength = GetEnvironmentVariableA("BC250_D3D_IMPORT_PROBE_HANDLE", probeHandle, sizeof(probeHandle));
+   if (probeLength && probeLength < sizeof(probeHandle) && (templat.bind & PIPE_BIND_RENDER_TARGET)) {
+      struct winsys_handle handle = {};
+      handle.type = WINSYS_HANDLE_TYPE_WIN32_HANDLE;
+      handle.handle = (HANDLE)(uintptr_t)_strtoui64(probeHandle, NULL, 16);
+      handle.stride = templat.width0 * 4;
+      handle.size = UINT64(handle.stride) * templat.height0;
+      templat.bind |= PIPE_BIND_LINEAR;
+      if (!screen->memobj_create_from_handle || !screen->resource_from_memobj) {
+         SetError(hDevice, E_NOTIMPL);
+         return;
+      }
+      struct pipe_memory_object *memory = screen->memobj_create_from_handle(screen, &handle, true);
+      if (!memory) { SetError(hDevice, E_OUTOFMEMORY); return; }
+      pResource->resource = screen->resource_from_memobj(screen, &templat, memory, 0);
+      screen->memobj_destroy(screen, memory);
+      fprintf(stderr, "BC250 native shared probe import %s\n", pResource->resource ? "ok" : "failed");
+   } else {
+      pResource->resource = screen->resource_create(screen, &templat);
+   }
    if (!pResource->resource) {
       DebugPrintf("%s: failed to create resource\n", __func__);
       SetError(hDevice, E_OUTOFMEMORY);

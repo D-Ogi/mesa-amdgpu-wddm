@@ -1175,6 +1175,12 @@ allocate_bo(struct zink_screen *screen, const struct pipe_resource *templ,
           heap = ZINK_HEAP_DEVICE_LOCAL;
    };
 
+#if defined(ZINK_USE_DMABUF) && defined(_WIN32)
+   /* Win32 memory import retains caller ownership, unlike an imported fd. */
+   if (imfi.handle)
+      CloseHandle(imfi.handle);
+#endif
+
    return obj->bo ? roc_success : roc_fail_and_cleanup_object;
 }
 
