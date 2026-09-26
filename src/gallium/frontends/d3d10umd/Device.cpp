@@ -44,11 +44,37 @@
 
 #include "Debug.h"
 
+#include "util/bc250_host_bootstrap.h"
 #include "util/u_sampler.h"
 #include "util/u_framebuffer.h"
 
 
 extern "C" struct pipe_screen *d3d10_create_screen(void);
+
+
+struct Bc250HostProbeState { Device *device; DWORD thread; };
+static int32_t Bc250HostDispatch(void *userdata, uint32_t operation, void *argument)
+{
+   auto *state = (Bc250HostProbeState *)userdata;
+   if (GetCurrentThreadId() != state->thread) return (int32_t)0xc000000d;
+   auto *device = state->device;
+   auto *paging = (bc250_host_paging *)argument;
+   HRESULT hr = E_NOTIMPL;
+   if (operation == BC250_HOST_CREATE_PAGING) {
+      D3DDDICB_CREATEPAGINGQUEUE create = {};
+      hr = device->KTCallbacks.pfnCreatePagingQueueCb(device->hDevice, &create);
+      paging->queue = create.hPagingQueue;
+      paging->sync = create.hSyncObject;
+      paging->cpu_address = create.FenceValueCPUVirtualAddress;
+   } else if (operation == BC250_HOST_DESTROY_PAGING) {
+      D3DDDI_DESTROYPAGINGQUEUE destroy = {};
+      destroy.hPagingQueue = paging->queue;
+      hr = device->KTCallbacks.pfnDestroyPagingQueueCb(device->hDevice, &destroy);
+   }
+   fprintf(stderr, "BC250 hosted callback op=%u runtime=%p hr=%08lx\n", operation, device->hDevice, hr);
+   return SUCCEEDED(hr) ? 0 : (int32_t)0xc0000001;
+}
+extern "C" bool d3d10_hosted_bootstrap(struct bc250_host *host);
 
 static void APIENTRY DestroyDevice(D3D10DDI_HDEVICE hDevice);
 static void APIENTRY RelocateDeviceFuncs(D3D10DDI_HDEVICE hDevice,
@@ -162,6 +188,14 @@ CreateDevice(D3D10DDI_HADAPTER hAdapter,                 // IN
    // Adapter screen remains capability-only for this prototype. Rendering
    // screens belong to one runtime device so future hosted callbacks cannot
    // accidentally be inherited from a different D3D device.
+   if (GetEnvironmentVariableA("BC250_HOSTED_ICD", NULL, 0)) {
+      Bc250HostProbeState state = {pDevice, GetCurrentThreadId()};
+      bc250_host host = {};
+      host.sType = BC250_HOST_STYPE; host.version = BC250_HOST_VERSION;
+      host.size = sizeof(host); host.identity = pDevice->hDevice;
+      host.userdata = &state; host.dispatch = Bc250HostDispatch;
+      if (!d3d10_hosted_bootstrap(&host)) return E_FAIL;
+   }
    pDevice->owned_screen = d3d10_create_screen();
    if (!pDevice->owned_screen) return E_OUTOFMEMORY;
    struct pipe_screen *screen = pDevice->owned_screen;
