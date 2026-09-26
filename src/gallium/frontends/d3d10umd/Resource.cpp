@@ -440,8 +440,9 @@ OpenResource(D3D10DDI_HDEVICE hDevice,                            // IN
    SurfacePrivate data;
    memcpy(&data, info->pPrivateDriverData, sizeof(data));
    if (data.magic != 0x4137424c || data.version != 1 || !data.width || !data.height ||
-       data.width > 8192 || data.height > 8192 || data.pitch != data.width * 4 ||
-       data.size < UINT64(data.pitch) * data.height) { SetError(hDevice, E_INVALIDARG); return; }
+       data.width > 8192 || data.height > 8192 || (data.pitch & 15u) ||
+       data.pitch < ((data.width + 3u) & ~3u) * 4 ||
+       data.size < UINT64(data.pitch) * ((data.height + 3u) & ~3u)) { SetError(hDevice, E_INVALIDARG); return; }
    DXGI_FORMAT format;
    switch (data.format) {
    case D3DDDIFMT_A8R8G8B8: format = DXGI_FORMAT_B8G8R8A8_UNORM; break;
@@ -463,6 +464,8 @@ OpenResource(D3D10DDI_HDEVICE hDevice,                            // IN
    Resource *resource = CastResource(hResource);
    if (!resource->resource) return;
    resource->allocation = info->hAllocation;
+   resource->surfacePitch = data.pitch;
+   resource->surfaceBytes = data.size;
    HRESULT hr = Bc250EnsureSurface(CastDevice(hDevice), resource);
    DebugPrintf("BC250 OpenResource %08lx handle %x\n", hr, resource->allocation);
    SetError(hDevice, hr);

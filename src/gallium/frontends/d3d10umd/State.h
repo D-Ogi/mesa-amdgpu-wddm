@@ -167,6 +167,8 @@ struct Resource
    HANDLE hRTResource;
    D3DKMT_HANDLE allocation;
    UINT64 gpuVa, gpuBytes;
+   UINT surfacePitch;
+   UINT64 surfaceBytes;
    BOOL presentReady;
    void *cpuMapping;
    BOOL primary, shared;
