@@ -1,3 +1,4 @@
+#include "util/bc250_host_bootstrap.h"
 /*
  * Copyright © 2020 Intel Corporation
  *
@@ -241,6 +242,7 @@ struct vk_device {
 
    /* Set by vk_device_set_wddm2_handle() */
    uint32_t wddm2_handle;
+   struct bc250_host bc250_host;
 
    /** Implicit pipeline cache, or NULL */
    struct vk_pipeline_cache *mem_cache;

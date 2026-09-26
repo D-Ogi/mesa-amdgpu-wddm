@@ -115,7 +115,7 @@ vk_wddm2_monitored_fence_init(struct vk_device *device,
          },
       }
    };
-   status = WDDM2_DISPATCH(CreateSynchronizationObject2(&create));
+   status = BC250_WDDM_CALL(&device->bc250_host, CreateSynchronizationObject2, &create);
    if (unlikely(!NT_SUCCESS(status)))
        return NTSTATUS_to_VkResult(device, status);
 
@@ -123,6 +123,7 @@ vk_wddm2_monitored_fence_init(struct vk_device *device,
    fence->value_map = create.Info.MonitoredFence.FenceValueCPUVirtualAddress;
 #ifdef _WIN32
    {
+      if (!device->bc250_host.dispatch) {
       OBJECT_ATTRIBUTES oa = { sizeof(OBJECT_ATTRIBUTES) };
       WDDM2_DISPATCH(ShareObjects(
          1,
@@ -131,6 +132,7 @@ vk_wddm2_monitored_fence_init(struct vk_device *device,
          D3DDDI_SYNC_OBJECT_ALL_ACCESS,
          &fence->shared_handle
       ));
+      }
    }
 #endif
 
@@ -153,7 +155,7 @@ vk_wddm2_monitored_fence_finish(struct vk_device *device,
    const D3DKMT_DESTROYSYNCHRONIZATIONOBJECT destroy = {
       .hSyncObject = fence->handle,
    };
-   ASSERTED NTSTATUS status = WDDM2_DISPATCH(DestroySynchronizationObject(&destroy));
+   ASSERTED NTSTATUS status = BC250_WDDM_CALL(&device->bc250_host, DestroySynchronizationObject, &destroy);
    assert(NT_SUCCESS(status));
 }
 
@@ -175,7 +177,7 @@ vk_wddm2_monitored_fence_signal(struct vk_device *device,
          .AllowFenceRewind = true,
       },
    };
-   NTSTATUS status = WDDM2_DISPATCH(SignalSynchronizationObjectFromCpu(&signal));
+   NTSTATUS status = BC250_WDDM_CALL(&device->bc250_host, SignalSynchronizationObjectFromCpu, &signal);
    if (unlikely(!NT_SUCCESS(status))) {
       vk_wddm2_monitored_fence_finish(device, sync);
       return NTSTATUS_to_VkResult(device, status);
@@ -251,7 +253,7 @@ vk_wddm2_monitored_fence_wait_many(struct vk_device *device,
       },
       .hAsyncEvent = async_event,
    };
-   status = WDDM2_DISPATCH(WaitForSynchronizationObjectFromCpu(&wait));
+   status = BC250_WDDM_CALL(&device->bc250_host, WaitForSynchronizationObjectFromCpu, &wait);
 
    STACK_ARRAY_FINISH(handles);
    STACK_ARRAY_FINISH(wait_values);
@@ -303,7 +305,7 @@ vk_wddm2_monitored_fence_import_opaque_win32_handle(struct vk_device *device,
       },
    };
 
-   status = WDDM2_DISPATCH(OpenSyncObjectFromNtHandle2(&open));
+   status = BC250_WDDM_CALL(&device->bc250_host, OpenSyncObjectFromNtHandle2, &open);
    if (unlikely(!NT_SUCCESS(status)))
       return NTSTATUS_to_VkResult(device, status);
 
@@ -355,13 +357,15 @@ const struct vk_sync_type vk_wddm2_monitored_fence_type = {
 VkResult
 vk_wddm2_check_device_status(struct vk_device *device)
 {
+   if (device->bc250_host.dispatch)
+      return VK_SUCCESS;
    NTSTATUS status;
 
    D3DKMT_GETDEVICESTATE get_state = {
       .hDevice = device->wddm2_handle,
       .StateType = D3DKMT_DEVICESTATE_EXECUTION,
    };
-   status = WDDM2_DISPATCH(GetDeviceState(&get_state));
+   status = BC250_WDDM_CALL(&device->bc250_host, GetDeviceState, &get_state);
    if (unlikely(!NT_SUCCESS(status))) {
       return vk_errorf(device, VK_ERROR_UNKNOWN,
                        "D3DKMTGetDeviceState failed");
@@ -382,7 +386,7 @@ vk_wddm2_check_device_status(struct vk_device *device)
       return vk_device_set_lost(device, "Device DMA fault");
    case D3DKMT_DEVICEEXECUTION_ERROR_DMAPAGEFAULT:
       get_state.StateType = D3DKMT_DEVICESTATE_PAGE_FAULT;
-      status = WDDM2_DISPATCH(GetDeviceState(&get_state));
+      status = BC250_WDDM_CALL(&device->bc250_host, GetDeviceState, &get_state);
       if (unlikely(!NT_SUCCESS(status))) {
          return vk_errorf(device, VK_ERROR_UNKNOWN,
                           "D3DKMTGetDeviceState failed");
@@ -423,7 +427,7 @@ vk_wddm2_monitored_fence_gpu_wait_many(struct vk_queue *queue,
       .ObjectHandleArray = handles,
       .MonitoredFenceValueArray = wait_values,
    };
-   NTSTATUS status = WDDM2_DISPATCH(WaitForSynchronizationObjectFromGpu(&gpu_wait));
+   NTSTATUS status = BC250_WDDM_CALL(&queue->base.device->bc250_host, WaitForSynchronizationObjectFromGpu, &gpu_wait);
 
    STACK_ARRAY_FINISH(handles);
    STACK_ARRAY_FINISH(wait_values);
@@ -464,7 +468,7 @@ vk_wddm2_monitored_fence_gpu_signal_many(struct vk_queue *queue,
       .ObjectHandleArray = handles,
       .MonitoredFenceValueArray = signal_values,
    };
-   NTSTATUS status = WDDM2_DISPATCH(SignalSynchronizationObjectFromGpu(&gpu_signal));
+   NTSTATUS status = BC250_WDDM_CALL(&queue->base.device->bc250_host, SignalSynchronizationObjectFromGpu, &gpu_signal);
 
    STACK_ARRAY_FINISH(handles);
    STACK_ARRAY_FINISH(signal_values);
