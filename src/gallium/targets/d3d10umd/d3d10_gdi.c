@@ -83,9 +83,13 @@ d3d10_create_screen(void)
    (void)driver;
 #endif
 
+#ifndef GALLIUM_LLVMPIPE
    if (screen == NULL) {
       screen = softpipe_create_screen( winsys );
    }
+#endif
+   // This diagnostic llvmpipe build must not silently fall back to softpipe:
+   // the comparison and the module manifest identify a single renderer.
 
    if (screen == NULL)
       goto no_screen;

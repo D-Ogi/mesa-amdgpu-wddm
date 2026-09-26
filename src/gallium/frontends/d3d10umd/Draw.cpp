@@ -40,6 +40,16 @@
 #include "util/u_draw.h"
 #include "util/u_memory.h"
 
+// Diagnostic wall-clock accounting around native draw entry points.
+struct Bc250DrawTimer {
+   Device *device; LARGE_INTEGER start;
+   Bc250DrawTimer(Device *d):device(d){QueryPerformanceCounter(&start);}
+   ~Bc250DrawTimer(){LARGE_INTEGER end;QueryPerformanceCounter(&end);
+      UINT64 ticks=end.QuadPart-start.QuadPart;
+      device->profileDrawTicks+=ticks;device->profileDrawCalls++;
+      if(ticks>device->profileDrawMax)device->profileDrawMax=ticks;}
+};
+
 static unsigned
 ClampedUAdd(unsigned a,
             unsigned b)
@@ -153,6 +163,7 @@ Draw(D3D10DDI_HDEVICE hDevice,   // IN
    LOG_ENTRYPOINT();
 
    Device *pDevice = CastDevice(hDevice);
+   Bc250DrawTimer timer(pDevice);
 
    ResolveState(pDevice);
 
@@ -183,6 +194,7 @@ DrawIndexed(D3D10DDI_HDEVICE hDevice,  // IN
    LOG_ENTRYPOINT();
 
    Device *pDevice = CastDevice(hDevice);
+   Bc250DrawTimer timer(pDevice);
    struct pipe_draw_info info;
    struct pipe_draw_start_count_bias draw;
    struct pipe_resource *null_ib = NULL;
@@ -241,6 +253,7 @@ DrawInstanced(D3D10DDI_HDEVICE hDevice,      // IN
    LOG_ENTRYPOINT();
 
    Device *pDevice = CastDevice(hDevice);
+   Bc250DrawTimer timer(pDevice);
 
    if (!InstanceCount) {
       return;
@@ -280,6 +293,7 @@ DrawIndexedInstanced(D3D10DDI_HDEVICE hDevice,   // IN
    LOG_ENTRYPOINT();
 
    Device *pDevice = CastDevice(hDevice);
+   Bc250DrawTimer timer(pDevice);
    struct pipe_draw_info info;
    struct pipe_draw_start_count_bias draw;
    struct pipe_resource *null_ib = NULL;
@@ -344,6 +358,7 @@ DrawAuto(D3D10DDI_HDEVICE hDevice)  // IN
    LOG_ENTRYPOINT();
 
    Device *pDevice = CastDevice(hDevice);
+   Bc250DrawTimer timer(pDevice);
    struct pipe_draw_info info;
    struct pipe_draw_indirect_info indirect;
 
