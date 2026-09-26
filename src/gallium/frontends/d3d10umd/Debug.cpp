@@ -34,6 +34,18 @@ DebugPrintf(const char *format, ...)
     va_end(ap);
 
     OutputDebugStringA(buf);
+    static volatile LONG lines = 0;
+    if (InterlockedIncrement(&lines) <= 10000 || strstr(buf, "BC250 SetError") || strstr(buf, "BC250 Perf")) {
+       char path[MAX_PATH];
+       snprintf(path, sizeof(path), "C:\\BC250\\e26\\umdlogs\\mesa-%lu.txt", GetCurrentProcessId());
+       HANDLE f = CreateFileA(path, FILE_APPEND_DATA, FILE_SHARE_READ | FILE_SHARE_WRITE,
+                              NULL, OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+       if (f != INVALID_HANDLE_VALUE) {
+          DWORD written;
+          WriteFile(f, buf, (DWORD)strlen(buf), &written, NULL);
+          CloseHandle(f);
+       }
+    }
 }
 
 

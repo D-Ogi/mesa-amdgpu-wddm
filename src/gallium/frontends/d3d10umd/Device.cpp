@@ -130,7 +130,20 @@ CreateDevice(D3D10DDI_HADAPTER hAdapter,                 // IN
    Device *pDevice = CastDevice(pCreateData->hDrvDevice);
    memset(pDevice, 0, sizeof *pDevice);
 
+   // E26: DWM requests runtime synchronization while creating its primary,
+   // before the first Present. Register a virtual context at device creation
+   // so the runtime has a context for its broadcast synchronization callbacks.
+   if (!pCreateData->pKTCallbacks->pfnCreateContextVirtualCb) return E_NOTIMPL;
+   D3DDDICB_CREATECONTEXTVIRTUAL context = {};
+   context.EngineAffinity = 1;
+   HRESULT contextResult = pCreateData->pKTCallbacks->pfnCreateContextVirtualCb(
+       (HANDLE)pCreateData->hRTDevice.handle, &context);
+   DebugPrintf("BC250 initial CreateContextVirtual %08lx\n", contextResult);
+   if (FAILED(contextResult)) return contextResult;
+   pDevice->hContext = context.hContext;
+
    struct pipe_screen *screen = pAdapter->screen;
+   DebugPrintf("BC250 Renderer: %s\n", screen->get_name(screen));
    struct pipe_context *pipe = screen->context_create(screen, NULL, 0);
    pDevice->pipe = pipe;
    pDevice->cso = cso_create_context(pipe, CSO_NO_VBUF);
@@ -294,14 +307,8 @@ CreateDevice(D3D10DDI_HADAPTER hAdapter,                 // IN
    pCreateData->DXGIBaseDDI.pDXGIDDIBaseFunctions->pfnBlt =
       _Blt;
 
-   if (0) {
-      return S_OK;
-   } else {
-      // Tell DXGI to not use the shared resource presentation path when
-      // communicating with DWM:
-      // http://msdn.microsoft.com/en-us/library/windows/hardware/ff569887(v=vs.85).aspx
-      return DXGI_STATUS_NO_REDIRECTION;
-   }
+   // E26: the linear shared-resource path is implemented for the tested formats.
+   return S_OK;
 }
 
 
@@ -361,6 +368,16 @@ DestroyDevice(D3D10DDI_HDEVICE hDevice)   // IN
    pipe->set_sampler_views(pipe, MESA_SHADER_GEOMETRY, 0,
                            PIPE_MAX_SHADER_SAMPLER_VIEWS, 0, sampler_views);
 
+   if (pDevice->hContext) {
+      D3DDDICB_DESTROYCONTEXT destroy = {};
+      destroy.hContext = pDevice->hContext;
+      pDevice->KTCallbacks.pfnDestroyContextCb(pDevice->hDevice, &destroy);
+   }
+   if (pDevice->pagingQueue) {
+      D3DDDI_DESTROYPAGINGQUEUE destroy = {};
+      destroy.hPagingQueue = pDevice->pagingQueue;
+      pDevice->KTCallbacks.pfnDestroyPagingQueueCb(pDevice->hDevice, &destroy);
+   }
    pipe->destroy(pipe);
 }
 

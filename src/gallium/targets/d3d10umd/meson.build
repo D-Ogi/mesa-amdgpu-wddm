@@ -41,3 +41,15 @@ if with_tests
     suite : ['d3d10'],
   )
 endif
+
+executable('bc250_ttn_control', 'bc250_ttn_control.c',
+ include_directories: [inc_include, inc_src, inc_gallium, inc_gallium_aux],
+ link_with: [libgallium],
+ dependencies: [dep_ws2_32, idep_nir, driver_swrast, idep_mesautil])
+
+executable('bc250_lp_test_arit',
+ ['../../drivers/llvmpipe/lp_test_arit.c', 'bc250_lp_test_main.c', sha1_h],
+ c_args: [c_msvc_compat_args],
+ dependencies: [dep_llvm, dep_dl, dep_clock, idep_mesautil],
+ include_directories: [inc_gallium, inc_gallium_aux, inc_include, inc_src],
+ link_with: [libllvmpipe, libgallium])

@@ -1503,8 +1503,14 @@ get_index_registers(const struct tgsi_exec_machine *mach,
    if (reg->Register.Indirect) {
       const unsigned execmask = mach->ExecMask;
 
-      assert(reg->Indirect.File == TGSI_FILE_ADDRESS);
-      const union tgsi_exec_channel *addr = &mach->Addrs[reg->Indirect.Index].xyzw[reg->Indirect.Swizzle];
+      /* D3D10 relative operands may use TEMP as well as ADDR.
+       * Fetch through the same register-file path as destination indirection. */
+      union tgsi_exec_channel indirect_index, indirect_value;
+      for (int lane = 0; lane < TGSI_QUAD_SIZE; lane++)
+         indirect_index.i[lane] = reg->Indirect.Index;
+      fetch_src_file_channel(mach, reg->Indirect.File, reg->Indirect.Swizzle,
+                             &indirect_index, &ZeroVec, &indirect_value);
+      const union tgsi_exec_channel *addr = &indirect_value;
       for (int i = 0; i < TGSI_QUAD_SIZE; i++)
          index->i[i] += addr->u[i];
 
@@ -1545,8 +1551,14 @@ get_index_registers(const struct tgsi_exec_machine *mach,
       if (reg->Dimension.Indirect) {
          const unsigned execmask = mach->ExecMask;
 
-         assert(reg->DimIndirect.File == TGSI_FILE_ADDRESS);
-         const union tgsi_exec_channel *addr = &mach->Addrs[reg->DimIndirect.Index].xyzw[reg->DimIndirect.Swizzle];
+         /* D3D10 relative operands may use TEMP as well as ADDR.
+          * Fetch through the same register-file path as destination indirection. */
+         union tgsi_exec_channel indirect_index, indirect_value;
+         for (int lane = 0; lane < TGSI_QUAD_SIZE; lane++)
+            indirect_index.i[lane] = reg->DimIndirect.Index;
+         fetch_src_file_channel(mach, reg->DimIndirect.File, reg->DimIndirect.Swizzle,
+                                &indirect_index, &ZeroVec, &indirect_value);
+         const union tgsi_exec_channel *addr = &indirect_value;
          for (int i = 0; i < TGSI_QUAD_SIZE; i++)
             index2D->i[i] += addr->u[i];
 
