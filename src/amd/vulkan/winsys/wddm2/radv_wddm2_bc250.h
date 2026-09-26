@@ -1,3 +1,8 @@
+/*
+ * Copyright (c) 2026 D-Ogi
+ * SPDX-License-Identifier: MIT
+ */
+
 /* The private-data blobs bc250kmd reads. Layout is driver/contract/bc250_umd_submit.h and
  * bc250_umd_private.h. Offsets below were printed from that header (scratch/tmp/blob_off.c).
  * This file does not include the contract header: Mesa's own amdgpu_drm.h is a different copy.
