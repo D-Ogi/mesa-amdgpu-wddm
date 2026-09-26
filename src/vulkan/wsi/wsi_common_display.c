@@ -3483,7 +3483,7 @@ wsi_display_surface_create_swapchain(
    }
 
    result = wsi_swapchain_init(wsi_device, &chain->base, device,
-                               create_info, &image_params.base,
+                               create_info, num_images, &image_params.base,
                                allocator);
    free((void *)modifiers);
    if (result != VK_SUCCESS)
@@ -3501,7 +3501,6 @@ wsi_display_surface_create_swapchain(
    chain->base.wait_for_present2 = wsi_display_wait_for_present;
    chain->base.set_hdr_metadata = wsi_display_set_hdr_metadata;
    chain->base.present_mode = wsi_swapchain_get_present_mode(wsi_device, create_info);
-   chain->base.image_count = num_images;
    chain->color_outcome_serial = 0;
 
    chain->wsi = wsi;

@@ -1336,7 +1336,9 @@ static VkResult
 radv_create_winsys(struct radv_device *device)
 {
 #ifdef _WIN32
-   return VK_ERROR_INCOMPATIBLE_DRIVER;
+   const struct radv_physical_device *pdev = radv_device_physical(device);
+   const struct radv_instance *instance = radv_physical_device_instance(pdev);
+   return radv_wddm2_winsys_create(&pdev->wddm2_adapter, instance->debug_flags, &device->ws);
 #else
    const struct radv_physical_device *pdev = radv_device_physical(device);
    const struct radv_instance *instance = radv_physical_device_instance(pdev);
@@ -1538,6 +1540,9 @@ radv_CreateDevice(VkPhysicalDevice physicalDevice, const VkDeviceCreateInfo *pCr
 
    device->vk.sync = device->ws->get_sync_provider(device->ws);
 
+   if (device->ws->get_wddm2_handle)
+      vk_device_set_wddm2_handle(&device->vk, device->ws->get_wddm2_handle(device->ws));
+
    /* Disable unordered submits when SQTT queue events are enabled because queue present events
     * might be missing otherwise.
     */
@@ -1713,8 +1718,15 @@ radv_CreateDevice(VkPhysicalDevice physicalDevice, const VkDeviceCreateInfo *pCr
          goto fail;
    }
 
-   if (pdev->info.has_graphics && !RADV_DEBUG(instance, NO_IB_CHAINING))
+   /* noibchaining, and bc250: the indirect gfx-init IB is a nested INDIRECT_BUFFER
+    * whose VMID field is 0. The KMD submits one IB, so that packet would be the
+    * first dword the CP executes. The Linux noibchaining capture inlines this
+    * state and starts with CONTEXT_CONTROL. */
+   if (pdev->info.has_graphics && !RADV_DEBUG(instance, NO_IB_CHAINING) &&
+       !(device->ws->inline_gfx_preamble && device->ws->inline_gfx_preamble(device->ws)))
       radv_create_gfx_preamble(device);
+   else if (device->ws->inline_gfx_preamble && device->ws->inline_gfx_preamble(device->ws))
+      fprintf(stderr, "bc250: gfx preamble inlined (no gfx_init IB)\n");
 
    if (device->vk.enabled_features.performanceCounterQueryPools) {
       result = radv_device_init_perf_counter(device);
@@ -1848,6 +1860,23 @@ radv_gfx11_set_db_render_control(const struct radv_device *device, unsigned num_
    *db_render_control |= S_028000_MAX_ALLOWED_TILES_IN_WAVE(max_allowed_tiles_in_wave);
 }
 
+#ifdef _WIN32
+VKAPI_ATTR VkResult VKAPI_CALL
+radv_GetMemoryWin32HandleKHR(VkDevice _device,
+                             const VkMemoryGetWin32HandleInfoKHR *pGetHandleInfo,
+                             HANDLE *pHandle)
+{
+   VK_FROM_HANDLE(radv_device, device, _device);
+   VK_FROM_HANDLE(radv_device_memory, memory, pGetHandleInfo->memory);
+
+   assert(pGetHandleInfo->sType == VK_STRUCTURE_TYPE_MEMORY_GET_WIN32_HANDLE_INFO_KHR);
+
+   bool ret = device->ws->buffer_get_handle(device->ws, memory->bo, pHandle);
+   if (ret == false)
+      return vk_error(device, VK_ERROR_OUT_OF_DEVICE_MEMORY);
+   return VK_SUCCESS;
+}
+#else
 VKAPI_ATTR VkResult VKAPI_CALL
 radv_GetMemoryFdKHR(VkDevice _device, const VkMemoryGetFdInfoKHR *pGetFdInfo, int *pFD)
 {
@@ -1865,8 +1894,10 @@ radv_GetMemoryFdKHR(VkDevice _device, const VkMemoryGetFdInfoKHR *pGetFdInfo, in
     */
    if (memory->image) {
       struct radv_image *image = memory->image;
+      struct radeon_bo_metadata md;
 
-      radv_image_bo_set_metadata(device, image, memory->bo);
+      radv_image_get_metadata(device, image, RADEON_METADATA_TYPE_UMD, &md);
+      device->ws->buffer_set_metadata(device->ws, memory->bo, &md);
    }
 
    bool ret = device->ws->buffer_get_fd(device->ws, memory->bo, pFD);
@@ -1874,6 +1905,7 @@ radv_GetMemoryFdKHR(VkDevice _device, const VkMemoryGetFdInfoKHR *pGetFdInfo, in
       return vk_error(device, VK_ERROR_OUT_OF_DEVICE_MEMORY);
    return VK_SUCCESS;
 }
+#endif
 
 static uint32_t
 radv_compute_valid_memory_types_attempt(struct radv_physical_device *pdev, enum radeon_bo_domain domains,
@@ -1921,6 +1953,39 @@ radv_compute_valid_memory_types(struct radv_physical_device *pdev, enum radeon_b
 
    return bits;
 }
+
+#ifdef _WIN32
+VKAPI_ATTR VkResult VKAPI_CALL
+radv_GetMemoryWin32HandlePropertiesKHR(VkDevice _device,
+                                       VkExternalMemoryHandleTypeFlagBits handleType,
+                                       HANDLE handle,
+                                       VkMemoryWin32HandlePropertiesKHR *pProperties)
+{
+   VK_FROM_HANDLE(radv_device, device, _device);
+   struct radv_physical_device *pdev = radv_device_physical(device);
+
+   switch (handleType) {
+   case VK_EXTERNAL_MEMORY_HANDLE_TYPE_D3D12_RESOURCE_BIT: {
+      enum radeon_bo_domain domains;
+      enum radeon_bo_flag flags;
+      if (!device->ws->buffer_get_flags_from_handle(device->ws, handle, &domains, &flags))
+         return vk_error(device, VK_ERROR_INVALID_EXTERNAL_HANDLE);
+
+      pProperties->memoryTypeBits = radv_compute_valid_memory_types(pdev, domains, flags);
+      return VK_SUCCESS;
+   }
+   default:
+      /* The valid usage section for this function says:
+       *
+       *    "handleType must not be one of the handle types defined as
+       *    opaque."
+       *
+       * So opaque handle types fall into the default "unsupported" case.
+       */
+      return vk_error(device, VK_ERROR_INVALID_EXTERNAL_HANDLE);
+   }
+}
+#else
 VKAPI_ATTR VkResult VKAPI_CALL
 radv_GetMemoryFdPropertiesKHR(VkDevice _device, VkExternalMemoryHandleTypeFlagBits handleType, int fd,
                               VkMemoryFdPropertiesKHR *pMemoryFdProperties)
@@ -1949,6 +2014,7 @@ radv_GetMemoryFdPropertiesKHR(VkDevice _device, VkExternalMemoryHandleTypeFlagBi
       return vk_error(device, VK_ERROR_INVALID_EXTERNAL_HANDLE);
    }
 }
+#endif
 
 VkResult
 radv_device_set_pstate(struct radv_device *device, bool enable, uint64_t timeout)

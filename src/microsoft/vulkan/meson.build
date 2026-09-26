@@ -56,9 +56,7 @@ dzn_deps = [
 dzn_flags = [ ]
 dzn_cpp_flags = [ ]
 
-if with_platform_windows
-  libdzn_files += files('dzn_dxgi.c')
-endif
+
 
 if cc.get_argument_syntax() != 'msvc'
   dzn_flags_to_try = [

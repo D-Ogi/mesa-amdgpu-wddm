@@ -229,6 +229,7 @@ wsi_device_init(struct wsi_device *wsi,
    WSI_GET_CB(GetCalibratedTimestampsKHR);
    WSI_GET_CB(GetQueryPoolResults);
    WSI_GET_CB(GetSemaphoreFdKHR);
+   WSI_GET_CB(GetSemaphoreWin32HandleKHR);
    WSI_GET_CB(ResetFences);
    WSI_GET_CB(QueueSubmit2);
    WSI_GET_CB(SetDebugUtilsObjectNameEXT);
@@ -449,9 +450,6 @@ configure_image(const struct wsi_swapchain *chain,
                 const struct wsi_base_image_params *params,
                 struct wsi_image_info *info)
 {
-   info->image_type = params->image_type;
-   info->color_space = pCreateInfo->imageColorSpace;
-
    switch (params->image_type) {
    case WSI_IMAGE_TYPE_CPU: {
       const struct wsi_cpu_image_params *cpu_params =
@@ -493,6 +491,7 @@ wsi_swapchain_init(const struct wsi_device *wsi,
                    struct wsi_swapchain *chain,
                    VkDevice _device,
                    const VkSwapchainCreateInfoKHR *pCreateInfo,
+                   uint32_t num_images,
                    const struct wsi_base_image_params *image_params,
                    const VkAllocationCallbacks *pAllocator)
 {
@@ -507,6 +506,7 @@ wsi_swapchain_init(const struct wsi_device *wsi,
    chain->wsi = wsi;
    chain->device = _device;
    chain->alloc = *pAllocator;
+   chain->image_count = num_images;
    chain->blit.type = get_blit_type(wsi, image_params, _device);
    chain->present_wait_enabled =
       device->enabled_features.presentWait ||
@@ -564,6 +564,26 @@ wsi_swapchain_init(const struct wsi_device *wsi,
                                        &chain->cmd_pools[i]);
          if (result != VK_SUCCESS)
             goto fail;
+      }
+   }
+
+   if (chain->blit.queue != NULL || wsi->blit != NULL) {
+      chain->blit.semaphores = vk_zalloc(pAllocator,
+                                         sizeof (*chain->blit.semaphores) * num_images,
+                                         sizeof (*chain->blit.semaphores),
+                                         VK_SYSTEM_ALLOCATION_SCOPE_OBJECT);
+      if (!chain->blit.semaphores) {
+         result = VK_ERROR_OUT_OF_HOST_MEMORY;
+         goto fail;
+      }
+
+      chain->blit.timeline_values = vk_zalloc(pAllocator,
+                                         sizeof (*chain->blit.timeline_values) * num_images,
+                                         sizeof (*chain->blit.timeline_values),
+                                         VK_SYSTEM_ALLOCATION_SCOPE_OBJECT);
+      if (!chain->blit.timeline_values) {
+         result = VK_ERROR_OUT_OF_HOST_MEMORY;
+         goto fail;
       }
    }
 
@@ -673,6 +693,7 @@ wsi_swapchain_finish(struct wsi_swapchain *chain)
          chain->wsi->DestroySemaphore(chain->device, chain->blit.semaphores[i], &chain->alloc);
 
       vk_free(&chain->alloc, chain->blit.semaphores);
+      vk_free(&chain->alloc, chain->blit.timeline_values);
    }
    chain->wsi->DestroySemaphore(chain->device, chain->dma_buf_semaphore,
                                 &chain->alloc);
@@ -1492,17 +1513,6 @@ wsi_CreateSwapchainKHR(VkDevice _device,
       /* We assume here that a driver exposing present_wait also exposes VK_KHR_timeline_semaphore. */
       result = wsi_device->CreateSemaphore(_device, &sem_info, alloc, &swapchain->present_id_timeline);
       if (result != VK_SUCCESS) {
-         swapchain->destroy(swapchain, alloc);
-         return VK_ERROR_OUT_OF_HOST_MEMORY;
-      }
-   }
-
-   if (swapchain->blit.queue != NULL) {
-      swapchain->blit.semaphores = vk_zalloc(alloc,
-                                         sizeof (*swapchain->blit.semaphores) * swapchain->image_count,
-                                         sizeof (*swapchain->blit.semaphores),
-                                         VK_SYSTEM_ALLOCATION_SCOPE_OBJECT);
-      if (!swapchain->blit.semaphores) {
          swapchain->destroy(swapchain, alloc);
          return VK_ERROR_OUT_OF_HOST_MEMORY;
       }
@@ -2706,12 +2716,12 @@ wsi_common_queue_present(const struct wsi_device *wsi,
             swapchain->get_wsi_image(swapchain, image_index);
 
          bool separate_queue_blit = swapchain->blit.type != WSI_SWAPCHAIN_NO_BLIT &&
-                                    swapchain->blit.queue != NULL;
+                                    (swapchain->blit.queue != NULL || wsi->blit != NULL);
 
          /* For TIMING_QUEUE_FULL_EXT, ensure sync objects are signaled,
           * but don't do any real work. */
          if (results[i] == VK_ERROR_PRESENT_TIMING_QUEUE_FULL_EXT ||
-               (!separate_queue_blit && results[i] == VK_SUCCESS)) {
+               (!separate_queue_blit && wsi->blit == NULL && results[i] == VK_SUCCESS)) {
             for (uint32_t j = 0; j < image_signal_infos[i].semaphore_count; j++) {
                signal_semaphore_infos[signal_semaphore_count++] =
                      image_signal_infos[i].semaphore_infos[j];
@@ -2727,7 +2737,7 @@ wsi_common_queue_present(const struct wsi_device *wsi,
           * semaphore for now.
           */
          if (separate_queue_blit) {
-            /* Create the blit semaphore if needed */
+            /* Create the blit semaphore if needed and not already created by the implementation */
             if (swapchain->blit.semaphores[image_index] == VK_NULL_HANDLE) {
                const VkSemaphoreCreateInfo sem_info = {
                   .sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO,
@@ -2746,6 +2756,7 @@ wsi_common_queue_present(const struct wsi_device *wsi,
                .sType = VK_STRUCTURE_TYPE_SEMAPHORE_SUBMIT_INFO,
                .stageMask = VK_PIPELINE_STAGE_2_TRANSFER_BIT,
                .semaphore = swapchain->blit.semaphores[image_index],
+               .value = ++swapchain->blit.timeline_values[image_index],
             };
             continue;
          }
@@ -2801,24 +2812,33 @@ wsi_common_queue_present(const struct wsi_device *wsi,
          continue;
 
       bool separate_queue_blit = swapchain->blit.type != WSI_SWAPCHAIN_NO_BLIT &&
-                                 swapchain->blit.queue != NULL;
+                                 (swapchain->blit.queue != NULL || wsi->blit != NULL);
 
       if (!separate_queue_blit)
          continue;
+
+      if (wsi->blit) {
+         results[i] = wsi->blit(swapchain, image_index);
+         if (results[i] != VK_SUCCESS)
+            continue;
+      }
 
       const VkSemaphoreSubmitInfo blit_semaphore_info = {
          .sType = VK_STRUCTURE_TYPE_SEMAPHORE_SUBMIT_INFO,
          .stageMask = VK_PIPELINE_STAGE_2_TRANSFER_BIT,
          .semaphore = swapchain->blit.semaphores[image_index],
+         .value = swapchain->blit.timeline_values[image_index],
       };
 
       VkCommandBufferSubmitInfo command_buffer_infos[2];
       uint32_t command_buffer_count = 0;
 
-      command_buffer_infos[command_buffer_count++] = (VkCommandBufferSubmitInfo) {
-         .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_SUBMIT_INFO,
-         .commandBuffer = image->blit.cmd_buffers[0],
-      };
+      if (wsi->blit == NULL) {
+         command_buffer_infos[command_buffer_count++] = (VkCommandBufferSubmitInfo) {
+            .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_SUBMIT_INFO,
+            .commandBuffer = image->blit.cmd_buffers[0],
+         };
+      }
 
       if (needs_timing_command_buffer) {
          command_buffer_infos[command_buffer_count++] = (VkCommandBufferSubmitInfo) {
@@ -2827,6 +2847,7 @@ wsi_common_queue_present(const struct wsi_device *wsi,
          };
       }
 
+      struct vk_queue *blit_queue = swapchain->blit.queue ? swapchain->blit.queue : queue;
       const VkSubmitInfo2 submit_info = {
          .sType = VK_STRUCTURE_TYPE_SUBMIT_INFO_2,
          .waitSemaphoreInfoCount = 1,
@@ -2836,7 +2857,7 @@ wsi_common_queue_present(const struct wsi_device *wsi,
          .signalSemaphoreInfoCount = image_signal_infos[i].semaphore_count,
          .pSignalSemaphoreInfos = image_signal_infos[i].semaphore_infos,
       };
-      results[i] = wsi_queue_submit2_unordered(wsi, swapchain->blit.queue,
+      results[i] = wsi_queue_submit2_unordered(wsi, blit_queue,
                                                &submit_info,
                                                image_signal_infos[i].fence_count,
                                                image_signal_infos[i].fences);
@@ -2887,8 +2908,10 @@ wsi_common_queue_present(const struct wsi_device *wsi,
       }
 
       if (wsi->sw) {
-         wsi->WaitForFences(vk_device_to_handle(dev),
+         results[i] = wsi->WaitForFences(vk_device_to_handle(dev),
                             1, &swapchain->fences[image_index], true, ~0ull);
+         if (results[i] != VK_SUCCESS)
+            continue;
       }
 
       const VkPresentRegionKHR *region = NULL;
@@ -3626,6 +3649,8 @@ wsi_configure_cpu_image(const struct wsi_swapchain *chain,
                                          handle_types, info);
    if (result != VK_SUCCESS)
       return result;
+
+   info->image_type = WSI_IMAGE_TYPE_CPU;
 
    if (chain->blit.type != WSI_SWAPCHAIN_NO_BLIT) {
       wsi_configure_buffer_image(chain, pCreateInfo,

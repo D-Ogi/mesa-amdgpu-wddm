@@ -41,6 +41,7 @@ typedef void *drmDevicePtr;
 #include "util/os_drm.h"
 #include "winsys/amdgpu/radv_amdgpu_winsys_public.h"
 #endif
+#include "winsys/wddm2/radv_wddm2_winsys_public.h"
 #include "git_sha1.h"
 
 #if AMD_LLVM_AVAILABLE
@@ -99,6 +100,9 @@ bool
 radv_sparse_enabled(const struct radv_physical_device *pdev)
 {
    const struct radv_instance *instance = radv_physical_device_instance(pdev);
+
+   if (pdev->info.compiler_info.has_smem_with_null_prt_bug && !pdev->info.address_prt_wa_control_bit)
+      return false;
 
    if (instance->queue_disable_flags & RADV_QUEUE_DISABLE_SPARSE)
       return false;
@@ -711,11 +715,16 @@ radv_physical_device_get_supported_extensions(const struct radv_physical_device 
       .KHR_dynamic_rendering_local_read = true,
       .KHR_extended_flags = true,
       .KHR_external_fence = true,
-      .KHR_external_fence_fd = true,
       .KHR_external_memory = true,
-      .KHR_external_memory_fd = true,
       .KHR_external_semaphore = true,
-      .KHR_external_semaphore_fd = true,
+#ifdef _WIN32
+      .KHR_external_memory_win32 = true,
+      .KHR_external_semaphore_win32 = true,
+#else
+      .KHR_external_fence_fd = pdev->info.is_amdgpu,
+      .KHR_external_memory_fd = pdev->info.is_amdgpu,
+      .KHR_external_semaphore_fd = pdev->info.is_amdgpu,
+#endif
       .KHR_format_feature_flags2 = true,
       .KHR_fragment_shader_barycentric = pdev->info.gfx_level >= GFX10_3,
       .KHR_fragment_shading_rate = pdev->info.gfx_level >= GFX10_3,
@@ -861,7 +870,7 @@ radv_physical_device_get_supported_extensions(const struct radv_physical_device 
       .EXT_extended_dynamic_state2 = true,
       .EXT_extended_dynamic_state3 = true,
       .EXT_external_memory_acquire_unmodified = true,
-      .EXT_external_memory_dma_buf = true,
+      .EXT_external_memory_dma_buf = pdev->info.is_amdgpu,
       .EXT_external_memory_host = pdev->info.has_userptr,
       .EXT_fragment_shader_interlock = radv_has_pops(pdev),
       .EXT_global_priority = true,
@@ -1930,7 +1939,7 @@ radv_get_physical_device_properties(struct radv_physical_device *pdev)
 
       /* Vulkan 1.1 */
       .driverID = VK_DRIVER_ID_MESA_RADV,
-      .deviceLUIDValid = false, /* The LUID is for Windows. */
+      .deviceLUIDValid = pdev->info.valid_luid,
       .deviceNodeMask = 0,
       .subgroupSize = RADV_SUBGROUP_SIZE,
       .subgroupSupportedStages =
@@ -2417,7 +2426,11 @@ radv_get_physical_device_properties(struct radv_physical_device *pdev)
 
    memcpy(p->deviceUUID, pdev->device_uuid, VK_UUID_SIZE);
    memcpy(p->driverUUID, pdev->driver_uuid, VK_UUID_SIZE);
-   memset(p->deviceLUID, 0, VK_LUID_SIZE);
+
+   if (p->deviceLUIDValid)
+      memcpy(p->deviceLUID, pdev->info.luid, VK_LUID_SIZE);
+   else
+      memset(p->deviceLUID, 0, VK_LUID_SIZE);
 
    snprintf(p->driverName, VK_MAX_DRIVER_NAME_SIZE, "radv");
    snprintf(p->driverInfo, VK_MAX_DRIVER_INFO_SIZE, "Mesa " PACKAGE_VERSION MESA_GIT_SHA1 "%s",
@@ -2537,6 +2550,8 @@ radv_physical_device_destroy(struct vk_physical_device *vk_device)
    if (pdev->drm_device)
       ac_drm_device_deinitialize(pdev->drm_device);
 #endif
+   if (pdev->ws)
+      pdev->ws->destroy(pdev->ws);
    vk_physical_device_finish(&pdev->vk);
    vk_free(&instance->vk.alloc, pdev);
 }
@@ -2592,14 +2607,12 @@ radv_init_dri_options(struct radv_physical_device *pdev)
 
 static VkResult
 radv_physical_device_try_create(struct radv_instance *instance, drmDevicePtr drm_device,
+                                const struct vk_dx_adapter_info *wddm2_adapter,
                                 struct radv_physical_device **pdev_out)
 {
-#ifdef _WIN32
-   assert(drm_device == NULL);
-   return VK_ERROR_INCOMPATIBLE_DRIVER;
-#else
    VkResult result;
    int fd = -1;
+#ifndef _WIN32
    const char *path = drm_device->nodes[DRM_NODE_RENDER];
    enum radv_drm_device_type drm_device_type;
    drmVersionPtr version;
@@ -2644,6 +2657,8 @@ radv_physical_device_try_create(struct radv_instance *instance, drmDevicePtr drm
    if (RADV_DEBUG(instance, STARTUP))
       fprintf(stderr, "radv: info: Found device '%s'.\n", path);
 
+#endif
+
    struct radv_physical_device *pdev =
       vk_zalloc2(&instance->vk.alloc, NULL, sizeof(*pdev), 8, VK_SYSTEM_ALLOCATION_SCOPE_INSTANCE);
    if (!pdev) {
@@ -2665,6 +2680,7 @@ radv_physical_device_try_create(struct radv_instance *instance, drmDevicePtr drm
       goto fail;
    }
 
+#ifndef _WIN32
    pdev->drm_device_type = drm_device_type;
 
    const bool is_virtio =
@@ -2721,6 +2737,23 @@ radv_physical_device_try_create(struct radv_instance *instance, drmDevicePtr drm
       if (fd != -1)
          pdev->wsi_syncobj_fd = os_dupfd_cloexec(fd);
    }
+
+#else
+   if (!wddm2_adapter) {
+      result = VK_ERROR_INCOMPATIBLE_DRIVER;
+      goto fail;
+   }
+   pdev->wddm2_adapter = *wddm2_adapter;
+   result = radv_wddm2_winsys_create(wddm2_adapter, instance->debug_flags, &pdev->ws);
+   if (result != VK_SUCCESS)
+      goto fail;
+   pdev->info = *pdev->ws->query_info(pdev->ws);
+   pdev->vk.supported_sync_types = pdev->ws->get_sync_types(pdev->ws);
+   pdev->global_priority_mask = radeon_to_vk_priority(RADEON_CTX_PRIORITY_LOW) |
+                                radeon_to_vk_priority(RADEON_CTX_PRIORITY_MEDIUM) |
+                                radeon_to_vk_priority(RADEON_CTX_PRIORITY_HIGH);
+   radv_init_dri_options(pdev);
+#endif
 
    /* Allow all devices on a virtual winsys, otherwise do a basic support check. */
    if (!radv_is_gpu_supported(&pdev->info)) {
@@ -2863,6 +2896,7 @@ radv_physical_device_try_create(struct radv_instance *instance, drmDevicePtr drm
    radv_physical_device_get_supported_extensions(pdev, &pdev->vk.supported_extensions);
    radv_physical_device_get_features(pdev, &pdev->vk.supported_features);
 
+#ifndef _WIN32
    struct stat primary_stat = {0}, render_stat = {0};
 
    pdev->available_nodes = drm_device->available_nodes;
@@ -2883,6 +2917,8 @@ radv_physical_device_try_create(struct radv_instance *instance, drmDevicePtr drm
       goto fail;
    }
    pdev->render_devid = render_stat.st_rdev;
+
+#endif
 
    if (radv_device_get_cache_uuid(pdev, pdev->cache_uuid)) {
       result = vk_errorf(instance, VK_ERROR_INITIALIZATION_FAILED, "cannot generate UUID");
@@ -2950,7 +2986,6 @@ fail_fd:
    if (fd != -1)
       close(fd);
    return result;
-#endif
 }
 
 VkResult
@@ -2972,11 +3007,21 @@ create_drm_physical_device(struct vk_instance *vk_instance, struct _drmDevice *d
    if (!supported_device)
       return VK_ERROR_INCOMPATIBLE_DRIVER;
 
-   return radv_physical_device_try_create((struct radv_instance *)vk_instance, device,
+   return radv_physical_device_try_create((struct radv_instance *)vk_instance, device, NULL,
                                           (struct radv_physical_device **)out);
 #else
    return VK_SUCCESS;
 #endif
+}
+
+VkResult
+create_dx_physical_device(struct vk_instance *vk_instance, const struct vk_dx_adapter_info *adapter,
+                          void *unk_adapter, struct vk_physical_device **out)
+{
+   if (adapter->vendor_id != ATI_VENDOR_ID)
+      return VK_ERROR_INCOMPATIBLE_DRIVER;
+   return radv_physical_device_try_create((struct radv_instance *)vk_instance, NULL, adapter,
+                                         (struct radv_physical_device **)out);
 }
 
 static VkQueueFlags

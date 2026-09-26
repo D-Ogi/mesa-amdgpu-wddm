@@ -8,6 +8,8 @@
 #ifndef AMD_FAMILY_H
 #define AMD_FAMILY_H
 
+#include <stdint.h>
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -300,6 +302,7 @@ enum rt_version {
 
 const char *ac_get_family_name(enum radeon_family family);
 enum amd_gfx_level ac_get_gfx_level(enum radeon_family family);
+uint32_t ac_get_pci_device_id(enum radeon_family family);
 const char *ac_get_llvm_processor_name(enum radeon_family family);
 const char *ac_get_ip_type_string(const struct radeon_info *info, enum amd_ip_type ip_type);
 

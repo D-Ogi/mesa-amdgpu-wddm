@@ -3933,8 +3933,8 @@ wsi_wl_surface_create_swapchain(VkIcdSurfaceBase *icd_surface,
       image_params = &drm_image_params.base;
    }
 
-   result = wsi_swapchain_init(wsi_device, &chain->base, device,
-                               pCreateInfo, image_params, pAllocator);
+   result = wsi_swapchain_init(wsi_device, &chain->base, device, pCreateInfo,
+                               num_images, image_params, pAllocator);
    if (result != VK_SUCCESS)
       goto fail;
 
@@ -3963,7 +3963,6 @@ wsi_wl_surface_create_swapchain(VkIcdSurfaceBase *icd_surface,
    chain->base.wait_for_present = wsi_wl_swapchain_wait_for_present;
    chain->base.wait_for_present2 = wsi_wl_swapchain_wait_for_present2;
    chain->base.present_mode = present_mode;
-   chain->base.image_count = num_images;
    chain->base.set_hdr_metadata = wsi_wl_swapchain_set_hdr_metadata;
    chain->extent = pCreateInfo->imageExtent;
    chain->vk_format = pCreateInfo->imageFormat;

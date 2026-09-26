@@ -2697,6 +2697,7 @@ static int gfx9_compute_miptree(struct ac_addrlib *addrlib, const struct radeon_
       surf->u.gfx9.color.fmask_epitch = surf->u.gfx9.epitch;
    }
 
+   surf->u.gfx9.num_slices = out.numSlices;
    surf->u.gfx9.surf_slice_size = out.sliceSize;
    surf->u.gfx9.surf_pitch = out.pitch;
    surf->u.gfx9.surf_height = out.height;
@@ -3257,6 +3258,9 @@ static int gfx9_compute_surface(struct ac_addrlib *addrlib, const struct radeon_
    }
 
    surf->u.gfx9.resource_type = (enum gfx9_resource_type)AddrSurfInfoIn.resourceType;
+   surf->u.gfx9.format = AddrSurfInfoIn.format;
+   surf->u.gfx9.num_samples = AddrSurfInfoIn.numSamples;
+   surf->u.gfx9.flags = AddrSurfInfoIn.flags.value;
    surf->has_stencil = !!(surf->flags & RADEON_SURF_SBUFFER);
 
    surf->num_meta_levels = 0;
@@ -3979,6 +3983,9 @@ static bool gfx12_compute_surface(struct ac_addrlib *addrlib, const struct radeo
 
    surf->u.gfx9.swizzle_mode = AddrSurfInfoIn.swizzleMode;
    surf->u.gfx9.resource_type = (enum gfx9_resource_type)AddrSurfInfoIn.resourceType;
+   surf->u.gfx9.format = AddrSurfInfoIn.format;
+   surf->u.gfx9.num_samples = AddrSurfInfoIn.numSamples;
+   surf->u.gfx9.flags = AddrSurfInfoIn.flags.value;
    surf->u.gfx9.gfx12_enable_dcc = ac_modifier_has_dcc(surf->modifier) ||
                                    (surf->modifier == DRM_FORMAT_MOD_INVALID &&
                                     !(surf->flags & RADEON_SURF_DISABLE_DCC) &&

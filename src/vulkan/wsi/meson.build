@@ -29,7 +29,7 @@ endif
 
 if with_platform_windows
   files_vulkan_wsi += files('wsi_common_win32.cpp')
-  platform_deps += dep_dxheaders
+  platform_deps += [dep_dxheaders, cc.find_library('dwmapi')]
 else
   files_vulkan_wsi += files('wsi_common_headless.c')
 endif

@@ -277,6 +277,9 @@ struct radeon_info {
    uint32_t chip_external_rev;
    uint32_t chip_rev; /* 0 = A0, 1 = A1, etc. */
 
+   bool valid_luid;
+   uint8_t luid[8];
+
    /* Flags. */
    bool has_graphics; /* false if the chip is compute-only */
    bool has_clear_state;
@@ -516,15 +519,17 @@ ac_identify_chip(struct radeon_info *info, const struct drm_amdgpu_info_device *
 void ac_fill_bug_info(struct radeon_info *info);
 void ac_fill_feature_info(struct radeon_info *info, const struct drm_amdgpu_info_device *device_info);
 void ac_fill_hw_info(struct radeon_info *info, const struct drm_amdgpu_info_device *device_info);
+void ac_get_default_max_submitted_ibs(struct radeon_info *info);
+void ac_fill_attribute_ring_info(struct radeon_info *info);
 void ac_fill_tess_info(struct radeon_info *info);
+void ac_fill_scratch_info(struct radeon_info *info);
 
 void ac_compute_driver_uuid(char *uuid, size_t size);
 
 void ac_compute_device_uuid(const struct radeon_info *info, char *uuid, size_t size);
 void ac_print_gpu_info(FILE *f, const struct radeon_info *info, int fd);
 int ac_get_gs_table_depth(enum amd_gfx_level gfx_level, enum radeon_family family);
-void ac_get_raster_config(const struct radeon_info *info, uint32_t *raster_config_p,
-                          uint32_t *raster_config_1_p, uint32_t *se_tile_repeat_p);
+void ac_fill_raster_config(struct radeon_info *info);
 void ac_get_harvested_configs(const struct radeon_info *info, unsigned raster_config,
                               unsigned *cik_raster_config_1_p, unsigned *raster_config_se);
 unsigned ac_get_compute_resource_limits(const struct radeon_info *info,

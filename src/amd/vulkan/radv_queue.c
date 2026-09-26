@@ -36,7 +36,7 @@ radv_get_queue_global_priority(const VkDeviceQueueGlobalPriorityCreateInfo *pObj
 }
 
 static VkResult
-radv_sparse_buffer_bind_memory(struct radv_device *device, const VkSparseBufferMemoryBindInfo *bind)
+radv_sparse_buffer_bind_memory(struct radv_queue *queue, const VkSparseBufferMemoryBindInfo *bind)
 {
    VK_FROM_HANDLE(radv_buffer, buffer, bind->buffer);
    VkResult result = VK_SUCCESS;
@@ -65,7 +65,7 @@ radv_sparse_buffer_bind_memory(struct radv_device *device, const VkSparseBufferM
          }
       }
       if (size) {
-         result = radv_bo_virtual_bind(device, &buffer->vk.base, buffer->bo, resourceOffset, size, mem ? mem->bo : NULL,
+         result = radv_bo_virtual_bind(queue, &buffer->vk.base, buffer->bo, resourceOffset, size, mem ? mem->bo : NULL,
                                        memoryOffset);
          if (result != VK_SUCCESS)
             return result;
@@ -76,7 +76,7 @@ radv_sparse_buffer_bind_memory(struct radv_device *device, const VkSparseBufferM
       memoryOffset = bind->pBinds[i].memoryOffset;
    }
    if (size) {
-      result = radv_bo_virtual_bind(device, &buffer->vk.base, buffer->bo, resourceOffset, size, mem ? mem->bo : NULL,
+      result = radv_bo_virtual_bind(queue, &buffer->vk.base, buffer->bo, resourceOffset, size, mem ? mem->bo : NULL,
                                     memoryOffset);
    }
 
@@ -84,7 +84,7 @@ radv_sparse_buffer_bind_memory(struct radv_device *device, const VkSparseBufferM
 }
 
 static VkResult
-radv_sparse_image_opaque_bind_memory(struct radv_device *device, const VkSparseImageOpaqueMemoryBindInfo *bind)
+radv_sparse_image_opaque_bind_memory(struct radv_queue *queue, const VkSparseImageOpaqueMemoryBindInfo *bind)
 {
    VK_FROM_HANDLE(radv_image, image, bind->image);
    VkResult result;
@@ -95,7 +95,7 @@ radv_sparse_image_opaque_bind_memory(struct radv_device *device, const VkSparseI
       if (bind->pBinds[i].memory != VK_NULL_HANDLE)
          mem = radv_device_memory_from_handle(bind->pBinds[i].memory);
 
-      result = radv_bo_virtual_bind(device, &image->vk.base, image->bindings[0].bo, bind->pBinds[i].resourceOffset,
+      result = radv_bo_virtual_bind(queue, &image->vk.base, image->bindings[0].bo, bind->pBinds[i].resourceOffset,
                                     bind->pBinds[i].size, mem ? mem->bo : NULL, bind->pBinds[i].memoryOffset);
       if (result != VK_SUCCESS)
          return result;
@@ -105,10 +105,10 @@ radv_sparse_image_opaque_bind_memory(struct radv_device *device, const VkSparseI
 }
 
 static VkResult
-radv_sparse_image_bind_memory(struct radv_device *device, const VkSparseImageMemoryBindInfo *bind)
+radv_sparse_image_bind_memory(struct radv_queue *queue, const VkSparseImageMemoryBindInfo *bind)
 {
    VK_FROM_HANDLE(radv_image, image, bind->image);
-   const struct radv_physical_device *pdev = radv_device_physical(device);
+   const struct radv_physical_device *pdev = radv_device_physical(radv_queue_device(queue));
    const struct radeon_surf *surface = &image->planes[0].surface;
    uint32_t bs = vk_format_get_blocksize(image->vk.format);
    VkResult result;
@@ -157,7 +157,7 @@ radv_sparse_image_bind_memory(struct radv_device *device, const VkSparseImageMem
 
       if (whole_subres) {
          uint64_t size = (uint64_t)aligned_extent_width * aligned_extent_height * aligned_extent_depth * bs;
-         result = radv_bo_virtual_bind(device, &image->vk.base, image->bindings[0].bo, offset, size,
+         result = radv_bo_virtual_bind(queue, &image->vk.base, image->bindings[0].bo, offset, size,
                                        mem ? mem->bo : NULL, mem_offset);
          if (result != VK_SUCCESS)
             return result;
@@ -171,7 +171,7 @@ radv_sparse_image_bind_memory(struct radv_device *device, const VkSparseImageMem
             for (unsigned y = 0; y < bind_extent.height; y += surface->prt_tile_height) {
                uint64_t bo_offset = offset + (uint64_t)img_y_increment * y;
 
-               result = radv_bo_virtual_bind(device, &image->vk.base, image->bindings[0].bo, bo_offset, size,
+               result = radv_bo_virtual_bind(queue, &image->vk.base, image->bindings[0].bo, bo_offset, size,
                                              mem ? mem->bo : NULL,
                                              mem_offset + (uint64_t)mem_y_increment * y + mem_z_increment * z);
                if (result != VK_SUCCESS)
@@ -184,28 +184,51 @@ radv_sparse_image_bind_memory(struct radv_device *device, const VkSparseImageMem
    return VK_SUCCESS;
 }
 
-static VkResult
-radv_queue_submit_bind_sparse_memory(struct radv_device *device, struct vk_queue_submit *submission)
+static bool
+radv_queue_has_sparse_binds(const struct vk_queue_submit *submission)
 {
-   for (uint32_t i = 0; i < submission->buffer_bind_count; ++i) {
-      VkResult result = radv_sparse_buffer_bind_memory(device, submission->buffer_binds + i);
+   return submission->buffer_bind_count || submission->image_opaque_bind_count || submission->image_bind_count;
+}
+
+static VkResult
+radv_queue_submit_bind_sparse_memory(struct radv_queue *queue, struct vk_queue_submit *submission)
+{
+   struct radv_device *device = radv_queue_device(queue);
+   struct radeon_winsys *ws = device->ws;
+   VkResult result = VK_SUCCESS;
+   const bool transaction = ws->buffer_virtual_bind_begin && radv_queue_has_sparse_binds(submission);
+   if (transaction) {
+      result = ws->buffer_virtual_bind_begin(ws, queue->hw_ctx, radv_queue_ring(queue));
       if (result != VK_SUCCESS)
          return result;
+   }
+   for (uint32_t i = 0; i < submission->buffer_bind_count; ++i) {
+      result = radv_sparse_buffer_bind_memory(queue, submission->buffer_binds + i);
+      if (result != VK_SUCCESS)
+         goto finish;
    }
 
    for (uint32_t i = 0; i < submission->image_opaque_bind_count; ++i) {
-      VkResult result = radv_sparse_image_opaque_bind_memory(device, submission->image_opaque_binds + i);
+      result = radv_sparse_image_opaque_bind_memory(queue, submission->image_opaque_binds + i);
       if (result != VK_SUCCESS)
-         return result;
+         goto finish;
    }
 
    for (uint32_t i = 0; i < submission->image_bind_count; ++i) {
-      VkResult result = radv_sparse_image_bind_memory(device, submission->image_binds + i);
+      result = radv_sparse_image_bind_memory(queue, submission->image_binds + i);
       if (result != VK_SUCCESS)
-         return result;
+         goto finish;
    }
 
-   return VK_SUCCESS;
+finish:
+   if (transaction) {
+      VkResult end_result = ws->buffer_virtual_bind_end(ws, queue->hw_ctx, radv_queue_ring(queue),
+                                                       queue->vk.index_in_family, submission->wait_count,
+                                                       submission->waits, result == VK_SUCCESS);
+      if (result == VK_SUCCESS)
+         result = end_result;
+   }
+   return result;
 }
 
 static VkResult
@@ -1790,6 +1813,7 @@ radv_queue_submit_normal(struct radv_queue *queue, struct vk_queue_submit *submi
          chainable = can_chain_next ? cs->b : NULL;
       }
 
+      submit.is_gang = submit_ace;
       submit.cs_count = num_submitted_cs;
       submit.initial_preamble_count = submit_ace ? num_initial_preambles : num_1q_initial_preambles;
       submit.continue_preamble_count = submit_ace ? num_continue_preambles : num_1q_continue_preambles;
@@ -1855,9 +1879,19 @@ radv_queue_sparse_submit(struct vk_queue *vqueue, struct vk_queue_submit *submis
    struct radv_device *device = radv_queue_device(queue);
    VkResult result;
 
-   result = radv_queue_submit_bind_sparse_memory(device, submission);
+   result = radv_queue_submit_bind_sparse_memory(queue, submission);
    if (result != VK_SUCCESS)
       goto fail;
+
+   if (device->ws->buffer_virtual_bind_end) {
+      /* WDDM mapping completion is queued on the GPU. Signal application
+       * fences there too, after the mapping wait inserted by the winsys. */
+      struct vk_queue_submit queued = *submission;
+      if (radv_queue_has_sparse_binds(submission))
+         queued.wait_count = 0;
+      result = radv_queue_submit_empty(queue, &queued);
+      goto fail;
+   }
 
    /* We do a CPU wait here, in part to avoid more winsys mechanisms. In the likely kernel explicit
     * sync mechanism, we'd need to do a CPU wait anyway. Haven't seen this be a perf issue yet, but
@@ -1892,11 +1926,18 @@ static VkResult
 radv_queue_submit(struct vk_queue *vqueue, struct vk_queue_submit *submission)
 {
    struct radv_queue *queue = (struct radv_queue *)vqueue;
-   struct radv_device *device = radv_queue_device(queue);
 
-   VkResult result = radv_queue_submit_bind_sparse_memory(device, submission);
+   VkResult result = radv_queue_submit_bind_sparse_memory(queue, submission);
    if (result != VK_SUCCESS)
       goto fail;
+
+   /* Keep the runtime-owned submission intact for its cleanup. WDDM has
+    * already queued these waits before the mapping transaction. */
+   struct vk_queue_submit queued = *submission;
+   if (radv_queue_device(queue)->ws->buffer_virtual_bind_end && radv_queue_has_sparse_binds(submission)) {
+      queued.wait_count = 0;
+      submission = &queued;
+   }
 
    if (!submission->command_buffer_count && !submission->wait_count && !submission->signal_count)
       return VK_SUCCESS;
@@ -1959,6 +2000,19 @@ radv_queue_init(struct radv_device *device, struct radv_queue *queue, int idx,
    if (result != VK_SUCCESS)
       return result;
 
+   queue->owns_hw_ctx = false;
+   if (queue->state.qf == RADV_QUEUE_SPARSE && device->ws->buffer_virtual_bind_end) {
+      /* WDDM queues mapping waits and signals through its companion context.
+       * A distinct render context keeps waits on this sparse queue from
+       * blocking a signal submitted later to the graphics queue. */
+      struct radeon_winsys_ctx *sparse_ctx = NULL;
+      result = device->ws->ctx_create(device->ws, queue->priority, &sparse_ctx);
+      if (result != VK_SUCCESS)
+         goto fail;
+      queue->hw_ctx = sparse_ctx;
+      queue->owns_hw_ctx = true;
+   }
+
    queue->state.uses_shadow_regs = device->uses_shadow_regs && queue->state.qf == RADV_QUEUE_GENERAL;
    if (queue->state.uses_shadow_regs) {
       result = radv_create_shadow_regs_preamble(device, &queue->state);
@@ -1978,7 +2032,13 @@ radv_queue_init(struct radv_device *device, struct radv_queue *queue, int idx,
 
    if (queue->state.qf == RADV_QUEUE_SPARSE) {
       queue->vk.driver_submit = radv_queue_sparse_submit;
-      vk_queue_enable_submit_thread(&queue->vk);
+      /* Linux performs host waits here. WDDM already queues GPU waits and
+       * signals and uses native timelines, so it must remain immediate. */
+      if (!device->ws->buffer_virtual_bind_end) {
+         result = vk_queue_enable_submit_thread(&queue->vk);
+         if (result != VK_SUCCESS)
+            goto fail;
+      }
    } else {
       queue->vk.driver_submit = radv_queue_submit;
    }
@@ -2004,6 +2064,10 @@ radv_queue_init(struct radv_device *device, struct radv_queue *queue, int idx,
    return VK_SUCCESS;
 fail:
    vk_queue_finish(&queue->vk);
+   if (queue->owns_hw_ctx) {
+      device->ws->ctx_destroy(queue->hw_ctx);
+      queue->owns_hw_ctx = false;
+   }
    return result;
 }
 
@@ -2088,6 +2152,8 @@ radv_queue_finish(struct radv_queue *queue)
 
    radv_queue_state_finish(&queue->state, device);
    vk_queue_finish(&queue->vk);
+   if (queue->owns_hw_ctx)
+      device->ws->ctx_destroy(queue->hw_ctx);
 }
 
 enum amd_ip_type
@@ -2108,6 +2174,11 @@ radv_queue_family_to_ring(const struct radv_physical_device *pdev, enum radv_que
       return AMD_IP_COMPUTE;
    case RADV_QUEUE_TRANSFER:
       return AMD_IP_SDMA;
+   case RADV_QUEUE_SPARSE:
+      /* The WDDM companion attaches to a separately owned graphics context.
+       * Linux sparse queues have no hardware ring and never reach this path. */
+      assert(pdev->ws->buffer_virtual_bind_end);
+      return AMD_IP_GFX;
    case RADV_QUEUE_VIDEO_DEC:
       return pdev->vid_decode_ip;
    case RADV_QUEUE_VIDEO_ENC:
