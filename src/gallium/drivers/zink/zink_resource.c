@@ -3639,3 +3639,25 @@ zink_context_resource_init(struct pipe_context *pctx)
    pctx->texture_subdata = zink_image_subdata;
    pctx->invalidate_resource = zink_resource_invalidate;
 }
+
+int
+zink_bc250_release_runtime_resource(struct pipe_context *pctx, struct pipe_resource **pres)
+{
+   struct zink_context *ctx=zink_context(pctx);
+   struct zink_screen *screen=zink_screen(pctx->screen);
+   if (!pres || !*pres || !screen->bc250_host.dispatch || screen->threaded_submit) return 0;
+   struct zink_resource *res=zink_resource(*pres);
+   if (!res->obj->bc250_runtime) return 0;
+   struct pipe_fence_handle *fence=NULL;
+   pctx->flush(pctx,&fence,0);
+   bool done=!fence || pctx->screen->fence_finish(pctx->screen,pctx,fence,10000000000ull);
+   pctx->screen->fence_reference(pctx->screen,&fence,NULL);
+   if (!done || screen->device_lost || bc250_host_check_status(&screen->bc250_host)<0) return 0;
+   zink_batch_reset_all(ctx);
+   unsigned resource_refs=p_atomic_read(&res->base.b.reference.count);
+   unsigned object_refs=p_atomic_read(&res->obj->reference.count);
+   fprintf(stderr,"BC250 release runtime resource refs=%u object_refs=%u\n",resource_refs,object_refs);
+   if (resource_refs!=1 || object_refs!=1) return 0;
+   pipe_resource_reference(pres,NULL);
+   return 1;
+}
