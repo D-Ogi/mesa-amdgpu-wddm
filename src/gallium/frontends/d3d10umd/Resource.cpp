@@ -252,6 +252,10 @@ CreateResource(D3D10DDI_HDEVICE hDevice,                                // IN
    Resource *pResource = CastResource(hResource);
 
    memset(pResource, 0, sizeof *pResource);
+   pResource->hRTResource = (HANDLE)hRTResource.handle;
+   pResource->primary = pCreateResource->pPrimaryDesc != NULL;
+   pResource->shared = (pCreateResource->MiscFlags & D3D10_DDI_RESOURCE_MISC_SHARED) != 0;
+   pResource->vidpn = pCreateResource->pPrimaryDesc ? pCreateResource->pPrimaryDesc->VidPnSourceId : 0;
 
 #if 0
    if (pCreateResource->pPrimaryDesc) {
@@ -308,7 +312,7 @@ CreateResource(D3D10DDI_HDEVICE hDevice,                                // IN
    }
 
    pResource->resource = screen->resource_create(screen, &templat);
-   if (!pResource) {
+   if (!pResource->resource) {
       DebugPrintf("%s: failed to create resource\n", __func__);
       SetError(hDevice, E_OUTOFMEMORY);
       return;
@@ -317,6 +321,12 @@ CreateResource(D3D10DDI_HDEVICE hDevice,                                // IN
    pResource->NumSubResources = pCreateResource->MipLevels * pCreateResource->ArraySize;
    pResource->transfers = (struct pipe_transfer **)calloc(pResource->NumSubResources,
                                                           sizeof *pResource->transfers);
+
+   if (pResource->primary || (pCreateResource->BindFlags & D3D10_DDI_BIND_PRESENT) ||
+       (pCreateResource->MiscFlags & D3D10_DDI_RESOURCE_MISC_SHARED)) {
+      HRESULT hr = Bc250EnsureSurface(CastDevice(hDevice), pResource);
+      if (FAILED(hr)) { SetError(hDevice, hr); return; }
+   }
 
    if (pCreateResource->pInitialDataUP) {
       if (pResource->buffer) {
@@ -418,8 +428,47 @@ OpenResource(D3D10DDI_HDEVICE hDevice,                            // IN
              D3D10DDI_HRESOURCE hResource,                        // IN
              D3D10DDI_HRTRESOURCE hRTResource)                    // IN
 {
-   LOG_UNSUPPORTED_ENTRYPOINT();
-   SetError(hDevice, E_OUTOFMEMORY);
+   LOG_ENTRYPOINT();
+   struct SurfacePrivate { UINT magic, version, width, height, pitch, format; UINT64 size; };
+   if (pOpenResource->NumAllocations != 1 || !pOpenResource->pOpenAllocationInfo2) {
+      SetError(hDevice, E_NOTIMPL); return;
+   }
+   const D3DDDI_OPENALLOCATIONINFO2 *info = pOpenResource->pOpenAllocationInfo2;
+   if (!info->pPrivateDriverData || info->PrivateDriverDataSize < sizeof(SurfacePrivate)) {
+      SetError(hDevice, E_INVALIDARG); return;
+   }
+   SurfacePrivate data;
+   memcpy(&data, info->pPrivateDriverData, sizeof(data));
+   if (data.magic != 0x4137424c || data.version != 1 || !data.width || !data.height ||
+       data.width > 8192 || data.height > 8192 || (data.pitch & 15u) ||
+       data.pitch < ((data.width + 3u) & ~3u) * 4 ||
+       data.size < UINT64(data.pitch) * ((data.height + 3u) & ~3u)) { SetError(hDevice, E_INVALIDARG); return; }
+   DXGI_FORMAT format;
+   switch (data.format) {
+   case D3DDDIFMT_A8R8G8B8: format = DXGI_FORMAT_B8G8R8A8_UNORM; break;
+   case D3DDDIFMT_X8R8G8B8: format = DXGI_FORMAT_B8G8R8X8_UNORM; break;
+   case D3DDDIFMT_A8B8G8R8: format = DXGI_FORMAT_R8G8B8A8_UNORM; break;
+   default: SetError(hDevice, E_NOTIMPL); return;
+   }
+   D3D10DDI_MIPINFO mip = {};
+   mip.TexelWidth = mip.PhysicalWidth = data.width;
+   mip.TexelHeight = mip.PhysicalHeight = data.height;
+   mip.TexelDepth = mip.PhysicalDepth = 1;
+   D3D10DDIARG_CREATERESOURCE create = {};
+   create.pMipInfoList = &mip; create.ResourceDimension = D3D10DDIRESOURCE_TEXTURE2D;
+   create.Usage = D3D10_DDI_USAGE_DEFAULT;
+   create.BindFlags = D3D10_DDI_BIND_SHADER_RESOURCE | D3D10_DDI_BIND_RENDER_TARGET;
+   create.Format = format; create.SampleDesc.Count = 1;
+   create.MipLevels = 1; create.ArraySize = 1;
+   CreateResource(hDevice, &create, hResource, hRTResource);
+   Resource *resource = CastResource(hResource);
+   if (!resource->resource) return;
+   resource->allocation = info->hAllocation;
+   resource->surfacePitch = data.pitch;
+   resource->surfaceBytes = data.size;
+   HRESULT hr = Bc250EnsureSurface(CastDevice(hDevice), resource);
+   DebugPrintf("BC250 OpenResource %08lx handle %x\n", hr, resource->allocation);
+   SetError(hDevice, hr);
 }
 
 
@@ -459,6 +508,25 @@ DestroyResource(D3D10DDI_HDEVICE hDevice,       // IN
          }
          pResource->transfers[SubResource] = NULL;
       }
+   }
+   if (pResource->allocation) {
+      Device *device = CastDevice(hDevice);
+      if (pResource->cpuMapping) {
+         D3DDDICB_UNLOCK2 unlock = {};
+         unlock.hAllocation = pResource->allocation;
+         device->KTCallbacks.pfnUnlock2Cb(device->hDevice, &unlock);
+      }
+      D3DDDICB_DEALLOCATE2 free = {};
+      // Shared resources must be closed atomically by their runtime resource
+      // handle (D3DDDICB_DEALLOCATE2 / pfnDeallocateCb). Closing only the
+      // allocation leaves the resource and its device bindings alive.
+      if (pResource->hRTResource) {
+         free.hResource = pResource->hRTResource;
+      } else {
+         free.NumAllocations = 1; free.HandleList = &pResource->allocation;
+      }
+      HRESULT hr = device->KTCallbacks.pfnDeallocate2Cb(device->hDevice, &free);
+      DebugPrintf("BC250 Deallocate %08lx\n", hr);
    }
    free(pResource->transfers);
 

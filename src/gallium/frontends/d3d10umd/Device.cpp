@@ -130,20 +130,58 @@ CreateDevice(D3D10DDI_HADAPTER hAdapter,                 // IN
    Device *pDevice = CastDevice(pCreateData->hDrvDevice);
    memset(pDevice, 0, sizeof *pDevice);
 
+   // This Zink-only diagnostic DLL is loaded through D3D_DRIVER_TYPE_SOFTWARE.
+   // That runtime cannot service native WDDM presentation callbacks. RADV owns
+   // its rendering context; native primary sharing/presentation is a separate
+   // prerequisite before this DLL may replace the system DWM UMD.
+#ifndef BC250_ZINK_OFFSCREEN_PROBE
+   // E26: DWM requests runtime synchronization while creating its primary,
+   // before the first Present. Register a virtual context at device creation
+   // so the runtime has a context for its broadcast synchronization callbacks.
+   fprintf(stderr,"BC250 D3D device stage 0\n"); fflush(stderr);
+   if (!pCreateData->pKTCallbacks->pfnCreateContextVirtualCb) return E_NOTIMPL;
+   D3DDDICB_CREATECONTEXTVIRTUAL context = {};
+   context.EngineAffinity = 1;
+   fprintf(stderr,"BC250 D3D device stage 1\n"); fflush(stderr);
+   HRESULT contextResult = pCreateData->pKTCallbacks->pfnCreateContextVirtualCb(
+       (HANDLE)pCreateData->hRTDevice.handle, &context);
+   DebugPrintf("BC250 initial CreateContextVirtual %08lx\n", contextResult);
+   if (FAILED(contextResult)) return contextResult;
+   pDevice->hContext = context.hContext;
+
+#endif
+
+   fprintf(stderr,"BC250 D3D device stage 2\n"); fflush(stderr);
    struct pipe_screen *screen = pAdapter->screen;
+   DebugPrintf("BC250 Renderer: %s\n", screen->get_name(screen));
+   fprintf(stderr,"BC250 D3D device stage 3\n"); fflush(stderr);
    struct pipe_context *pipe = screen->context_create(screen, NULL, 0);
+   if (!pipe) return E_OUTOFMEMORY;
    pDevice->pipe = pipe;
+   static const float zero_vertex[4] = {0, 0, 0, 0};
+   pDevice->zero_vertex_buffer = pipe_buffer_create_with_data(
+       pipe, PIPE_BIND_VERTEX_BUFFER, PIPE_USAGE_IMMUTABLE,
+       sizeof(zero_vertex), zero_vertex);
+   if (!pDevice->zero_vertex_buffer) {
+      pipe->destroy(pipe);
+      return E_OUTOFMEMORY;
+   }
+   fprintf(stderr,"BC250 D3D device stage 4\n"); fflush(stderr);
    pDevice->cso = cso_create_context(pipe, CSO_NO_VBUF);
 
+   fprintf(stderr,"BC250 D3D device stage 5\n"); fflush(stderr);
    pDevice->empty_vs = CreateEmptyShader(pDevice, MESA_SHADER_VERTEX);
+   fprintf(stderr,"BC250 D3D device stage 6\n"); fflush(stderr);
    pDevice->empty_fs = CreateEmptyShader(pDevice, MESA_SHADER_FRAGMENT);
 
+   fprintf(stderr,"BC250 D3D device stage 7\n"); fflush(stderr);
    pipe->bind_vs_state(pipe, pDevice->empty_vs);
    pipe->bind_fs_state(pipe, pDevice->empty_fs);
 
    pDevice->max_dual_source_render_targets =
          screen->caps.max_dual_source_render_targets;
 
+   fprintf(stderr,"BC250 D3D device stage 8\n"); fflush(stderr);
    pDevice->hRTCoreLayer = pCreateData->hRTCoreLayer;
    pDevice->hDevice = (HANDLE)pCreateData->hRTDevice.handle;
    pDevice->KTCallbacks = *pCreateData->pKTCallbacks;
@@ -294,14 +332,8 @@ CreateDevice(D3D10DDI_HADAPTER hAdapter,                 // IN
    pCreateData->DXGIBaseDDI.pDXGIDDIBaseFunctions->pfnBlt =
       _Blt;
 
-   if (0) {
-      return S_OK;
-   } else {
-      // Tell DXGI to not use the shared resource presentation path when
-      // communicating with DWM:
-      // http://msdn.microsoft.com/en-us/library/windows/hardware/ff569887(v=vs.85).aspx
-      return DXGI_STATUS_NO_REDIRECTION;
-   }
+   // E26: the linear shared-resource path is implemented for the tested formats.
+   return S_OK;
 }
 
 
@@ -325,6 +357,7 @@ DestroyDevice(D3D10DDI_HDEVICE hDevice)   // IN
    Device *pDevice = CastDevice(hDevice);
    struct pipe_context *pipe = pDevice->pipe;
 
+   fprintf(stderr,"D3D destroy stage 0\n"); fflush(stderr);
    pipe->flush(pipe, NULL, 0);
 
    for (i = 0; i < PIPE_MAX_SO_BUFFERS; ++i) {
@@ -336,12 +369,16 @@ DestroyDevice(D3D10DDI_HDEVICE hDevice)   // IN
 
    pipe->bind_fs_state(pipe, NULL);
    pipe->bind_vs_state(pipe, NULL);
+   fprintf(stderr,"D3D destroy stage 1\n"); fflush(stderr);
    cso_unbind_context(pDevice->cso);
+   fprintf(stderr,"D3D destroy stage 2\n"); fflush(stderr);
    cso_destroy_context(pDevice->cso);
 
+   fprintf(stderr,"D3D destroy stage 3\n"); fflush(stderr);
    DeleteEmptyShader(pDevice, MESA_SHADER_FRAGMENT, pDevice->empty_fs);
    DeleteEmptyShader(pDevice, MESA_SHADER_VERTEX, pDevice->empty_vs);
 
+   fprintf(stderr,"D3D destroy stage 4\n"); fflush(stderr);
    util_unreference_framebuffer_state(&pDevice->fb);
 
    for (i = 0; i < PIPE_MAX_ATTRIBS; ++i) {
@@ -350,10 +387,13 @@ DestroyDevice(D3D10DDI_HDEVICE hDevice)   // IN
       }
    }
 
+   fprintf(stderr,"D3D destroy stage 5\n"); fflush(stderr);
+   pipe_resource_reference(&pDevice->zero_vertex_buffer, NULL);
    pipe_resource_reference(&pDevice->index_buffer, NULL);
 
    static struct pipe_sampler_view * sampler_views[PIPE_MAX_SHADER_SAMPLER_VIEWS];
    memset(sampler_views, 0, sizeof sampler_views);
+   fprintf(stderr,"D3D destroy stage 6\n"); fflush(stderr);
    pipe->set_sampler_views(pipe, MESA_SHADER_FRAGMENT, 0,
                            PIPE_MAX_SHADER_SAMPLER_VIEWS, 0, sampler_views);
    pipe->set_sampler_views(pipe, MESA_SHADER_VERTEX, 0,
@@ -361,6 +401,18 @@ DestroyDevice(D3D10DDI_HDEVICE hDevice)   // IN
    pipe->set_sampler_views(pipe, MESA_SHADER_GEOMETRY, 0,
                            PIPE_MAX_SHADER_SAMPLER_VIEWS, 0, sampler_views);
 
+   fprintf(stderr,"D3D destroy stage 7\n"); fflush(stderr);
+   if (pDevice->hContext) {
+      D3DDDICB_DESTROYCONTEXT destroy = {};
+      destroy.hContext = pDevice->hContext;
+      pDevice->KTCallbacks.pfnDestroyContextCb(pDevice->hDevice, &destroy);
+   }
+   if (pDevice->pagingQueue) {
+      D3DDDI_DESTROYPAGINGQUEUE destroy = {};
+      destroy.hPagingQueue = pDevice->pagingQueue;
+      pDevice->KTCallbacks.pfnDestroyPagingQueueCb(pDevice->hDevice, &destroy);
+   }
+   fprintf(stderr,"D3D destroy stage 8\n"); fflush(stderr);
    pipe->destroy(pipe);
 }
 

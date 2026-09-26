@@ -64,14 +64,22 @@ struct Shader
 struct Query;
 struct ElementLayout;
 
+struct RenderTargetView;
+struct ShaderResourceView;
+
 struct Device
 {
+   UINT64 profileDrawTicks, profileDrawMax, profileDrawCalls, profileLastPresent;
+   UINT profilePresents;
+   RenderTargetView *renderTargetViews;
+   ShaderResourceView *shaderResourceViews;
    struct pipe_context *pipe;
 
    struct cso_context *cso;
    struct pipe_framebuffer_state fb;
    struct pipe_vertex_buffer vertex_buffers[PIPE_MAX_ATTRIBS];
    unsigned vertex_strides[PIPE_MAX_ATTRIBS];
+   struct pipe_resource *zero_vertex_buffer;
    struct pipe_resource *index_buffer;
    unsigned restart_index;
    unsigned index_size;
@@ -95,6 +103,8 @@ struct Device
 
    HANDLE hDevice;
    HANDLE hContext;
+   D3DKMT_HANDLE pagingQueue;
+   volatile UINT64 *pagingFence;
 
    D3DDDI_DEVICECALLBACKS KTCallbacks;
    D3D10DDI_CORELAYER_DEVICECALLBACKS UMCallbacks;
@@ -146,6 +156,7 @@ static inline void
 SetError(D3D10DDI_HDEVICE hDevice, HRESULT hr)
 {
    if (FAILED(hr)) {
+      DebugPrintf("BC250 SetError %08lx\n", hr);
       Device *pDevice = CastDevice(hDevice);
       pDevice->UMCallbacks.pfnSetErrorCb(pDevice->hRTCoreLayer, hr);
    }
@@ -154,6 +165,15 @@ SetError(D3D10DDI_HDEVICE hDevice, HRESULT hr)
 
 struct Resource
 {
+   HANDLE hRTResource;
+   D3DKMT_HANDLE allocation;
+   UINT64 gpuVa, gpuBytes;
+   UINT surfacePitch;
+   UINT64 surfaceBytes;
+   BOOL presentReady;
+   void *cpuMapping;
+   BOOL primary, shared;
+   UINT vidpn;
    DXGI_FORMAT Format;
    UINT MipLevels;
    UINT NumSubResources;
@@ -163,6 +183,8 @@ struct Resource
    struct pipe_stream_output_target *so_target;
 };
 
+
+HRESULT Bc250EnsureSurface(Device *device, Resource *resource);
 
 static inline Resource *
 CastResource(D3D10DDI_HRESOURCE hResource)
@@ -207,6 +229,7 @@ CastPipeBuffer(D3D10DDI_HRESOURCE hResource)
 
 struct RenderTargetView
 {
+   RenderTargetView *next;
    struct pipe_surface surface;
    D3D10DDI_HRTRENDERTARGETVIEW hRTRenderTargetView;
 };
@@ -362,6 +385,7 @@ CastPipeSamplerState(D3D10DDI_HSAMPLER hSampler)
 
 struct ShaderResourceView
 {
+   ShaderResourceView *next;
    struct pipe_sampler_view *handle;
 };
 

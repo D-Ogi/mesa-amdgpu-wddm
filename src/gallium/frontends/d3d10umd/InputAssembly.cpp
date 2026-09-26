@@ -39,6 +39,19 @@
 #include "Debug.h"
 #include "Format.h"
 
+// Gallium GPU backends may retain a binding without taking another reference.
+// Notify the context when the frontend drops its old vertex-buffer reference.
+static void
+ReferenceVertexBuffer(struct pipe_context *pipe, struct pipe_resource **dst,
+                      struct pipe_resource *src)
+{
+   struct pipe_resource *old = *dst;
+   *dst = NULL;
+   pipe_resource_reference(dst, src);
+   pipe_resource_release(pipe, old);
+}
+
+
 
 /*
  * ----------------------------------------------------------------------
@@ -121,7 +134,6 @@ IaSetVertexBuffers(D3D10DDI_HDEVICE hDevice,                                    
                    __in_ecount (NumBuffers) const UINT *pStrides,                // IN
                    __in_ecount (NumBuffers) const UINT *pOffsets)                // IN
 {
-   static const float dummy[4] = {0.0f, 0.0f, 0.0f, 0.0f};
 
    LOG_ENTRYPOINT();
 
@@ -150,16 +162,15 @@ IaSetVertexBuffers(D3D10DDI_HDEVICE hDevice,                                    
             vb->buffer.resource = NULL;
             vb->is_user_buffer = false;
          }
-         pipe_resource_reference(&vb->buffer.resource, resource);
+         ReferenceVertexBuffer(pDevice->pipe, &vb->buffer.resource, resource);
       }
       else {
          pDevice->vertex_strides[StartBuffer + i] = 0;
          vb->buffer_offset = 0;
-         if (!vb->is_user_buffer) {
-            pipe_resource_reference(&vb->buffer.resource, NULL);
-            vb->is_user_buffer = true;
-         }
-         vb->buffer.user = dummy;
+         // GPU backends cannot dereference a CPU dummy vertex pointer.
+         // A zero-stride resource preserves D3D's unbound-input zero value.
+         ReferenceVertexBuffer(pDevice->pipe, &vb->buffer.resource, pDevice->zero_vertex_buffer);
+         vb->is_user_buffer = false;
       }
    }
 
@@ -170,8 +181,8 @@ IaSetVertexBuffers(D3D10DDI_HDEVICE hDevice,                                    
       if (!vb->is_user_buffer && !vb->buffer.resource) {
          pDevice->vertex_strides[i] = 0;
          vb->buffer_offset = 0;
-         vb->is_user_buffer = true;
-         vb->buffer.user = dummy;
+         ReferenceVertexBuffer(pDevice->pipe, &vb->buffer.resource, pDevice->zero_vertex_buffer);
+         vb->is_user_buffer = false;
       }
    }
 

@@ -3547,6 +3547,7 @@ zink_internal_create_screen(const struct pipe_screen_config *config, int64_t dev
          debug_printf("ZINK: failed to setup debug utils\n");
    }
 
+   fprintf(stderr, "BC250 zink init stage 0\n"); fflush(stderr);
    choose_pdev(screen, dev_major, dev_minor, adapter_luid);
    if (screen->pdev == VK_NULL_HANDLE) {
       if (!screen->driver_name_is_inferred)
@@ -3653,6 +3654,7 @@ zink_internal_create_screen(const struct pipe_screen_config *config, int64_t dev
    init_driver_workarounds(screen);
    disable_features(screen);
 
+   fprintf(stderr, "BC250 zink init stage 1\n"); fflush(stderr);
    struct zink_device *zdev = zink_create_logical_device(screen);
    if (!zdev->dev)
       goto fail;
@@ -3663,8 +3665,10 @@ zink_internal_create_screen(const struct pipe_screen_config *config, int64_t dev
                                              screen->vk_GetDeviceProcAddr,
                                              screen->dev);
 
+   fprintf(stderr, "BC250 zink init stage 2\n"); fflush(stderr);
    init_queue(screen);
 
+   fprintf(stderr, "BC250 zink init stage 3\n"); fflush(stderr);
    zink_verify_device_extensions(screen);
 
    /* descriptor set indexing is determined by 'compact' descriptor mode:
@@ -3689,6 +3693,7 @@ zink_internal_create_screen(const struct pipe_screen_config *config, int64_t dev
       screen->desc_set_id[ZINK_DESCRIPTOR_BINDLESS] = 5;
    }
 
+   fprintf(stderr, "BC250 zink init stage 4\n"); fflush(stderr);
    if (screen->info.have_EXT_calibrated_timestamps && !check_have_device_time(screen))
       goto fail;
 
@@ -3699,6 +3704,7 @@ zink_internal_create_screen(const struct pipe_screen_config *config, int64_t dev
    }
 #endif // VK_KHR_PORTABILITY_SUBSET_EXTENSION_NAME
 
+   fprintf(stderr, "BC250 zink init stage 5\n"); fflush(stderr);
    check_base_requirements(screen);
    util_live_shader_cache_init(&screen->shaders, zink_create_gfx_shader_state, zink_delete_shader_state);
 
@@ -3765,6 +3771,7 @@ zink_internal_create_screen(const struct pipe_screen_config *config, int64_t dev
       }
    }
 
+   fprintf(stderr, "BC250 zink init stage 6\n"); fflush(stderr);
    if (!zink_screen_resource_init(&screen->base))
       goto fail;
    if (!zink_bo_init(screen)) {
@@ -3774,6 +3781,7 @@ zink_internal_create_screen(const struct pipe_screen_config *config, int64_t dev
    }
    zink_screen_fence_init(&screen->base);
 
+   fprintf(stderr, "BC250 zink init stage 7\n"); fflush(stderr);
    zink_screen_init_compiler(screen);
    if (!disk_cache_init(screen)) {
       if (!screen->driver_name_is_inferred)
@@ -3783,12 +3791,14 @@ zink_internal_create_screen(const struct pipe_screen_config *config, int64_t dev
    if (!util_queue_init(&screen->cache_get_thread, "zcfq", 8, 4,
                         UTIL_QUEUE_INIT_RESIZE_IF_FULL, screen))
       goto fail;
+   fprintf(stderr, "BC250 zink init stage 8\n"); fflush(stderr);
    populate_format_props(screen);
 
    slab_create_parent(&screen->transfer_pool, sizeof(struct zink_transfer), 16);
 
    screen->driconf.inline_uniforms = debug_get_bool_option("ZINK_INLINE_UNIFORMS", screen->is_cpu);
 
+   fprintf(stderr, "BC250 zink init stage 9\n"); fflush(stderr);
    if (!zink_screen_init_semaphore(screen)) {
       if (!screen->driver_name_is_inferred)
          mesa_loge("zink: failed to create timeline semaphore");
@@ -3876,16 +3886,20 @@ zink_internal_create_screen(const struct pipe_screen_config *config, int64_t dev
    screen->base.create_vertex_state = zink_cache_create_vertex_state;
    screen->base.vertex_state_destroy = zink_cache_vertex_state_destroy;
 
+   fprintf(stderr, "BC250 zink init stage 10\n"); fflush(stderr);
    zink_synchronization_init(screen);
 
+   fprintf(stderr, "BC250 zink init stage 11\n"); fflush(stderr);
    zink_init_screen_pipeline_libs(screen);
 
+   fprintf(stderr, "BC250 zink init stage 12\n"); fflush(stderr);
    if (!init_layouts(screen)) {
       if (!screen->driver_name_is_inferred)
          mesa_loge("ZINK: failed to initialize layouts");
       goto fail;
    }
 
+   fprintf(stderr, "BC250 zink init stage 13\n"); fflush(stderr);
    if (!zink_descriptor_layouts_init(screen)) {
       if (!screen->driver_name_is_inferred)
          mesa_loge("ZINK: failed to initialize descriptor layouts");
@@ -3896,6 +3910,7 @@ zink_internal_create_screen(const struct pipe_screen_config *config, int64_t dev
 
    init_optimal_keys(screen);
 
+   fprintf(stderr, "BC250 zink init stage 14\n"); fflush(stderr);
    zink_init_shader_caps(screen);
    zink_init_compute_caps(screen);
    zink_init_screen_caps(screen);
@@ -3908,6 +3923,7 @@ zink_internal_create_screen(const struct pipe_screen_config *config, int64_t dev
    screen->frame_marker_emitted = zink_screen_debug_marker_begin(screen, "frame");
    simple_mtx_unlock(screen->queue_lock);
 
+   fprintf(stderr, "BC250 zink init stage 15\n"); fflush(stderr);
    return screen;
 
 fail:

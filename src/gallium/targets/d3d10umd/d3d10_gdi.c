@@ -27,73 +27,34 @@
  **************************************************************************/
 
 
+/* BC250 experimental native D3D -> Zink path. Not a system UMD yet.
+ * A nonzero adapter LUID is mandatory to prevent accidental GPU selection.
+ * The bounded test supplies it from DXGI enumeration of the BC250 adapter.
+ */
+#include <stdint.h>
+#include <stdlib.h>
+#include <errno.h>
 #include "util/u_debug.h"
+#include "pipe/p_screen.h"
 #include "target-helpers/inline_debug_helper.h"
-#include "llvmpipe/lp_public.h"
-#include "softpipe/sp_public.h"
-#include "sw/gdi/gdi_sw_winsys.h"
+#include "zink/zink_public.h"
 
-#include "winddk_compat.h"
-#include <d3dkmthk.h>
-
-extern struct pipe_screen *
-d3d10_create_screen(void);
-
-static HDC
-d3d10_gdi_acquire_hdc(void *winsys_drawable_handle) {
-   D3DKMT_PRESENT *pPresentInfo = (D3DKMT_PRESENT *)winsys_drawable_handle;
-
-   HWND hWnd = pPresentInfo->hWindow;
-   return GetDC(hWnd);
-}
-
-static void
-d3d10_gdi_release_hdc(void *winsys_drawable_handle, HDC hDC) {
-   D3DKMT_PRESENT *pPresentInfo = (D3DKMT_PRESENT *)winsys_drawable_handle;
-
-   HWND hWnd = pPresentInfo->hWindow;
-   ReleaseDC(hWnd, hDC);
-}
+extern struct pipe_screen *d3d10_create_screen(void);
 
 struct pipe_screen *
 d3d10_create_screen(void)
 {
-   const char *default_driver;
-   const char *driver;
-   struct pipe_screen *screen = NULL;
-   struct sw_winsys *winsys;
-
-   winsys = gdi_create_sw_winsys(d3d10_gdi_acquire_hdc, d3d10_gdi_release_hdc);
-   if(!winsys)
-      goto no_winsys;
-
-#ifdef GALLIUM_LLVMPIPE
-   default_driver = "llvmpipe";
-#else
-   default_driver = "softpipe";
-#endif
-
-   driver = debug_get_option("GALLIUM_DRIVER", default_driver);
-
-#ifdef GALLIUM_LLVMPIPE
-   if (strcmp(driver, "llvmpipe") == 0) {
-      screen = llvmpipe_create_screen( winsys );
+   const char *value = debug_get_option("BC250_D3D_ZINK_LUID", "");
+   char *end;
+   errno = 0;
+   uint64_t luid = strtoull(value, &end, 16);
+   if (errno || end == value || *end || !luid) {
+      debug_printf("BC250 D3D Zink: explicit adapter LUID required\n");
+      return NULL;
    }
-#else
-   (void)driver;
-#endif
-
-   if (screen == NULL) {
-      screen = softpipe_create_screen( winsys );
-   }
-
-   if (screen == NULL)
-      goto no_screen;
-
-   return debug_screen_wrap( screen );
-
-no_screen:
-   winsys->destroy(winsys);
-no_winsys:
-   return NULL;
+   struct pipe_screen *screen = zink_win32_create_screen(luid);
+   if (!screen)
+      return NULL;
+   debug_printf("BC250 D3D renderer: %s\n", screen->get_name(screen));
+   return debug_screen_wrap(screen);
 }
