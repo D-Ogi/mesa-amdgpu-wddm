@@ -31,6 +31,7 @@
  */
 
 #include <stdio.h>
+#include <stddef.h>
 #include <windows.h>
 #include <winternl.h>
 #include <d3dkmthk.h>
@@ -113,12 +114,13 @@ HRESULT Bc250EnsureSurface(Device *device, Resource *resource)
       DebugPrintf("BC250 Allocate input runtime %p size %llu primary %u\n", resource->hRTResource, data.size, resource->primary);
       allocate.NumAllocations = 1; allocate.pAllocationInfo2 = &info;
       hr = device->KTCallbacks.pfnAllocateCb(device->hDevice, &allocate);
-      fprintf(stderr, "BC250 Allocate %08lx format %u primary %u handle %x resource %x\n", hr, format, resource->primary, info.hAllocation, allocate.hKMResource);
+      fprintf(stderr, "BC250 Allocate hr=%08lx inputRT=%p callbackRT=%p miscShared=%u format=%u primary=%u allocation=%x resource=%x\n", hr, resource->hRTResource, allocate.hResource, resource->shared, format, resource->primary, info.hAllocation, allocate.hKMResource);
+      fprintf(stderr, "BC250 ALLOCATE ABI size=%zu private=%zu privateSize=%zu hResource=%zu hKMResource=%zu NumAllocations=%zu info2=%zu\n", sizeof(D3DDDICB_ALLOCATE), offsetof(D3DDDICB_ALLOCATE,pPrivateDriverData), offsetof(D3DDDICB_ALLOCATE,PrivateDriverDataSize), offsetof(D3DDDICB_ALLOCATE,hResource), offsetof(D3DDDICB_ALLOCATE,hKMResource), offsetof(D3DDDICB_ALLOCATE,NumAllocations), offsetof(D3DDDICB_ALLOCATE,pAllocationInfo2));
       if (FAILED(hr)) return hr;
       resource->allocation = info.hAllocation;
       resource->surfacePitch = pitch;
       resource->surfaceBytes = bytes;
-      if (GetEnvironmentVariableA("BC250_D3D_RUNTIME_PROBE", NULL, 0)) {
+      if (GetEnvironmentVariableA("BC250_D3D_RUNTIME_INVENTORY", NULL, 0)) {
          // Inventory only: do not claim this unimported resource is presentable.
          auto share = (decltype(&D3DKMTShareObjects))GetProcAddress(GetModuleHandleA("gdi32.dll"), "D3DKMTShareObjects");
          if (!share) return E_NOTIMPL;

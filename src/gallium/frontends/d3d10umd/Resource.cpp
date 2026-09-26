@@ -345,10 +345,10 @@ CreateResource(D3D10DDI_HDEVICE hDevice,                                // IN
    pResource->transfers = (struct pipe_transfer **)calloc(pResource->NumSubResources,
                                                           sizeof *pResource->transfers);
 
-   if (GetEnvironmentVariableA("BC250_D3D_RUNTIME_PROBE", NULL, 0))
+   if (GetEnvironmentVariableA("BC250_D3D_RUNTIME_INVENTORY", NULL, 0))
       fprintf(stderr, "BC250 runtime resource misc=%x bind=%x primary=%u\n",
               pCreateResource->MiscFlags, pCreateResource->BindFlags, pResource->primary);
-   if (GetEnvironmentVariableA("BC250_D3D_RUNTIME_PROBE", NULL, 0) ||
+   if (GetEnvironmentVariableA("BC250_D3D_RUNTIME_INVENTORY", NULL, 0) ||
        pResource->primary || (pCreateResource->BindFlags & D3D10_DDI_BIND_PRESENT) ||
        (pCreateResource->MiscFlags & D3D10_DDI_RESOURCE_MISC_SHARED)) {
       HRESULT hr = Bc250EnsureSurface(CastDevice(hDevice), pResource);
