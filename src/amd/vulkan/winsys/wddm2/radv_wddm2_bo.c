@@ -1140,7 +1140,7 @@ radv_wddm2_bo_destroy(struct radeon_winsys *_ws, struct radeon_winsys_bo *_bo)
    struct radv_wddm2_bo *bo = radv_wddm2_bo(_bo);
    ASSERTED NTSTATUS status;
 
-   if (all_resident && !bo->base.is_virtual) {
+   if (all_resident && !bo->base.is_virtual && !bo->borrowed) {
       D3DKMT_EVICT evict = {
          .hDevice = ws->device_h,
          .NumAllocations = 1,
