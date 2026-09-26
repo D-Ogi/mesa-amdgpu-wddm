@@ -394,6 +394,7 @@ struct radeon_winsys {
 
    /* When non-NULL and true, do not build the indirect gfx-init IB. The state is
     * emitted inline, the same stream as RADV_DEBUG=noibchaining. NULL means no. */
+   VkResult (*buffer_from_hosted)(struct radeon_winsys *, void *, uint32_t, uint64_t, uint64_t, struct radeon_winsys_bo **);
    bool (*inline_gfx_preamble)(struct radeon_winsys *ws);
 };
 
