@@ -78,6 +78,10 @@ struct Bc250HostProbeState {
    DWORD thread;
    HANDLE contexts[16];
    unsigned calls[64];
+   bc250_host_progress progress[16];
+   bool submission_failed;
+   D3DKMT_HANDLE present_sync;
+   UINT64 present_value, present_waited[16];
 };
 
 static HANDLE Bc250HostContext(Bc250HostProbeState *s, UINT token)
@@ -92,6 +96,14 @@ static HRESULT Bc250HostOperation(Bc250HostProbeState *s, uint32_t op, void *arg
    if (!argument) return E_INVALIDARG;
 #define HOST_CALL(name, arg) (cb.pfn##name##Cb ? cb.pfn##name##Cb(rt, arg) : E_NOTIMPL)
    switch (op) {
+   case BC250_HOST_PUBLISH_PROGRESS: {
+      auto *a=(bc250_host_progress *)argument;
+      if (!Bc250HostContext(s,a->context) || !a->sync || !a->value) return E_INVALIDARG;
+      auto &old=s->progress[a->context-1];
+      if (old.sync && (old.sync!=a->sync || old.value>=a->value)) return E_INVALIDARG;
+      old=*a;
+      return S_OK;
+   }
    case BC250_HOST_CREATE_PAGING: {
       auto *a = (bc250_host_paging *)argument;
       D3DDDICB_CREATEPAGINGQUEUE b = {};
@@ -157,7 +169,7 @@ static HRESULT Bc250HostOperation(Bc250HostProbeState *s, uint32_t op, void *arg
       b.NodeOrdinal=a->NodeOrdinal; b.EngineAffinity=a->EngineAffinity; b.Flags=a->Flags;
       b.pPrivateDriverData=a->pPrivateDriverData; b.PrivateDriverDataSize=a->PrivateDriverDataSize;
       HRESULT hr=HOST_CALL(CreateContextVirtual, &b);
-      if (SUCCEEDED(hr)) { s->contexts[slot]=b.hContext; a->hContext=slot+1; }
+      if (SUCCEEDED(hr)) { s->contexts[slot]=b.hContext; s->present_waited[slot]=0; a->hContext=slot+1; }
       return hr;
    }
    case BC250_HOST_DestroyContext: {
@@ -166,7 +178,10 @@ static HRESULT Bc250HostOperation(Bc250HostProbeState *s, uint32_t op, void *arg
       b.hContext=Bc250HostContext(s,a->hContext);
       if (!b.hContext) return E_INVALIDARG;
       HRESULT hr=HOST_CALL(DestroyContext, &b);
-      if (SUCCEEDED(hr)) s->contexts[a->hContext-1]=NULL;
+      if (SUCCEEDED(hr)) {
+         s->contexts[a->hContext-1]=NULL;
+         s->progress[a->hContext-1]={};
+      }
       return hr;
    }
    case BC250_HOST_CreateSynchronizationObject2: {
@@ -180,7 +195,9 @@ static HRESULT Bc250HostOperation(Bc250HostProbeState *s, uint32_t op, void *arg
    case BC250_HOST_DestroySynchronizationObject: {
       D3DDDICB_DESTROYSYNCHRONIZATIONOBJECT b = {};
       b.hSyncObject=((D3DKMT_DESTROYSYNCHRONIZATIONOBJECT *)argument)->hSyncObject;
-      return HOST_CALL(DestroySynchronizationObject, &b);
+      HRESULT hr=HOST_CALL(DestroySynchronizationObject, &b);
+      if (SUCCEEDED(hr)) for (auto &p:s->progress) if (p.sync==b.hSyncObject) p={};
+      return hr;
    }
    case BC250_HOST_WaitForSynchronizationObjectFromCpu: {
       auto *a=(D3DKMT_WAITFORSYNCHRONIZATIONOBJECTFROMCPU *)argument;
@@ -225,6 +242,16 @@ static HRESULT Bc250HostOperation(Bc250HostProbeState *s, uint32_t op, void *arg
       b.BroadcastContextCount=a->BroadcastContextCount;
       for (UINT i=0;i<a->BroadcastContextCount;++i) {
          b.BroadcastContext[i]=Bc250HostContext(s,a->BroadcastContext[i]); if (!b.BroadcastContext[i]) return E_INVALIDARG;
+         UINT token=a->BroadcastContext[i];
+         if (s->present_value>s->present_waited[token-1]) {
+            D3DDDICB_WAITFORSYNCHRONIZATIONOBJECTFROMGPU wait={};
+            wait.hContext=b.BroadcastContext[i]; wait.ObjectCount=1;
+            wait.ObjectHandleArray=&s->present_sync; wait.MonitoredFenceValueArray=&s->present_value;
+            HRESULT hr=HOST_CALL(WaitForSynchronizationObjectFromGpu, &wait);
+            if (s->present_value<=3 || FAILED(hr)) fprintf(stderr,"BC250 render waits Present value=%llu hr=%08lx\n",(unsigned long long)s->present_value,hr);
+            if (FAILED(hr)) return hr;
+            s->present_waited[token-1]=s->present_value;
+         }
       }
       b.NumPrimaries=a->NumPrimaries;
       for (UINT i=0;i<a->NumPrimaries;++i) b.WrittenPrimaries[i]=a->WrittenPrimaries[i];
@@ -243,10 +270,80 @@ static int32_t Bc250HostDispatch(void *userdata, uint32_t operation, void *argum
       return (int32_t)0xc000000d;
    }
    HRESULT hr=Bc250HostOperation(s,operation,argument);
+   if (FAILED(hr) && (operation==BC250_HOST_SubmitCommand || operation==BC250_HOST_SignalSynchronizationObjectFromGpu2 || operation==BC250_HOST_PUBLISH_PROGRESS))
+      s->submission_failed=true;
    unsigned count=operation<64 ? ++s->calls[operation] : 0;
    if (count<=2 || (FAILED(hr) && hr!=E_PENDING)) fprintf(stderr,"BC250 hosted op=%u count=%u hr=%08lx\n",operation,count,hr);
    if (hr==E_PENDING && (operation==BC250_HOST_MapGpuVirtualAddress || operation==BC250_HOST_MakeResident)) return 0x103;
    return SUCCEEDED(hr) ? 0 : hr==E_NOTIMPL ? (int32_t)0xc00000bb : (int32_t)0xc0000001;
+}
+
+HRESULT Bc250QueuePresentWait(Device *device)
+{
+   auto *s=(Bc250HostProbeState *)device->hosted_state;
+   if (!s || Bc250RuntimeDevice!=device || !device->hContext) return E_INVALIDARG;
+   if (s->submission_failed) return DXGI_ERROR_DEVICE_REMOVED;
+   if (!device->KTCallbacks.pfnWaitForSynchronizationObjectFromGpuCb ||
+       !device->KTCallbacks.pfnSignalSynchronizationObjectFromGpu2Cb ||
+       !device->KTCallbacks.pfnCreateSynchronizationObject2Cb) return E_NOTIMPL;
+   if (!s->present_sync) {
+      D3DDDICB_CREATESYNCHRONIZATIONOBJECT2 create={};
+      create.Info.Type=D3DDDI_MONITORED_FENCE;
+      create.Info.MonitoredFence.EngineAffinity=1;
+      HRESULT hr=device->KTCallbacks.pfnCreateSynchronizationObject2Cb(device->hDevice,&create);
+      if (FAILED(hr)) return hr;
+      s->present_sync=create.hSyncObject;
+   }
+   D3DKMT_HANDLE objects[16]={};
+   UINT64 values[16]={};
+   UINT count=0;
+   for (const auto &p:s->progress) {
+      if (!p.sync) continue;
+      if (!Bc250HostContext(s,p.context)) return E_FAIL;
+      objects[count]=p.sync; values[count]=p.value; ++count;
+   }
+   D3DDDICB_WAITFORSYNCHRONIZATIONOBJECTFROMGPU wait={};
+   wait.hContext=device->hContext; wait.ObjectCount=count;
+   wait.ObjectHandleArray=objects; wait.MonitoredFenceValueArray=values;
+   HRESULT hr=count ? device->KTCallbacks.pfnWaitForSynchronizationObjectFromGpuCb(device->hDevice,&wait) : S_OK;
+   if (device->profilePresents<3 || FAILED(hr)) {
+      fprintf(stderr,"BC250 Present GPU wait count=%u hr=%08lx cpu_render_wait=0\n",count,hr);
+      for (UINT i=0;i<count;++i) fprintf(stderr,"BC250 Present fence=%x value=%llu\n",objects[i],(unsigned long long)values[i]);
+   }
+   return hr;
+}
+
+HRESULT Bc250SignalPresent(Device *device)
+{
+   auto *s=(Bc250HostProbeState *)device->hosted_state;
+   if (!s || Bc250RuntimeDevice!=device || !s->present_sync) return E_INVALIDARG;
+   UINT64 value=s->present_value+1;
+   if (!value) return E_FAIL;
+   D3DDDICB_SIGNALSYNCHRONIZATIONOBJECTFROMGPU2 signal={};
+   signal.ObjectCount=1; signal.ObjectHandleArray=&s->present_sync;
+   signal.BroadcastContextCount=1; signal.BroadcastContextArray=&device->hContext;
+   signal.MonitoredFenceValueArray=&value;
+   HRESULT hr=device->KTCallbacks.pfnSignalSynchronizationObjectFromGpu2Cb(device->hDevice,&signal);
+   if (SUCCEEDED(hr)) s->present_value=value;
+   else s->submission_failed=true;
+   if (value<=3 || FAILED(hr)) fprintf(stderr,"BC250 Present signals value=%llu hr=%08lx\n",(unsigned long long)value,hr);
+   return hr;
+}
+
+HRESULT Bc250WaitPresentIdle(Device *device)
+{
+   auto *s=(Bc250HostProbeState *)device->hosted_state;
+   if (!s || !s->present_value) return S_OK;
+   if (Bc250RuntimeDevice!=device || !device->KTCallbacks.pfnWaitForSynchronizationObjectFromCpuCb) return E_INVALIDARG;
+   HANDLE event=CreateEventW(NULL,FALSE,FALSE,NULL);
+   if (!event) return HRESULT_FROM_WIN32(GetLastError());
+   D3DDDICB_WAITFORSYNCHRONIZATIONOBJECTFROMCPU wait={};
+   wait.ObjectCount=1; wait.ObjectHandleArray=&s->present_sync; wait.FenceValueArray=&s->present_value;
+   wait.hAsyncEvent=event;
+   HRESULT hr=device->KTCallbacks.pfnWaitForSynchronizationObjectFromCpuCb(device->hDevice,&wait);
+   if (SUCCEEDED(hr) && WaitForSingleObject(event,10000)!=WAIT_OBJECT_0) hr=DXGI_ERROR_DEVICE_HUNG;
+   CloseHandle(event);
+   return hr;
 }
 
 extern "C" bool d3d10_hosted_bootstrap(struct bc250_host *host);
@@ -645,6 +742,16 @@ DestroyDevice(D3D10DDI_HDEVICE hDevice)   // IN
       fprintf(stderr, "BC250 destroy device screen=%p runtime=%p\n", pDevice->owned_screen, pDevice->hDevice);
       pDevice->owned_screen->destroy(pDevice->owned_screen);
       pDevice->owned_screen = NULL;
+   }
+   auto *hosted=(Bc250HostProbeState *)pDevice->hosted_state;
+   if (hosted && hosted->present_sync) {
+      HRESULT hr=Bc250WaitPresentIdle(pDevice);
+      if (FAILED(hr)) { SetError(hDevice,hr); return; }
+      D3DDDICB_DESTROYSYNCHRONIZATIONOBJECT destroy={};
+      destroy.hSyncObject=hosted->present_sync;
+      hr=pDevice->KTCallbacks.pfnDestroySynchronizationObjectCb(pDevice->hDevice,&destroy);
+      if (FAILED(hr)) { SetError(hDevice,hr); return; }
+      hosted->present_sync=0;
    }
    if (pDevice->hContext) {
       D3DDDICB_DESTROYCONTEXT destroy = {};

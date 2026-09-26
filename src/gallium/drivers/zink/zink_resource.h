@@ -183,7 +183,7 @@ zink_batch_resource_usage_set(struct zink_batch_state *bs, struct zink_resource 
          VkSemaphore acquire = zink_kopper_acquire_submit(zink_screen(bs->ctx->base.screen), res);
          if (acquire)
             util_dynarray_append(&bs->acquires, acquire);
-      } else if (res->obj->exportable) {
+      } else if (res->obj->exportable || res->obj->bc250_runtime) {
          struct pipe_resource *pres = NULL;
          bool found = false;
          simple_mtx_lock(&bs->exportable_lock);

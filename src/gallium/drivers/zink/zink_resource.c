@@ -1112,6 +1112,7 @@ allocate_bo(struct zink_screen *screen, const struct pipe_resource *templ,
    if (alloc_info->whandle && alloc_info->whandle->bc250_identity) {
       if (!screen->bc250_host.dispatch || alloc_info->whandle->bc250_identity!=screen->bc250_host.identity)
          return roc_fail_and_cleanup_object;
+      obj->bc250_runtime=true;
       host_import.sType=BC250_HOST_IMPORT_STYPE;
       host_import.pNext=mai.pNext;
       host_import.identity=alloc_info->whandle->bc250_identity;

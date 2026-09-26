@@ -542,6 +542,8 @@ DestroyResource(D3D10DDI_HDEVICE hDevice,       // IN
       bool done=!fence || pipe->screen->fence_finish(pipe->screen,pipe,fence,10000000000ull);
       pipe->screen->fence_reference(pipe->screen,&fence,NULL);
       if (!done) { SetError(hDevice,DXGI_ERROR_DEVICE_HUNG); return; }
+      HRESULT idle=Bc250WaitPresentIdle(CastDevice(hDevice));
+      if (FAILED(idle)) { SetError(hDevice,idle); return; }
       pipe_resource_reference(&pResource->resource,NULL);
    }
    if (pResource->allocation) {

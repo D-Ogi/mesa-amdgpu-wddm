@@ -187,6 +187,9 @@ struct Resource
 
 
 HRESULT Bc250EnsureSurface(Device *device, Resource *resource);
+HRESULT Bc250QueuePresentWait(Device *device);
+HRESULT Bc250SignalPresent(Device *device);
+HRESULT Bc250WaitPresentIdle(Device *device);
 
 static inline Resource *
 CastResource(D3D10DDI_HRESOURCE hResource)

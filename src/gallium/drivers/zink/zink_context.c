@@ -4793,7 +4793,7 @@ zink_flush_resource(struct pipe_context *pctx,
          zink_resource_reference(&ctx->needs_present, res);
       }
       ctx->swapchain = res;
-   } else if (res->dmabuf)
+   } else if (res->dmabuf && !res->obj->bc250_runtime)
       res->queue = VK_QUEUE_FAMILY_FOREIGN_EXT;
 }
 

@@ -223,18 +223,25 @@ _Present(DXGI_DDI_ARG_PRESENT *pPresentData)
        resource->format != PIPE_FORMAT_R8G8B8X8_UNORM) return E_NOTIMPL;
    HRESULT allocated = Bc250EnsureSurface(device, pSrcResource);
    if (FAILED(allocated)) return allocated;
-   // llvmpipe flush queues CPU raster work. Publish the scanout allocation
-   // only after its render fence completes; a CPU barrier alone cannot wait.
    LARGE_INTEGER renderStart, renderEnd;
    QueryPerformanceCounter(&renderStart);
-   pipe_fence_handle *renderFence = NULL;
-   device->pipe->flush(device->pipe, &renderFence, 0);
-   bool rendered = !renderFence || device->pipe->screen->fence_finish(
-      device->pipe->screen, device->pipe, renderFence, OS_TIMEOUT_INFINITE);
-   device->pipe->screen->fence_reference(device->pipe->screen, &renderFence, NULL);
+   if (device->hosted_state) {
+      device->pipe->flush(device->pipe, NULL, 0);
+      if (device->pipe->get_device_reset_status &&
+          device->pipe->get_device_reset_status(device->pipe)!=PIPE_NO_RESET)
+         return DXGI_ERROR_DEVICE_REMOVED;
+      HRESULT ordered=Bc250QueuePresentWait(device);
+      if (FAILED(ordered)) return ordered;
+   } else {
+      pipe_fence_handle *renderFence = NULL;
+      device->pipe->flush(device->pipe, &renderFence, 0);
+      bool rendered = !renderFence || device->pipe->screen->fence_finish(
+         device->pipe->screen, device->pipe, renderFence, OS_TIMEOUT_INFINITE);
+      device->pipe->screen->fence_reference(device->pipe->screen, &renderFence, NULL);
+      if (!rendered) return E_FAIL;
+      MemoryBarrier();
+   }
    QueryPerformanceCounter(&renderEnd);
-   if (!rendered) return E_FAIL;
-   MemoryBarrier();
    HRESULT hr;
    DXGIDDICB_PRESENT present = {};
    present.hSrcAllocation = pSrcResource->allocation;
@@ -251,6 +258,7 @@ _Present(DXGI_DDI_ARG_PRESENT *pPresentData)
    LARGE_INTEGER presentStart, presentEnd, frequency;
    QueryPerformanceCounter(&presentStart);
    hr = device->pDXGIBaseCallbacks->pfnPresentCb(device->hDevice, &present);
+   if (device->hosted_state && SUCCEEDED(hr)) hr=Bc250SignalPresent(device);
    QueryPerformanceCounter(&presentEnd);QueryPerformanceFrequency(&frequency);
    if(++device->profilePresents<=120 || device->profilePresents%60==0)
       DebugPrintf("BC250 Perf frame %u gap_ms %.3f draws %llu draw_ms %.3f max_draw_ms %.3f present_ms %.3f render_wait_ms %.3f\n",
