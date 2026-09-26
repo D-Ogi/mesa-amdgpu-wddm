@@ -40,6 +40,13 @@ struct vk_wddm2_fence {
    uint64_t *value_map;
 };
 
+#define BC250_GATHER_SLOTS 7u
+struct bc250_gather_slot {
+   struct radeon_winsys_bo *bo;
+   uint8_t *map;
+   uint64_t retire_value;
+};
+
 struct radv_wddm2_queue {
    enum amd_ip_type hw_ip;
    uint32_t context_h;
@@ -50,8 +57,9 @@ struct radv_wddm2_queue {
    bool sparse_batch_active;
    /* Each queue owns its packed IB and an unconditional retirement fence. */
    struct radv_wddm2_winsys *bc250_ws;
-   struct radeon_winsys_bo *bc250_gather;
-   uint8_t *bc250_gather_map;
+   struct bc250_gather_slot bc250_gather[BC250_GATHER_SLOTS];
+   unsigned bc250_gather_index;
+   bool bc250_submit_failed;
    struct radv_winsys_ib *bc250_ibs;
    unsigned bc250_ib_capacity;
    struct vk_wddm2_fence bc250_progress;
