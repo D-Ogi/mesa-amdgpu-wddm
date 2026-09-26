@@ -2901,8 +2901,10 @@ wsi_common_queue_present(const struct wsi_device *wsi,
       }
 
       if (wsi->sw) {
-         wsi->WaitForFences(vk_device_to_handle(dev),
+         results[i] = wsi->WaitForFences(vk_device_to_handle(dev),
                             1, &swapchain->fences[image_index], true, ~0ull);
+         if (results[i] != VK_SUCCESS)
+            continue;
       }
 
       const VkPresentRegionKHR *region = NULL;
