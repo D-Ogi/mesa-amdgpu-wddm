@@ -193,3 +193,9 @@ d3d10_create_hosted_screen(struct bc250_host *host)
    if (!host->adapter_luid || !path || !*path) return NULL;
    return zink_win32_create_hosted_screen(host->adapter_luid,host);
 }
+
+int
+d3d10_release_hosted_resource(struct pipe_context *ctx, struct pipe_resource **resource)
+{
+   return zink_bc250_release_runtime_resource(ctx,resource);
+}

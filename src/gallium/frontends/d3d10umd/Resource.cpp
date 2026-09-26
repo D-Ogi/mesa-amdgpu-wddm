@@ -513,6 +513,8 @@ OpenResource(D3D10DDI_HDEVICE hDevice,                            // IN
  */
 
 
+extern "C" int d3d10_release_hosted_resource(struct pipe_context *, struct pipe_resource **);
+
 void APIENTRY
 DestroyResource(D3D10DDI_HDEVICE hDevice,       // IN
                 D3D10DDI_HRESOURCE hResource)   // IN
@@ -537,14 +539,11 @@ DestroyResource(D3D10DDI_HDEVICE hDevice,       // IN
       }
    }
    if (pResource->allocation && CastDevice(hDevice)->hosted_state) {
-      pipe_fence_handle *fence=NULL;
-      pipe->flush(pipe,&fence,0);
-      bool done=!fence || pipe->screen->fence_finish(pipe->screen,pipe,fence,10000000000ull);
-      pipe->screen->fence_reference(pipe->screen,&fence,NULL);
-      if (!done) { SetError(hDevice,DXGI_ERROR_DEVICE_HUNG); return; }
       HRESULT idle=Bc250WaitPresentIdle(CastDevice(hDevice));
       if (FAILED(idle)) { SetError(hDevice,idle); return; }
-      pipe_resource_reference(&pResource->resource,NULL);
+      if (!d3d10_release_hosted_resource(pipe,&pResource->resource)) {
+         SetError(hDevice,D3DDDIERR_DEVICEREMOVED); return;
+      }
    }
    if (pResource->allocation) {
       Device *device = CastDevice(hDevice);
