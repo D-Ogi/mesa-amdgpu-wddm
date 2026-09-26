@@ -536,8 +536,22 @@ DestroyResource(D3D10DDI_HDEVICE hDevice,       // IN
          pResource->transfers[SubResource] = NULL;
       }
    }
+   if (pResource->allocation && CastDevice(hDevice)->hosted_state) {
+      pipe_fence_handle *fence=NULL;
+      pipe->flush(pipe,&fence,0);
+      bool done=!fence || pipe->screen->fence_finish(pipe->screen,pipe,fence,10000000000ull);
+      pipe->screen->fence_reference(pipe->screen,&fence,NULL);
+      if (!done) { SetError(hDevice,DXGI_ERROR_DEVICE_HUNG); return; }
+      pipe_resource_reference(&pResource->resource,NULL);
+   }
    if (pResource->allocation) {
       Device *device = CastDevice(hDevice);
+      if (device->hosted_state && pResource->gpuVa) {
+         D3DDDICB_FREEGPUVIRTUALADDRESS unmap={};
+         unmap.BaseAddress=pResource->gpuVa; unmap.Size=pResource->gpuBytes;
+         HRESULT hr=device->KTCallbacks.pfnFreeGpuVirtualAddressCb(device->hDevice,&unmap);
+         if (FAILED(hr)) { SetError(hDevice,hr); return; }
+      }
       if (pResource->cpuMapping) {
          D3DDDICB_UNLOCK2 unlock = {};
          unlock.hAllocation = pResource->allocation;

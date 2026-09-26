@@ -54,6 +54,8 @@
 
 #if defined(ZINK_USE_DMABUF) && !defined(_WIN32)
 #include "drm-uapi/drm_fourcc.h"
+#elif defined(_WIN32)
+#include "amd/common/ac_drm_fourcc.h"
 #else
 /* these won't actually be used */
 #define DRM_FORMAT_MOD_INVALID 0
@@ -1001,6 +1003,10 @@ struct mem_alloc_info {
 static inline bool
 get_export_flags(struct zink_screen *screen, const struct pipe_resource *templ, struct mem_alloc_info *alloc_info)
 {
+   if (alloc_info->whandle && alloc_info->whandle->bc250_identity) {
+      alloc_info->external=0; alloc_info->export_types=0; alloc_info->shared=false;
+      return screen->bc250_host.dispatch!=NULL;
+   }
    bool needs_export = (templ->bind & (ZINK_BIND_VIDEO | ZINK_BIND_DMABUF)) != 0;
    if (alloc_info->whandle) {
       if (alloc_info->whandle->type == WINSYS_HANDLE_TYPE_FD ||
@@ -1097,12 +1103,23 @@ allocate_bo(struct zink_screen *screen, const struct pipe_resource *templ,
       mai.pNext = &imfi;
    }
 #else
+   struct bc250_host_import host_import={0};
    VkImportMemoryWin32HandleInfoKHR imfi = {
       VK_STRUCTURE_TYPE_IMPORT_MEMORY_WIN32_HANDLE_INFO_KHR,
       NULL,
    };
 
-   if (alloc_info->whandle) {
+   if (alloc_info->whandle && alloc_info->whandle->bc250_identity) {
+      if (!screen->bc250_host.dispatch || alloc_info->whandle->bc250_identity!=screen->bc250_host.identity)
+         return roc_fail_and_cleanup_object;
+      host_import.sType=BC250_HOST_IMPORT_STYPE;
+      host_import.pNext=mai.pNext;
+      host_import.identity=alloc_info->whandle->bc250_identity;
+      host_import.allocation=(uint32_t)(uintptr_t)alloc_info->whandle->handle;
+      host_import.va=alloc_info->whandle->bc250_va;
+      host_import.size=alloc_info->whandle->size;
+      mai.pNext=&host_import;
+   } else if (alloc_info->whandle) {
       HANDLE source_target = GetCurrentProcess();
       HANDLE out_handle;
 
@@ -1476,13 +1493,15 @@ setup_image_pnext(struct zink_screen *screen, const struct pipe_resource *templ,
 
    filter_external_image_export_types(screen, ici, mod, alloc_info);
 
-   if (alloc_info->shared || alloc_info->external) {
+   if (alloc_info->shared || alloc_info->external || (alloc_info->whandle && alloc_info->whandle->bc250_identity)) {
+      if (alloc_info->shared || alloc_info->external) {
       s->emici.sType = VK_STRUCTURE_TYPE_EXTERNAL_MEMORY_IMAGE_CREATE_INFO;
       s->emici.pNext = ici->pNext;
       s->emici.handleTypes = alloc_info->export_types;
       assert(!(s->emici.handleTypes & VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT) ||
              ici->tiling != VK_IMAGE_TILING_OPTIMAL);
       ici->pNext = &s->emici;
+      }
 
       assert(ici->tiling != VK_IMAGE_TILING_DRM_FORMAT_MODIFIER_EXT || mod != DRM_FORMAT_MOD_INVALID);
       if (alloc_info->whandle && ici->tiling == VK_IMAGE_TILING_DRM_FORMAT_MODIFIER_EXT) {
@@ -2320,6 +2339,7 @@ zink_resource_from_handle(struct pipe_screen *pscreen,
 #ifdef ZINK_USE_DMABUF
    struct zink_screen *screen = zink_screen(pscreen);
 
+   fprintf(stderr,"BC250 zink import type=%u modifier=%llu identity=%p va=%llu\n",whandle->type,(unsigned long long)whandle->modifier,whandle->bc250_identity,(unsigned long long)whandle->bc250_va);
    if (whandle->modifier != DRM_FORMAT_MOD_INVALID &&
        !screen->info.have_EXT_image_drm_format_modifier)
       return NULL;
@@ -2343,7 +2363,7 @@ zink_resource_from_handle(struct pipe_screen *pscreen,
          whandle->modifier = modifier;
       }
    }
-   templ2.bind |= ZINK_BIND_DMABUF;
+   if (!whandle->bc250_identity) templ2.bind |= ZINK_BIND_DMABUF;
    struct pipe_resource *pres = resource_create(pscreen, &templ2, whandle, usage, &modifier, modifier_count, NULL, NULL);
    if (!pres)
       return NULL;

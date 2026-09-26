@@ -109,6 +109,8 @@ struct winsys_handle
     * Output for resource_get_handle.
     */
    uint64_t size;
+   uint64_t bc250_va;
+   void *bc250_identity;
 };
 
 #ifdef __cplusplus

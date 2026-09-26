@@ -154,6 +154,23 @@ HRESULT Bc250EnsureSurface(Device *device, Resource *resource)
    ULONGLONG deadline = GetTickCount64() + 5000;
    while (device->pagingFence && *device->pagingFence < fence && GetTickCount64() < deadline) Sleep(1);
    if (!device->pagingFence || *device->pagingFence < fence) return HRESULT_FROM_WIN32(WAIT_TIMEOUT);
+   fprintf(stderr,"BC250 surface hosted=%u allocation=%x pitch=%u bytes=%llu\n",device->hosted_state!=NULL,resource->allocation,data.pitch,resource->gpuBytes);
+   if (device->hosted_state) {
+      struct winsys_handle handle={};
+      handle.type=WINSYS_HANDLE_TYPE_FD;
+      handle.handle=(HANDLE)(uintptr_t)resource->allocation;
+      handle.stride=data.pitch; handle.size=resource->gpuBytes;
+      handle.modifier=0; handle.format=resource->resource->format;
+      handle.bc250_va=resource->gpuVa; handle.bc250_identity=device->hDevice;
+      struct pipe_resource desc=*resource->resource;
+      desc.bind |= PIPE_BIND_DISPLAY_TARGET | PIPE_BIND_SHARED;
+      struct pipe_resource *imported=device->pipe->screen->resource_from_handle(device->pipe->screen,&desc,&handle,0);
+      if (!imported) return E_OUTOFMEMORY;
+      pipe_resource_reference(&resource->resource,NULL);
+      resource->resource=imported;
+      resource->presentReady=TRUE;
+      return S_OK;
+   }
    D3DDDICB_LOCK2 lock = {};
    lock.hAllocation = resource->allocation;
    hr = device->KTCallbacks.pfnLock2Cb(device->hDevice, &lock);
