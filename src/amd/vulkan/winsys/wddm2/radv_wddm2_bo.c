@@ -1044,6 +1044,8 @@ radv_wddm2_bo_map(struct radeon_winsys *_ws, struct radeon_winsys_bo *_bo,
    struct radv_wddm2_bo *bo = radv_wddm2_bo(_bo);
    ASSERTED NTSTATUS status;
 
+   if (bo->borrowed) return NULL;
+
    if (bo->map && !fixed_addr)
       return bo->map;
 
