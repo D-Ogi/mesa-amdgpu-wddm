@@ -46,28 +46,71 @@ TEMPLATE_H = Template(COPYRIGHT + """\
 
  #ifdef _WIN32
 
- #ifndef NSTATUS
+ #ifndef NTSTATUS
  #define NTSTATUS LONG
+ #endif
+ /* winnt.h already defines some STATUS_* codes; guard each one. */
+ #ifndef STATUS_SUCCESS
  #define STATUS_SUCCESS                  ((NTSTATUS)(0))
+ #endif
+ #ifndef STATUS_WAIT_0
  #define STATUS_WAIT_0                   ((NTSTATUS)(0x00000000L)) 
+ #endif
+ #ifndef STATUS_OBJECT_NAME_INVALID
  #define STATUS_OBJECT_NAME_INVALID	     ((NTSTATUS)(0xC0000033L))
+ #endif
+ #ifndef STATUS_DEVICE_REMOVED
  #define STATUS_DEVICE_REMOVED           ((NTSTATUS)(0xC00002B6L))
+ #endif
+ #ifndef STATUS_INVALID_HANDLE
  #define STATUS_INVALID_HANDLE           ((NTSTATUS)(0xC0000008L))
+ #endif
+ #ifndef STATUS_ILLEGAL_INSTRUCTION
  #define STATUS_ILLEGAL_INSTRUCTION      ((NTSTATUS)(0xC000001DL))
+ #endif
+ #ifndef STATUS_NOT_IMPLEMENTED
  #define STATUS_NOT_IMPLEMENTED          ((NTSTATUS)(0xC0000002L))
+ #endif
+ #ifndef STATUS_PENDING
  #define STATUS_PENDING                  ((NTSTATUS)(0x00000103L))
+ #endif
+ #ifndef STATUS_ACCESS_DENIED
  #define STATUS_ACCESS_DENIED            ((NTSTATUS)(0xC0000022L))
+ #endif
+ #ifndef STATUS_BUFFER_TOO_SMALL
  #define STATUS_BUFFER_TOO_SMALL         ((NTSTATUS)(0xC0000023L))
+ #endif
+ #ifndef STATUS_OBJECT_TYPE_MISMATCH
  #define STATUS_OBJECT_TYPE_MISMATCH     ((NTSTATUS)(0xC0000024L))
+ #endif
+ #ifndef STATUS_GRAPHICS_ALLOCATION_BUSY
  #define STATUS_GRAPHICS_ALLOCATION_BUSY ((NTSTATUS)(0xC01E0102L))
+ #endif
+ #ifndef STATUS_NOT_SUPPORTED
  #define STATUS_NOT_SUPPORTED            ((NTSTATUS)(0xC00000BBL))
+ #endif
+ #ifndef STATUS_TIMEOUT
  #define STATUS_TIMEOUT                  ((NTSTATUS)(0x00000102L))
+ #endif
+ #ifndef STATUS_INVALID_PARAMETER
  #define STATUS_INVALID_PARAMETER        ((NTSTATUS)(0xC000000DL))
+ #endif
+ #ifndef STATUS_NO_MEMORY
  #define STATUS_NO_MEMORY                ((NTSTATUS)(0xC0000017L))
+ #endif
+ #ifndef STATUS_OBJECT_NAME_COLLISION
  #define STATUS_OBJECT_NAME_COLLISION    ((NTSTATUS)(0xC0000035L))
+ #endif
+ #ifndef STATUS_OBJECT_NAME_NOT_FOUND
  #define STATUS_OBJECT_NAME_NOT_FOUND    ((NTSTATUS)(0xC0000034L))
+ #endif
+ #ifndef STATUS_UNSUCCESSFUL
  #define STATUS_UNSUCCESSFUL             ((NTSTATUS)(0xC0000001L))
+ #endif
+ #ifndef STATUS_INVALID_PARAMETER
  #define STATUS_INVALID_PARAMETER        ((NTSTATUS)(0xC000000DL))
+ #endif
+ #ifndef NT_SUCCESS
  #define NT_SUCCESS(status)              (status >= 0)
  #endif
 
@@ -196,6 +239,7 @@ def main():
     args = parser.parse_args()
 
     entrypoints = [
+      ('EnumAdapters2', None),
       ('QueryAdapterInfo', None),
       ('QueryStatistics', None),
       ('QueryVideoMemoryInfo', 'D3DKMT_QUERYVIDEOMEMORYINFO *arg'),
