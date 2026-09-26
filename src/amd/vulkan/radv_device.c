@@ -32,7 +32,9 @@
 #include "vk_common_entrypoints.h"
 #include "vk_pipeline_cache.h"
 #include "vk_util.h"
-#ifndef _WIN32
+#ifdef _WIN32
+#include "winsys/wddm2/radv_wddm2_winsys_public.h"
+#else
 #include "winsys/amdgpu/radv_amdgpu_winsys_public.h"
 #endif
 #include "util/mesa-blake3.h"
@@ -1338,7 +1340,8 @@ radv_create_winsys(struct radv_device *device)
 #ifdef _WIN32
    const struct radv_physical_device *pdev = radv_device_physical(device);
    const struct radv_instance *instance = radv_physical_device_instance(pdev);
-   return radv_wddm2_winsys_create(&pdev->wddm2_adapter, instance->debug_flags, &device->ws);
+   return radv_wddm2_winsys_create(&pdev->wddm2_adapter, instance->debug_flags,
+                                   instance->bc250_host.dispatch ? &instance->bc250_host : NULL, &device->ws);
 #else
    const struct radv_physical_device *pdev = radv_device_physical(device);
    const struct radv_instance *instance = radv_physical_device_instance(pdev);
