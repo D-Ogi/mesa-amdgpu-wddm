@@ -2283,6 +2283,12 @@ hw_init_scratch(Builder& bld, Definition def, Operand scratch_addr, Operand scra
       bld.sop2(aco_opcode::s_addc_u32, Definition(scratch_hi, s1), Definition(scc, s1),
                scratch_addr_hi, hi_add, Operand(scc, s1));
 
+      /* The descriptor carries a 48-bit VA. Reconstruct its canonical upper
+       * bits from bit47 instead of assuming the Linux high-half allocation
+       * range: WDDM also uses low-half GPU VAs. Preserve the wave-offset carry. */
+      bld.sop1(aco_opcode::s_sext_i32_i16, Definition(scratch_hi, s1),
+               Operand(scratch_hi, s1));
+
       /* "((size - 1) << 11) | register" (FLAT_SCRATCH_LO/HI is encoded as register
        * 20/21) */
       bld.sopk(aco_opcode::s_setreg_b32, Operand(scratch_lo, s1), (31 << 11) | 20);
