@@ -7,7 +7,7 @@
 #define BC250_HOST_BOOTSTRAP_H
 #include <stdint.h>
 #define BC250_HOST_STYPE 0x42434831u
-#define BC250_HOST_VERSION 4u
+#define BC250_HOST_VERSION 5u
 #define BC250_HOST_IMPORT_STYPE 0x42434832u
 struct bc250_host_import {
    uint32_t sType;
@@ -19,9 +19,12 @@ struct bc250_host_import {
 #define BC250_HOST_CREATE_PAGING 1u
 #define BC250_HOST_DESTROY_PAGING 2u
 #define BC250_HOST_PUBLISH_PROGRESS 3u
+#define BC250_HOST_CHECK_STATUS 4u
+#define BC250_HOST_REPORT_LOST 5u
 struct bc250_host_progress {
    uint32_t context, sync;
    uint64_t value;
+   const uint64_t *cpu_address;
 };
 struct bc250_host_paging {
    uint32_t queue, sync;
@@ -36,6 +39,18 @@ struct bc250_host {
    void *userdata;
    int32_t (*dispatch)(void *userdata, uint32_t operation, void *argument);
 };
+static inline int32_t bc250_host_check_status(const struct bc250_host *host)
+{
+   return host->dispatch ? host->dispatch(host->userdata, BC250_HOST_CHECK_STATUS, 0) : 0;
+}
+static inline int bc250_host_fence_valid(const struct bc250_host *host, uint64_t value)
+{
+   if (host->dispatch && value == UINT64_MAX) {
+      host->dispatch(host->userdata, BC250_HOST_REPORT_LOST, 0);
+      return 0;
+   }
+   return bc250_host_check_status(host) >= 0;
+}
 #define BC250_HOST_CreateAllocation2 16u
 #define BC250_HOST_DestroyAllocation2 17u
 #define BC250_HOST_ReserveGpuVirtualAddress 18u

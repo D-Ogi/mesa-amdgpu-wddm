@@ -434,8 +434,9 @@ vk_wddm2_fence_wait(struct radv_wddm2_winsys *ws, struct vk_wddm2_fence *fence)
    /* Quick poll all the fences ourselves.  We may not have to call into the
     * kernel at all.
     */
-   if (p_atomic_read(fence->value_map) >= fence->wait_value)
-      return true;
+   uint64_t observed=p_atomic_read(fence->value_map);
+   if (!bc250_host_fence_valid(&ws->host,observed)) return false;
+   if (observed >= fence->wait_value) return true;
 
    result = vk_async_event_create(&async_event);
    if (unlikely(result != VK_SUCCESS))
@@ -477,7 +478,7 @@ vk_wddm2_fence_wait(struct radv_wddm2_winsys *ws, struct vk_wddm2_fence *fence)
       return false;
    }
 
-   return result == VK_SUCCESS;
+   return result == VK_SUCCESS && bc250_host_fence_valid(&ws->host,p_atomic_read(fence->value_map));
 }
 
 static bool
@@ -1034,6 +1035,7 @@ radv_wddm2_cs_submit(struct radeon_winsys_ctx *_ctx,
       struct bc250_gather_slot *slot = &queue->bc250_gather[queue->bc250_gather_index];
       uint64_t pending_value = queue->bc250_progress.wait_value;
       uint64_t observed = p_atomic_read(queue->bc250_progress.value_map);
+      if (!bc250_host_fence_valid(&ws->host,observed)) return VK_ERROR_DEVICE_LOST;
       if (queue->bc250_submit_failed)
          return VK_ERROR_DEVICE_LOST;
       if (ctx->ws->bc250_trace_submits || pending_value == 0)
@@ -1050,6 +1052,7 @@ radv_wddm2_cs_submit(struct radeon_winsys_ctx *_ctx,
          fprintf(stderr, "bc250: native submit failed NTSTATUS=0x%X cs_count=%u\n", status, submit->cs_count);
          return VK_ERROR_DEVICE_LOST;
       }
+      if (queue->bc250_progress.wait_value >= UINT64_MAX-1) return VK_ERROR_DEVICE_LOST;
       uint64_t next_value = queue->bc250_progress.wait_value + 1;
       D3DKMT_SIGNALSYNCHRONIZATIONOBJECTFROMGPU2 progress_signal = {
          .ObjectCount = 1,
@@ -1066,7 +1069,7 @@ radv_wddm2_cs_submit(struct radeon_winsys_ctx *_ctx,
       slot->retire_value = next_value;
       queue->bc250_progress.wait_value = next_value;
       if (ws->host.dispatch) {
-         struct bc250_host_progress progress = {queue->context_h, queue->bc250_progress.handle, next_value};
+         struct bc250_host_progress progress = {queue->context_h, queue->bc250_progress.handle, next_value, queue->bc250_progress.value_map};
          if (ws->host.dispatch(ws->host.userdata, BC250_HOST_PUBLISH_PROGRESS, &progress) < 0) {
             queue->bc250_submit_failed = true;
             return VK_ERROR_DEVICE_LOST;
