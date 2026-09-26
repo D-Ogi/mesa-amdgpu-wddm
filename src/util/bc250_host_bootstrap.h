@@ -7,7 +7,7 @@
 #define BC250_HOST_BOOTSTRAP_H
 #include <stdint.h>
 #define BC250_HOST_STYPE 0x42434831u
-#define BC250_HOST_VERSION 3u
+#define BC250_HOST_VERSION 4u
 #define BC250_HOST_IMPORT_STYPE 0x42434832u
 struct bc250_host_import {
    uint32_t sType;
@@ -18,6 +18,11 @@ struct bc250_host_import {
 };
 #define BC250_HOST_CREATE_PAGING 1u
 #define BC250_HOST_DESTROY_PAGING 2u
+#define BC250_HOST_PUBLISH_PROGRESS 3u
+struct bc250_host_progress {
+   uint32_t context, sync;
+   uint64_t value;
+};
 struct bc250_host_paging {
    uint32_t queue, sync;
    void *cpu_address;
