@@ -31,6 +31,9 @@
  */
 
 #include <stdio.h>
+#include <windows.h>
+#include <winternl.h>
+#include <d3dkmthk.h>
 #include <vector>
 
 #include "DxgiFns.h"
@@ -110,11 +113,22 @@ HRESULT Bc250EnsureSurface(Device *device, Resource *resource)
       DebugPrintf("BC250 Allocate input runtime %p size %llu primary %u\n", resource->hRTResource, data.size, resource->primary);
       allocate.NumAllocations = 1; allocate.pAllocationInfo2 = &info;
       hr = device->KTCallbacks.pfnAllocateCb(device->hDevice, &allocate);
-      DebugPrintf("BC250 Allocate %08lx format %u primary %u handle %x resource %x\n", hr, format, resource->primary, info.hAllocation, allocate.hKMResource);
+      fprintf(stderr, "BC250 Allocate %08lx format %u primary %u handle %x resource %x\n", hr, format, resource->primary, info.hAllocation, allocate.hKMResource);
       if (FAILED(hr)) return hr;
       resource->allocation = info.hAllocation;
       resource->surfacePitch = pitch;
       resource->surfaceBytes = bytes;
+      if (GetEnvironmentVariableA("BC250_D3D_RUNTIME_PROBE", NULL, 0)) {
+         // Inventory only: do not claim this unimported resource is presentable.
+         auto share = (decltype(&D3DKMTShareObjects))GetProcAddress(GetModuleHandleA("gdi32.dll"), "D3DKMTShareObjects");
+         if (!share) return E_NOTIMPL;
+         OBJECT_ATTRIBUTES attrs = {}; attrs.Length = sizeof(attrs);
+         HANDLE nt = NULL;
+         NTSTATUS status = share(1, &allocate.hKMResource, &attrs, SHARED_ALLOCATION_ALL_ACCESS, &nt);
+         fprintf(stderr, "BC250 runtime ShareObjects status=%08lx nt=%u\n", status, nt != NULL);
+         if (nt) CloseHandle(nt);
+         return S_OK;
+      }
    }
    resource->gpuBytes = (data.size + 4095) & ~UINT64(4095);
    D3DDDI_MAPGPUVIRTUALADDRESS map = {};

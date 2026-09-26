@@ -134,7 +134,7 @@ CreateDevice(D3D10DDI_HADAPTER hAdapter,                 // IN
    // That runtime cannot service native WDDM presentation callbacks. RADV owns
    // its rendering context; native primary sharing/presentation is a separate
    // prerequisite before this DLL may replace the system DWM UMD.
-#ifndef BC250_ZINK_OFFSCREEN_PROBE
+   if (GetEnvironmentVariableA("BC250_D3D_RUNTIME_PROBE", NULL, 0)) {
    // E26: DWM requests runtime synchronization while creating its primary,
    // before the first Present. Register a virtual context at device creation
    // so the runtime has a context for its broadcast synchronization callbacks.
@@ -149,7 +149,7 @@ CreateDevice(D3D10DDI_HADAPTER hAdapter,                 // IN
    if (FAILED(contextResult)) return contextResult;
    pDevice->hContext = context.hContext;
 
-#endif
+   }
 
    fprintf(stderr,"BC250 D3D device stage 2\n"); fflush(stderr);
    struct pipe_screen *screen = pAdapter->screen;

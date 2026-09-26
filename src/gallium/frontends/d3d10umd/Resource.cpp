@@ -345,7 +345,11 @@ CreateResource(D3D10DDI_HDEVICE hDevice,                                // IN
    pResource->transfers = (struct pipe_transfer **)calloc(pResource->NumSubResources,
                                                           sizeof *pResource->transfers);
 
-   if (pResource->primary || (pCreateResource->BindFlags & D3D10_DDI_BIND_PRESENT) ||
+   if (GetEnvironmentVariableA("BC250_D3D_RUNTIME_PROBE", NULL, 0))
+      fprintf(stderr, "BC250 runtime resource misc=%x bind=%x primary=%u\n",
+              pCreateResource->MiscFlags, pCreateResource->BindFlags, pResource->primary);
+   if (GetEnvironmentVariableA("BC250_D3D_RUNTIME_PROBE", NULL, 0) ||
+       pResource->primary || (pCreateResource->BindFlags & D3D10_DDI_BIND_PRESENT) ||
        (pCreateResource->MiscFlags & D3D10_DDI_RESOURCE_MISC_SHARED)) {
       HRESULT hr = Bc250EnsureSurface(CastDevice(hDevice), pResource);
       if (FAILED(hr)) { SetError(hDevice, hr); return; }
@@ -549,7 +553,7 @@ DestroyResource(D3D10DDI_HDEVICE hDevice,       // IN
          free.NumAllocations = 1; free.HandleList = &pResource->allocation;
       }
       HRESULT hr = device->KTCallbacks.pfnDeallocate2Cb(device->hDevice, &free);
-      DebugPrintf("BC250 Deallocate %08lx\n", hr);
+      fprintf(stderr, "BC250 Deallocate %08lx\n", hr);
    }
    free(pResource->transfers);
 
