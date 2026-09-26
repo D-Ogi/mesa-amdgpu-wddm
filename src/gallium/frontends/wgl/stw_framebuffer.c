@@ -159,6 +159,8 @@ stw_framebuffer_get_size(struct stw_framebuffer *fb)
    width  = client_rect.right  - client_rect.left;
    height = client_rect.bottom - client_rect.top;
 
+   if (fb->minimized != (width == 0 || height == 0))
+      fb->must_resize = true;
    fb->minimized = width == 0 || height == 0;
 
    if (width <= 0 || height <= 0) {
