@@ -73,7 +73,9 @@ update_velems(Device *pDevice)
       struct cso_velems_state *state = &pDevice->element_layout->state;
       for (unsigned i = 0; i < state->count; i++)
          state->velems[i].src_stride = pDevice->vertex_strides[state->velems[i].vertex_buffer_index];
+      fprintf(stderr,"D3D resolve part 0 before\n"); fflush(stderr);
       cso_set_vertex_elements(pDevice->cso, state);
+      fprintf(stderr,"D3D resolve part 0 after\n"); fflush(stderr);
    }
 
    pDevice->velems_changed = false;
@@ -112,10 +114,14 @@ ResolveState(Device *pDevice)
       }
       pipe->bind_gs_state(pipe, gs->handle);
    }
-   update_velems(pDevice);
+   fprintf(stderr,"D3D resolve part 1 before\n"); fflush(stderr);
+      update_velems(pDevice);
+      fprintf(stderr,"D3D resolve part 1 after\n"); fflush(stderr);
 
    if (pDevice->vbuffers_changed) {
+      fprintf(stderr,"D3D resolve part 2 before\n"); fflush(stderr);
       cso_set_vertex_buffers(pDevice->cso, PIPE_MAX_ATTRIBS, pDevice->vertex_buffers);
+      fprintf(stderr,"D3D resolve part 2 after\n"); fflush(stderr);
       pDevice->vbuffers_changed = false;
    }
 }
@@ -165,7 +171,9 @@ Draw(D3D10DDI_HDEVICE hDevice,   // IN
    Device *pDevice = CastDevice(hDevice);
    Bc250DrawTimer timer(pDevice);
 
+   fprintf(stderr,"D3D resolve begin\n"); fflush(stderr);
    ResolveState(pDevice);
+   fprintf(stderr,"D3D resolve done\n"); fflush(stderr);
 
    assert(pDevice->primitive < MESA_PRIM_COUNT);
    util_draw_arrays(pDevice->pipe,

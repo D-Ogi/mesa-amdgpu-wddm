@@ -79,6 +79,7 @@ struct Device
    struct pipe_framebuffer_state fb;
    struct pipe_vertex_buffer vertex_buffers[PIPE_MAX_ATTRIBS];
    unsigned vertex_strides[PIPE_MAX_ATTRIBS];
+   struct pipe_resource *zero_vertex_buffer;
    struct pipe_resource *index_buffer;
    unsigned restart_index;
    unsigned index_size;
