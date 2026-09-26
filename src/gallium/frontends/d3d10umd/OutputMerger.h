@@ -92,7 +92,7 @@ void APIENTRY SetBlendState(D3D10DDI_HDEVICE hDevice, D3D10DDI_HBLENDSTATE hStat
 
 void APIENTRY SetRenderTargets(
    D3D10DDI_HDEVICE hDevice,
-   __in_ecount (NumViews) const D3D10DDI_HRENDERTARGETVIEW *phRenderTargetView,
+   __in_ecount (RTargets) const D3D10DDI_HRENDERTARGETVIEW *phRenderTargetView,
    UINT RTargets, UINT ClearTargets, D3D10DDI_HDEPTHSTENCILVIEW hDepthStencilView);
 
 SIZE_T APIENTRY CalcPrivateDepthStencilStateSize(

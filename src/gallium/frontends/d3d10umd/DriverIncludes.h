@@ -46,6 +46,8 @@
  */
 #include <d3d10_1.h>
 
+/* WDK DDI SAL expressions also reference the D3D11 limit constants. */
+#include <d3d11.h>
 #include <d3d10umddi.h>
 
 #endif   /* DRIVER_INCLUDES_H */

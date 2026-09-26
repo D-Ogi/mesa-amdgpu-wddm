@@ -41,7 +41,7 @@ void APIENTRY SetViewports(
 
 void APIENTRY SetScissorRects(
    D3D10DDI_HDEVICE hDevice, UINT NumScissorRects, UINT ClearScissorRects,
-   __in_ecount (NumRects) const D3D10_DDI_RECT *pRects);
+   __in_ecount (NumScissorRects) const D3D10_DDI_RECT *pRects);
 
 SIZE_T APIENTRY CalcPrivateRasterizerStateSize(
    D3D10DDI_HDEVICE hDevice,

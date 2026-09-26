@@ -1403,6 +1403,7 @@ if cc.get_argument_syntax() == 'msvc'
     '/wd4309',  # 'initializing': truncation of constant value
     '/wd4838',  # conversion from 'int' to 'const char' requires a narrowing conversion
     '/wd5105',  # macro expansion producing 'defined' has undefined behavior (winbase.h, need Windows SDK upgrade)
+    '/we4013',  # Reject undeclared functions before any lab deployment
     '/we4020',  # Error when passing the wrong number of parameters
     '/we4024',  # Error when passing different type of parameter
     '/we4189',  # 'identifier' : local variable is initialized but not referenced

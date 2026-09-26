@@ -68,7 +68,7 @@ void APIENTRY CreateSampler(D3D10DDI_HDEVICE hDevice,
 void APIENTRY DestroySampler(D3D10DDI_HDEVICE hDevice, D3D10DDI_HSAMPLER hSampler);
 
 void APIENTRY CreateVertexShader(D3D10DDI_HDEVICE hDevice,
-                        __in_ecount (pShaderCode[1]) const UINT *pCode,
+                        __in_ecount (pCode[1]) const UINT *pCode,
                         D3D10DDI_HSHADER hShader, D3D10DDI_HRTSHADER hRTShader,
                         __in const D3D10DDIARG_STAGE_IO_SIGNATURES *pSignatures);
 
@@ -84,7 +84,7 @@ void APIENTRY VsSetSamplers(D3D10DDI_HDEVICE hDevice, UINT Offset, UINT NumSampl
                    __in_ecount (NumSamplers) const D3D10DDI_HSAMPLER *phSamplers);
 
 void APIENTRY CreateGeometryShader(D3D10DDI_HDEVICE hDevice,
-                          __in_ecount (pShaderCode[1]) const UINT *pCode,
+                          __in_ecount (pCode[1]) const UINT *pCode,
                           D3D10DDI_HSHADER hShader, D3D10DDI_HRTSHADER hRTShader,
                           __in const D3D10DDIARG_STAGE_IO_SIGNATURES *pSignatures);
 
@@ -116,7 +116,7 @@ void APIENTRY SoSetTargets(D3D10DDI_HDEVICE hDevice, UINT SOTargets, UINT ClearT
                   __in_ecount (SOTargets) const UINT *pOffsets);
 
 void APIENTRY CreatePixelShader(D3D10DDI_HDEVICE hDevice,
-                       __in_ecount (pShaderCode[1]) const UINT *pCode,
+                       __in_ecount (pCode[1]) const UINT *pCode,
                        D3D10DDI_HSHADER hShader, D3D10DDI_HRTSHADER hRTShader,
                        __in const D3D10DDIARG_STAGE_IO_SIGNATURES *pSignatures);
 void APIENTRY PsSetShader(D3D10DDI_HDEVICE hDevice, D3D10DDI_HSHADER hShader);

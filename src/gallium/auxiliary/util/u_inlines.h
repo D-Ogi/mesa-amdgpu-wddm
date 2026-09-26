@@ -182,7 +182,7 @@ pipe_resource_destroy(struct pipe_resource *res)
 
       res->screen->resource_destroy(res->screen, res);
       res = next;
-   } while (pipe_reference_described(res ? &res->reference : NULL,
+   } while (res && pipe_reference_described(&res->reference,
                                      NULL,
                                      (debug_reference_descriptor)
                                      debug_describe_resource));
@@ -244,7 +244,7 @@ pipe_sampler_view_reference(struct pipe_sampler_view **dst,
    if (pipe_reference_described_nonatomic(old_dst ? &old_dst->reference : NULL,
                                           src ? &src->reference : NULL,
                                           (debug_reference_descriptor)
-                                          debug_describe_sampler_view))
+                                          debug_describe_sampler_view) && old_dst)
       old_dst->context->sampler_view_destroy(old_dst->context, old_dst);
    *dst = src;
 }
@@ -289,7 +289,7 @@ pipe_so_target_reference(struct pipe_stream_output_target **dst,
 
    if (pipe_reference_described(old_dst ? &old_dst->reference : NULL,
                      src ? &src->reference : NULL,
-                     (debug_reference_descriptor)debug_describe_so_target))
+                     (debug_reference_descriptor)debug_describe_so_target) && old_dst)
       old_dst->context->stream_output_target_destroy(old_dst->context, old_dst);
    *dst = src;
 }
@@ -301,7 +301,7 @@ pipe_vertex_state_reference(struct pipe_vertex_state **dst,
    struct pipe_vertex_state *old_dst = *dst;
 
    if (pipe_reference(old_dst ? &old_dst->reference : NULL,
-                      src ? &src->reference : NULL))
+                      src ? &src->reference : NULL) && old_dst)
       old_dst->screen->vertex_state_destroy(old_dst->screen, old_dst);
    *dst = src;
 }
@@ -413,7 +413,9 @@ pipe_surface_size(const struct pipe_surface *ps, unsigned *width, unsigned *heig
 static inline bool
 pipe_surface_equal(const struct pipe_surface *s1, const struct pipe_surface *s2)
 {
-   return !!s1 == !!s2 && s1->texture == s2->texture &&
+   if (!s1 || !s2)
+      return s1 == s2;
+   return s1->texture == s2->texture &&
           s1->format == s2->format &&
           s1->nr_samples == s2->nr_samples &&
           (!s1->texture ||
