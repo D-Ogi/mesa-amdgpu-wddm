@@ -1,4 +1,7 @@
-/* SPDX-License-Identifier: MIT */
+/*
+ * Copyright (c) 2026 D-Ogi
+ * SPDX-License-Identifier: MIT
+ */
 #ifndef U_WIN32_LIBRARY_H
 #define U_WIN32_LIBRARY_H
 #include <windows.h>

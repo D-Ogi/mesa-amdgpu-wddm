@@ -1,4 +1,7 @@
-/* SPDX-License-Identifier: MIT
+/*
+ * Copyright (c) 2026 D-Ogi
+ * SPDX-License-Identifier: MIT
+ *
  * Private BC250 bootstrap contract, not a registered Vulkan extension.
  * Both endpoints are built together against the same WDK and x64 ABI.
  * Version 2 carries device-scoped runtime operations.
