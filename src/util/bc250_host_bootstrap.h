@@ -1,13 +1,13 @@
 /* SPDX-License-Identifier: MIT
  * Private BC250 bootstrap contract, not a registered Vulkan extension.
  * Both endpoints are built together against the same WDK and x64 ABI.
- * Version 1 supports adapter enumeration/paging only, never rendering.
+ * Version 2 carries device-scoped runtime operations.
  */
 #ifndef BC250_HOST_BOOTSTRAP_H
 #define BC250_HOST_BOOTSTRAP_H
 #include <stdint.h>
 #define BC250_HOST_STYPE 0x42434831u
-#define BC250_HOST_VERSION 1u
+#define BC250_HOST_VERSION 2u
 #define BC250_HOST_CREATE_PAGING 1u
 #define BC250_HOST_DESTROY_PAGING 2u
 struct bc250_host_paging {
@@ -23,4 +23,35 @@ struct bc250_host {
    void *userdata;
    int32_t (*dispatch)(void *userdata, uint32_t operation, void *argument);
 };
+#define BC250_HOST_CreateAllocation2 16u
+#define BC250_HOST_DestroyAllocation2 17u
+#define BC250_HOST_ReserveGpuVirtualAddress 18u
+#define BC250_HOST_MapGpuVirtualAddress 19u
+#define BC250_HOST_FreeGpuVirtualAddress 20u
+#define BC250_HOST_MakeResident 21u
+#define BC250_HOST_Evict 22u
+#define BC250_HOST_Lock2 23u
+#define BC250_HOST_Unlock2 24u
+#define BC250_HOST_CreateContextVirtual 25u
+#define BC250_HOST_DestroyContext 26u
+#define BC250_HOST_CreateSynchronizationObject2 27u
+#define BC250_HOST_DestroySynchronizationObject 28u
+#define BC250_HOST_WaitForSynchronizationObjectFromCpu 29u
+#define BC250_HOST_SignalSynchronizationObjectFromCpu 30u
+#define BC250_HOST_WaitForSynchronizationObjectFromGpu 31u
+#define BC250_HOST_SignalSynchronizationObjectFromGpu 32u
+#define BC250_HOST_SignalSynchronizationObjectFromGpu2 33u
+#define BC250_HOST_SubmitCommand 34u
+#define BC250_HOST_UpdateGpuVirtualAddress 35u
+#define BC250_HOST_GetDeviceState 36u
+#define BC250_HOST_QueryResourceInfoFromNtHandle 37u
+#define BC250_HOST_OpenResourceFromNtHandle 38u
+#define BC250_HOST_OpenSyncObjectFromNtHandle2 39u
+#define BC250_HOST_CreateHwQueue 40u
+#define BC250_HOST_DestroyHwQueue 41u
+#define BC250_HOST_SubmitCommandToHwQueue 42u
+#define BC250_HOST_SubmitWaitForSyncObjectsToHwQueue 43u
+#define BC250_HOST_SubmitSignalSyncObjectsToHwQueue 44u
+#define BC250_WDDM_CALL(host, name, argument) \
+   ((host)->dispatch ? (host)->dispatch((host)->userdata, BC250_HOST_##name, (void *)(argument)) : WDDM2_DISPATCH(name(argument)))
 #endif

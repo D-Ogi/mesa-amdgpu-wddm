@@ -52,28 +52,184 @@
 extern "C" struct pipe_screen *d3d10_create_screen(void);
 
 
-struct Bc250HostProbeState { Device *device; DWORD thread; };
+#include <d3dkmthk.h>
+
+struct Bc250HostProbeState {
+   Device *device;
+   DWORD thread;
+   HANDLE contexts[16];
+   unsigned calls[64];
+};
+
+static HANDLE Bc250HostContext(Bc250HostProbeState *s, UINT token)
+{
+   return token && token <= 16 ? s->contexts[token - 1] : NULL;
+}
+
+static HRESULT Bc250HostOperation(Bc250HostProbeState *s, uint32_t op, void *argument)
+{
+   auto &cb = s->device->KTCallbacks;
+   HANDLE rt = s->device->hDevice;
+   if (!argument) return E_INVALIDARG;
+#define HOST_CALL(name, arg) (cb.pfn##name##Cb ? cb.pfn##name##Cb(rt, arg) : E_NOTIMPL)
+   switch (op) {
+   case BC250_HOST_CREATE_PAGING: {
+      auto *a = (bc250_host_paging *)argument;
+      D3DDDICB_CREATEPAGINGQUEUE b = {};
+      HRESULT hr = HOST_CALL(CreatePagingQueue, &b);
+      a->queue=b.hPagingQueue; a->sync=b.hSyncObject; a->cpu_address=b.FenceValueCPUVirtualAddress;
+      return hr;
+   }
+   case BC250_HOST_DESTROY_PAGING: {
+      D3DDDI_DESTROYPAGINGQUEUE b = {};
+      b.hPagingQueue=((bc250_host_paging *)argument)->queue;
+      return HOST_CALL(DestroyPagingQueue, &b);
+   }
+   case BC250_HOST_CreateAllocation2: {
+      auto *a=(D3DKMT_CREATEALLOCATION *)argument;
+      D3DDDICB_ALLOCATE b = {};
+      b.pPrivateDriverData=a->pPrivateDriverData; b.PrivateDriverDataSize=a->PrivateDriverDataSize;
+      b.NumAllocations=a->NumAllocations; b.pAllocationInfo2=a->pAllocationInfo2;
+      HRESULT hr=HOST_CALL(Allocate, &b);
+      a->hResource=b.hKMResource;
+      return hr;
+   }
+   case BC250_HOST_DestroyAllocation2: {
+      auto *a=(D3DKMT_DESTROYALLOCATION2 *)argument;
+      if (a->hResource || a->Flags.Value) return E_NOTIMPL;
+      D3DDDICB_DEALLOCATE b = {};
+      b.NumAllocations=a->AllocationCount; b.HandleList=a->phAllocationList;
+      return HOST_CALL(Deallocate, &b);
+   }
+   case BC250_HOST_ReserveGpuVirtualAddress:
+      return HOST_CALL(ReserveGpuVirtualAddress, (D3DDDI_RESERVEGPUVIRTUALADDRESS *)argument);
+   case BC250_HOST_MapGpuVirtualAddress:
+      return HOST_CALL(MapGpuVirtualAddress, (D3DDDI_MAPGPUVIRTUALADDRESS *)argument);
+   case BC250_HOST_MakeResident:
+      return HOST_CALL(MakeResident, (D3DDDI_MAKERESIDENT *)argument);
+   case BC250_HOST_FreeGpuVirtualAddress: {
+      auto *a=(D3DKMT_FREEGPUVIRTUALADDRESS *)argument;
+      D3DDDICB_FREEGPUVIRTUALADDRESS b = {};
+      b.BaseAddress=a->BaseAddress; b.Size=a->Size;
+      return HOST_CALL(FreeGpuVirtualAddress, &b);
+   }
+   case BC250_HOST_Evict: {
+      auto *a=(D3DKMT_EVICT *)argument;
+      D3DDDICB_EVICT b = {};
+      b.NumAllocations=a->NumAllocations; b.AllocationList=a->AllocationList; b.Flags=a->Flags;
+      HRESULT hr=HOST_CALL(Evict, &b); a->NumBytesToTrim=b.NumBytesToTrim; return hr;
+   }
+   case BC250_HOST_Lock2: {
+      auto *a=(D3DKMT_LOCK2 *)argument;
+      D3DDDICB_LOCK2 b = {};
+      b.hAllocation=a->hAllocation; b.Flags.Value=a->Flags.Value;
+      HRESULT hr=HOST_CALL(Lock2, &b); a->pData=b.pData; return hr;
+   }
+   case BC250_HOST_Unlock2: {
+      D3DDDICB_UNLOCK2 b = {};
+      b.hAllocation=((D3DKMT_UNLOCK2 *)argument)->hAllocation;
+      return HOST_CALL(Unlock2, &b);
+   }
+   case BC250_HOST_CreateContextVirtual: {
+      auto *a=(D3DKMT_CREATECONTEXTVIRTUAL *)argument;
+      unsigned slot=0; while (slot<16 && s->contexts[slot]) ++slot;
+      if (slot==16) return E_OUTOFMEMORY;
+      D3DDDICB_CREATECONTEXTVIRTUAL b = {};
+      b.NodeOrdinal=a->NodeOrdinal; b.EngineAffinity=a->EngineAffinity; b.Flags=a->Flags;
+      b.pPrivateDriverData=a->pPrivateDriverData; b.PrivateDriverDataSize=a->PrivateDriverDataSize;
+      HRESULT hr=HOST_CALL(CreateContextVirtual, &b);
+      if (SUCCEEDED(hr)) { s->contexts[slot]=b.hContext; a->hContext=slot+1; }
+      return hr;
+   }
+   case BC250_HOST_DestroyContext: {
+      auto *a=(D3DKMT_DESTROYCONTEXT *)argument;
+      D3DDDICB_DESTROYCONTEXT b = {};
+      b.hContext=Bc250HostContext(s,a->hContext);
+      if (!b.hContext) return E_INVALIDARG;
+      HRESULT hr=HOST_CALL(DestroyContext, &b);
+      if (SUCCEEDED(hr)) s->contexts[a->hContext-1]=NULL;
+      return hr;
+   }
+   case BC250_HOST_CreateSynchronizationObject2: {
+      auto *a=(D3DKMT_CREATESYNCHRONIZATIONOBJECT2 *)argument;
+      if (a->Info.Flags.Shared || a->Info.Flags.NtSecuritySharing) return E_NOTIMPL;
+      D3DDDICB_CREATESYNCHRONIZATIONOBJECT2 b = {};
+      b.Info=a->Info;
+      HRESULT hr=HOST_CALL(CreateSynchronizationObject2, &b);
+      a->Info=b.Info; a->hSyncObject=b.hSyncObject; return hr;
+   }
+   case BC250_HOST_DestroySynchronizationObject: {
+      D3DDDICB_DESTROYSYNCHRONIZATIONOBJECT b = {};
+      b.hSyncObject=((D3DKMT_DESTROYSYNCHRONIZATIONOBJECT *)argument)->hSyncObject;
+      return HOST_CALL(DestroySynchronizationObject, &b);
+   }
+   case BC250_HOST_WaitForSynchronizationObjectFromCpu: {
+      auto *a=(D3DKMT_WAITFORSYNCHRONIZATIONOBJECTFROMCPU *)argument;
+      D3DDDICB_WAITFORSYNCHRONIZATIONOBJECTFROMCPU b = {};
+      b.ObjectCount=a->ObjectCount; b.ObjectHandleArray=a->ObjectHandleArray;
+      b.FenceValueArray=a->FenceValueArray; b.hAsyncEvent=a->hAsyncEvent; b.Flags=a->Flags;
+      return HOST_CALL(WaitForSynchronizationObjectFromCpu, &b);
+   }
+   case BC250_HOST_SignalSynchronizationObjectFromCpu: {
+      auto *a=(D3DKMT_SIGNALSYNCHRONIZATIONOBJECTFROMCPU *)argument;
+      D3DDDICB_SIGNALSYNCHRONIZATIONOBJECTFROMCPU b = {};
+      b.ObjectCount=a->ObjectCount; b.ObjectHandleArray=a->ObjectHandleArray; b.FenceValueArray=a->FenceValueArray;
+      return HOST_CALL(SignalSynchronizationObjectFromCpu, &b);
+   }
+   case BC250_HOST_WaitForSynchronizationObjectFromGpu: {
+      auto *a=(D3DKMT_WAITFORSYNCHRONIZATIONOBJECTFROMGPU *)argument;
+      D3DDDICB_WAITFORSYNCHRONIZATIONOBJECTFROMGPU b = {};
+      b.hContext=Bc250HostContext(s,a->hContext); if (!b.hContext) return E_INVALIDARG;
+      b.ObjectCount=a->ObjectCount; b.ObjectHandleArray=a->ObjectHandleArray;
+      b.MonitoredFenceValueArray=a->MonitoredFenceValueArray;
+      return HOST_CALL(WaitForSynchronizationObjectFromGpu, &b);
+   }
+   case BC250_HOST_SignalSynchronizationObjectFromGpu2: {
+      auto *a=(D3DKMT_SIGNALSYNCHRONIZATIONOBJECTFROMGPU2 *)argument;
+      if (a->BroadcastContextCount > D3DDDI_MAX_BROADCAST_CONTEXT || a->Flags.Value) return E_NOTIMPL;
+      HANDLE contexts[D3DDDI_MAX_BROADCAST_CONTEXT] = {};
+      for (UINT i=0;i<a->BroadcastContextCount;++i) {
+         contexts[i]=Bc250HostContext(s,a->BroadcastContextArray[i]); if (!contexts[i]) return E_INVALIDARG;
+      }
+      D3DDDICB_SIGNALSYNCHRONIZATIONOBJECTFROMGPU2 b = {};
+      b.ObjectCount=a->ObjectCount; b.ObjectHandleArray=a->ObjectHandleArray;
+      b.BroadcastContextCount=a->BroadcastContextCount; b.BroadcastContextArray=contexts;
+      b.MonitoredFenceValueArray=a->MonitoredFenceValueArray;
+      return HOST_CALL(SignalSynchronizationObjectFromGpu2, &b);
+   }
+   case BC250_HOST_SubmitCommand: {
+      auto *a=(D3DKMT_SUBMITCOMMAND *)argument;
+      if (a->BroadcastContextCount>D3DDDI_MAX_BROADCAST_CONTEXT || a->NumPrimaries>D3DDDI_MAX_WRITTEN_PRIMARIES || a->Flags.NullRendering || a->Flags.PresentRedirected || a->Flags.NoKmdAccess || a->Flags.Reserved || a->PresentHistoryToken || a->NumHistoryBuffers) return E_NOTIMPL;
+      D3DDDICB_SUBMITCOMMAND b = {};
+      b.Commands=a->Commands; b.CommandLength=a->CommandLength;
+      b.pPrivateDriverData=a->pPrivateDriverData; b.PrivateDriverDataSize=a->PrivateDriverDataSize;
+      b.BroadcastContextCount=a->BroadcastContextCount;
+      for (UINT i=0;i<a->BroadcastContextCount;++i) {
+         b.BroadcastContext[i]=Bc250HostContext(s,a->BroadcastContext[i]); if (!b.BroadcastContext[i]) return E_INVALIDARG;
+      }
+      b.NumPrimaries=a->NumPrimaries;
+      for (UINT i=0;i<a->NumPrimaries;++i) b.WrittenPrimaries[i]=a->WrittenPrimaries[i];
+      return HOST_CALL(SubmitCommand, &b);
+   }
+   default: return E_NOTIMPL;
+   }
+#undef HOST_CALL
+}
+
 static int32_t Bc250HostDispatch(void *userdata, uint32_t operation, void *argument)
 {
-   auto *state = (Bc250HostProbeState *)userdata;
-   if (GetCurrentThreadId() != state->thread) return (int32_t)0xc000000d;
-   auto *device = state->device;
-   auto *paging = (bc250_host_paging *)argument;
-   HRESULT hr = E_NOTIMPL;
-   if (operation == BC250_HOST_CREATE_PAGING) {
-      D3DDDICB_CREATEPAGINGQUEUE create = {};
-      hr = device->KTCallbacks.pfnCreatePagingQueueCb(device->hDevice, &create);
-      paging->queue = create.hPagingQueue;
-      paging->sync = create.hSyncObject;
-      paging->cpu_address = create.FenceValueCPUVirtualAddress;
-   } else if (operation == BC250_HOST_DESTROY_PAGING) {
-      D3DDDI_DESTROYPAGINGQUEUE destroy = {};
-      destroy.hPagingQueue = paging->queue;
-      hr = device->KTCallbacks.pfnDestroyPagingQueueCb(device->hDevice, &destroy);
+   auto *s=(Bc250HostProbeState *)userdata;
+   if (GetCurrentThreadId()!=s->thread) {
+      fprintf(stderr,"BC250 hosted wrong-thread op=%u\n",operation);
+      return (int32_t)0xc000000d;
    }
-   fprintf(stderr, "BC250 hosted callback op=%u runtime=%p hr=%08lx\n", operation, device->hDevice, hr);
-   return SUCCEEDED(hr) ? 0 : (int32_t)0xc0000001;
+   HRESULT hr=Bc250HostOperation(s,operation,argument);
+   unsigned count=operation<64 ? ++s->calls[operation] : 0;
+   if (count<=2 || FAILED(hr)) fprintf(stderr,"BC250 hosted op=%u count=%u hr=%08lx\n",operation,count,hr);
+   if (hr==E_PENDING && (operation==BC250_HOST_MapGpuVirtualAddress || operation==BC250_HOST_MakeResident)) return 0x103;
+   return SUCCEEDED(hr) ? 0 : hr==E_NOTIMPL ? (int32_t)0xc00000bb : (int32_t)0xc0000001;
 }
+
 extern "C" bool d3d10_hosted_bootstrap(struct bc250_host *host);
 
 static void APIENTRY DestroyDevice(D3D10DDI_HDEVICE hDevice);
