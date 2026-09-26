@@ -160,7 +160,16 @@ radv_alloc_memory(struct radv_device *device, const VkMemoryAllocateInfo *pAlloc
    mem->android_hardware_buffer = NULL;
 #endif
 
-   if (ahb_import_info) {
+   const struct bc250_host_import *host_import=NULL;
+   for (const VkBaseInStructure *ext=pAllocateInfo->pNext;ext;ext=ext->pNext)
+      if ((uint32_t)ext->sType==BC250_HOST_IMPORT_STYPE) host_import=(const void *)ext;
+   if (host_import) {
+      if (!device->vk.bc250_host.dispatch || !device->ws->buffer_from_hosted ||
+          host_import->size<pAllocateInfo->allocationSize) { result=VK_ERROR_INVALID_EXTERNAL_HANDLE; goto fail; }
+      result=device->ws->buffer_from_hosted(device->ws,host_import->identity,host_import->allocation,
+                                           host_import->va,host_import->size,&mem->bo);
+      if (result!=VK_SUCCESS) goto fail;
+   } else if (ahb_import_info) {
       result = radv_import_ahb_memory(device, mem, priority, ahb_import_info);
       if (result != VK_SUCCESS)
          goto fail;

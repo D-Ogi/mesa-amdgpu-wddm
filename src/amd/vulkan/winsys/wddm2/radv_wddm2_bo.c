@@ -1088,7 +1088,7 @@ static VkResult
 radv_wddm2_bo_make_resident(struct radeon_winsys *_ws, struct radeon_winsys_bo *_bo,
                             bool resident)
 {
-   if (all_resident)
+   if (all_resident || radv_wddm2_bo(_bo)->borrowed)
       return VK_SUCCESS;
 
    //fprintf(stderr, "make resident \n");
@@ -1105,7 +1105,7 @@ radv_wddm2_bo_make_resident(struct radeon_winsys *_ws, struct radeon_winsys_bo *
             .MustSucceed = 1,
          },
       };
-      status = D3DKMTMakeResident(&make_resident);
+      status = BC250_WDDM_CALL(&ws->host, MakeResident, &make_resident);
       if (!NT_SUCCESS(status))
          return VK_ERROR_OUT_OF_DEVICE_MEMORY;
 
@@ -1115,7 +1115,7 @@ radv_wddm2_bo_make_resident(struct radeon_winsys *_ws, struct radeon_winsys_bo *
          .ObjectHandleArray = &ws->paging_fence_h,
          .FenceValueArray = &make_resident.PagingFenceValue,
       };
-      status = D3DKMTWaitForSynchronizationObjectFromCpu(&wait);
+      status = BC250_WDDM_CALL(&ws->host, WaitForSynchronizationObjectFromCpu, &wait);
       if (!NT_SUCCESS(status))
          return VK_ERROR_OUT_OF_DEVICE_MEMORY;
    } else {
@@ -1156,6 +1156,7 @@ radv_wddm2_bo_destroy(struct radeon_winsys *_ws, struct radeon_winsys_bo *_bo)
 
    radv_wddm2_bo_unmap(_ws, _bo, false);
 
+   if (bo->borrowed) { FREE(bo); return; }
    if (bo->sparse_high_va) {
       const D3DKMT_FREEGPUVIRTUALADDRESS high = {
          .hAdapter = ws->adapter_h,
@@ -1476,9 +1477,27 @@ radv_wddm2_dump_bo_ranges(struct radeon_winsys *_ws, FILE *file)
       fprintf(file, "  To get BO VA ranges, please specify RADV_DEBUG=allbos\n");
 }
 
+static VkResult
+radv_wddm2_bo_from_hosted(struct radeon_winsys *rws, void *identity, uint32_t allocation,
+                         uint64_t va, uint64_t size, struct radeon_winsys_bo **out)
+{
+   struct radv_wddm2_winsys *ws=radv_wddm2_winsys(rws);
+   if (!ws->host.dispatch || identity!=ws->host.identity || !allocation || !va || !size ||
+       (va & 4095) || (size & 4095) || va>=RADV_WDDM2_PRT_CONTROL_MASK || size>RADV_WDDM2_PRT_CONTROL_MASK-va)
+      return VK_ERROR_INVALID_EXTERNAL_HANDLE;
+   struct radv_wddm2_bo *bo=CALLOC_STRUCT(radv_wddm2_bo);
+   if (!bo) return VK_ERROR_OUT_OF_HOST_MEMORY;
+   bo->ws=ws; bo->borrowed=true;
+   bo->base.va=va; bo->base.size=size; bo->base.handle=allocation; bo->base.obj_id=allocation;
+   bo->base.initial_domain=RADEON_DOMAIN_VRAM;
+   *out=&bo->base;
+   return VK_SUCCESS;
+}
+
 void
 radv_wddm2_bo_init_functions(struct radv_wddm2_winsys *ws)
 {
+   ws->base.buffer_from_hosted=radv_wddm2_bo_from_hosted;
    ws->base.buffer_create = radv_wddm2_bo_create;
    ws->base.buffer_destroy = radv_wddm2_bo_destroy;
    ws->base.buffer_map = radv_wddm2_bo_map;

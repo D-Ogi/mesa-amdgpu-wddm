@@ -51,6 +51,7 @@ struct radv_wddm2_bo {
    uint64_t reserved_size;
    uint64_t sparse_high_va;
    bool emulate_sparse_residency;
+   bool borrowed;
 
    void *map;
    uint32_t handle;
