@@ -26,6 +26,9 @@
 #include <windows.h>
 #include <dxgi1_4.h>
 #include "util/u_win32_library.h"
+#include "vk_wddm2_dispatch_table.h"
+#include <d3dkmthk.h>
+#include <stdlib.h>
 #include <directx/d3d12.h>
 
 static IDXGIFactory4 *
@@ -57,42 +60,99 @@ vk_dxgi_get_factory(bool debug)
    return factory;
 }
 
+/* Adapter enumeration goes through the D3DKMT thunks, not through DXGI.
+ *
+ * An ICD must not call CreateDXGIFactory while it enumerates physical
+ * devices: a process that carries its own dxgi.dll (DXVK, vkd3d-proton, a
+ * capture layer) has that module registered under the name "dxgi.dll", and
+ * LoadLibrary returns the loaded module for any path with that base name. The
+ * ICD then re-enters the translation layer that is creating a Vulkan instance
+ * at this very moment. With DXVK's DXGI this is a self-deadlock on its
+ * instance singleton lock (E37, run 004 minidump). D3DKMTEnumAdapters2 lists
+ * every WDDM adapter with its LUID, needs no COM and never loads a user-mode
+ * module; the queries below mirror what DXGI_ADAPTER_DESC1 carried.
+ *
+ * WARP is not a WDDM adapter, so is_warp stays false here; software devices
+ * that the kernel does know are skipped by their adapter type.
+ */
+static NTSTATUS
+vk_kmt_query_adapter(D3DKMT_HANDLE adapter, KMTQUERYADAPTERINFOTYPE type, void *data, UINT size)
+{
+   D3DKMT_QUERYADAPTERINFO query = {};
+   query.hAdapter = adapter;
+   query.Type = type;
+   query.pPrivateDriverData = data;
+   query.PrivateDriverDataSize = size;
+   return WDDM2_DISPATCH(QueryAdapterInfo(&query));
+}
+
 VkResult
 vk_dxgi_adapter_foreach(vk_dxgi_adapter_cb func, void *user_data)
-{   IDXGIFactory4 *factory = vk_dxgi_get_factory(false);
-   if (!factory)
+{
+   D3DKMT_ENUMADAPTERS2 enum_adapters = {};
+   NTSTATUS status = WDDM2_DISPATCH(EnumAdapters2(&enum_adapters));
+   if (!NT_SUCCESS(status) || !enum_adapters.NumAdapters)
       return VK_ERROR_INITIALIZATION_FAILED;
 
-   IDXGIAdapter1 *adapter = NULL;
-   VkResult result = VK_SUCCESS;
-
-   for (UINT i = 0; SUCCEEDED(factory->EnumAdapters1(i, &adapter)); ++i) {
-      DXGI_ADAPTER_DESC1 dxgi_desc;
-      adapter->GetDesc1(&dxgi_desc);
-
-      struct vk_dx_adapter_info info = {};
-      info.physical_adapter_index = i;
-      info.adapter_luid = dxgi_desc.AdapterLuid;
-      info.vendor_id = dxgi_desc.VendorId;
-      info.device_id = dxgi_desc.DeviceId;
-      info.subsys_id = dxgi_desc.SubSysId;
-      info.revision = dxgi_desc.Revision;
-      info.shared_system_memory = dxgi_desc.SharedSystemMemory;
-      info.dedicated_system_memory = dxgi_desc.DedicatedSystemMemory;
-      info.dedicated_video_memory = dxgi_desc.DedicatedVideoMemory;
-      info.is_warp = (dxgi_desc.Flags & DXGI_ADAPTER_FLAG_SOFTWARE) != 0;
-      WideCharToMultiByte(CP_ACP, 0, dxgi_desc.Description,
-                          ARRAYSIZE(dxgi_desc.Description),
-                          info.description, sizeof(info.description), NULL, NULL);
-
-      result = func(&info, (void *)adapter, user_data);
-      adapter->Release();
-
-      if (result != VK_SUCCESS)
-         break;
+   D3DKMT_ADAPTERINFO *adapters =
+      (D3DKMT_ADAPTERINFO *)calloc(enum_adapters.NumAdapters, sizeof(*adapters));
+   if (!adapters)
+      return VK_ERROR_OUT_OF_HOST_MEMORY;
+   enum_adapters.pAdapters = adapters;
+   status = WDDM2_DISPATCH(EnumAdapters2(&enum_adapters));
+   if (!NT_SUCCESS(status)) {
+      free(adapters);
+      return VK_ERROR_INITIALIZATION_FAILED;
    }
 
-   factory->Release();
+   VkResult result = VK_SUCCESS;
+   for (ULONG i = 0; i < enum_adapters.NumAdapters; i++) {
+      D3DKMT_HANDLE handle = adapters[i].hAdapter;
+      if (result == VK_SUCCESS) {
+         struct vk_dx_adapter_info info = {};
+         D3DKMT_ADAPTERTYPE type = {};
+         D3DKMT_QUERY_DEVICE_IDS ids = {};
+         D3DKMT_SEGMENTSIZEINFO segments = {};
+         D3DKMT_ADAPTERREGISTRYINFO registry = {};
+
+         info.adapter_luid = adapters[i].AdapterLuid;
+         /* One physical adapter per LUID; linked adapters are not supported. */
+         info.physical_adapter_index = 0;
+
+         bool usable = true;
+         if (NT_SUCCESS(vk_kmt_query_adapter(handle, KMTQAITYPE_ADAPTERTYPE, &type, sizeof(type))))
+            usable = type.RenderSupported && !type.SoftwareDevice;
+
+         ids.PhysicalAdapterIndex = 0;
+         if (usable &&
+             NT_SUCCESS(vk_kmt_query_adapter(handle, KMTQAITYPE_PHYSICALADAPTERDEVICEIDS, &ids, sizeof(ids)))) {
+            info.vendor_id = ids.DeviceIds.VendorID;
+            info.device_id = ids.DeviceIds.DeviceID;
+            info.subsys_id = ids.DeviceIds.SubSystemID;
+            info.revision = ids.DeviceIds.RevisionID;
+         } else {
+            usable = false;
+         }
+
+         if (usable) {
+            if (NT_SUCCESS(vk_kmt_query_adapter(handle, KMTQAITYPE_GETSEGMENTSIZE, &segments, sizeof(segments)))) {
+               info.dedicated_video_memory = segments.DedicatedVideoMemorySize;
+               info.dedicated_system_memory = segments.DedicatedSystemMemorySize;
+               info.shared_system_memory = segments.SharedSystemMemorySize;
+            }
+            if (NT_SUCCESS(vk_kmt_query_adapter(handle, KMTQAITYPE_ADAPTERREGISTRYINFO, &registry, sizeof(registry)))) {
+               WideCharToMultiByte(CP_ACP, 0, registry.AdapterString, -1,
+                                   info.description, sizeof(info.description), NULL, NULL);
+               info.description[sizeof(info.description) - 1] = '\0';
+            }
+            result = func(&info, NULL, user_data);
+         }
+      }
+      D3DKMT_CLOSEADAPTER close_adapter = {};
+      close_adapter.hAdapter = handle;
+      WDDM2_DISPATCH(CloseAdapter(&close_adapter));
+   }
+   free(adapters);
    return result;
 }
 
