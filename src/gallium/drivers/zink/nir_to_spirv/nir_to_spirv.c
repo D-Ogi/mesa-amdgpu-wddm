@@ -1390,7 +1390,7 @@ emit_sampler(struct ntv_context *ctx, nir_variable *var)
    snprintf(buf, sizeof(buf), "sampler_%u", var->data.driver_location);
    spirv_builder_emit_name(&ctx->builder, var_id, buf);
    spirv_builder_emit_descriptor_set(&ctx->builder, var_id, var->data.descriptor_set);
-   spirv_builder_emit_binding(&ctx->builder, var_id, var->data.driver_location);
+   spirv_builder_emit_binding(&ctx->builder, var_id, var->data.binding);
    _mesa_hash_table_insert(ctx->vars, var, (void *)(intptr_t)var_id);
    if (ctx->spirv_1_4_interfaces) {
       assert(ctx->num_entry_ifaces < ARRAY_SIZE(ctx->entry_ifaces));
@@ -4325,7 +4325,19 @@ get_texture_load(struct ntv_context *ctx, SpvId sampler_id, nir_tex_instr *tex,
          return image_load;
       }
    } else {
-      return spirv_builder_emit_load(&ctx->builder, sampled_type, sampler_id, false);
+      SpvId combined = spirv_builder_emit_load(&ctx->builder, sampled_type, sampler_id, false);
+      int sampler_src = nir_tex_instr_src_index(tex, nir_tex_src_sampler_deref);
+      if (nir_tex_instr_need_sampler(tex) && sampler_src >= 0) {
+         nir_variable *sampler_var = nir_deref_instr_get_variable(nir_src_as_deref(tex->src[sampler_src].src));
+         if (sampler_var && glsl_type_is_bare_sampler(glsl_without_array(sampler_var->type))) {
+            if (getenv("BC250_HOST_TRACE_SAMPLER")) fprintf(stderr,"BC250 SPIRV separate sampler binding=%u texture=%u\n",sampler_var->data.binding,var->data.binding);
+            SpvId image = spirv_builder_emit_image(&ctx->builder, image_type, combined);
+            SpvId sampler = spirv_builder_emit_load(&ctx->builder,
+               spirv_builder_type_sampler(&ctx->builder), cl_sampler, false);
+            return spirv_builder_emit_sampled_image(&ctx->builder, sampled_type, image, sampler);
+         }
+      }
+      return combined;
    }
 }
 

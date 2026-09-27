@@ -221,6 +221,21 @@ zink_batch_reset_all(struct zink_context *ctx)
    }
 }
 
+void
+zink_batch_reclaim_completed(struct zink_screen *screen)
+{
+   simple_mtx_lock(&screen->active_batch_states_lock);
+   simple_mtx_lock(&screen->free_batch_states_lock);
+   for (struct zink_batch_state *i = screen->active_batch_states, *j = i ? i->next : NULL; i; i = j, j = j ? j->next : NULL) {
+      reset_batch_state_internal(screen, i);
+      zink_batch_state_append(&screen->free_batch_states, &screen->last_free_batch_state, i);
+   }
+   screen->active_batch_states = NULL;
+   screen->last_active_batch_state = NULL;
+   simple_mtx_unlock(&screen->free_batch_states_lock);
+   simple_mtx_unlock(&screen->active_batch_states_lock);
+}
+
 /* called only on context destruction */
 void
 zink_batch_state_destroy(struct zink_screen *screen, struct zink_batch_state *bs)
@@ -848,16 +863,7 @@ end:
 
    p_atomic_set(&bs->fence.submitted, true);
 
-   simple_mtx_lock(&screen->active_batch_states_lock);
-   simple_mtx_lock(&screen->free_batch_states_lock);
-   for (struct zink_batch_state *i = screen->active_batch_states, *j = i ? i->next : NULL; i; i = j, j = j ? j->next : NULL) {
-      reset_batch_state_internal(screen, i);
-      zink_batch_state_append(&screen->free_batch_states, &screen->last_free_batch_state, i);
-   }
-   screen->active_batch_states = NULL;
-   screen->last_active_batch_state = NULL;
-   simple_mtx_unlock(&screen->free_batch_states_lock);
-   simple_mtx_unlock(&screen->active_batch_states_lock);
+   zink_batch_reclaim_completed(screen);
 }
 
 /* called during flush */
@@ -898,9 +904,10 @@ zink_end_batch(struct zink_context *ctx)
 
    set_foreach(&bs->dmabuf_exports, entry) {
       struct zink_resource *res = (void*)entry->key;
+      VkImageLayout release_layout=res->obj->bc250_runtime ? VK_IMAGE_LAYOUT_GENERAL : res->layout;
       if (screen->info.have_KHR_synchronization2) {
          VkImageMemoryBarrier2 imb;
-         zink_resource_image_barrier2_init(&imb, res, res->layout, 0, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT);
+         zink_resource_image_barrier2_init(&imb, res, release_layout, 0, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT);
          imb.srcQueueFamilyIndex = screen->gfx_queue;
          imb.dstQueueFamilyIndex = VK_QUEUE_FAMILY_FOREIGN_EXT;
          VkDependencyInfo dep = {
@@ -917,7 +924,7 @@ zink_end_batch(struct zink_context *ctx)
          VKCTX(CmdPipelineBarrier2)(bs->cmdbuf, &dep);
       } else {
          VkImageMemoryBarrier imb;
-         zink_resource_image_barrier_init(&imb, res, res->layout, 0, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT);
+         zink_resource_image_barrier_init(&imb, res, release_layout, 0, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT);
          imb.srcQueueFamilyIndex = screen->gfx_queue;
          imb.dstQueueFamilyIndex = VK_QUEUE_FAMILY_FOREIGN_EXT;
          VKCTX(CmdPipelineBarrier)(
@@ -930,6 +937,7 @@ zink_end_batch(struct zink_context *ctx)
             1, &imb
          );
       }
+      res->layout = release_layout;
       res->queue = VK_QUEUE_FAMILY_FOREIGN_EXT;
 
       /* We just transitioned to VK_QUEUE_FAMILY_FOREIGN_EXT.  We'll need a
@@ -942,6 +950,7 @@ zink_end_batch(struct zink_context *ctx)
       }
 
       for (; res; res = zink_resource(res->base.b.next)) {
+         if (res->obj->bc250_runtime) continue;
          VkSemaphore sem = zink_create_exportable_semaphore(screen);
          if (sem) {
             util_dynarray_append(&ctx->bs->signal_semaphores, sem);

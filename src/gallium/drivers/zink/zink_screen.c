@@ -1717,10 +1717,19 @@ zink_destroy_screen(struct pipe_screen *pscreen)
       simple_mtx_unlock(&device_lock);
    }
 
-   simple_mtx_lock(&instance_lock);
-   if (screen->instance && --instance_refcount == 0)
-      VKSCR(DestroyInstance)(instance, NULL);
-   simple_mtx_unlock(&instance_lock);
+   if (screen->owned_instance) {
+      if (screen->instance) {
+         fprintf(stderr, "BC250 destroy private Vulkan instance=%p\n", (void *)screen->instance);
+         PFN_vkDestroyInstance destroy = (PFN_vkDestroyInstance)
+            screen->vk_GetInstanceProcAddr(screen->instance, "vkDestroyInstance");
+         destroy(screen->instance, NULL);
+      }
+   } else {
+      simple_mtx_lock(&instance_lock);
+      if (screen->instance && --instance_refcount == 0)
+         VKSCR(DestroyInstance)(instance, NULL);
+      simple_mtx_unlock(&instance_lock);
+   }
 
    util_idalloc_mt_fini(&screen->buffer_ids);
 
@@ -3449,7 +3458,7 @@ zink_cl_cts_version(struct pipe_screen *pscreen)
 }
 
 static struct zink_screen *
-zink_internal_create_screen(const struct pipe_screen_config *config, int64_t dev_major, int64_t dev_minor, uint64_t adapter_luid)
+zink_internal_create_screen(const struct pipe_screen_config *config, int64_t dev_major, int64_t dev_minor, uint64_t adapter_luid, bool owned_instance, const struct bc250_host *host)
 {
    if (os_get_option("ZINK_USE_LAVAPIPE")) {
       mesa_loge("ZINK_USE_LAVAPIPE is obsolete. Use LIBGL_ALWAYS_SOFTWARE\n");
@@ -3465,6 +3474,8 @@ zink_internal_create_screen(const struct pipe_screen_config *config, int64_t dev
 
    screen->driver_name_is_inferred = config && config->driver_name_is_inferred;
    screen->drm_fd = -1;
+   screen->owned_instance = owned_instance;
+   if (host) screen->bc250_host=*host;
 
    glsl_type_singleton_init_or_ref();
    zink_debug = debug_get_option_zink_debug();
@@ -3476,22 +3487,25 @@ zink_internal_create_screen(const struct pipe_screen_config *config, int64_t dev
       screen->threaded_submit = false;
    else
       screen->threaded_submit = screen->threaded;
+   if (host) { screen->threaded=false; screen->threaded_submit=false; }
    screen->abort_on_hang = debug_get_bool_option("ZINK_HANG_ABORT", false);
 
 
    u_trace_state_init();
 
-   screen->loader_lib = util_dl_open(VK_LIBNAME);
+   screen->loader_lib = util_dl_open(host ? os_get_option("BC250_HOSTED_ICD") : VK_LIBNAME);
    if (!screen->loader_lib) {
       if (!screen->driver_name_is_inferred)
          mesa_loge("ZINK: failed to load "VK_LIBNAME);
       goto fail;
    }
 
-   screen->vk_GetInstanceProcAddr = (PFN_vkGetInstanceProcAddr)util_dl_get_proc_address(screen->loader_lib, "vkGetInstanceProcAddr");
+   screen->vk_GetInstanceProcAddr = (PFN_vkGetInstanceProcAddr)util_dl_get_proc_address(screen->loader_lib, host ? "vk_icdGetInstanceProcAddr" : "vkGetInstanceProcAddr");
    screen->vk_GetDeviceProcAddr = (PFN_vkGetDeviceProcAddr)util_dl_get_proc_address(screen->loader_lib, "vkGetDeviceProcAddr");
+   if (host && screen->vk_GetInstanceProcAddr)
+      screen->vk_GetDeviceProcAddr=(PFN_vkGetDeviceProcAddr)screen->vk_GetInstanceProcAddr(NULL,"vkGetDeviceProcAddr");
    if (!screen->vk_GetInstanceProcAddr ||
-       !screen->vk_GetDeviceProcAddr) {
+       (!host && !screen->vk_GetDeviceProcAddr)) {
       if (!screen->driver_name_is_inferred)
          mesa_loge("ZINK: failed to get proc address");
       goto fail;
@@ -3506,22 +3520,35 @@ zink_internal_create_screen(const struct pipe_screen_config *config, int64_t dev
       screen->driconf.zink_shader_object_enable = driQueryOptionb(config->options, "zink_shader_object_enable");
    }
 
-   simple_mtx_lock(&instance_lock);
-   if (++instance_refcount == 1) {
-      instance_info.loader_version = zink_get_loader_version(screen);
-      instance_info.no_device_select = zink_picks_device(dev_major, adapter_luid);
-      instance = zink_create_instance(screen, &instance_info);
-   }
-   if (!instance) {
-      /* We don't decrement instance_refcount here. This prevents us from trying
-       * to create another instance on subsequent calls.
-       */
+   if (screen->owned_instance) {
+      struct zink_instance_info *info = rzalloc(screen, struct zink_instance_info);
+      if (!info)
+         goto fail;
+      info->loader_version = zink_get_loader_version(screen);
+      info->no_device_select = zink_picks_device(dev_major, adapter_luid);
+      screen->instance_info = info;
+      screen->instance = zink_create_instance(screen, info);
+      if (!screen->instance)
+         goto fail;
+      fprintf(stderr, "BC250 private Vulkan instance=%p screen=%p\n", (void *)screen->instance, (void *)screen);
+   } else {
+      simple_mtx_lock(&instance_lock);
+      if (++instance_refcount == 1) {
+         instance_info.loader_version = zink_get_loader_version(screen);
+         instance_info.no_device_select = zink_picks_device(dev_major, adapter_luid);
+         instance = zink_create_instance(screen, &instance_info);
+      }
+      if (!instance) {
+         /* We don't decrement instance_refcount here. This prevents us from trying
+          * to create another instance on subsequent calls.
+          */
+         simple_mtx_unlock(&instance_lock);
+         goto fail;
+      }
+      screen->instance = instance;
+      screen->instance_info = &instance_info;
       simple_mtx_unlock(&instance_lock);
-      goto fail;
    }
-   screen->instance = instance;
-   screen->instance_info = &instance_info;
-   simple_mtx_unlock(&instance_lock);
 
    if (zink_debug & ZINK_DEBUG_VALIDATION) {
       if (!screen->instance_info->have_layer_KHRONOS_validation &&
@@ -3532,6 +3559,7 @@ zink_internal_create_screen(const struct pipe_screen_config *config, int64_t dev
       }
    }
 
+   if (host) screen->vk_GetDeviceProcAddr=(PFN_vkGetDeviceProcAddr)screen->vk_GetInstanceProcAddr(screen->instance,"vkGetDeviceProcAddr");
    vk_instance_uncompacted_dispatch_table_load(&screen->vk.instance,
                                                 screen->vk_GetInstanceProcAddr,
                                                 screen->instance);
@@ -3547,6 +3575,7 @@ zink_internal_create_screen(const struct pipe_screen_config *config, int64_t dev
          debug_printf("ZINK: failed to setup debug utils\n");
    }
 
+   fprintf(stderr, "BC250 zink init stage 0\n"); fflush(stderr);
    choose_pdev(screen, dev_major, dev_minor, adapter_luid);
    if (screen->pdev == VK_NULL_HANDLE) {
       if (!screen->driver_name_is_inferred)
@@ -3653,6 +3682,7 @@ zink_internal_create_screen(const struct pipe_screen_config *config, int64_t dev
    init_driver_workarounds(screen);
    disable_features(screen);
 
+   fprintf(stderr, "BC250 zink init stage 1\n"); fflush(stderr);
    struct zink_device *zdev = zink_create_logical_device(screen);
    if (!zdev->dev)
       goto fail;
@@ -3663,8 +3693,10 @@ zink_internal_create_screen(const struct pipe_screen_config *config, int64_t dev
                                              screen->vk_GetDeviceProcAddr,
                                              screen->dev);
 
+   fprintf(stderr, "BC250 zink init stage 2\n"); fflush(stderr);
    init_queue(screen);
 
+   fprintf(stderr, "BC250 zink init stage 3\n"); fflush(stderr);
    zink_verify_device_extensions(screen);
 
    /* descriptor set indexing is determined by 'compact' descriptor mode:
@@ -3689,6 +3721,7 @@ zink_internal_create_screen(const struct pipe_screen_config *config, int64_t dev
       screen->desc_set_id[ZINK_DESCRIPTOR_BINDLESS] = 5;
    }
 
+   fprintf(stderr, "BC250 zink init stage 4\n"); fflush(stderr);
    if (screen->info.have_EXT_calibrated_timestamps && !check_have_device_time(screen))
       goto fail;
 
@@ -3699,6 +3732,7 @@ zink_internal_create_screen(const struct pipe_screen_config *config, int64_t dev
    }
 #endif // VK_KHR_PORTABILITY_SUBSET_EXTENSION_NAME
 
+   fprintf(stderr, "BC250 zink init stage 5\n"); fflush(stderr);
    check_base_requirements(screen);
    util_live_shader_cache_init(&screen->shaders, zink_create_gfx_shader_state, zink_delete_shader_state);
 
@@ -3765,6 +3799,7 @@ zink_internal_create_screen(const struct pipe_screen_config *config, int64_t dev
       }
    }
 
+   fprintf(stderr, "BC250 zink init stage 6\n"); fflush(stderr);
    if (!zink_screen_resource_init(&screen->base))
       goto fail;
    if (!zink_bo_init(screen)) {
@@ -3774,6 +3809,7 @@ zink_internal_create_screen(const struct pipe_screen_config *config, int64_t dev
    }
    zink_screen_fence_init(&screen->base);
 
+   fprintf(stderr, "BC250 zink init stage 7\n"); fflush(stderr);
    zink_screen_init_compiler(screen);
    if (!disk_cache_init(screen)) {
       if (!screen->driver_name_is_inferred)
@@ -3783,12 +3819,14 @@ zink_internal_create_screen(const struct pipe_screen_config *config, int64_t dev
    if (!util_queue_init(&screen->cache_get_thread, "zcfq", 8, 4,
                         UTIL_QUEUE_INIT_RESIZE_IF_FULL, screen))
       goto fail;
+   fprintf(stderr, "BC250 zink init stage 8\n"); fflush(stderr);
    populate_format_props(screen);
 
    slab_create_parent(&screen->transfer_pool, sizeof(struct zink_transfer), 16);
 
    screen->driconf.inline_uniforms = debug_get_bool_option("ZINK_INLINE_UNIFORMS", screen->is_cpu);
 
+   fprintf(stderr, "BC250 zink init stage 9\n"); fflush(stderr);
    if (!zink_screen_init_semaphore(screen)) {
       if (!screen->driver_name_is_inferred)
          mesa_loge("zink: failed to create timeline semaphore");
@@ -3876,16 +3914,20 @@ zink_internal_create_screen(const struct pipe_screen_config *config, int64_t dev
    screen->base.create_vertex_state = zink_cache_create_vertex_state;
    screen->base.vertex_state_destroy = zink_cache_vertex_state_destroy;
 
+   fprintf(stderr, "BC250 zink init stage 10\n"); fflush(stderr);
    zink_synchronization_init(screen);
 
+   fprintf(stderr, "BC250 zink init stage 11\n"); fflush(stderr);
    zink_init_screen_pipeline_libs(screen);
 
+   fprintf(stderr, "BC250 zink init stage 12\n"); fflush(stderr);
    if (!init_layouts(screen)) {
       if (!screen->driver_name_is_inferred)
          mesa_loge("ZINK: failed to initialize layouts");
       goto fail;
    }
 
+   fprintf(stderr, "BC250 zink init stage 13\n"); fflush(stderr);
    if (!zink_descriptor_layouts_init(screen)) {
       if (!screen->driver_name_is_inferred)
          mesa_loge("ZINK: failed to initialize descriptor layouts");
@@ -3896,6 +3938,7 @@ zink_internal_create_screen(const struct pipe_screen_config *config, int64_t dev
 
    init_optimal_keys(screen);
 
+   fprintf(stderr, "BC250 zink init stage 14\n"); fflush(stderr);
    zink_init_shader_caps(screen);
    zink_init_compute_caps(screen);
    zink_init_screen_caps(screen);
@@ -3908,6 +3951,7 @@ zink_internal_create_screen(const struct pipe_screen_config *config, int64_t dev
    screen->frame_marker_emitted = zink_screen_debug_marker_begin(screen, "frame");
    simple_mtx_unlock(screen->queue_lock);
 
+   fprintf(stderr, "BC250 zink init stage 15\n"); fflush(stderr);
    return screen;
 
 fail:
@@ -3918,7 +3962,7 @@ fail:
 struct pipe_screen *
 zink_create_screen(struct sw_winsys *winsys, const struct pipe_screen_config *config)
 {
-   struct zink_screen *ret = zink_internal_create_screen(config, -1, -1, 0);
+   struct zink_screen *ret = zink_internal_create_screen(config, -1, -1, 0, false, NULL);
    if (ret) {
       ret->drm_fd = -1;
    }
@@ -3970,7 +4014,7 @@ zink_drm_create_screen(int fd, const struct pipe_screen_config *config, struct r
    if (zink_render_rdev(fd, &dev_major, &dev_minor))
       return NULL;
 
-   ret = zink_internal_create_screen(config, dev_major, dev_minor, 0);
+   ret = zink_internal_create_screen(config, dev_major, dev_minor, 0, false, NULL);
    if (!ret)
       return NULL;
 
@@ -4005,7 +4049,7 @@ fail:
 struct pipe_screen *
 zink_win32_create_screen(uint64_t adapter_luid)
 {
-   struct zink_screen *ret = zink_internal_create_screen(NULL, -1, -1, adapter_luid);
+   struct zink_screen *ret = zink_internal_create_screen(NULL, -1, -1, adapter_luid, true, NULL);
    return ret ? &ret->base : NULL;
 }
 
@@ -4052,4 +4096,11 @@ zink_screen_debug_marker_end(struct zink_screen *screen, bool emitted)
 
    if (emitted)
       VKSCR(QueueEndDebugUtilsLabelEXT)(screen->queue);
+}
+
+struct pipe_screen *
+zink_win32_create_hosted_screen(uint64_t adapter_luid, const struct bc250_host *host)
+{
+   struct zink_screen *ret=zink_internal_create_screen(NULL,-1,-1,adapter_luid,true,host);
+   return ret ? &ret->base : NULL;
 }

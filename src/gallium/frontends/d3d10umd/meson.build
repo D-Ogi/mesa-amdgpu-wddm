@@ -1,5 +1,5 @@
 inc_d3d10umd = include_directories('.')
-_c_args_d3d10umd = []
+_c_args_d3d10umd = ['-DBC250_ZINK_OFFSCREEN_PROBE=1']
 
 if cc.get_argument_syntax() == 'gcc'
   _c_args_d3d10umd += '-Wno-unknown-pragmas'

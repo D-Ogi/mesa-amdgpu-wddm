@@ -37,3 +37,10 @@ zink_drm_create_screen(int fd, const struct pipe_screen_config *config, struct r
 struct pipe_screen *
 zink_win32_create_screen(uint64_t adapter_luid);
 #endif
+
+struct bc250_host;
+struct pipe_screen *zink_win32_create_hosted_screen(uint64_t adapter_luid, const struct bc250_host *host);
+
+struct pipe_context;
+struct pipe_resource;
+int zink_bc250_release_runtime_resource(struct pipe_context *ctx, struct pipe_resource **resource);

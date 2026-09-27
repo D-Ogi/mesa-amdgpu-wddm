@@ -10,6 +10,7 @@ typedef void *HANDLE;
 extern "C" {
 #endif
 
+#define WINSYS_HANDLE_TYPE_USER_MEMORY 6 /* caller-owned mapped CPU memory */
 #define WINSYS_HANDLE_TYPE_SHARED 0
 #define WINSYS_HANDLE_TYPE_KMS    1
 #define WINSYS_HANDLE_TYPE_FD     2
@@ -94,6 +95,7 @@ struct winsys_handle
        * Output for resource_get_handle.
        */
       void *com_obj;
+      void *user_memory;
 
       /**
        * String name for an object.
@@ -107,6 +109,8 @@ struct winsys_handle
     * Output for resource_get_handle.
     */
    uint64_t size;
+   uint64_t bc250_va;
+   void *bc250_identity;
 };
 
 #ifdef __cplusplus

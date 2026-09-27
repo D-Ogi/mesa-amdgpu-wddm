@@ -130,6 +130,9 @@ CreateRenderTargetView(
    }
 
    pRTView->surface = desc;
+   Device *device = CastDevice(hDevice);
+   pRTView->next = device->renderTargetViews;
+   device->renderTargetViews = pRTView;
 }
 
 
@@ -153,6 +156,9 @@ DestroyRenderTargetView(D3D10DDI_HDEVICE hDevice,                       // IN
 
    RenderTargetView *pRTView = CastRenderTargetView(hRenderTargetView);
 
+   RenderTargetView **link = &CastDevice(hDevice)->renderTargetViews;
+   while (*link && *link != pRTView) link = &(*link)->next;
+   if (*link) *link = pRTView->next;
    pipe_resource_reference(&pRTView->surface.texture, NULL);
 }
 

@@ -98,9 +98,35 @@ check_resource_for_batch_ref(struct zink_context *ctx, struct zink_resource *res
 }
 
 static void
+bc250_audit_maps(struct zink_context *ctx, bool final)
+{
+   if (!ctx->bc250_audit) return;
+   uint64_t sequence = ++ctx->bc250_audit_flushes;
+   if (!final && sequence > 8 && sequence % 64) return;
+   fprintf(stderr, "BC250 audit maps ctx=%p final=%u sample=%llu image_calls=%llu image_request_bytes=%llu buffer_calls=%llu buffer_request_bytes=%llu persistent_calls=%llu\n",
+           (void *)ctx, final, (unsigned long long)sequence,
+           (unsigned long long)ctx->bc250_image_maps, (unsigned long long)ctx->bc250_image_map_bytes,
+           (unsigned long long)ctx->bc250_buffer_maps, (unsigned long long)ctx->bc250_buffer_map_bytes,
+           (unsigned long long)ctx->bc250_persistent_maps);
+   fprintf(stderr, "BC250 audit bucket_summary ctx=%p sample=%llu overflow=%llu\n",
+           (void *)ctx, (unsigned long long)sequence, (unsigned long long)ctx->bc250_map_overflow);
+   for (unsigned i=0; i<ARRAY_SIZE(ctx->bc250_map_buckets); ++i) {
+      const struct zink_bc250_map_bucket *b=&ctx->bc250_map_buckets[i];
+      if (!b->calls) break;
+      fprintf(stderr, "BC250 audit bucket ctx=%p sample=%llu id=%u target=%u size=%ux%ux%u format=%u bind=%x usage=%x box=%ux%ux%u runtime=%u user_ptr=%u calls=%llu bytes=%llu\n",
+              (void *)ctx, (unsigned long long)sequence, i, b->target,
+              b->width, b->height, b->depth, b->format, b->bind, b->usage,
+              b->box_width, b->box_height, b->box_depth, b->runtime, b->user_ptr,
+              (unsigned long long)b->calls, (unsigned long long)b->bytes);
+   }
+
+}
+
+static void
 zink_context_destroy(struct pipe_context *pctx)
 {
    struct zink_context *ctx = zink_context(pctx);
+   bc250_audit_maps(ctx, true);
    struct zink_screen *screen = zink_screen(pctx->screen);
 
    struct pipe_framebuffer_state fb = {0};
@@ -585,6 +611,7 @@ zink_create_sampler_state(struct pipe_context *pctx,
       return NULL;
 
    VkResult result = VKSCR(CreateSampler)(screen->dev, &sci, NULL, &sampler->sampler);
+   if (getenv("BC250_HOST_TRACE_SAMPLER")) fprintf(stderr,"BC250 sampler create handle=%p u=%u border=%u\n",(void*)sampler->sampler,sci.addressModeU,sci.borderColor);
    if (result != VK_SUCCESS) {
       mesa_loge("ZINK: vkCreateSampler failed (%s)", vk_Result_to_str(result));
       FREE(sampler);
@@ -4452,6 +4479,7 @@ zink_flush(struct pipe_context *pctx,
            unsigned flags)
 {
    struct zink_context *ctx = zink_context(pctx);
+   bc250_audit_maps(ctx, false);
    bool deferred = flags & PIPE_FLUSH_DEFERRED;
    bool deferred_fence = false;
    struct zink_batch_state *bs = NULL;
@@ -4793,7 +4821,7 @@ zink_flush_resource(struct pipe_context *pctx,
          zink_resource_reference(&ctx->needs_present, res);
       }
       ctx->swapchain = res;
-   } else if (res->dmabuf)
+   } else if (res->dmabuf && !res->obj->bc250_runtime)
       res->queue = VK_QUEUE_FAMILY_FOREIGN_EXT;
 }
 
@@ -5844,6 +5872,7 @@ zink_context_create(struct pipe_screen *pscreen, void *priv, unsigned flags)
    if (!ctx)
       goto fail;
 
+   ctx->bc250_audit = debug_get_bool_option("BC250_HOST_AUDIT", false);
    ctx->flags = flags;
    memset(ctx->pipeline_changed, 1, sizeof(ctx->pipeline_changed));
    ctx->gfx_pipeline_state.dirty = ctx->gfx_pipeline_state.mesh_dirty = true;

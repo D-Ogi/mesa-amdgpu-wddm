@@ -75,8 +75,10 @@ CreateEmptyShader(Device *pDevice,
    ureg_END(ureg);
 
    tokens = ureg_get_tokens(ureg, &nr_tokens);
-   if (!tokens)
+   if (!tokens) {
+      ureg_destroy(ureg);
       return NULL;
+   }
 
    ureg_destroy(ureg);
 
@@ -99,8 +101,6 @@ CreateEmptyShader(Device *pDevice,
       handle = NULL;
       assert(0);
    }
-   assert(handle);
-
    ureg_free_tokens(tokens);
 
    return handle;
@@ -203,6 +203,8 @@ SetSamplers(mesa_shader_stage shader_type,     // IN
    for (UINT i = 0; i < NumSamplers; i++) {
       assert(Offset + i < PIPE_MAX_SAMPLERS);
       samplers[Offset + i] = CastPipeSamplerState(phSamplers[i]);
+      if (!samplers[Offset + i])
+         samplers[Offset + i] = pDevice->default_sampler;
    }
 
    pipe->bind_sampler_states(pipe, shader_type, 0, PIPE_MAX_SAMPLERS, samplers);
@@ -231,6 +233,15 @@ SetShaderResources(mesa_shader_stage shader_type,                  // IN
 
    assert(Offset + NumViews <= D3D10_COMMONSHADER_INPUT_RESOURCE_SLOT_COUNT);
 
+   const UINT view_limit = MIN2(PIPE_MAX_SHADER_SAMPLER_VIEWS,
+                                pipe->screen->shader_caps[shader_type].max_sampler_views);
+   for (UINT i = 0; i < NumViews; ++i) {
+      if (Offset + i >= view_limit && CastPipeShaderResourceView(phShaderResourceViews[i])) {
+         SetError(hDevice, E_NOTIMPL);
+         return;
+      }
+   }
+
    struct pipe_sampler_view **sampler_views = pDevice->sampler_views[shader_type];
    for (UINT i = 0; i < NumViews; i++) {
       struct pipe_sampler_view *sampler_view =
@@ -249,7 +260,7 @@ SetShaderResources(mesa_shader_stage shader_type,                  // IN
     * XXX: Now that the semantics are actually the same in gallium, should
     * probably think about not updating all always... It should just work.
     */
-   pipe->set_sampler_views(pipe, shader_type, 0, PIPE_MAX_SHADER_SAMPLER_VIEWS,
+   pipe->set_sampler_views(pipe, shader_type, 0, view_limit,
                            0, sampler_views);
 }
 
@@ -1251,6 +1262,9 @@ CreateShaderResourceView(
    }
 
    pSRView->handle = pipe->create_sampler_view(pipe, resource, &desc);
+   Device *device = CastDevice(hDevice);
+   pSRView->next = device->shaderResourceViews;
+   device->shaderResourceViews = pSRView;
 }
 
 
@@ -1333,6 +1347,9 @@ CreateShaderResourceView1(
    }
 
    pSRView->handle = pipe->create_sampler_view(pipe, resource, &desc);
+   Device *device = CastDevice(hDevice);
+   pSRView->next = device->shaderResourceViews;
+   device->shaderResourceViews = pSRView;
 }
 
 
@@ -1360,6 +1377,9 @@ DestroyShaderResourceView(D3D10DDI_HDEVICE hDevice,                           //
    Device *pDevice = CastDevice(hDevice);
    struct pipe_context *pipe = pDevice->pipe;
 
+   ShaderResourceView **link = &pDevice->shaderResourceViews;
+   while (*link && *link != pSRView) link = &(*link)->next;
+   if (*link) *link = pSRView->next;
    pipe->sampler_view_release(pipe, pSRView->handle);
    pSRView->handle = NULL;
 }

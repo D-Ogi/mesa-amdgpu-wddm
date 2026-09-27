@@ -1,3 +1,4 @@
+#include "util/bc250_host_bootstrap.h"
 /*
  * Copyright © 2022 Valve Corporation
  *
@@ -90,7 +91,7 @@
 
 /* enum zink_descriptor_type */
 #define ZINK_MAX_DESCRIPTOR_SETS 6
-#define ZINK_MAX_DESCRIPTORS_PER_TYPE (32 * ZINK_GFX_SHADER_COUNT)
+#define ZINK_MAX_DESCRIPTORS_PER_TYPE (96 * ZINK_GFX_SHADER_COUNT)
 /* Descriptor size reported by lavapipe. */
 #define ZINK_FBFETCH_DESCRIPTOR_SIZE 280
 
@@ -1232,6 +1233,7 @@ struct zink_resource_object {
    bool render_target;
    bool is_buffer;
    bool exportable;
+   bool bc250_runtime;
    bool exportable_dmabuf;
 
    /* TODO: this should be a union */
@@ -1454,6 +1456,8 @@ struct zink_screen {
    uint64_t mapped_vram;
 
    VkInstance instance;
+   struct bc250_host bc250_host;
+   bool owned_instance; /* Native D3D devices must not share callback ownership. */
    const struct zink_instance_info *instance_info;
 
    struct hash_table *debug_mem_sizes;
@@ -1728,8 +1732,19 @@ enum zink_ds3_state {
    ZINK_DS3_BLEND_LOGIC,
 };
 
+struct zink_bc250_map_bucket {
+   unsigned target, width, height, depth, format, bind, usage;
+   unsigned box_width, box_height, box_depth, runtime, user_ptr;
+   uint64_t calls, bytes;
+};
+
 struct zink_context {
    struct pipe_context base;
+   bool bc250_audit;
+   struct zink_bc250_map_bucket bc250_map_buckets[128];
+   uint64_t bc250_map_overflow;
+   uint64_t bc250_audit_flushes, bc250_image_maps, bc250_image_map_bytes;
+   uint64_t bc250_buffer_maps, bc250_buffer_map_bytes, bc250_persistent_maps;
    struct threaded_context *tc;
    struct slab_child_pool transfer_pool;
    struct slab_child_pool transfer_pool_unsync;

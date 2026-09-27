@@ -44,9 +44,408 @@
 
 #include "Debug.h"
 
+#include "util/bc250_host_bootstrap.h"
 #include "util/u_sampler.h"
 #include "util/u_framebuffer.h"
 
+
+extern "C" struct pipe_screen *d3d10_create_screen(void);
+extern "C" struct pipe_screen *d3d10_create_hosted_screen(struct bc250_host *host);
+
+
+#include <d3dkmthk.h>
+#include <new>
+#include <float.h>
+#include <initializer_list>
+
+static thread_local Device *Bc250RuntimeDevice;
+struct Bc250RuntimeScope {
+   Device *previous;
+   explicit Bc250RuntimeScope(Device *device) : previous(Bc250RuntimeDevice) { Bc250RuntimeDevice=device; }
+   ~Bc250RuntimeScope() { Bc250RuntimeDevice=previous; }
+};
+
+static Device *Bc250EntryDevice(D3D10DDI_HDEVICE h) { return CastDevice(h); }
+template <typename A> static Device *Bc250EntryDevice(A *a) { return CastDevice(a->hDevice); }
+static LONG Bc250TraceCount;
+struct Bc250DdiTrace {
+   LONG sequence;
+   explicit Bc250DdiTrace(const char *name, bool selected) : sequence(0) {
+      if (selected && GetEnvironmentVariableA("BC250_HOST_TRACE_DDI",NULL,0)) {
+         LONG n=InterlockedIncrement(&Bc250TraceCount);
+         if (n<=2048) {
+            sequence=n;
+            fprintf(stderr,"BC250 DDI begin seq=%ld tid=%lu name=%s\n",sequence,GetCurrentThreadId(),name);
+         }
+      }
+   }
+   ~Bc250DdiTrace() {
+      if (sequence) fprintf(stderr,"BC250 DDI end seq=%ld tid=%lu\n",sequence,GetCurrentThreadId());
+   }
+};
+template <auto F> struct Bc250Entry;
+template <typename R, typename A, typename... Rest, R (APIENTRY *F)(A, Rest...)>
+struct Bc250Entry<F> {
+   static R APIENTRY Call(A a, Rest... rest) {
+      Bc250RuntimeScope scope(Bc250EntryDevice(a));
+      static LONG entryCount;
+      Bc250DdiTrace trace(__FUNCSIG__,InterlockedIncrement(&entryCount)<=8);
+      return F(a, rest...);
+   }
+};
+
+struct Bc250HostProbeState {
+   Device *device;
+   DWORD thread;
+   HANDLE contexts[16];
+   unsigned calls[64];
+   bc250_host_progress progress[16];
+   bool submission_failed;
+   bool device_lost;
+   UINT test_loss;
+   const UINT64 *present_cpu;
+   D3DKMT_HANDLE present_sync;
+   UINT64 present_value, present_waited[16];
+};
+
+static HRESULT Bc250HostLost(Bc250HostProbeState *s)
+{
+   if (!s->device_lost) {
+      s->device_lost=true;
+      s->submission_failed=true;
+      fprintf(stderr,"BC250 hosted device lost: SetErrorCb\n");
+      s->device->UMCallbacks.pfnSetErrorCb(s->device->hRTCoreLayer,D3DDDIERR_DEVICEREMOVED);
+   }
+   return D3DDDIERR_DEVICEREMOVED;
+}
+
+static bool Bc250DeviceLostResult(HRESULT hr)
+{
+   return hr==D3DDDIERR_DEVICEREMOVED || hr==DXGI_ERROR_DEVICE_REMOVED ||
+          hr==DXGI_ERROR_DEVICE_RESET || hr==DXGI_ERROR_DEVICE_HUNG ||
+          hr==DXGI_ERROR_DRIVER_INTERNAL_ERROR;
+}
+
+static HRESULT Bc250HostStatus(Bc250HostProbeState *s)
+{
+   if (s->device_lost) return D3DDDIERR_DEVICEREMOVED;
+   for (const auto &p:s->progress) {
+      if (!p.cpu_address) continue;
+      UINT64 observed=*(const volatile UINT64 *)p.cpu_address;
+      if (s->test_loss==2 && s->calls[BC250_HOST_SubmitCommand]>=3) {
+         fprintf(stderr,"BC250 injected fence observation UINT64_MAX; mapped memory unchanged\n");
+         observed=UINT64_MAX;
+      }
+      if (observed==UINT64_MAX) return Bc250HostLost(s);
+   }
+   if ((s->present_cpu && *(const volatile UINT64 *)s->present_cpu==UINT64_MAX) ||
+       (s->device->pagingFence && *s->device->pagingFence==UINT64_MAX))
+      return Bc250HostLost(s);
+   return S_OK;
+}
+
+static HANDLE Bc250HostContext(Bc250HostProbeState *s, UINT token)
+{
+   return token && token <= 16 ? s->contexts[token - 1] : NULL;
+}
+
+static HRESULT Bc250HostOperation(Bc250HostProbeState *s, uint32_t op, void *argument)
+{
+   auto &cb = s->device->KTCallbacks;
+   HANDLE rt = s->device->hDevice;
+   if (op==BC250_HOST_CHECK_STATUS) return Bc250HostStatus(s);
+   if (op==BC250_HOST_REPORT_LOST) return Bc250HostLost(s);
+   if (!argument) return E_INVALIDARG;
+#define HOST_CALL(name, arg) (cb.pfn##name##Cb ? cb.pfn##name##Cb(rt, arg) : E_NOTIMPL)
+   switch (op) {
+   case BC250_HOST_PUBLISH_PROGRESS: {
+      auto *a=(bc250_host_progress *)argument;
+      if (!Bc250HostContext(s,a->context) || !a->sync || !a->value || !a->cpu_address || a->value==UINT64_MAX) return E_INVALIDARG;
+      auto &old=s->progress[a->context-1];
+      if (old.sync && (old.sync!=a->sync || old.value>=a->value)) return E_INVALIDARG;
+      old=*a;
+      return S_OK;
+   }
+   case BC250_HOST_CREATE_PAGING: {
+      auto *a = (bc250_host_paging *)argument;
+      D3DDDICB_CREATEPAGINGQUEUE b = {};
+      HRESULT hr = HOST_CALL(CreatePagingQueue, &b);
+      a->queue=b.hPagingQueue; a->sync=b.hSyncObject; a->cpu_address=b.FenceValueCPUVirtualAddress;
+      return hr;
+   }
+   case BC250_HOST_DESTROY_PAGING: {
+      D3DDDI_DESTROYPAGINGQUEUE b = {};
+      b.hPagingQueue=((bc250_host_paging *)argument)->queue;
+      return HOST_CALL(DestroyPagingQueue, &b);
+   }
+   case BC250_HOST_CreateAllocation2: {
+      auto *a=(D3DKMT_CREATEALLOCATION *)argument;
+      D3DDDICB_ALLOCATE b = {};
+      b.pPrivateDriverData=a->pPrivateDriverData; b.PrivateDriverDataSize=a->PrivateDriverDataSize;
+      b.NumAllocations=a->NumAllocations; b.pAllocationInfo2=a->pAllocationInfo2;
+      HRESULT hr=HOST_CALL(Allocate, &b);
+      a->hResource=b.hKMResource;
+      return hr;
+   }
+   case BC250_HOST_DestroyAllocation2: {
+      auto *a=(D3DKMT_DESTROYALLOCATION2 *)argument;
+      if (a->hResource || a->Flags.Value) return E_NOTIMPL;
+      D3DDDICB_DEALLOCATE b = {};
+      b.NumAllocations=a->AllocationCount; b.HandleList=a->phAllocationList;
+      return HOST_CALL(Deallocate, &b);
+   }
+   case BC250_HOST_ReserveGpuVirtualAddress:
+      return HOST_CALL(ReserveGpuVirtualAddress, (D3DDDI_RESERVEGPUVIRTUALADDRESS *)argument);
+   case BC250_HOST_MapGpuVirtualAddress:
+      return HOST_CALL(MapGpuVirtualAddress, (D3DDDI_MAPGPUVIRTUALADDRESS *)argument);
+   case BC250_HOST_MakeResident:
+      return HOST_CALL(MakeResident, (D3DDDI_MAKERESIDENT *)argument);
+   case BC250_HOST_FreeGpuVirtualAddress: {
+      auto *a=(D3DKMT_FREEGPUVIRTUALADDRESS *)argument;
+      D3DDDICB_FREEGPUVIRTUALADDRESS b = {};
+      b.BaseAddress=a->BaseAddress; b.Size=a->Size;
+      return HOST_CALL(FreeGpuVirtualAddress, &b);
+   }
+   case BC250_HOST_Evict: {
+      auto *a=(D3DKMT_EVICT *)argument;
+      D3DDDICB_EVICT b = {};
+      b.NumAllocations=a->NumAllocations; b.AllocationList=a->AllocationList; b.Flags=a->Flags;
+      HRESULT hr=HOST_CALL(Evict, &b); a->NumBytesToTrim=b.NumBytesToTrim; return hr;
+   }
+   case BC250_HOST_Lock2: {
+      auto *a=(D3DKMT_LOCK2 *)argument;
+      D3DDDICB_LOCK2 b = {};
+      b.hAllocation=a->hAllocation; b.Flags.Value=a->Flags.Value;
+      HRESULT hr=HOST_CALL(Lock2, &b); a->pData=b.pData; return hr;
+   }
+   case BC250_HOST_Unlock2: {
+      D3DDDICB_UNLOCK2 b = {};
+      b.hAllocation=((D3DKMT_UNLOCK2 *)argument)->hAllocation;
+      return HOST_CALL(Unlock2, &b);
+   }
+   case BC250_HOST_CreateContextVirtual: {
+      auto *a=(D3DKMT_CREATECONTEXTVIRTUAL *)argument;
+      unsigned slot=0; while (slot<16 && s->contexts[slot]) ++slot;
+      if (slot==16) return E_OUTOFMEMORY;
+      D3DDDICB_CREATECONTEXTVIRTUAL b = {};
+      b.NodeOrdinal=a->NodeOrdinal; b.EngineAffinity=a->EngineAffinity; b.Flags=a->Flags;
+      b.pPrivateDriverData=a->pPrivateDriverData; b.PrivateDriverDataSize=a->PrivateDriverDataSize;
+      HRESULT hr=HOST_CALL(CreateContextVirtual, &b);
+      if (SUCCEEDED(hr)) { s->contexts[slot]=b.hContext; s->present_waited[slot]=0; a->hContext=slot+1; }
+      return hr;
+   }
+   case BC250_HOST_DestroyContext: {
+      auto *a=(D3DKMT_DESTROYCONTEXT *)argument;
+      D3DDDICB_DESTROYCONTEXT b = {};
+      b.hContext=Bc250HostContext(s,a->hContext);
+      if (!b.hContext) return E_INVALIDARG;
+      HRESULT hr=HOST_CALL(DestroyContext, &b);
+      if (SUCCEEDED(hr)) {
+         s->contexts[a->hContext-1]=NULL;
+         s->progress[a->hContext-1]={};
+      }
+      return hr;
+   }
+   case BC250_HOST_CreateSynchronizationObject2: {
+      auto *a=(D3DKMT_CREATESYNCHRONIZATIONOBJECT2 *)argument;
+      if (a->Info.Flags.Shared || a->Info.Flags.NtSecuritySharing) return E_NOTIMPL;
+      D3DDDICB_CREATESYNCHRONIZATIONOBJECT2 b = {};
+      b.Info=a->Info;
+      HRESULT hr=HOST_CALL(CreateSynchronizationObject2, &b);
+      a->Info=b.Info; a->hSyncObject=b.hSyncObject; return hr;
+   }
+   case BC250_HOST_DestroySynchronizationObject: {
+      D3DDDICB_DESTROYSYNCHRONIZATIONOBJECT b = {};
+      b.hSyncObject=((D3DKMT_DESTROYSYNCHRONIZATIONOBJECT *)argument)->hSyncObject;
+      HRESULT hr=HOST_CALL(DestroySynchronizationObject, &b);
+      if (SUCCEEDED(hr)) for (auto &p:s->progress) if (p.sync==b.hSyncObject) p={};
+      return hr;
+   }
+   case BC250_HOST_WaitForSynchronizationObjectFromCpu: {
+      auto *a=(D3DKMT_WAITFORSYNCHRONIZATIONOBJECTFROMCPU *)argument;
+      D3DDDICB_WAITFORSYNCHRONIZATIONOBJECTFROMCPU b = {};
+      b.ObjectCount=a->ObjectCount; b.ObjectHandleArray=a->ObjectHandleArray;
+      b.FenceValueArray=a->FenceValueArray; b.hAsyncEvent=a->hAsyncEvent; b.Flags=a->Flags;
+      return HOST_CALL(WaitForSynchronizationObjectFromCpu, &b);
+   }
+   case BC250_HOST_SignalSynchronizationObjectFromCpu: {
+      auto *a=(D3DKMT_SIGNALSYNCHRONIZATIONOBJECTFROMCPU *)argument;
+      D3DDDICB_SIGNALSYNCHRONIZATIONOBJECTFROMCPU b = {};
+      b.ObjectCount=a->ObjectCount; b.ObjectHandleArray=a->ObjectHandleArray; b.FenceValueArray=a->FenceValueArray;
+      return HOST_CALL(SignalSynchronizationObjectFromCpu, &b);
+   }
+   case BC250_HOST_WaitForSynchronizationObjectFromGpu: {
+      auto *a=(D3DKMT_WAITFORSYNCHRONIZATIONOBJECTFROMGPU *)argument;
+      D3DDDICB_WAITFORSYNCHRONIZATIONOBJECTFROMGPU b = {};
+      b.hContext=Bc250HostContext(s,a->hContext); if (!b.hContext) return E_INVALIDARG;
+      b.ObjectCount=a->ObjectCount; b.ObjectHandleArray=a->ObjectHandleArray;
+      b.MonitoredFenceValueArray=a->MonitoredFenceValueArray;
+      return HOST_CALL(WaitForSynchronizationObjectFromGpu, &b);
+   }
+   case BC250_HOST_SignalSynchronizationObjectFromGpu2: {
+      auto *a=(D3DKMT_SIGNALSYNCHRONIZATIONOBJECTFROMGPU2 *)argument;
+      if (a->BroadcastContextCount > D3DDDI_MAX_BROADCAST_CONTEXT || a->Flags.Value) return E_NOTIMPL;
+      HANDLE contexts[D3DDDI_MAX_BROADCAST_CONTEXT] = {};
+      for (UINT i=0;i<a->BroadcastContextCount;++i) {
+         contexts[i]=Bc250HostContext(s,a->BroadcastContextArray[i]); if (!contexts[i]) return E_INVALIDARG;
+      }
+      D3DDDICB_SIGNALSYNCHRONIZATIONOBJECTFROMGPU2 b = {};
+      b.ObjectCount=a->ObjectCount; b.ObjectHandleArray=a->ObjectHandleArray;
+      b.BroadcastContextCount=a->BroadcastContextCount; b.BroadcastContextArray=contexts;
+      b.MonitoredFenceValueArray=a->MonitoredFenceValueArray;
+      return HOST_CALL(SignalSynchronizationObjectFromGpu2, &b);
+   }
+   case BC250_HOST_SubmitCommand: {
+      HRESULT health=Bc250HostStatus(s);
+      if (FAILED(health)) return health;
+      if (s->test_loss==1 && s->calls[BC250_HOST_SubmitCommand]>=2) {
+         fprintf(stderr,"BC250 injected SubmitCommand D3DDDIERR_DEVICEREMOVED; no submission\n");
+         return D3DDDIERR_DEVICEREMOVED;
+      }
+      auto *a=(D3DKMT_SUBMITCOMMAND *)argument;
+      if (a->BroadcastContextCount>D3DDDI_MAX_BROADCAST_CONTEXT || a->NumPrimaries>D3DDDI_MAX_WRITTEN_PRIMARIES || a->Flags.NullRendering || a->Flags.PresentRedirected || a->Flags.NoKmdAccess || a->Flags.Reserved || a->PresentHistoryToken || a->NumHistoryBuffers) return E_NOTIMPL;
+      D3DDDICB_SUBMITCOMMAND b = {};
+      b.Commands=a->Commands; b.CommandLength=a->CommandLength;
+      b.pPrivateDriverData=a->pPrivateDriverData; b.PrivateDriverDataSize=a->PrivateDriverDataSize;
+      b.BroadcastContextCount=a->BroadcastContextCount;
+      for (UINT i=0;i<a->BroadcastContextCount;++i) {
+         b.BroadcastContext[i]=Bc250HostContext(s,a->BroadcastContext[i]); if (!b.BroadcastContext[i]) return E_INVALIDARG;
+         UINT token=a->BroadcastContext[i];
+         if (s->present_value>s->present_waited[token-1]) {
+            D3DDDICB_WAITFORSYNCHRONIZATIONOBJECTFROMGPU wait={};
+            wait.hContext=b.BroadcastContext[i]; wait.ObjectCount=1;
+            wait.ObjectHandleArray=&s->present_sync; wait.MonitoredFenceValueArray=&s->present_value;
+            HRESULT hr=HOST_CALL(WaitForSynchronizationObjectFromGpu, &wait);
+            if (s->present_value<=3 || FAILED(hr)) fprintf(stderr,"BC250 render waits Present value=%llu hr=%08lx\n",(unsigned long long)s->present_value,hr);
+            if (FAILED(hr)) return hr;
+            s->present_waited[token-1]=s->present_value;
+         }
+      }
+      b.NumPrimaries=a->NumPrimaries;
+      for (UINT i=0;i<a->NumPrimaries;++i) b.WrittenPrimaries[i]=a->WrittenPrimaries[i];
+      return HOST_CALL(SubmitCommand, &b);
+   }
+   default: return E_NOTIMPL;
+   }
+#undef HOST_CALL
+}
+
+static int32_t Bc250HostDispatch(void *userdata, uint32_t operation, void *argument)
+{
+   auto *s=(Bc250HostProbeState *)userdata;
+   if (Bc250RuntimeDevice!=s->device) {
+      fprintf(stderr,"BC250 hosted wrong-thread op=%u\n",operation);
+      return (int32_t)0xc000000d;
+   }
+   if (operation<64 && s->calls[operation]<2 && GetEnvironmentVariableA("BC250_HOST_TRACE_DDI",NULL,0)) fprintf(stderr,"BC250 callback begin op=%u tid=%lu\n",operation,GetCurrentThreadId());
+   HRESULT hr=Bc250HostOperation(s,operation,argument);
+   if (Bc250DeviceLostResult(hr)) {
+      Bc250HostLost(s);
+      return (int32_t)0xc00002b6;
+   }
+   if (FAILED(hr) && (operation==BC250_HOST_SubmitCommand || operation==BC250_HOST_SignalSynchronizationObjectFromGpu2 || operation==BC250_HOST_PUBLISH_PROGRESS))
+      s->submission_failed=true;
+   unsigned count=operation<64 ? ++s->calls[operation] : 0;
+   if (count<=2 || (FAILED(hr) && hr!=E_PENDING)) fprintf(stderr,"BC250 hosted op=%u count=%u hr=%08lx\n",operation,count,hr);
+   if (hr==E_PENDING && (operation==BC250_HOST_MapGpuVirtualAddress || operation==BC250_HOST_MakeResident)) return 0x103;
+   return SUCCEEDED(hr) ? 0 : hr==E_NOTIMPL ? (int32_t)0xc00000bb :
+          hr==E_OUTOFMEMORY ? (int32_t)0xc0000017 :
+          hr==E_INVALIDARG ? (int32_t)0xc000000d : (int32_t)0xc0000001;
+}
+
+void Bc250AuditPresent(Device *device)
+{
+   static const bool enabled = GetEnvironmentVariableA("BC250_HOST_AUDIT", NULL, 0) != 0;
+   auto *s = (Bc250HostProbeState *)device->hosted_state;
+   if (!enabled || !s || (device->profilePresents > 8 && device->profilePresents % 60)) return;
+   for (const auto &p : s->progress) {
+      if (!p.cpu_address) continue;
+      UINT64 completed = *(const volatile UINT64 *)p.cpu_address;
+      fprintf(stderr, "BC250 audit progress pid=%lu device=%p tick=%llu present=%u context=%u sync=%x submitted=%llu completed=%llu submits=%u\n",
+              GetCurrentProcessId(), device->hDevice, (unsigned long long)GetTickCount64(),
+              device->profilePresents, p.context, p.sync, (unsigned long long)p.value,
+              (unsigned long long)completed, s->calls[BC250_HOST_SubmitCommand]);
+   }
+}
+
+HRESULT Bc250QueuePresentWait(Device *device)
+{
+   auto *s=(Bc250HostProbeState *)device->hosted_state;
+   if (!s || Bc250RuntimeDevice!=device || !device->hContext) return E_INVALIDARG;
+   if (FAILED(Bc250HostStatus(s)) || s->submission_failed) return DXGI_ERROR_DEVICE_REMOVED;
+   if (!device->KTCallbacks.pfnWaitForSynchronizationObjectFromGpuCb ||
+       !device->KTCallbacks.pfnSignalSynchronizationObjectFromGpu2Cb ||
+       !device->KTCallbacks.pfnCreateSynchronizationObject2Cb) return E_NOTIMPL;
+   if (!s->present_sync) {
+      D3DDDICB_CREATESYNCHRONIZATIONOBJECT2 create={};
+      create.Info.Type=D3DDDI_MONITORED_FENCE;
+      create.Info.MonitoredFence.EngineAffinity=1;
+      HRESULT hr=device->KTCallbacks.pfnCreateSynchronizationObject2Cb(device->hDevice,&create);
+      if (FAILED(hr)) return hr;
+      s->present_sync=create.hSyncObject;
+      s->present_cpu=(const UINT64 *)create.Info.MonitoredFence.FenceValueCPUVirtualAddress;
+   }
+   D3DKMT_HANDLE objects[16]={};
+   UINT64 values[16]={};
+   UINT count=0;
+   for (const auto &p:s->progress) {
+      if (!p.sync) continue;
+      if (!Bc250HostContext(s,p.context)) return E_FAIL;
+      objects[count]=p.sync; values[count]=p.value; ++count;
+   }
+   D3DDDICB_WAITFORSYNCHRONIZATIONOBJECTFROMGPU wait={};
+   wait.hContext=device->hContext; wait.ObjectCount=count;
+   wait.ObjectHandleArray=objects; wait.MonitoredFenceValueArray=values;
+   HRESULT hr=count ? device->KTCallbacks.pfnWaitForSynchronizationObjectFromGpuCb(device->hDevice,&wait) : S_OK;
+   if (device->profilePresents<3 || FAILED(hr)) {
+      fprintf(stderr,"BC250 Present GPU wait count=%u hr=%08lx cpu_render_wait=0\n",count,hr);
+      for (UINT i=0;i<count;++i) fprintf(stderr,"BC250 Present fence=%x value=%llu\n",objects[i],(unsigned long long)values[i]);
+   }
+   return hr;
+}
+
+HRESULT Bc250SignalPresent(Device *device)
+{
+   auto *s=(Bc250HostProbeState *)device->hosted_state;
+   if (!s || Bc250RuntimeDevice!=device || !s->present_sync) return E_INVALIDARG;
+   UINT64 value=s->present_value+1;
+   if (!value) return E_FAIL;
+   D3DDDICB_SIGNALSYNCHRONIZATIONOBJECTFROMGPU2 signal={};
+   signal.ObjectCount=1; signal.ObjectHandleArray=&s->present_sync;
+   signal.BroadcastContextCount=1; signal.BroadcastContextArray=&device->hContext;
+   signal.MonitoredFenceValueArray=&value;
+   HRESULT hr=device->KTCallbacks.pfnSignalSynchronizationObjectFromGpu2Cb(device->hDevice,&signal);
+   if (SUCCEEDED(hr)) s->present_value=value;
+   else s->submission_failed=true;
+   if (value<=3 || FAILED(hr)) fprintf(stderr,"BC250 Present signals value=%llu hr=%08lx\n",(unsigned long long)value,hr);
+   return hr;
+}
+
+void Bc250StopHostedSubmission(Device *device)
+{
+   auto *state=(Bc250HostProbeState *)device->hosted_state;
+   if (state) Bc250HostLost(state);
+}
+
+HRESULT Bc250WaitPresentIdle(Device *device)
+{
+   auto *s=(Bc250HostProbeState *)device->hosted_state;
+   if (!s || !s->present_value) return S_OK;
+   if (FAILED(Bc250HostStatus(s))) return D3DDDIERR_DEVICEREMOVED;
+   if (Bc250RuntimeDevice!=device || !device->KTCallbacks.pfnWaitForSynchronizationObjectFromCpuCb) return E_INVALIDARG;
+   HANDLE event=CreateEventW(NULL,FALSE,FALSE,NULL);
+   if (!event) return HRESULT_FROM_WIN32(GetLastError());
+   D3DDDICB_WAITFORSYNCHRONIZATIONOBJECTFROMCPU wait={};
+   wait.ObjectCount=1; wait.ObjectHandleArray=&s->present_sync; wait.FenceValueArray=&s->present_value;
+   wait.hAsyncEvent=event;
+   HRESULT hr=device->KTCallbacks.pfnWaitForSynchronizationObjectFromCpuCb(device->hDevice,&wait);
+   if (SUCCEEDED(hr) && WaitForSingleObject(event,10000)!=WAIT_OBJECT_0) hr=DXGI_ERROR_DEVICE_HUNG;
+   CloseHandle(event);
+   if (Bc250DeviceLostResult(hr)) return Bc250HostLost(s);
+   return SUCCEEDED(hr) ? Bc250HostStatus(s) : hr;
+}
+
+extern "C" bool d3d10_hosted_bootstrap(struct bc250_host *host);
 
 static void APIENTRY DestroyDevice(D3D10DDI_HDEVICE hDevice);
 static void APIENTRY RelocateDeviceFuncs(D3D10DDI_HDEVICE hDevice,
@@ -93,6 +492,81 @@ CalcPrivateDeviceSize(D3D10DDI_HADAPTER hAdapter,                          // IN
  * ----------------------------------------------------------------------
  */
 
+static void
+Bc250DeleteDefaultSampler(Device *device)
+{
+   if (!device->default_sampler) return;
+   void *unbound[PIPE_MAX_SAMPLERS] = {};
+   auto *pipe = device->pipe;
+   for (auto stage : {MESA_SHADER_VERTEX, MESA_SHADER_FRAGMENT, MESA_SHADER_GEOMETRY})
+      pipe->bind_sampler_states(pipe, stage, 0, PIPE_MAX_SAMPLERS, unbound);
+   pipe->delete_sampler_state(pipe, device->default_sampler);
+   device->default_sampler = NULL;
+}
+
+struct Bc250CreateGuard {
+   Device *device;
+   bool complete = false;
+   explicit Bc250CreateGuard(Device *value) : device(value) {}
+   ~Bc250CreateGuard() {
+      if (complete) return;
+      auto *pipe = device->pipe;
+      if (pipe) {
+         pipe->bind_fs_state(pipe, NULL);
+         pipe->bind_vs_state(pipe, NULL);
+         if (device->cso) {
+            cso_unbind_context(device->cso);
+            cso_destroy_context(device->cso);
+            device->cso = NULL;
+         }
+         if (device->empty_fs)
+            DeleteEmptyShader(device, MESA_SHADER_FRAGMENT, device->empty_fs);
+         if (device->empty_vs)
+            DeleteEmptyShader(device, MESA_SHADER_VERTEX, device->empty_vs);
+         device->empty_fs = device->empty_vs = NULL;
+         pipe_resource_reference(&device->zero_vertex_buffer, NULL);
+         Bc250DeleteDefaultSampler(device);
+         pipe->destroy(pipe);
+         device->pipe = NULL;
+      }
+      if (device->owned_screen) {
+         device->owned_screen->destroy(device->owned_screen);
+         device->owned_screen = NULL;
+      }
+      if (device->hContext) {
+         D3DDDICB_DESTROYCONTEXT destroy = {};
+         destroy.hContext = device->hContext;
+         HRESULT hr = device->KTCallbacks.pfnDestroyContextCb(device->hDevice, &destroy);
+         fprintf(stderr, "BC250 create cleanup context hr=%08lx\n", hr);
+         device->hContext = 0;
+      }
+      if (device->pagingQueue) {
+         D3DDDI_DESTROYPAGINGQUEUE destroy = {};
+         destroy.hPagingQueue = device->pagingQueue;
+         HRESULT hr = device->KTCallbacks.pfnDestroyPagingQueueCb(device->hDevice, &destroy);
+         fprintf(stderr, "BC250 create cleanup paging hr=%08lx\n", hr);
+         device->pagingQueue = 0;
+      }
+      delete (Bc250HostProbeState *)device->hosted_state;
+      device->hosted_state = NULL;
+      fprintf(stderr, "BC250 create cleanup finished\n");
+   }
+};
+
+static bool
+Bc250FailCreate(const char *stage)
+{
+   char requested[32] = {};
+   if (!GetEnvironmentVariableA("BC250_D3D_RUNTIME_PROBE", NULL, 0) ||
+       !GetEnvironmentVariableA("BC250_HOSTED_RENDER", NULL, 0))
+      return false;
+   DWORD length = GetEnvironmentVariableA("BC250_HOST_TEST_CREATE", requested, sizeof(requested));
+   if (!length || length >= sizeof(requested) || strcmp(requested, stage))
+      return false;
+   fprintf(stderr, "BC250 injected create failure stage=%s\n", stage);
+   return true;
+}
+
 HRESULT APIENTRY
 CreateDevice(D3D10DDI_HADAPTER hAdapter,                 // IN
              __in D3D10DDIARG_CREATEDEVICE *pCreateData) // IN
@@ -125,30 +599,128 @@ CreateDevice(D3D10DDI_HADAPTER hAdapter,                 // IN
       return E_FAIL;
    }
 
-   Adapter *pAdapter = CastAdapter(hAdapter);
+
 
    Device *pDevice = CastDevice(pCreateData->hDrvDevice);
    memset(pDevice, 0, sizeof *pDevice);
+   Bc250RuntimeScope runtimeScope(pDevice);
+   pDevice->hRTCoreLayer = pCreateData->hRTCoreLayer;
+   pDevice->hDevice = (HANDLE)pCreateData->hRTDevice.handle;
+   pDevice->KTCallbacks = *pCreateData->pKTCallbacks;
+   pDevice->UMCallbacks = *pCreateData->pUMCallbacks;
+   pDevice->pDXGIBaseCallbacks = pCreateData->DXGIBaseDDI.pDXGIBaseCallbacks;
+   Bc250CreateGuard createGuard(pDevice);
 
-   struct pipe_screen *screen = pAdapter->screen;
+   // This Zink-only diagnostic DLL is loaded through D3D_DRIVER_TYPE_SOFTWARE.
+   // That runtime cannot service native WDDM presentation callbacks. RADV owns
+   // its rendering context; native primary sharing/presentation is a separate
+   // prerequisite before this DLL may replace the system DWM UMD.
+   if (GetEnvironmentVariableA("BC250_D3D_RUNTIME_PROBE", NULL, 0)) {
+   // E26: DWM requests runtime synchronization while creating its primary,
+   // before the first Present. Register a virtual context at device creation
+   // so the runtime has a context for its broadcast synchronization callbacks.
+   fprintf(stderr,"BC250 D3D device stage 0\n"); fflush(stderr);
+   if (!pCreateData->pKTCallbacks->pfnCreateContextVirtualCb) return E_NOTIMPL;
+   D3DDDICB_CREATECONTEXTVIRTUAL context = {};
+   context.EngineAffinity = 1;
+   fprintf(stderr,"BC250 D3D device stage 1\n"); fflush(stderr);
+   HRESULT contextResult = pCreateData->pKTCallbacks->pfnCreateContextVirtualCb(
+       (HANDLE)pCreateData->hRTDevice.handle, &context);
+   DebugPrintf("BC250 initial CreateContextVirtual %08lx\n", contextResult);
+   if (FAILED(contextResult)) return contextResult;
+   pDevice->hContext = context.hContext;
+   if (Bc250FailCreate("context")) return E_OUTOFMEMORY;
+
+   }
+
+   fprintf(stderr,"BC250 D3D device stage 2\n"); fflush(stderr);
+   // Adapter screen remains capability-only for this prototype. Rendering
+   // screens belong to one runtime device so future hosted callbacks cannot
+   // accidentally be inherited from a different D3D device.
+   const bool hostedRender=GetEnvironmentVariableA("BC250_HOSTED_RENDER", NULL, 0)!=0;
+   if (!hostedRender && GetEnvironmentVariableA("BC250_HOSTED_ICD", NULL, 0)) {
+      Bc250HostProbeState state = {pDevice, GetCurrentThreadId()};
+      bc250_host host = {};
+      host.sType = BC250_HOST_STYPE; host.version = BC250_HOST_VERSION;
+      host.size = sizeof(host); host.identity = pDevice->hDevice;
+      host.userdata = &state; host.dispatch = Bc250HostDispatch;
+      if (!d3d10_hosted_bootstrap(&host)) return E_FAIL;
+   }
+   if (hostedRender) {
+      auto *state=new (std::nothrow) Bc250HostProbeState;
+      if (!state) return E_OUTOFMEMORY;
+      memset(state, 0, sizeof(*state));
+      state->device=pDevice;
+      state->thread=GetCurrentThreadId();
+      char testLoss[16]={};
+      if (GetEnvironmentVariableA("BC250_D3D_RUNTIME_PROBE",NULL,0) &&
+          GetEnvironmentVariableA("BC250_HOST_TEST_LOSS",testLoss,sizeof(testLoss)))
+         state->test_loss=!strcmp(testLoss,"submit") ? 1 : !strcmp(testLoss,"fence") ? 2 : 0;
+      pDevice->hosted_state=state;
+      bc250_host host={};
+      host.sType=BC250_HOST_STYPE; host.version=BC250_HOST_VERSION;
+      host.size=sizeof(host); host.identity=pDevice->hDevice;
+      host.userdata=state; host.dispatch=Bc250HostDispatch;
+      pDevice->owned_screen=d3d10_create_hosted_screen(&host);
+   } else {
+      pDevice->owned_screen = d3d10_create_screen();
+   }
+   if (!pDevice->owned_screen || Bc250FailCreate("screen")) return E_OUTOFMEMORY;
+   struct pipe_screen *screen = pDevice->owned_screen;
+   fprintf(stderr, "BC250 device screen=%p runtime=%p\n", screen, pDevice->hDevice);
+   DebugPrintf("BC250 Renderer: %s\n", screen->get_name(screen));
+   fprintf(stderr,"BC250 D3D device stage 3\n"); fflush(stderr);
    struct pipe_context *pipe = screen->context_create(screen, NULL, 0);
+   if (!pipe) return E_OUTOFMEMORY;
    pDevice->pipe = pipe;
+   if (Bc250FailCreate("pipe")) return E_OUTOFMEMORY;
+   struct pipe_sampler_state default_sampler = {};
+   default_sampler.seamless_cube_map = 1;
+   default_sampler.wrap_s = PIPE_TEX_WRAP_CLAMP_TO_EDGE;
+   default_sampler.wrap_t = PIPE_TEX_WRAP_CLAMP_TO_EDGE;
+   default_sampler.wrap_r = PIPE_TEX_WRAP_CLAMP_TO_EDGE;
+   default_sampler.min_img_filter = PIPE_TEX_FILTER_LINEAR;
+   default_sampler.mag_img_filter = PIPE_TEX_FILTER_LINEAR;
+   default_sampler.min_mip_filter = PIPE_TEX_MIPFILTER_LINEAR;
+   default_sampler.compare_func = PIPE_FUNC_NEVER;
+   default_sampler.min_lod = -FLT_MAX;
+   default_sampler.max_lod = FLT_MAX;
+   for (unsigned i = 0; i < 4; ++i)
+      default_sampler.border_color.f[i] = 1.0f;
+   pDevice->default_sampler = pipe->create_sampler_state(pipe, &default_sampler);
+   if (!pDevice->default_sampler || Bc250FailCreate("sampler")) return E_OUTOFMEMORY;
+   for (auto stage : {MESA_SHADER_VERTEX, MESA_SHADER_FRAGMENT, MESA_SHADER_GEOMETRY}) {
+      for (unsigned i = 0; i < PIPE_MAX_SAMPLERS; ++i)
+         pDevice->samplers[stage][i] = pDevice->default_sampler;
+      pipe->bind_sampler_states(pipe, stage, 0, PIPE_MAX_SAMPLERS, pDevice->samplers[stage]);
+   }
+
+   static const float zero_vertex[4] = {0, 0, 0, 0};
+   pDevice->zero_vertex_buffer = pipe_buffer_create_with_data(
+       pipe, PIPE_BIND_VERTEX_BUFFER, PIPE_USAGE_IMMUTABLE,
+       sizeof(zero_vertex), zero_vertex);
+   if (!pDevice->zero_vertex_buffer || Bc250FailCreate("buffer")) return E_OUTOFMEMORY;
+   fprintf(stderr,"BC250 D3D device stage 4\n"); fflush(stderr);
    pDevice->cso = cso_create_context(pipe, CSO_NO_VBUF);
+   if (!pDevice->cso || Bc250FailCreate("cso")) return E_OUTOFMEMORY;
+   pDevice->velems_changed = true;
 
+   fprintf(stderr,"BC250 D3D device stage 5\n"); fflush(stderr);
    pDevice->empty_vs = CreateEmptyShader(pDevice, MESA_SHADER_VERTEX);
+   if (!pDevice->empty_vs || Bc250FailCreate("empty_vs")) return E_OUTOFMEMORY;
+   fprintf(stderr,"BC250 D3D device stage 6\n"); fflush(stderr);
    pDevice->empty_fs = CreateEmptyShader(pDevice, MESA_SHADER_FRAGMENT);
+   if (!pDevice->empty_fs || Bc250FailCreate("empty_fs")) return E_OUTOFMEMORY;
 
+   fprintf(stderr,"BC250 D3D device stage 7\n"); fflush(stderr);
    pipe->bind_vs_state(pipe, pDevice->empty_vs);
    pipe->bind_fs_state(pipe, pDevice->empty_fs);
 
    pDevice->max_dual_source_render_targets =
          screen->caps.max_dual_source_render_targets;
 
-   pDevice->hRTCoreLayer = pCreateData->hRTCoreLayer;
-   pDevice->hDevice = (HANDLE)pCreateData->hRTDevice.handle;
-   pDevice->KTCallbacks = *pCreateData->pKTCallbacks;
-   pDevice->UMCallbacks = *pCreateData->pUMCallbacks;
-   pDevice->pDXGIBaseCallbacks = pCreateData->DXGIBaseDDI.pDXGIBaseCallbacks;
+   fprintf(stderr,"BC250 D3D device stage 8\n"); fflush(stderr);
+
 
    pDevice->draw_so_target = NULL;
 
@@ -162,146 +734,141 @@ CreateDevice(D3D10DDI_HADAPTER hAdapter,                 // IN
     * Fill in the D3D10 DDI functions
     */
    D3D10DDI_DEVICEFUNCS *pDeviceFuncs = pCreateData->pDeviceFuncs;
-   pDeviceFuncs->pfnDefaultConstantBufferUpdateSubresourceUP = ResourceUpdateSubResourceUP;
-   pDeviceFuncs->pfnVsSetConstantBuffers = VsSetConstantBuffers;
-   pDeviceFuncs->pfnPsSetShaderResources = PsSetShaderResources;
-   pDeviceFuncs->pfnPsSetShader = PsSetShader;
-   pDeviceFuncs->pfnPsSetSamplers = PsSetSamplers;
-   pDeviceFuncs->pfnVsSetShader = VsSetShader;
-   pDeviceFuncs->pfnDrawIndexed = DrawIndexed;
-   pDeviceFuncs->pfnDraw = Draw;
-   pDeviceFuncs->pfnDynamicIABufferMapNoOverwrite = ResourceMap;
-   pDeviceFuncs->pfnDynamicIABufferUnmap = ResourceUnmap;
-   pDeviceFuncs->pfnDynamicConstantBufferMapDiscard = ResourceMap;
-   pDeviceFuncs->pfnDynamicIABufferMapDiscard = ResourceMap;
-   pDeviceFuncs->pfnDynamicConstantBufferUnmap = ResourceUnmap;
-   pDeviceFuncs->pfnPsSetConstantBuffers = PsSetConstantBuffers;
-   pDeviceFuncs->pfnIaSetInputLayout = IaSetInputLayout;
-   pDeviceFuncs->pfnIaSetVertexBuffers = IaSetVertexBuffers;
-   pDeviceFuncs->pfnIaSetIndexBuffer = IaSetIndexBuffer;
-   pDeviceFuncs->pfnDrawIndexedInstanced = DrawIndexedInstanced;
-   pDeviceFuncs->pfnDrawInstanced = DrawInstanced;
-   pDeviceFuncs->pfnDynamicResourceMapDiscard = ResourceMap;
-   pDeviceFuncs->pfnDynamicResourceUnmap = ResourceUnmap;
-   pDeviceFuncs->pfnGsSetConstantBuffers = GsSetConstantBuffers;
-   pDeviceFuncs->pfnGsSetShader = GsSetShader;
-   pDeviceFuncs->pfnIaSetTopology = IaSetTopology;
-   pDeviceFuncs->pfnStagingResourceMap = ResourceMap;
-   pDeviceFuncs->pfnStagingResourceUnmap = ResourceUnmap;
-   pDeviceFuncs->pfnVsSetShaderResources = VsSetShaderResources;
-   pDeviceFuncs->pfnVsSetSamplers = VsSetSamplers;
-   pDeviceFuncs->pfnGsSetShaderResources = GsSetShaderResources;
-   pDeviceFuncs->pfnGsSetSamplers = GsSetSamplers;
-   pDeviceFuncs->pfnSetRenderTargets = SetRenderTargets;
-   pDeviceFuncs->pfnShaderResourceViewReadAfterWriteHazard = ShaderResourceViewReadAfterWriteHazard;
-   pDeviceFuncs->pfnResourceReadAfterWriteHazard = ResourceReadAfterWriteHazard;
-   pDeviceFuncs->pfnSetBlendState = SetBlendState;
-   pDeviceFuncs->pfnSetDepthStencilState = SetDepthStencilState;
-   pDeviceFuncs->pfnSetRasterizerState = SetRasterizerState;
-   pDeviceFuncs->pfnQueryEnd = QueryEnd;
-   pDeviceFuncs->pfnQueryBegin = QueryBegin;
-   pDeviceFuncs->pfnResourceCopyRegion = ResourceCopyRegion;
-   pDeviceFuncs->pfnResourceUpdateSubresourceUP = ResourceUpdateSubResourceUP;
-   pDeviceFuncs->pfnSoSetTargets = SoSetTargets;
-   pDeviceFuncs->pfnDrawAuto = DrawAuto;
-   pDeviceFuncs->pfnSetViewports = SetViewports;
-   pDeviceFuncs->pfnSetScissorRects = SetScissorRects;
-   pDeviceFuncs->pfnClearRenderTargetView = ClearRenderTargetView;
-   pDeviceFuncs->pfnClearDepthStencilView = ClearDepthStencilView;
-   pDeviceFuncs->pfnSetPredication = SetPredication;
-   pDeviceFuncs->pfnQueryGetData = QueryGetData;
-   pDeviceFuncs->pfnFlush = Flush;
-   pDeviceFuncs->pfnGenMips = GenMips;
-   pDeviceFuncs->pfnResourceCopy = ResourceCopy;
-   pDeviceFuncs->pfnResourceResolveSubresource = ResourceResolveSubResource;
-   pDeviceFuncs->pfnResourceMap = ResourceMap;
-   pDeviceFuncs->pfnResourceUnmap = ResourceUnmap;
-   pDeviceFuncs->pfnResourceIsStagingBusy = ResourceIsStagingBusy;
-   pDeviceFuncs->pfnRelocateDeviceFuncs = RelocateDeviceFuncs;
-   pDeviceFuncs->pfnCalcPrivateResourceSize = CalcPrivateResourceSize;
-   pDeviceFuncs->pfnCalcPrivateOpenedResourceSize = CalcPrivateOpenedResourceSize;
-   pDeviceFuncs->pfnCreateResource = CreateResource;
-   pDeviceFuncs->pfnOpenResource = OpenResource;
-   pDeviceFuncs->pfnDestroyResource = DestroyResource;
-   pDeviceFuncs->pfnCalcPrivateShaderResourceViewSize = CalcPrivateShaderResourceViewSize;
-   pDeviceFuncs->pfnCreateShaderResourceView = CreateShaderResourceView;
-   pDeviceFuncs->pfnDestroyShaderResourceView = DestroyShaderResourceView;
-   pDeviceFuncs->pfnCalcPrivateRenderTargetViewSize = CalcPrivateRenderTargetViewSize;
-   pDeviceFuncs->pfnCreateRenderTargetView = CreateRenderTargetView;
-   pDeviceFuncs->pfnDestroyRenderTargetView = DestroyRenderTargetView;
-   pDeviceFuncs->pfnCalcPrivateDepthStencilViewSize = CalcPrivateDepthStencilViewSize;
-   pDeviceFuncs->pfnCreateDepthStencilView = CreateDepthStencilView;
-   pDeviceFuncs->pfnDestroyDepthStencilView = DestroyDepthStencilView;
-   pDeviceFuncs->pfnCalcPrivateElementLayoutSize = CalcPrivateElementLayoutSize;
-   pDeviceFuncs->pfnCreateElementLayout = CreateElementLayout;
-   pDeviceFuncs->pfnDestroyElementLayout = DestroyElementLayout;
-   pDeviceFuncs->pfnCalcPrivateBlendStateSize = CalcPrivateBlendStateSize;
-   pDeviceFuncs->pfnCreateBlendState = CreateBlendState;
-   pDeviceFuncs->pfnDestroyBlendState = DestroyBlendState;
-   pDeviceFuncs->pfnCalcPrivateDepthStencilStateSize = CalcPrivateDepthStencilStateSize;
-   pDeviceFuncs->pfnCreateDepthStencilState = CreateDepthStencilState;
-   pDeviceFuncs->pfnDestroyDepthStencilState = DestroyDepthStencilState;
-   pDeviceFuncs->pfnCalcPrivateRasterizerStateSize = CalcPrivateRasterizerStateSize;
-   pDeviceFuncs->pfnCreateRasterizerState = CreateRasterizerState;
-   pDeviceFuncs->pfnDestroyRasterizerState = DestroyRasterizerState;
-   pDeviceFuncs->pfnCalcPrivateShaderSize = CalcPrivateShaderSize;
-   pDeviceFuncs->pfnCreateVertexShader = CreateVertexShader;
-   pDeviceFuncs->pfnCreateGeometryShader = CreateGeometryShader;
-   pDeviceFuncs->pfnCreatePixelShader = CreatePixelShader;
-   pDeviceFuncs->pfnCalcPrivateGeometryShaderWithStreamOutput = CalcPrivateGeometryShaderWithStreamOutput;
-   pDeviceFuncs->pfnCreateGeometryShaderWithStreamOutput = CreateGeometryShaderWithStreamOutput;
-   pDeviceFuncs->pfnDestroyShader = DestroyShader;
-   pDeviceFuncs->pfnCalcPrivateSamplerSize = CalcPrivateSamplerSize;
-   pDeviceFuncs->pfnCreateSampler = CreateSampler;
-   pDeviceFuncs->pfnDestroySampler = DestroySampler;
-   pDeviceFuncs->pfnCalcPrivateQuerySize = CalcPrivateQuerySize;
-   pDeviceFuncs->pfnCreateQuery = CreateQuery;
-   pDeviceFuncs->pfnDestroyQuery = DestroyQuery;
-   pDeviceFuncs->pfnCheckFormatSupport = CheckFormatSupport;
-   pDeviceFuncs->pfnCheckMultisampleQualityLevels = CheckMultisampleQualityLevels;
-   pDeviceFuncs->pfnCheckCounterInfo = CheckCounterInfo;
-   pDeviceFuncs->pfnCheckCounter = CheckCounter;
-   pDeviceFuncs->pfnDestroyDevice = DestroyDevice;
-   pDeviceFuncs->pfnSetTextFilterSize = SetTextFilterSize;
+   pDeviceFuncs->pfnDefaultConstantBufferUpdateSubresourceUP = Bc250Entry<ResourceUpdateSubResourceUP>::Call;
+   pDeviceFuncs->pfnVsSetConstantBuffers = Bc250Entry<VsSetConstantBuffers>::Call;
+   pDeviceFuncs->pfnPsSetShaderResources = Bc250Entry<PsSetShaderResources>::Call;
+   pDeviceFuncs->pfnPsSetShader = Bc250Entry<PsSetShader>::Call;
+   pDeviceFuncs->pfnPsSetSamplers = Bc250Entry<PsSetSamplers>::Call;
+   pDeviceFuncs->pfnVsSetShader = Bc250Entry<VsSetShader>::Call;
+   pDeviceFuncs->pfnDrawIndexed = Bc250Entry<DrawIndexed>::Call;
+   pDeviceFuncs->pfnDraw = Bc250Entry<Draw>::Call;
+   pDeviceFuncs->pfnDynamicIABufferMapNoOverwrite = Bc250Entry<ResourceMap>::Call;
+   pDeviceFuncs->pfnDynamicIABufferUnmap = Bc250Entry<ResourceUnmap>::Call;
+   pDeviceFuncs->pfnDynamicConstantBufferMapDiscard = Bc250Entry<ResourceMap>::Call;
+   pDeviceFuncs->pfnDynamicIABufferMapDiscard = Bc250Entry<ResourceMap>::Call;
+   pDeviceFuncs->pfnDynamicConstantBufferUnmap = Bc250Entry<ResourceUnmap>::Call;
+   pDeviceFuncs->pfnPsSetConstantBuffers = Bc250Entry<PsSetConstantBuffers>::Call;
+   pDeviceFuncs->pfnIaSetInputLayout = Bc250Entry<IaSetInputLayout>::Call;
+   pDeviceFuncs->pfnIaSetVertexBuffers = Bc250Entry<IaSetVertexBuffers>::Call;
+   pDeviceFuncs->pfnIaSetIndexBuffer = Bc250Entry<IaSetIndexBuffer>::Call;
+   pDeviceFuncs->pfnDrawIndexedInstanced = Bc250Entry<DrawIndexedInstanced>::Call;
+   pDeviceFuncs->pfnDrawInstanced = Bc250Entry<DrawInstanced>::Call;
+   pDeviceFuncs->pfnDynamicResourceMapDiscard = Bc250Entry<ResourceMap>::Call;
+   pDeviceFuncs->pfnDynamicResourceUnmap = Bc250Entry<ResourceUnmap>::Call;
+   pDeviceFuncs->pfnGsSetConstantBuffers = Bc250Entry<GsSetConstantBuffers>::Call;
+   pDeviceFuncs->pfnGsSetShader = Bc250Entry<GsSetShader>::Call;
+   pDeviceFuncs->pfnIaSetTopology = Bc250Entry<IaSetTopology>::Call;
+   pDeviceFuncs->pfnStagingResourceMap = Bc250Entry<ResourceMap>::Call;
+   pDeviceFuncs->pfnStagingResourceUnmap = Bc250Entry<ResourceUnmap>::Call;
+   pDeviceFuncs->pfnVsSetShaderResources = Bc250Entry<VsSetShaderResources>::Call;
+   pDeviceFuncs->pfnVsSetSamplers = Bc250Entry<VsSetSamplers>::Call;
+   pDeviceFuncs->pfnGsSetShaderResources = Bc250Entry<GsSetShaderResources>::Call;
+   pDeviceFuncs->pfnGsSetSamplers = Bc250Entry<GsSetSamplers>::Call;
+   pDeviceFuncs->pfnSetRenderTargets = Bc250Entry<SetRenderTargets>::Call;
+   pDeviceFuncs->pfnShaderResourceViewReadAfterWriteHazard = Bc250Entry<ShaderResourceViewReadAfterWriteHazard>::Call;
+   pDeviceFuncs->pfnResourceReadAfterWriteHazard = Bc250Entry<ResourceReadAfterWriteHazard>::Call;
+   pDeviceFuncs->pfnSetBlendState = Bc250Entry<SetBlendState>::Call;
+   pDeviceFuncs->pfnSetDepthStencilState = Bc250Entry<SetDepthStencilState>::Call;
+   pDeviceFuncs->pfnSetRasterizerState = Bc250Entry<SetRasterizerState>::Call;
+   pDeviceFuncs->pfnQueryEnd = Bc250Entry<QueryEnd>::Call;
+   pDeviceFuncs->pfnQueryBegin = Bc250Entry<QueryBegin>::Call;
+   pDeviceFuncs->pfnResourceCopyRegion = Bc250Entry<ResourceCopyRegion>::Call;
+   pDeviceFuncs->pfnResourceUpdateSubresourceUP = Bc250Entry<ResourceUpdateSubResourceUP>::Call;
+   pDeviceFuncs->pfnSoSetTargets = Bc250Entry<SoSetTargets>::Call;
+   pDeviceFuncs->pfnDrawAuto = Bc250Entry<DrawAuto>::Call;
+   pDeviceFuncs->pfnSetViewports = Bc250Entry<SetViewports>::Call;
+   pDeviceFuncs->pfnSetScissorRects = Bc250Entry<SetScissorRects>::Call;
+   pDeviceFuncs->pfnClearRenderTargetView = Bc250Entry<ClearRenderTargetView>::Call;
+   pDeviceFuncs->pfnClearDepthStencilView = Bc250Entry<ClearDepthStencilView>::Call;
+   pDeviceFuncs->pfnSetPredication = Bc250Entry<SetPredication>::Call;
+   pDeviceFuncs->pfnQueryGetData = Bc250Entry<QueryGetData>::Call;
+   pDeviceFuncs->pfnFlush = Bc250Entry<Flush>::Call;
+   pDeviceFuncs->pfnGenMips = Bc250Entry<GenMips>::Call;
+   pDeviceFuncs->pfnResourceCopy = Bc250Entry<ResourceCopy>::Call;
+   pDeviceFuncs->pfnResourceResolveSubresource = Bc250Entry<ResourceResolveSubResource>::Call;
+   pDeviceFuncs->pfnResourceMap = Bc250Entry<ResourceMap>::Call;
+   pDeviceFuncs->pfnResourceUnmap = Bc250Entry<ResourceUnmap>::Call;
+   pDeviceFuncs->pfnResourceIsStagingBusy = Bc250Entry<ResourceIsStagingBusy>::Call;
+   pDeviceFuncs->pfnRelocateDeviceFuncs = Bc250Entry<RelocateDeviceFuncs>::Call;
+   pDeviceFuncs->pfnCalcPrivateResourceSize = Bc250Entry<CalcPrivateResourceSize>::Call;
+   pDeviceFuncs->pfnCalcPrivateOpenedResourceSize = Bc250Entry<CalcPrivateOpenedResourceSize>::Call;
+   pDeviceFuncs->pfnCreateResource = Bc250Entry<CreateResource>::Call;
+   pDeviceFuncs->pfnOpenResource = Bc250Entry<OpenResource>::Call;
+   pDeviceFuncs->pfnDestroyResource = Bc250Entry<DestroyResource>::Call;
+   pDeviceFuncs->pfnCalcPrivateShaderResourceViewSize = Bc250Entry<CalcPrivateShaderResourceViewSize>::Call;
+   pDeviceFuncs->pfnCreateShaderResourceView = Bc250Entry<CreateShaderResourceView>::Call;
+   pDeviceFuncs->pfnDestroyShaderResourceView = Bc250Entry<DestroyShaderResourceView>::Call;
+   pDeviceFuncs->pfnCalcPrivateRenderTargetViewSize = Bc250Entry<CalcPrivateRenderTargetViewSize>::Call;
+   pDeviceFuncs->pfnCreateRenderTargetView = Bc250Entry<CreateRenderTargetView>::Call;
+   pDeviceFuncs->pfnDestroyRenderTargetView = Bc250Entry<DestroyRenderTargetView>::Call;
+   pDeviceFuncs->pfnCalcPrivateDepthStencilViewSize = Bc250Entry<CalcPrivateDepthStencilViewSize>::Call;
+   pDeviceFuncs->pfnCreateDepthStencilView = Bc250Entry<CreateDepthStencilView>::Call;
+   pDeviceFuncs->pfnDestroyDepthStencilView = Bc250Entry<DestroyDepthStencilView>::Call;
+   pDeviceFuncs->pfnCalcPrivateElementLayoutSize = Bc250Entry<CalcPrivateElementLayoutSize>::Call;
+   pDeviceFuncs->pfnCreateElementLayout = Bc250Entry<CreateElementLayout>::Call;
+   pDeviceFuncs->pfnDestroyElementLayout = Bc250Entry<DestroyElementLayout>::Call;
+   pDeviceFuncs->pfnCalcPrivateBlendStateSize = Bc250Entry<CalcPrivateBlendStateSize>::Call;
+   pDeviceFuncs->pfnCreateBlendState = Bc250Entry<CreateBlendState>::Call;
+   pDeviceFuncs->pfnDestroyBlendState = Bc250Entry<DestroyBlendState>::Call;
+   pDeviceFuncs->pfnCalcPrivateDepthStencilStateSize = Bc250Entry<CalcPrivateDepthStencilStateSize>::Call;
+   pDeviceFuncs->pfnCreateDepthStencilState = Bc250Entry<CreateDepthStencilState>::Call;
+   pDeviceFuncs->pfnDestroyDepthStencilState = Bc250Entry<DestroyDepthStencilState>::Call;
+   pDeviceFuncs->pfnCalcPrivateRasterizerStateSize = Bc250Entry<CalcPrivateRasterizerStateSize>::Call;
+   pDeviceFuncs->pfnCreateRasterizerState = Bc250Entry<CreateRasterizerState>::Call;
+   pDeviceFuncs->pfnDestroyRasterizerState = Bc250Entry<DestroyRasterizerState>::Call;
+   pDeviceFuncs->pfnCalcPrivateShaderSize = Bc250Entry<CalcPrivateShaderSize>::Call;
+   pDeviceFuncs->pfnCreateVertexShader = Bc250Entry<CreateVertexShader>::Call;
+   pDeviceFuncs->pfnCreateGeometryShader = Bc250Entry<CreateGeometryShader>::Call;
+   pDeviceFuncs->pfnCreatePixelShader = Bc250Entry<CreatePixelShader>::Call;
+   pDeviceFuncs->pfnCalcPrivateGeometryShaderWithStreamOutput = Bc250Entry<CalcPrivateGeometryShaderWithStreamOutput>::Call;
+   pDeviceFuncs->pfnCreateGeometryShaderWithStreamOutput = Bc250Entry<CreateGeometryShaderWithStreamOutput>::Call;
+   pDeviceFuncs->pfnDestroyShader = Bc250Entry<DestroyShader>::Call;
+   pDeviceFuncs->pfnCalcPrivateSamplerSize = Bc250Entry<CalcPrivateSamplerSize>::Call;
+   pDeviceFuncs->pfnCreateSampler = Bc250Entry<CreateSampler>::Call;
+   pDeviceFuncs->pfnDestroySampler = Bc250Entry<DestroySampler>::Call;
+   pDeviceFuncs->pfnCalcPrivateQuerySize = Bc250Entry<CalcPrivateQuerySize>::Call;
+   pDeviceFuncs->pfnCreateQuery = Bc250Entry<CreateQuery>::Call;
+   pDeviceFuncs->pfnDestroyQuery = Bc250Entry<DestroyQuery>::Call;
+   pDeviceFuncs->pfnCheckFormatSupport = Bc250Entry<CheckFormatSupport>::Call;
+   pDeviceFuncs->pfnCheckMultisampleQualityLevels = Bc250Entry<CheckMultisampleQualityLevels>::Call;
+   pDeviceFuncs->pfnCheckCounterInfo = Bc250Entry<CheckCounterInfo>::Call;
+   pDeviceFuncs->pfnCheckCounter = Bc250Entry<CheckCounter>::Call;
+   pDeviceFuncs->pfnDestroyDevice = Bc250Entry<DestroyDevice>::Call;
+   pDeviceFuncs->pfnSetTextFilterSize = Bc250Entry<SetTextFilterSize>::Call;
    if (pCreateData->Interface == D3D10_1_DDI_INTERFACE_VERSION ||
        pCreateData->Interface == D3D10_1_x_DDI_INTERFACE_VERSION ||
        pCreateData->Interface == D3D10_1_7_DDI_INTERFACE_VERSION) {
       D3D10_1DDI_DEVICEFUNCS *p10_1DeviceFuncs = pCreateData->p10_1DeviceFuncs;
-      p10_1DeviceFuncs->pfnRelocateDeviceFuncs = RelocateDeviceFuncs1;
-      p10_1DeviceFuncs->pfnCalcPrivateShaderResourceViewSize = CalcPrivateShaderResourceViewSize1;
-      p10_1DeviceFuncs->pfnCreateShaderResourceView = CreateShaderResourceView1;
-      p10_1DeviceFuncs->pfnCalcPrivateBlendStateSize = CalcPrivateBlendStateSize1;
-      p10_1DeviceFuncs->pfnCreateBlendState = CreateBlendState1;
-      p10_1DeviceFuncs->pfnResourceConvert = ResourceCopy;
-      p10_1DeviceFuncs->pfnResourceConvertRegion = ResourceCopyRegion;
+      p10_1DeviceFuncs->pfnRelocateDeviceFuncs = Bc250Entry<RelocateDeviceFuncs1>::Call;
+      p10_1DeviceFuncs->pfnCalcPrivateShaderResourceViewSize = Bc250Entry<CalcPrivateShaderResourceViewSize1>::Call;
+      p10_1DeviceFuncs->pfnCreateShaderResourceView = Bc250Entry<CreateShaderResourceView1>::Call;
+      p10_1DeviceFuncs->pfnCalcPrivateBlendStateSize = Bc250Entry<CalcPrivateBlendStateSize1>::Call;
+      p10_1DeviceFuncs->pfnCreateBlendState = Bc250Entry<CreateBlendState1>::Call;
+      p10_1DeviceFuncs->pfnResourceConvert = Bc250Entry<ResourceCopy>::Call;
+      p10_1DeviceFuncs->pfnResourceConvertRegion = Bc250Entry<ResourceCopyRegion>::Call;
    }
 
    /*
     * Fill in DXGI DDI functions
     */
    pCreateData->DXGIBaseDDI.pDXGIDDIBaseFunctions->pfnPresent =
-      _Present;
+      Bc250Entry<_Present>::Call;
    pCreateData->DXGIBaseDDI.pDXGIDDIBaseFunctions->pfnGetGammaCaps =
-      _GetGammaCaps;
+      Bc250Entry<_GetGammaCaps>::Call;
    pCreateData->DXGIBaseDDI.pDXGIDDIBaseFunctions->pfnSetDisplayMode =
-      _SetDisplayMode;
+      Bc250Entry<_SetDisplayMode>::Call;
    pCreateData->DXGIBaseDDI.pDXGIDDIBaseFunctions->pfnSetResourcePriority =
-      _SetResourcePriority;
+      Bc250Entry<_SetResourcePriority>::Call;
    pCreateData->DXGIBaseDDI.pDXGIDDIBaseFunctions->pfnQueryResourceResidency =
-      _QueryResourceResidency;
+      Bc250Entry<_QueryResourceResidency>::Call;
    pCreateData->DXGIBaseDDI.pDXGIDDIBaseFunctions->pfnRotateResourceIdentities =
-      _RotateResourceIdentities;
+      Bc250Entry<_RotateResourceIdentities>::Call;
    pCreateData->DXGIBaseDDI.pDXGIDDIBaseFunctions->pfnBlt =
-      _Blt;
+      Bc250Entry<_Blt>::Call;
 
-   if (0) {
-      return S_OK;
-   } else {
-      // Tell DXGI to not use the shared resource presentation path when
-      // communicating with DWM:
-      // http://msdn.microsoft.com/en-us/library/windows/hardware/ff569887(v=vs.85).aspx
-      return DXGI_STATUS_NO_REDIRECTION;
-   }
+   // E26: the linear shared-resource path is implemented for the tested formats.
+   createGuard.complete = true;
+   return S_OK;
 }
 
 
@@ -325,6 +892,7 @@ DestroyDevice(D3D10DDI_HDEVICE hDevice)   // IN
    Device *pDevice = CastDevice(hDevice);
    struct pipe_context *pipe = pDevice->pipe;
 
+   fprintf(stderr,"D3D destroy stage 0\n"); fflush(stderr);
    pipe->flush(pipe, NULL, 0);
 
    for (i = 0; i < PIPE_MAX_SO_BUFFERS; ++i) {
@@ -336,12 +904,16 @@ DestroyDevice(D3D10DDI_HDEVICE hDevice)   // IN
 
    pipe->bind_fs_state(pipe, NULL);
    pipe->bind_vs_state(pipe, NULL);
+   fprintf(stderr,"D3D destroy stage 1\n"); fflush(stderr);
    cso_unbind_context(pDevice->cso);
+   fprintf(stderr,"D3D destroy stage 2\n"); fflush(stderr);
    cso_destroy_context(pDevice->cso);
 
+   fprintf(stderr,"D3D destroy stage 3\n"); fflush(stderr);
    DeleteEmptyShader(pDevice, MESA_SHADER_FRAGMENT, pDevice->empty_fs);
    DeleteEmptyShader(pDevice, MESA_SHADER_VERTEX, pDevice->empty_vs);
 
+   fprintf(stderr,"D3D destroy stage 4\n"); fflush(stderr);
    util_unreference_framebuffer_state(&pDevice->fb);
 
    for (i = 0; i < PIPE_MAX_ATTRIBS; ++i) {
@@ -350,18 +922,58 @@ DestroyDevice(D3D10DDI_HDEVICE hDevice)   // IN
       }
    }
 
+   fprintf(stderr,"D3D destroy stage 5\n"); fflush(stderr);
+   pipe_resource_reference(&pDevice->zero_vertex_buffer, NULL);
    pipe_resource_reference(&pDevice->index_buffer, NULL);
 
    static struct pipe_sampler_view * sampler_views[PIPE_MAX_SHADER_SAMPLER_VIEWS];
    memset(sampler_views, 0, sizeof sampler_views);
+   fprintf(stderr,"D3D destroy stage 6\n"); fflush(stderr);
    pipe->set_sampler_views(pipe, MESA_SHADER_FRAGMENT, 0,
-                           PIPE_MAX_SHADER_SAMPLER_VIEWS, 0, sampler_views);
+                           MIN2(PIPE_MAX_SHADER_SAMPLER_VIEWS,
+                                pipe->screen->shader_caps[MESA_SHADER_FRAGMENT].max_sampler_views),
+                           0, sampler_views);
    pipe->set_sampler_views(pipe, MESA_SHADER_VERTEX, 0,
-                           PIPE_MAX_SHADER_SAMPLER_VIEWS, 0, sampler_views);
+                           MIN2(PIPE_MAX_SHADER_SAMPLER_VIEWS,
+                                pipe->screen->shader_caps[MESA_SHADER_VERTEX].max_sampler_views),
+                           0, sampler_views);
    pipe->set_sampler_views(pipe, MESA_SHADER_GEOMETRY, 0,
-                           PIPE_MAX_SHADER_SAMPLER_VIEWS, 0, sampler_views);
+                           MIN2(PIPE_MAX_SHADER_SAMPLER_VIEWS,
+                                pipe->screen->shader_caps[MESA_SHADER_GEOMETRY].max_sampler_views),
+                           0, sampler_views);
 
+   Bc250DeleteDefaultSampler(pDevice);
+   fprintf(stderr,"D3D destroy stage 7\n"); fflush(stderr);
    pipe->destroy(pipe);
+   pDevice->pipe = NULL;
+   if (pDevice->owned_screen) {
+      fprintf(stderr, "BC250 destroy device screen=%p runtime=%p\n", pDevice->owned_screen, pDevice->hDevice);
+      pDevice->owned_screen->destroy(pDevice->owned_screen);
+      pDevice->owned_screen = NULL;
+   }
+   auto *hosted=(Bc250HostProbeState *)pDevice->hosted_state;
+   if (hosted && hosted->present_sync) {
+      HRESULT hr=Bc250WaitPresentIdle(pDevice);
+      if (FAILED(hr)) { Bc250StopHostedSubmission(pDevice); SetError(hDevice,hr); }
+      D3DDDICB_DESTROYSYNCHRONIZATIONOBJECT destroy={};
+      destroy.hSyncObject=hosted->present_sync;
+      hr=pDevice->KTCallbacks.pfnDestroySynchronizationObjectCb(pDevice->hDevice,&destroy);
+      if (FAILED(hr)) SetError(hDevice,hr);
+      hosted->present_sync=0;
+   }
+   if (pDevice->hContext) {
+      D3DDDICB_DESTROYCONTEXT destroy = {};
+      destroy.hContext = pDevice->hContext;
+      pDevice->KTCallbacks.pfnDestroyContextCb(pDevice->hDevice, &destroy);
+   }
+   if (pDevice->pagingQueue) {
+      D3DDDI_DESTROYPAGINGQUEUE destroy = {};
+      destroy.hPagingQueue = pDevice->pagingQueue;
+      pDevice->KTCallbacks.pfnDestroyPagingQueueCb(pDevice->hDevice, &destroy);
+   }
+   delete (Bc250HostProbeState *)pDevice->hosted_state;
+   pDevice->hosted_state=NULL;
+   fprintf(stderr,"D3D destroy stage 8\n"); fflush(stderr);
 }
 
 

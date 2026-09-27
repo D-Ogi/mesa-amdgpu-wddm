@@ -4754,8 +4754,10 @@ zink_binding(mesa_shader_stage stage, VkDescriptorType type, int index, bool com
 
       case VK_DESCRIPTOR_TYPE_SAMPLER:
          assert(index < PIPE_MAX_SAMPLERS);
-         assert(stage == MESA_SHADER_KERNEL);
-         return index;
+         if (stage == MESA_SHADER_KERNEL)
+            return index;
+         return ZINK_GFX_SHADER_COUNT * (PIPE_MAX_SAMPLERS + ZINK_MAX_SHADER_IMAGES) +
+                base * PIPE_MAX_SAMPLERS + index;
 
       case VK_DESCRIPTOR_TYPE_STORAGE_BUFFER:
          return base + (compact_descriptors * (ZINK_GFX_SHADER_COUNT * 2));
@@ -5663,6 +5665,17 @@ boop_componenty_so_vars(nir_shader *nir)
    }
 }
 
+static bool
+lower_zero_base_vertex_id(nir_builder *b, nir_intrinsic_instr *intr, void *data)
+{
+   if (intr->intrinsic != nir_intrinsic_load_vertex_id_zero_base)
+      return false;
+   b->cursor = nir_before_instr(&intr->instr);
+   nir_def *value = nir_isub(b, nir_load_vertex_id(b), nir_load_first_vertex(b));
+   nir_def_replace(&intr->def, value);
+   return true;
+}
+
 void
 zink_shader_init(struct zink_screen *screen, struct zink_shader *zs)
 {
@@ -5695,6 +5708,9 @@ zink_shader_init(struct zink_screen *screen, struct zink_shader *zs)
    if (nir->info.stage < MESA_SHADER_FRAGMENT)
       nir_gather_xfb_info_from_intrinsics(nir);
    NIR_PASS(_, nir, fix_vertex_input_locations);
+   if (nir->info.stage == MESA_SHADER_VERTEX && screen->base.caps.draw_parameters)
+      NIR_PASS(_, nir, nir_shader_intrinsics_pass, lower_zero_base_vertex_id,
+               nir_metadata_control_flow, NULL);
    nir_shader_gather_info(nir, nir_shader_get_entrypoint(nir));
    scan_nir(screen, nir, zs);
 
@@ -5893,6 +5909,7 @@ zink_shader_init(struct zink_screen *screen, struct zink_shader *zs)
    zink_shader_serialize_blob(nir, &zs->blob);
    memcpy(&zs->info, &nir->info, sizeof(nir->info));
 }
+
 
 void
 zink_shader_finalize(struct pipe_screen *pscreen, struct nir_shader *nir, bool optimize)

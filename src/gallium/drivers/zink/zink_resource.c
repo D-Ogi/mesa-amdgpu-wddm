@@ -54,6 +54,8 @@
 
 #if defined(ZINK_USE_DMABUF) && !defined(_WIN32)
 #include "drm-uapi/drm_fourcc.h"
+#elif defined(_WIN32)
+#include "amd/common/ac_drm_fourcc.h"
 #else
 /* these won't actually be used */
 #define DRM_FORMAT_MOD_INVALID 0
@@ -1001,6 +1003,10 @@ struct mem_alloc_info {
 static inline bool
 get_export_flags(struct zink_screen *screen, const struct pipe_resource *templ, struct mem_alloc_info *alloc_info)
 {
+   if (alloc_info->whandle && alloc_info->whandle->bc250_identity) {
+      alloc_info->external=0; alloc_info->export_types=0; alloc_info->shared=false;
+      return screen->bc250_host.dispatch!=NULL;
+   }
    bool needs_export = (templ->bind & (ZINK_BIND_VIDEO | ZINK_BIND_DMABUF)) != 0;
    if (alloc_info->whandle) {
       if (alloc_info->whandle->type == WINSYS_HANDLE_TYPE_FD ||
@@ -1097,12 +1103,24 @@ allocate_bo(struct zink_screen *screen, const struct pipe_resource *templ,
       mai.pNext = &imfi;
    }
 #else
+   struct bc250_host_import host_import={0};
    VkImportMemoryWin32HandleInfoKHR imfi = {
       VK_STRUCTURE_TYPE_IMPORT_MEMORY_WIN32_HANDLE_INFO_KHR,
       NULL,
    };
 
-   if (alloc_info->whandle) {
+   if (alloc_info->whandle && alloc_info->whandle->bc250_identity) {
+      if (!screen->bc250_host.dispatch || alloc_info->whandle->bc250_identity!=screen->bc250_host.identity)
+         return roc_fail_and_cleanup_object;
+      obj->bc250_runtime=true;
+      host_import.sType=BC250_HOST_IMPORT_STYPE;
+      host_import.pNext=mai.pNext;
+      host_import.identity=alloc_info->whandle->bc250_identity;
+      host_import.allocation=(uint32_t)(uintptr_t)alloc_info->whandle->handle;
+      host_import.va=alloc_info->whandle->bc250_va;
+      host_import.size=alloc_info->whandle->size;
+      mai.pNext=&host_import;
+   } else if (alloc_info->whandle) {
       HANDLE source_target = GetCurrentProcess();
       HANDLE out_handle;
 
@@ -1174,6 +1192,12 @@ allocate_bo(struct zink_screen *screen, const struct pipe_resource *templ,
       else
           heap = ZINK_HEAP_DEVICE_LOCAL;
    };
+
+#if defined(ZINK_USE_DMABUF) && defined(_WIN32)
+   /* Win32 memory import retains caller ownership, unlike an imported fd. */
+   if (imfi.handle)
+      CloseHandle(imfi.handle);
+#endif
 
    return obj->bo ? roc_success : roc_fail_and_cleanup_object;
 }
@@ -1470,13 +1494,15 @@ setup_image_pnext(struct zink_screen *screen, const struct pipe_resource *templ,
 
    filter_external_image_export_types(screen, ici, mod, alloc_info);
 
-   if (alloc_info->shared || alloc_info->external) {
+   if (alloc_info->shared || alloc_info->external || (alloc_info->whandle && alloc_info->whandle->bc250_identity)) {
+      if (alloc_info->shared || alloc_info->external) {
       s->emici.sType = VK_STRUCTURE_TYPE_EXTERNAL_MEMORY_IMAGE_CREATE_INFO;
       s->emici.pNext = ici->pNext;
       s->emici.handleTypes = alloc_info->export_types;
       assert(!(s->emici.handleTypes & VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT) ||
              ici->tiling != VK_IMAGE_TILING_OPTIMAL);
       ici->pNext = &s->emici;
+      }
 
       assert(ici->tiling != VK_IMAGE_TILING_DRM_FORMAT_MODIFIER_EXT || mod != DRM_FORMAT_MOD_INVALID);
       if (alloc_info->whandle && ici->tiling == VK_IMAGE_TILING_DRM_FORMAT_MODIFIER_EXT) {
@@ -2314,6 +2340,7 @@ zink_resource_from_handle(struct pipe_screen *pscreen,
 #ifdef ZINK_USE_DMABUF
    struct zink_screen *screen = zink_screen(pscreen);
 
+   fprintf(stderr,"BC250 zink import type=%u modifier=%llu identity=%p va=%llu\n",whandle->type,(unsigned long long)whandle->modifier,whandle->bc250_identity,(unsigned long long)whandle->bc250_va);
    if (whandle->modifier != DRM_FORMAT_MOD_INVALID &&
        !screen->info.have_EXT_image_drm_format_modifier)
       return NULL;
@@ -2337,7 +2364,7 @@ zink_resource_from_handle(struct pipe_screen *pscreen,
          whandle->modifier = modifier;
       }
    }
-   templ2.bind |= ZINK_BIND_DMABUF;
+   if (!whandle->bc250_identity) templ2.bind |= ZINK_BIND_DMABUF;
    struct pipe_resource *pres = resource_create(pscreen, &templ2, whandle, usage, &modifier, modifier_count, NULL, NULL);
    if (!pres)
       return NULL;
@@ -2474,7 +2501,7 @@ invalidate_buffer(struct zink_context *ctx, struct zink_resource *res)
 
    util_range_set_empty(&res->valid_buffer_range);
    if (!zink_resource_has_usage(res))
-      return false;
+      return true;
 
    struct zink_resource_object *new_obj = resource_object_create(screen, &res->base.b, NULL, NULL, NULL, 0, NULL, 0);
    if (!new_obj) {
@@ -2485,6 +2512,9 @@ invalidate_buffer(struct zink_context *ctx, struct zink_resource *res)
    /* this ref must be transferred before rebind or else BOOM */
    zink_batch_reference_resource_move(ctx, res);
    res->obj = new_obj;
+   /* The cached resource identity survives DISCARD, but its VkBuffer does not. */
+   if (ctx->index_buffer == &res->base.b)
+      ctx->index_buffer = NULL;
    res->queue = VK_QUEUE_FAMILY_IGNORED;
    if (needs_bda)
       zink_resource_get_address(screen, res);
@@ -2611,6 +2641,28 @@ destroy_transfer(struct zink_context *ctx, struct zink_transfer *trans)
    }
 }
 
+static void
+bc250_audit_map_bucket(struct zink_context *ctx, struct pipe_resource *pres,
+                       unsigned usage, const struct pipe_box *box, uint64_t bytes)
+{
+   struct zink_resource *res = zink_resource(pres);
+   struct zink_bc250_map_bucket key = {0};
+   key.target=pres->target; key.width=pres->width0; key.height=pres->height0;
+   key.depth=pres->depth0; key.format=pres->format; key.bind=pres->bind;
+   key.usage=usage | (res->base.is_user_ptr ? PIPE_MAP_PERSISTENT : 0);
+   key.box_width=box->width; key.box_height=box->height; key.box_depth=box->depth;
+   key.runtime=res->obj->bc250_runtime; key.user_ptr=res->base.is_user_ptr;
+   for (unsigned i=0; i<ARRAY_SIZE(ctx->bc250_map_buckets); ++i) {
+      struct zink_bc250_map_bucket *bucket=&ctx->bc250_map_buckets[i];
+      if (!bucket->calls) *bucket=key;
+      if (!memcmp(bucket, &key, offsetof(struct zink_bc250_map_bucket, calls))) {
+         bucket->calls++; bucket->bytes+=bytes;
+         return;
+      }
+   }
+   ctx->bc250_map_overflow++;
+}
+
 static void *
 zink_buffer_map(struct pipe_context *pctx,
                     struct pipe_resource *pres,
@@ -2621,6 +2673,12 @@ zink_buffer_map(struct pipe_context *pctx,
 {
    MESA_TRACE_FUNC();
    struct zink_context *ctx = zink_context(pctx);
+   if (ctx->bc250_audit) {
+      ctx->bc250_buffer_maps++;
+      ctx->bc250_buffer_map_bytes += (uint64_t)box->width;
+      bc250_audit_map_bucket(ctx, pres, usage, box, (uint64_t)box->width);
+      if ((usage & PIPE_MAP_PERSISTENT) || zink_resource(pres)->base.is_user_ptr) ctx->bc250_persistent_maps++;
+   }
    struct zink_screen *screen = zink_screen(pctx->screen);
    struct zink_resource *res = zink_resource(pres);
    struct zink_transfer *trans = create_transfer(ctx, pres, usage, box);
@@ -2830,6 +2888,12 @@ zink_image_map(struct pipe_context *pctx,
 {
    MESA_TRACE_FUNC();
    struct zink_context *ctx = zink_context(pctx);
+   if (ctx->bc250_audit) {
+      ctx->bc250_image_maps++;
+      ctx->bc250_image_map_bytes += (uint64_t)util_format_get_2d_size(pres->format, util_format_get_stride(pres->format, box->width), box->height) * box->depth;
+      bc250_audit_map_bucket(ctx, pres, usage, box, (uint64_t)util_format_get_2d_size(pres->format, util_format_get_stride(pres->format, box->width), box->height) * box->depth);
+      if ((usage & PIPE_MAP_PERSISTENT) || zink_resource(pres)->base.is_user_ptr) ctx->bc250_persistent_maps++;
+   }
    struct zink_screen *screen = zink_screen(pctx->screen);
    struct zink_resource *res = zink_resource(pres);
    if (res->unflushed_transient)
@@ -3611,4 +3675,27 @@ zink_context_resource_init(struct pipe_context *pctx)
    pctx->buffer_subdata = zink_buffer_subdata;
    pctx->texture_subdata = zink_image_subdata;
    pctx->invalidate_resource = zink_resource_invalidate;
+}
+
+int
+zink_bc250_release_runtime_resource(struct pipe_context *pctx, struct pipe_resource **pres)
+{
+   struct zink_context *ctx=zink_context(pctx);
+   struct zink_screen *screen=zink_screen(pctx->screen);
+   if (!pres || !*pres || !screen->bc250_host.dispatch || screen->threaded_submit) return 0;
+   struct zink_resource *res=zink_resource(*pres);
+   if (!res->obj->bc250_runtime) return 0;
+   struct pipe_fence_handle *fence=NULL;
+   pctx->flush(pctx,&fence,0);
+   bool done=!fence || pctx->screen->fence_finish(pctx->screen,pctx,fence,10000000000ull);
+   pctx->screen->fence_reference(pctx->screen,&fence,NULL);
+   if (!done || screen->device_lost || bc250_host_check_status(&screen->bc250_host)<0) return 0;
+   zink_batch_reset_all(ctx);
+   zink_batch_reclaim_completed(screen);
+   unsigned resource_refs=p_atomic_read(&res->base.b.reference.count);
+   unsigned object_refs=p_atomic_read(&res->obj->reference.count);
+   fprintf(stderr,"BC250 release runtime resource refs=%u object_refs=%u\n",resource_refs,object_refs);
+   if (resource_refs!=1 || object_refs!=1) return 0;
+   pipe_resource_reference(pres,NULL);
+   return 1;
 }

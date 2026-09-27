@@ -48,6 +48,9 @@ void
 zink_batch_reset_all(struct zink_context *ctx);
 
 void
+zink_batch_reclaim_completed(struct zink_screen *screen);
+
+void
 zink_batch_state_destroy(struct zink_screen *screen, struct zink_batch_state *bs);
 
 void

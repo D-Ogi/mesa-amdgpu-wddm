@@ -40,6 +40,16 @@
 #include "util/u_draw.h"
 #include "util/u_memory.h"
 
+// Diagnostic wall-clock accounting around native draw entry points.
+struct Bc250DrawTimer {
+   Device *device; LARGE_INTEGER start;
+   Bc250DrawTimer(Device *d):device(d){QueryPerformanceCounter(&start);}
+   ~Bc250DrawTimer(){LARGE_INTEGER end;QueryPerformanceCounter(&end);
+      UINT64 ticks=end.QuadPart-start.QuadPart;
+      device->profileDrawTicks+=ticks;device->profileDrawCalls++;
+      if(ticks>device->profileDrawMax)device->profileDrawMax=ticks;}
+};
+
 static unsigned
 ClampedUAdd(unsigned a,
             unsigned b)
@@ -63,7 +73,12 @@ update_velems(Device *pDevice)
       struct cso_velems_state *state = &pDevice->element_layout->state;
       for (unsigned i = 0; i < state->count; i++)
          state->velems[i].src_stride = pDevice->vertex_strides[state->velems[i].vertex_buffer_index];
+      DebugPrintf("D3D resolve part 0 before\n");
       cso_set_vertex_elements(pDevice->cso, state);
+      DebugPrintf("D3D resolve part 0 after\n");
+   } else {
+      struct cso_velems_state empty = {};
+      cso_set_vertex_elements(pDevice->cso, &empty);
    }
 
    pDevice->velems_changed = false;
@@ -102,10 +117,14 @@ ResolveState(Device *pDevice)
       }
       pipe->bind_gs_state(pipe, gs->handle);
    }
-   update_velems(pDevice);
+   DebugPrintf("D3D resolve part 1 before\n");
+      update_velems(pDevice);
+      DebugPrintf("D3D resolve part 1 after\n");
 
    if (pDevice->vbuffers_changed) {
+      DebugPrintf("D3D resolve part 2 before\n");
       cso_set_vertex_buffers(pDevice->cso, PIPE_MAX_ATTRIBS, pDevice->vertex_buffers);
+      DebugPrintf("D3D resolve part 2 after\n");
       pDevice->vbuffers_changed = false;
    }
 }
@@ -153,8 +172,11 @@ Draw(D3D10DDI_HDEVICE hDevice,   // IN
    LOG_ENTRYPOINT();
 
    Device *pDevice = CastDevice(hDevice);
+   Bc250DrawTimer timer(pDevice);
 
+   DebugPrintf("D3D resolve begin\n");
    ResolveState(pDevice);
+   DebugPrintf("D3D resolve done\n");
 
    assert(pDevice->primitive < MESA_PRIM_COUNT);
    util_draw_arrays(pDevice->pipe,
@@ -183,6 +205,7 @@ DrawIndexed(D3D10DDI_HDEVICE hDevice,  // IN
    LOG_ENTRYPOINT();
 
    Device *pDevice = CastDevice(hDevice);
+   Bc250DrawTimer timer(pDevice);
    struct pipe_draw_info info;
    struct pipe_draw_start_count_bias draw;
    struct pipe_resource *null_ib = NULL;
@@ -241,6 +264,7 @@ DrawInstanced(D3D10DDI_HDEVICE hDevice,      // IN
    LOG_ENTRYPOINT();
 
    Device *pDevice = CastDevice(hDevice);
+   Bc250DrawTimer timer(pDevice);
 
    if (!InstanceCount) {
       return;
@@ -280,6 +304,7 @@ DrawIndexedInstanced(D3D10DDI_HDEVICE hDevice,   // IN
    LOG_ENTRYPOINT();
 
    Device *pDevice = CastDevice(hDevice);
+   Bc250DrawTimer timer(pDevice);
    struct pipe_draw_info info;
    struct pipe_draw_start_count_bias draw;
    struct pipe_resource *null_ib = NULL;
@@ -344,6 +369,7 @@ DrawAuto(D3D10DDI_HDEVICE hDevice)  // IN
    LOG_ENTRYPOINT();
 
    Device *pDevice = CastDevice(hDevice);
+   Bc250DrawTimer timer(pDevice);
    struct pipe_draw_info info;
    struct pipe_draw_indirect_info indirect;
 

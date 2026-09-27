@@ -40,6 +40,8 @@
 #include "Format.h"
 
 
+
+
 /*
  * ----------------------------------------------------------------------
  *
@@ -121,7 +123,6 @@ IaSetVertexBuffers(D3D10DDI_HDEVICE hDevice,                                    
                    __in_ecount (NumBuffers) const UINT *pStrides,                // IN
                    __in_ecount (NumBuffers) const UINT *pOffsets)                // IN
 {
-   static const float dummy[4] = {0.0f, 0.0f, 0.0f, 0.0f};
 
    LOG_ENTRYPOINT();
 
@@ -155,11 +156,10 @@ IaSetVertexBuffers(D3D10DDI_HDEVICE hDevice,                                    
       else {
          pDevice->vertex_strides[StartBuffer + i] = 0;
          vb->buffer_offset = 0;
-         if (!vb->is_user_buffer) {
-            pipe_resource_reference(&vb->buffer.resource, NULL);
-            vb->is_user_buffer = true;
-         }
-         vb->buffer.user = dummy;
+         // GPU backends cannot dereference a CPU dummy vertex pointer.
+         // A zero-stride resource preserves D3D's unbound-input zero value.
+         pipe_resource_reference(&vb->buffer.resource, pDevice->zero_vertex_buffer);
+         vb->is_user_buffer = false;
       }
    }
 
@@ -170,8 +170,8 @@ IaSetVertexBuffers(D3D10DDI_HDEVICE hDevice,                                    
       if (!vb->is_user_buffer && !vb->buffer.resource) {
          pDevice->vertex_strides[i] = 0;
          vb->buffer_offset = 0;
-         vb->is_user_buffer = true;
-         vb->buffer.user = dummy;
+         pipe_resource_reference(&vb->buffer.resource, pDevice->zero_vertex_buffer);
+         vb->is_user_buffer = false;
       }
    }
 
