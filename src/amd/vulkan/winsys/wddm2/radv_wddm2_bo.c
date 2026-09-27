@@ -53,6 +53,25 @@
 
 static const bool all_resident = true;
 
+/* Every operation on a device paging queue gets a unique value of the queue's
+ * monitored fence, signaled when the operation completes, and zero when it
+ * completed immediately ("Device paging queues" in the WDDM docs). A monitored
+ * fence value only grows, so waiting for the largest returned value waits for
+ * all of them. A later value must never replace an earlier one: a zero or
+ * smaller later result would drop the wait for an operation still pending.
+ *
+ * MapGpuVirtualAddress always reports the value to wait for. MakeResident
+ * documents it only for STATUS_PENDING (E_PENDING in the UMD callback). It is
+ * taken for any success here, as the d3d10umd shared-surface import does: the
+ * field is zero-initialized, and an under-wait lets the GPU touch an unmapped
+ * page, which this part cannot recover from.
+ */
+static inline void
+radv_wddm2_require_paging_fence(uint64_t *required, uint64_t value)
+{
+   *required = MAX2(*required, value);
+}
+
 static struct util_vma_heap *
 radv_wddm2_bo_heap(struct radv_wddm2_winsys *ws, enum radeon_bo_flag flags)
 {
@@ -504,7 +523,7 @@ radv_wddm2_init_sparse_alias(struct radv_wddm2_winsys *ws, struct radv_wddm2_bo 
       status = BC250_WDDM_CALL(&ws->host, MapGpuVirtualAddress, &map);
       if (!NT_SUCCESS(status))
          return false;
-      fence = map.PagingFenceValue;
+      radv_wddm2_require_paging_fence(&fence, map.PagingFenceValue);
       offset += bytes;
    }
 
@@ -766,7 +785,7 @@ radv_wddm2_bo_create_internal(struct radeon_winsys *_ws, uint64_t size, unsigned
          goto error_va_alloc;
       }
 
-      paging_fence_value = make_resident.PagingFenceValue;
+      radv_wddm2_require_paging_fence(&paging_fence_value, make_resident.PagingFenceValue);
    }
 
    const D3DKMT_WAITFORSYNCHRONIZATIONOBJECTFROMCPU wait = {
@@ -958,6 +977,7 @@ radv_wddm2_bo_from_handle(struct radeon_winsys *_ws, void *handle, unsigned prio
       goto error_import;
    }
    bo->base.va = map.VirtualAddress;
+   uint64_t paging_fence_value = map.PagingFenceValue;
 
    if (alloc_size)
       *alloc_size = bo->base.size;
@@ -976,13 +996,14 @@ radv_wddm2_bo_from_handle(struct radeon_winsys *_ws, void *handle, unsigned prio
       result = VK_ERROR_OUT_OF_DEVICE_MEMORY;
       goto error_map;
    }
+   radv_wddm2_require_paging_fence(&paging_fence_value, make_resident.PagingFenceValue);
 
-   /* Wait for the paging operation to complete */
+   /* Wait for both paging operations to complete */
    const D3DKMT_WAITFORSYNCHRONIZATIONOBJECTFROMCPU wait = {
       .hDevice = ws->device_h,
       .ObjectCount = 1,
       .ObjectHandleArray = &ws->paging_fence_h,
-      .FenceValueArray = &make_resident.PagingFenceValue,
+      .FenceValueArray = &paging_fence_value,
    };
    status = BC250_WDDM_CALL(&ws->host, WaitForSynchronizationObjectFromCpu, &wait);
    if (!NT_SUCCESS(status)) {
