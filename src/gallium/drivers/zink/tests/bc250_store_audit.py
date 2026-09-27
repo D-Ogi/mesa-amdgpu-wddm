@@ -44,11 +44,13 @@ static volatile LONG64 next_id, ticks;
 static uint64_t bc250_audit_id(void) { return InterlockedIncrement64(&next_id); }
 static uint64_t os_time_get_nano(void) { return InterlockedIncrement64(&ticks); }
 struct pipe_resource { unsigned target; };
-struct pipe_transfer { struct pipe_resource *resource; struct { int width; } box; };
+struct pipe_transfer { struct pipe_resource *resource; struct { int width, x; } box; };
 struct zink_transfer {
    struct { struct pipe_transfer b; } base;
    uint64_t bc250_audit_map_id;
    uintptr_t bc250_audit_map_ptr;
+   struct pipe_resource *staging_res;
+   unsigned offset;
 };
 """
     code = preamble
@@ -62,7 +64,7 @@ static DWORD WINAPI worker(void *arg)
    unsigned char dst[128] = {0}, src[16];
    memset(src, 0xa5, sizeof(src));
    struct pipe_resource resource = {PIPE_BUFFER};
-   struct zink_transfer trans = {{{&resource, {128}}}, 77, (uintptr_t)dst};
+   struct zink_transfer trans = {{{&resource, {128, 0}}}, 77, (uintptr_t)dst, NULL, 0};
    for (unsigned i = 0; i < 1000; i++) {
       unsigned offset = (i % 8) * 16;
       bc250_descriptor_copy(&trans.base.b, dst + offset, src, sizeof(src), "thread");
@@ -78,13 +80,20 @@ int main(void)
    enabled = true;
    unsigned char dst[128] = {0};
    struct pipe_resource resource = {PIPE_BUFFER};
-   struct zink_transfer trans = {{{&resource, {128}}}, 42, (uintptr_t)dst};
+   struct zink_transfer trans = {{{&resource, {128, 0}}}, 42, (uintptr_t)dst, NULL, 0};
    uint64_t id;
 #define CHECK(pointer, count, label) \
    id = zink_bc250_audit_store_begin(&trans.base.b, pointer, count, label, "bounds"); \
    zink_bc250_audit_store_end(id)
    CHECK(dst, 128, "exact");
    CHECK(dst + 128, 0, "end_zero");
+   trans.staging_res = &resource;
+   trans.offset = 4096;
+   CHECK(dst, 16, "staging");
+   trans.staging_res = NULL;
+   trans.base.b.box.x = 128;
+   CHECK(dst, 16, "direct_offset");
+   trans.base.b.box.x = 0;
    CHECK(dst + 128, 1, "over_end");
    CHECK((void *)((uintptr_t)dst - 1), 1, "under_start");
    CHECK(dst + 1, SIZE_MAX, "overflow");
@@ -129,7 +138,9 @@ int main(void)
             assert int(row["time_ns"]) > int(begin["time_ns"])
             complete.append(begin)
     assert invalid == ["over_end", "under_start", "overflow", "image", "missing_id"]
-    assert len(complete) == 2007
+    assert len(complete) == 2009
+    assert next(r for r in complete if r["writer"] == "staging")["mapped_offset"] == "4096"
+    assert next(r for r in complete if r["writer"] == "direct_offset")["mapped_offset"] == "128"
     assert len(pending) == 1 and next(iter(pending.values()))["writer"] == "unfinished"
     thread_writes = [r for r in complete if r["writer"] == "thread"]
     assert len(thread_writes) == 2000

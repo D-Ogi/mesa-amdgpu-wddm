@@ -2735,14 +2735,16 @@ zink_bc250_audit_store_begin(struct pipe_transfer *transfer, const void *dst,
    uint64_t offset = address >= base ? address - base : UINT64_MAX;
    bool valid = map && base && transfer->resource->target == PIPE_BUFFER &&
                 offset <= capacity && bytes <= capacity - offset;
+   uint64_t mapped_offset = trans && trans->staging_res ? trans->offset :
+                            transfer && transfer->box.x >= 0 ? transfer->box.x : 0;
    uint64_t store = bc250_audit_id();
    simple_mtx_lock(&bc250_audit_lifetime_lock);
-   fprintf(stderr, "BC250 audit store event=begin seq=%llu store=%llu map=%llu time_ns=%llu writer=%s kind=%s offset=%llu bytes=%llu capacity=%llu valid=%u\n",
+   fprintf(stderr, "BC250 audit store event=begin seq=%llu store=%llu map=%llu time_ns=%llu writer=%s kind=%s offset=%llu bytes=%llu capacity=%llu mapped_offset=%llu valid=%u\n",
            (unsigned long long)++bc250_audit_event_sequence,
            (unsigned long long)store, (unsigned long long)map,
            (unsigned long long)os_time_get_nano(), writer, kind,
            (unsigned long long)offset, (unsigned long long)bytes,
-           (unsigned long long)capacity, valid);
+           (unsigned long long)capacity, (unsigned long long)mapped_offset, valid);
    simple_mtx_unlock(&bc250_audit_lifetime_lock);
    return store;
 }
@@ -3669,7 +3671,9 @@ zink_buffer_subdata(struct pipe_context *ctx, struct pipe_resource *buffer,
    u_box_1d(offset, size, &box);
    map = zink_buffer_map(ctx, buffer, 0, usage, &box, &transfer);
    if (map) {
+      uint64_t store = zink_bc250_audit_store_begin(transfer, map, size, __func__, "buffer_subdata");
       memcpy(map, data, size);
+      zink_bc250_audit_store_end(store);
       zink_buffer_unmap(ctx, transfer);
    }
    res->subdata = false;
