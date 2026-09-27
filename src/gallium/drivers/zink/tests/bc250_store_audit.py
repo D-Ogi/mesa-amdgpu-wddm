@@ -42,6 +42,7 @@ static SRWLOCK bc250_audit_lifetime_lock = SRWLOCK_INIT;
 #define simple_mtx_unlock ReleaseSRWLockExclusive
 static uint64_t bc250_audit_event_sequence;
 static uint64_t bc250_audit_stores_begun, bc250_audit_stores_ended;
+static uint64_t bc250_audit_runtime_sequence;
 static uint64_t bc250_audit_requests, bc250_audit_successful, bc250_audit_failed;
 static uint64_t bc250_audit_ended, bc250_audit_last_marker;
 static uint64_t bc250_audit_read_marker(void) { return 0; }
@@ -158,6 +159,7 @@ int main(void)
         row = dict(re.findall(r"(\w+)=(\S+)", line))
         assert int(row["seq"]) == seq
         if row["event"] == "checkpoint":
+            assert int(row["runtime_events"]) == 0
             assert int(row["stores_begun"]) == len(complete) + len(pending)
             assert int(row["stores_ended"]) == len(complete)
             continue

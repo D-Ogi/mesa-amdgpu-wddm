@@ -397,6 +397,14 @@ HRESULT Bc250QueuePresentWait(Device *device)
    wait.hContext=device->hContext; wait.ObjectCount=count;
    wait.ObjectHandleArray=objects; wait.MonitoredFenceValueArray=values;
    HRESULT hr=count ? device->KTCallbacks.pfnWaitForSynchronizationObjectFromGpuCb(device->hDevice,&wait) : S_OK;
+   static const bool auditWait = GetEnvironmentVariableA("BC250_HOST_AUDIT", NULL, 0) != 0;
+   if (auditWait) {
+      fprintf(stderr, "BC250 audit present event=wait device=%p present=%u context=%p count=%u hr=%08lx\n",
+              device->hDevice, device->profilePresents+1, device->hContext, count, hr);
+      for (UINT i=0;i<count;++i)
+         fprintf(stderr, "BC250 audit present event=wait_fence device=%p present=%u index=%u sync=%x value=%llu\n",
+                 device->hDevice, device->profilePresents+1, i, objects[i], (unsigned long long)values[i]);
+   }
    if (device->profilePresents<3 || FAILED(hr)) {
       fprintf(stderr,"BC250 Present GPU wait count=%u hr=%08lx cpu_render_wait=0\n",count,hr);
       for (UINT i=0;i<count;++i) fprintf(stderr,"BC250 Present fence=%x value=%llu\n",objects[i],(unsigned long long)values[i]);
@@ -417,6 +425,11 @@ HRESULT Bc250SignalPresent(Device *device)
    HRESULT hr=device->KTCallbacks.pfnSignalSynchronizationObjectFromGpu2Cb(device->hDevice,&signal);
    if (SUCCEEDED(hr)) s->present_value=value;
    else s->submission_failed=true;
+   static const bool auditSignal = GetEnvironmentVariableA("BC250_HOST_AUDIT", NULL, 0) != 0;
+   if (auditSignal)
+      fprintf(stderr, "BC250 audit present event=signal device=%p present=%u context=%p sync=%x value=%llu hr=%08lx\n",
+              device->hDevice, device->profilePresents+1, device->hContext,
+              s->present_sync, (unsigned long long)value, hr);
    if (value<=3 || FAILED(hr)) fprintf(stderr,"BC250 Present signals value=%llu hr=%08lx\n",(unsigned long long)value,hr);
    return hr;
 }

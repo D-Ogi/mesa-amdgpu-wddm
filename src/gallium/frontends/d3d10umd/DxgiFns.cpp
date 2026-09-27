@@ -260,6 +260,18 @@ _Present(DXGI_DDI_ARG_PRESENT *pPresentData)
    hr = device->pDXGIBaseCallbacks->pfnPresentCb(device->hDevice, &present);
    if (device->hosted_state && SUCCEEDED(hr)) hr=Bc250SignalPresent(device);
    QueryPerformanceCounter(&presentEnd);QueryPerformanceFrequency(&frequency);
+   static const bool auditPresent = GetEnvironmentVariableA("BC250_HOST_AUDIT", NULL, 0) != 0;
+   if (auditPresent && device->hosted_state) {
+      fprintf(stderr, "BC250 audit present event=complete pid=%lu device=%p present=%u time_ns=%llu context=%p src=%p src_allocation=%x dst=%p dst_allocation=%x width=%u height=%u format=%u primary=%u flags=%x hr=%08lx\n",
+              GetCurrentProcessId(), device->hDevice, device->profilePresents+1,
+              (unsigned long long)os_time_get_nano(), device->hContext,
+              (void *)pSrcResource->resource, present.hSrcAllocation,
+              dstResource ? (void *)dstResource->resource : NULL, present.hDstAllocation,
+              pSrcResource->resource->width0, pSrcResource->resource->height0,
+              pSrcResource->resource->format, pSrcResource->primary,
+              pPresentData->Flags.Value, hr);
+   }
+
    if(++device->profilePresents<=120 || device->profilePresents%60==0)
       DebugPrintf("BC250 Perf frame %u gap_ms %.3f draws %llu draw_ms %.3f max_draw_ms %.3f present_ms %.3f render_wait_ms %.3f\n",
        device->profilePresents,

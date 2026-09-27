@@ -80,6 +80,7 @@ static uint64_t bc250_audit_event_sequence;
 static uint64_t bc250_audit_requests, bc250_audit_successful, bc250_audit_failed;
 static uint64_t bc250_audit_ended, bc250_audit_last_marker;
 static uint64_t bc250_audit_stores_begun, bc250_audit_stores_ended;
+static uint64_t bc250_audit_runtime_sequence;
 
 
 static uint64_t
@@ -275,11 +276,32 @@ zink_destroy_resource_object(struct zink_screen *screen, struct zink_resource_ob
 }
 
 static void
+bc250_audit_runtime(const char *event, struct pipe_resource *pres,
+                    const struct winsys_handle *handle)
+{
+   if (!debug_get_option_bc250_map_lifetime()) return;
+   struct zink_resource *res = zink_resource(pres);
+   if (!res->obj || !res->obj->bc250_runtime) return;
+   simple_mtx_lock(&bc250_audit_lifetime_lock);
+   fprintf(stderr, "BC250 audit runtime event=%s seq=%llu time_ns=%llu resource=%p resource_id=%llu object_id=%llu allocation=%p identity=%p va=%llu width=%u height=%u format=%u bind=%x\n",
+           event, (unsigned long long)++bc250_audit_runtime_sequence,
+           (unsigned long long)os_time_get_nano(), (void *)pres,
+           (unsigned long long)res->bc250_audit_id,
+           (unsigned long long)res->obj->bc250_audit_id,
+           handle ? (void *)(uintptr_t)handle->handle : NULL,
+           handle ? handle->bc250_identity : NULL,
+           (unsigned long long)(handle ? handle->bc250_va : 0),
+           pres->width0, pres->height0, pres->format, pres->bind);
+   simple_mtx_unlock(&bc250_audit_lifetime_lock);
+}
+
+static void
 zink_resource_destroy(struct pipe_screen *pscreen,
                       struct pipe_resource *pres)
 {
    struct zink_screen *screen = zink_screen(pscreen);
    struct zink_resource *res = zink_resource(pres);
+   bc250_audit_runtime("destroy", pres, NULL);
    /* prevent double-free when unrefing internal surfaces */
    res->base.b.reference.count = 999;
 
@@ -2405,6 +2427,7 @@ zink_resource_from_handle(struct pipe_screen *pscreen,
       tc_buffer_disable_cpu_storage(pres);
    res->obj->immutable_handle = true;
    res->internal_format = whandle->format;
+   bc250_audit_runtime("import", pres, whandle);
 
 #ifdef HAVE_LIBDRM
    if (screen->ro) {
@@ -2818,7 +2841,7 @@ zink_bc250_audit_map_checkpoint(bool sampled)
    if (sampled || requested) {
       if (requested)
          bc250_audit_last_marker = marker;
-      fprintf(stderr, "BC250 audit lifetime event=checkpoint seq=%llu time_ns=%llu marker=%llu requests=%llu successful=%llu failed=%llu ended=%llu pending=%llu live=%llu stores_begun=%llu stores_ended=%llu\n",
+      fprintf(stderr, "BC250 audit lifetime event=checkpoint seq=%llu time_ns=%llu marker=%llu requests=%llu successful=%llu failed=%llu ended=%llu pending=%llu live=%llu stores_begun=%llu stores_ended=%llu runtime_events=%llu\n",
               (unsigned long long)++bc250_audit_event_sequence,
               (unsigned long long)os_time_get_nano(),
               (unsigned long long)(requested ? marker : 0),
@@ -2829,7 +2852,8 @@ zink_bc250_audit_map_checkpoint(bool sampled)
               (unsigned long long)(bc250_audit_requests - bc250_audit_successful - bc250_audit_failed),
               (unsigned long long)(bc250_audit_successful - bc250_audit_ended),
               (unsigned long long)bc250_audit_stores_begun,
-              (unsigned long long)bc250_audit_stores_ended);
+              (unsigned long long)bc250_audit_stores_ended,
+              (unsigned long long)bc250_audit_runtime_sequence);
       fflush(stderr);
    }
    simple_mtx_unlock(&bc250_audit_lifetime_lock);
