@@ -1196,6 +1196,7 @@ struct zink_rt_attrib {
 /** resource types */
 struct zink_resource_object {
    struct pipe_reference reference;
+   uint64_t bc250_audit_id;
 
    VkPipelineStageFlags access_stage;
    VkAccessFlags access;
@@ -1270,6 +1271,7 @@ struct zink_resource_object {
 /* "gfx" includes mesh here */
 struct zink_resource {
    struct threaded_resource base;
+   uint64_t bc250_audit_id;
 
    enum pipe_format internal_format:16;
 
@@ -1349,6 +1351,7 @@ zink_resource(struct pipe_resource *r)
 
 struct zink_transfer {
    struct threaded_transfer base;
+   uint64_t bc250_audit_map_id;
    struct pipe_resource *staging_res;
    unsigned offset;
    unsigned depthPitch;

@@ -39,6 +39,7 @@
 
 #include "vk_format.h"
 #include "util/u_blitter.h"
+#include "util/os_time.h"
 #include "util/u_debug.h"
 #include "util/format/u_format.h"
 #include "util/u_transfer_helper.h"
@@ -69,6 +70,23 @@
 #endif /* __APPLE__ */
 
 #define ZINK_EXTERNAL_MEMORY_HANDLE 999
+
+DEBUG_GET_ONCE_BOOL_OPTION(bc250_map_lifetime, "BC250_HOST_AUDIT", false)
+static uint64_t bc250_audit_next_id;
+
+static uint64_t
+bc250_audit_id(void)
+{
+   if (!debug_get_option_bc250_map_lifetime())
+      return 0;
+   uint64_t id = p_atomic_inc_return(&bc250_audit_next_id);
+   if (!id) {
+      fprintf(stderr, "BC250 audit lifetime event=invalid reason=id_wrap\n");
+      abort();
+   }
+   return id;
+}
+
 
 
 
@@ -1745,6 +1763,7 @@ resource_object_create(struct zink_screen *screen, const struct pipe_resource *t
    unsigned max_level = 0;
    if (!obj)
       return NULL;
+   obj->bc250_audit_id = bc250_audit_id();
    u_rwlock_init(&obj->copy_lock);
    obj->unordered_read = true;
    obj->unordered_write = true;
@@ -1838,6 +1857,8 @@ resource_create(struct pipe_screen *pscreen,
       mesa_loge("ZINK: failed to allocate res!");
       return NULL;
    }
+
+   res->bc250_audit_id = bc250_audit_id();
 
    if (modifiers_count > 0 && screen->info.have_EXT_image_drm_format_modifier) {
       /* for rebinds */
@@ -2641,6 +2662,50 @@ destroy_transfer(struct zink_context *ctx, struct zink_transfer *trans)
    }
 }
 
+static uint64_t
+bc250_audit_map_begin(struct zink_context *ctx, struct pipe_resource *pres,
+                      unsigned level, unsigned usage, const struct pipe_box *box)
+{
+   if (!ctx->bc250_audit)
+      return 0;
+   struct zink_resource *res = zink_resource(pres);
+   uint64_t id = bc250_audit_id();
+   fprintf(stderr, "BC250 audit lifetime event=begin map=%llu time_ns=%llu ctx=%p resource=%p resource_id=%llu object_id=%llu target=%u width=%u height=%u depth=%u format=%u bind=%x level=%u usage=%x user_ptr=%u runtime=%u x=%d y=%d z=%d box_width=%d box_height=%d box_depth=%d\n",
+           (unsigned long long)id, (unsigned long long)os_time_get_nano(), (void *)ctx, (void *)pres,
+           (unsigned long long)res->bc250_audit_id, (unsigned long long)res->obj->bc250_audit_id,
+           pres->target, pres->width0, pres->height0, pres->depth0, pres->format, pres->bind,
+           level, usage, res->base.is_user_ptr, res->obj->bc250_runtime,
+           box->x, box->y, box->z, box->width, box->height, box->depth);
+   return id;
+}
+
+static void
+bc250_audit_map_result(uint64_t id, struct zink_transfer *trans,
+                       struct zink_resource *mapped, void *ptr, unsigned usage)
+{
+   if (!id)
+      return;
+   if (ptr)
+      trans->bc250_audit_map_id = id;
+   fprintf(stderr, "BC250 audit lifetime event=result map=%llu time_ns=%llu success=%u resource=%p resource_id=%llu object_id=%llu usage=%x staging=%u stride=%u layer_stride=%llu\n",
+           (unsigned long long)id, (unsigned long long)os_time_get_nano(), ptr != NULL,
+           ptr ? (void *)&mapped->base.b : NULL,
+           (unsigned long long)(ptr ? mapped->bc250_audit_id : 0),
+           (unsigned long long)(ptr ? mapped->obj->bc250_audit_id : 0), usage,
+           trans && trans->staging_res != NULL,
+           trans ? trans->base.b.stride : 0,
+           (unsigned long long)(trans ? trans->base.b.layer_stride : 0));
+}
+
+static void
+bc250_audit_map_end(struct zink_transfer *trans)
+{
+   if (trans->bc250_audit_map_id)
+      fprintf(stderr, "BC250 audit lifetime event=end map=%llu time_ns=%llu\n",
+              (unsigned long long)trans->bc250_audit_map_id,
+              (unsigned long long)os_time_get_nano());
+}
+
 static void
 bc250_audit_map_bucket(struct zink_context *ctx, struct pipe_resource *pres,
                        unsigned usage, const struct pipe_box *box, uint64_t bytes)
@@ -2679,14 +2744,17 @@ zink_buffer_map(struct pipe_context *pctx,
 {
    MESA_TRACE_FUNC();
    struct zink_context *ctx = zink_context(pctx);
+   uint64_t audit_id = bc250_audit_map_begin(ctx, pres, level, usage, box);
    if (ctx->bc250_audit) {
       bc250_audit_map_bucket(ctx, pres, usage, box, (uint64_t)box->width);
    }
    struct zink_screen *screen = zink_screen(pctx->screen);
    struct zink_resource *res = zink_resource(pres);
    struct zink_transfer *trans = create_transfer(ctx, pres, usage, box);
-   if (!trans)
+   if (!trans) {
+      bc250_audit_map_result(audit_id, NULL, NULL, NULL, usage);
       return NULL;
+   }
 
    void *ptr = NULL;
 
@@ -2871,12 +2939,14 @@ success:
    /* ensure the copy context gets unlocked */
    if (ctx == screen->copy_context)
       zink_screen_unlock_context(screen);
+   bc250_audit_map_result(audit_id, trans, res, ptr, usage);
    *transfer = &trans->base.b;
    return ptr;
 
 fail:
    if (ctx == screen->copy_context)
       zink_screen_unlock_context(screen);
+   bc250_audit_map_result(audit_id, trans, NULL, NULL, usage);
    destroy_transfer(ctx, trans);
    return NULL;
 }
@@ -2891,6 +2961,7 @@ zink_image_map(struct pipe_context *pctx,
 {
    MESA_TRACE_FUNC();
    struct zink_context *ctx = zink_context(pctx);
+   uint64_t audit_id = bc250_audit_map_begin(ctx, pres, level, usage, box);
    if (ctx->bc250_audit) {
       bc250_audit_map_bucket(ctx, pres, usage, box, (uint64_t)util_format_get_2d_size(pres->format, util_format_get_stride(pres->format, box->width), box->height) * box->depth);
    }
@@ -2899,8 +2970,10 @@ zink_image_map(struct pipe_context *pctx,
    if (res->unflushed_transient)
       res = res->transient;
    struct zink_transfer *trans = create_transfer(ctx, pres, usage, box);
-   if (!trans)
+   if (!trans) {
+      bc250_audit_map_result(audit_id, NULL, NULL, NULL, usage);
       return NULL;
+   }
 
    trans->base.b.level = level;
    if (zink_is_swapchain(res))
@@ -3009,10 +3082,12 @@ zink_image_map(struct pipe_context *pctx,
    if (sizeof(void*) == 4)
       trans->base.b.usage |= ZINK_MAP_TEMPORARY;
 
+   bc250_audit_map_result(audit_id, trans, trans->staging_res ? zink_resource(trans->staging_res) : res, ptr, usage);
    *transfer = &trans->base.b;
    return ptr;
 
 fail:
+   bc250_audit_map_result(audit_id, trans, NULL, NULL, usage);
    destroy_transfer(ctx, trans);
    return NULL;
 }
@@ -3405,6 +3480,8 @@ transfer_unmap(struct pipe_context *pctx, struct pipe_transfer *ptrans)
          trans->base.b.usage &= ~PIPE_MAP_UNSYNCHRONIZED;
       zink_transfer_flush_region(pctx, ptrans, &box);
    }
+
+   bc250_audit_map_end(trans);
 
    if (trans->staging_res)
       pipe_resource_reference(&trans->staging_res, NULL);
