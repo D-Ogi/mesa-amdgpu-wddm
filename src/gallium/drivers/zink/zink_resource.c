@@ -79,6 +79,7 @@ static simple_mtx_t bc250_audit_lifetime_lock = SIMPLE_MTX_INITIALIZER;
 static uint64_t bc250_audit_event_sequence;
 static uint64_t bc250_audit_requests, bc250_audit_successful, bc250_audit_failed;
 static uint64_t bc250_audit_ended, bc250_audit_last_marker;
+static uint64_t bc250_audit_stores_begun, bc250_audit_stores_ended;
 
 
 static uint64_t
@@ -2733,12 +2734,14 @@ zink_bc250_audit_store_begin(struct pipe_transfer *transfer, const void *dst,
    uint64_t map = trans ? trans->bc250_audit_map_id : 0;
    uint64_t capacity = transfer && transfer->box.width > 0 ? transfer->box.width : 0;
    uint64_t offset = address >= base ? address - base : UINT64_MAX;
-   bool valid = map && base && transfer->resource->target == PIPE_BUFFER &&
+   bool valid = map && base && (transfer->usage & PIPE_MAP_WRITE) &&
+                transfer->resource->target == PIPE_BUFFER &&
                 offset <= capacity && bytes <= capacity - offset;
    uint64_t mapped_offset = trans && trans->staging_res ? trans->offset :
                             transfer && transfer->box.x >= 0 ? transfer->box.x : 0;
    uint64_t store = bc250_audit_id();
    simple_mtx_lock(&bc250_audit_lifetime_lock);
+   bc250_audit_stores_begun++;
    fprintf(stderr, "BC250 audit store event=begin seq=%llu store=%llu map=%llu time_ns=%llu writer=%s kind=%s offset=%llu bytes=%llu capacity=%llu mapped_offset=%llu valid=%u\n",
            (unsigned long long)++bc250_audit_event_sequence,
            (unsigned long long)store, (unsigned long long)map,
@@ -2755,6 +2758,7 @@ zink_bc250_audit_store_end(uint64_t store)
    if (!store)
       return;
    simple_mtx_lock(&bc250_audit_lifetime_lock);
+   bc250_audit_stores_ended++;
    fprintf(stderr, "BC250 audit store event=end seq=%llu store=%llu time_ns=%llu\n",
            (unsigned long long)++bc250_audit_event_sequence,
            (unsigned long long)store, (unsigned long long)os_time_get_nano());
@@ -2814,7 +2818,7 @@ zink_bc250_audit_map_checkpoint(bool sampled)
    if (sampled || requested) {
       if (requested)
          bc250_audit_last_marker = marker;
-      fprintf(stderr, "BC250 audit lifetime event=checkpoint seq=%llu time_ns=%llu marker=%llu requests=%llu successful=%llu failed=%llu ended=%llu pending=%llu live=%llu\n",
+      fprintf(stderr, "BC250 audit lifetime event=checkpoint seq=%llu time_ns=%llu marker=%llu requests=%llu successful=%llu failed=%llu ended=%llu pending=%llu live=%llu stores_begun=%llu stores_ended=%llu\n",
               (unsigned long long)++bc250_audit_event_sequence,
               (unsigned long long)os_time_get_nano(),
               (unsigned long long)(requested ? marker : 0),
@@ -2823,7 +2827,9 @@ zink_bc250_audit_map_checkpoint(bool sampled)
               (unsigned long long)bc250_audit_failed,
               (unsigned long long)bc250_audit_ended,
               (unsigned long long)(bc250_audit_requests - bc250_audit_successful - bc250_audit_failed),
-              (unsigned long long)(bc250_audit_successful - bc250_audit_ended));
+              (unsigned long long)(bc250_audit_successful - bc250_audit_ended),
+              (unsigned long long)bc250_audit_stores_begun,
+              (unsigned long long)bc250_audit_stores_ended);
       fflush(stderr);
    }
    simple_mtx_unlock(&bc250_audit_lifetime_lock);

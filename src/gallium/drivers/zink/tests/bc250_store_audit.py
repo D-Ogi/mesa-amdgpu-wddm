@@ -34,17 +34,22 @@ def main():
 #include <string.h>
 #include <assert.h>
 #define PIPE_BUFFER 0
+#define PIPE_MAP_WRITE 2
 static bool enabled;
 static bool debug_get_option_bc250_map_lifetime(void) { return enabled; }
 static SRWLOCK bc250_audit_lifetime_lock = SRWLOCK_INIT;
 #define simple_mtx_lock AcquireSRWLockExclusive
 #define simple_mtx_unlock ReleaseSRWLockExclusive
 static uint64_t bc250_audit_event_sequence;
+static uint64_t bc250_audit_stores_begun, bc250_audit_stores_ended;
+static uint64_t bc250_audit_requests, bc250_audit_successful, bc250_audit_failed;
+static uint64_t bc250_audit_ended, bc250_audit_last_marker;
+static uint64_t bc250_audit_read_marker(void) { return 0; }
 static volatile LONG64 next_id, ticks;
 static uint64_t bc250_audit_id(void) { return InterlockedIncrement64(&next_id); }
 static uint64_t os_time_get_nano(void) { return InterlockedIncrement64(&ticks); }
 struct pipe_resource { unsigned target; };
-struct pipe_transfer { struct pipe_resource *resource; struct { int width, x; } box; };
+struct pipe_transfer { struct pipe_resource *resource; struct { int width, x; } box; unsigned usage; };
 struct zink_transfer {
    struct { struct pipe_transfer b; } base;
    uint64_t bc250_audit_map_id;
@@ -53,9 +58,24 @@ struct zink_transfer {
    unsigned offset;
 };
 """
+    preamble += r"""
+struct zink_screen { unsigned dev; };
+typedef struct { unsigned pattern; } VkDescriptorGetInfoEXT;
+static unsigned get_calls;
+#define VKSCR(f) stub_##f
+static void stub_GetDescriptorEXT(unsigned dev, const VkDescriptorGetInfoEXT *info,
+                                  size_t size, void *dst)
+{
+   assert(dev == 7);
+   memset(dst, (int)info->pattern, size);
+   get_calls++;
+}
+"""
     code = preamble
     code += "\nuint64_t\n" + function(resource, "zink_bc250_audit_store_begin")
     code += "\nvoid\n" + function(resource, "zink_bc250_audit_store_end")
+    code += "\nbool\n" + function(resource, "zink_bc250_audit_map_checkpoint")
+    code += "\nstatic void\n" + function(descriptors, "bc250_descriptor_get")
     code += "\nstatic void\n" + function(descriptors, "bc250_descriptor_copy")
     code += r"""
 static DWORD WINAPI worker(void *arg)
@@ -64,7 +84,7 @@ static DWORD WINAPI worker(void *arg)
    unsigned char dst[128] = {0}, src[16];
    memset(src, 0xa5, sizeof(src));
    struct pipe_resource resource = {PIPE_BUFFER};
-   struct zink_transfer trans = {{{&resource, {128, 0}}}, 77, (uintptr_t)dst, NULL, 0};
+   struct zink_transfer trans = {{{&resource, {128, 0}, PIPE_MAP_WRITE}}, 77, (uintptr_t)dst, NULL, 0};
    for (unsigned i = 0; i < 1000; i++) {
       unsigned offset = (i % 8) * 16;
       bc250_descriptor_copy(&trans.base.b, dst + offset, src, sizeof(src), "thread");
@@ -78,13 +98,23 @@ int main(void)
    zink_bc250_audit_store_end(0);
    assert(bc250_audit_event_sequence == 0);
    enabled = true;
+   zink_bc250_audit_map_checkpoint(true);
    unsigned char dst[128] = {0};
    struct pipe_resource resource = {PIPE_BUFFER};
-   struct zink_transfer trans = {{{&resource, {128, 0}}}, 42, (uintptr_t)dst, NULL, 0};
+   struct zink_transfer trans = {{{&resource, {128, 0}, PIPE_MAP_WRITE}}, 42, (uintptr_t)dst, NULL, 0};
    uint64_t id;
 #define CHECK(pointer, count, label) \
    id = zink_bc250_audit_store_begin(&trans.base.b, pointer, count, label, "bounds"); \
    zink_bc250_audit_store_end(id)
+   struct zink_screen screen = {7};
+   VkDescriptorGetInfoEXT info = {0x5a};
+   bc250_descriptor_get(&screen, &trans.base.b, &info, 16, dst + 32, "descriptor_get");
+   assert(get_calls == 1);
+   for (unsigned i = 0; i < 128; i++)
+      assert(dst[i] == (i >= 32 && i < 48 ? 0x5a : 0));
+   trans.base.b.usage = 0;
+   CHECK(dst, 1, "read_only");
+   trans.base.b.usage = PIPE_MAP_WRITE;
    CHECK(dst, 128, "exact");
    CHECK(dst + 128, 0, "end_zero");
    trans.staging_res = &resource;
@@ -111,6 +141,7 @@ int main(void)
    assert(WaitForMultipleObjects(2, threads, TRUE, INFINITE) == WAIT_OBJECT_0);
    for (unsigned i = 0; i < 2; i++) CloseHandle(threads[i]);
    zink_bc250_audit_store_begin(&trans.base.b, dst, 1, "unfinished", "bounds");
+   zink_bc250_audit_map_checkpoint(true);
    return 0;
 }
 """
@@ -124,9 +155,13 @@ int main(void)
     invalid = []
     rows = result.stderr.decode().splitlines()
     for seq, line in enumerate(rows, 1):
-        assert line.startswith("BC250 audit store "), line
         row = dict(re.findall(r"(\w+)=(\S+)", line))
         assert int(row["seq"]) == seq
+        if row["event"] == "checkpoint":
+            assert int(row["stores_begun"]) == len(complete) + len(pending)
+            assert int(row["stores_ended"]) == len(complete)
+            continue
+        assert line.startswith("BC250 audit store "), line
         ident = row["store"]
         if row["event"] == "begin":
             assert ident not in pending
@@ -137,8 +172,8 @@ int main(void)
             begin = pending.pop(ident)
             assert int(row["time_ns"]) > int(begin["time_ns"])
             complete.append(begin)
-    assert invalid == ["over_end", "under_start", "overflow", "image", "missing_id"]
-    assert len(complete) == 2009
+    assert invalid == ["read_only", "over_end", "under_start", "overflow", "image", "missing_id"]
+    assert len(complete) == 2011
     assert next(r for r in complete if r["writer"] == "staging")["mapped_offset"] == "4096"
     assert next(r for r in complete if r["writer"] == "direct_offset")["mapped_offset"] == "128"
     assert len(pending) == 1 and next(iter(pending.values()))["writer"] == "unfinished"
