@@ -1352,6 +1352,7 @@ zink_resource(struct pipe_resource *r)
 struct zink_transfer {
    struct threaded_transfer base;
    uint64_t bc250_audit_map_id;
+   uintptr_t bc250_audit_map_ptr;
    struct pipe_resource *staging_res;
    unsigned offset;
    unsigned depthPitch;

@@ -36,6 +36,25 @@
 #define XXH_INLINE_ALL
 #include "util/xxhash.h"
 
+static void
+bc250_descriptor_get(struct zink_screen *screen, struct pipe_transfer *transfer,
+                     const VkDescriptorGetInfoEXT *info, size_t size, void *dst,
+                     const char *writer)
+{
+   uint64_t store = zink_bc250_audit_store_begin(transfer, dst, size, writer, "get_descriptor");
+   VKSCR(GetDescriptorEXT)(screen->dev, info, size, dst);
+   zink_bc250_audit_store_end(store);
+}
+
+static void
+bc250_descriptor_copy(struct pipe_transfer *transfer, void *dst, const void *src,
+                      size_t size, const char *writer)
+{
+   uint64_t store = zink_bc250_audit_store_begin(transfer, dst, size, writer, "descriptor_copy");
+   memcpy(dst, src, size);
+   zink_bc250_audit_store_end(store);
+}
+
 static VkDescriptorSetLayout
 descriptor_layout_create(struct zink_screen *screen, enum zink_descriptor_type t, VkDescriptorSetLayoutBinding *bindings, unsigned num_bindings)
 {
@@ -1149,7 +1168,7 @@ update_separable(struct zink_context *ctx, struct zink_program *pg)
                info.data.pSampler = (void*)(((uint8_t*)ctx) + zs->precompile.db_template[i].offset + k * zs->precompile.db_template[i].stride);
                if (getenv("BC250_HOST_TRACE_SAMPLER") && info.type == VK_DESCRIPTOR_TYPE_SAMPLER)
                   fprintf(stderr,"BC250 sampler descriptor binding=%u handle=%p\n",zs->precompile.bindings[i].binding,(void*)*info.data.pSampler);
-               VKSCR(GetDescriptorEXT)(screen->dev, &info, zs->precompile.db_template[i].db_size, bs->dd.db_map + desc_offset + k * zs->precompile.db_template[i].db_size);
+               bc250_descriptor_get(screen, bs->dd.db_xfer, &info, zs->precompile.db_template[i].db_size, bs->dd.db_map + desc_offset + k * zs->precompile.db_template[i].db_size, __func__);
             }
          } else {
             assert(zs->precompile.bindings[i].descriptorType == VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER);
@@ -1167,8 +1186,8 @@ update_separable(struct zink_context *ctx, struct zink_program *pg)
                   * 
                   * which means each descriptor's data must be split
                   */
-               memcpy(db, buf, screen->info.db_props.samplerDescriptorSize);
-               memcpy(samplers, &buf[screen->info.db_props.samplerDescriptorSize], screen->info.db_props.sampledImageDescriptorSize);
+               bc250_descriptor_copy(bs->dd.db_xfer, db, buf, screen->info.db_props.samplerDescriptorSize, __func__);
+               bc250_descriptor_copy(bs->dd.db_xfer, samplers, &buf[screen->info.db_props.samplerDescriptorSize], screen->info.db_props.sampledImageDescriptorSize, __func__);
                db += screen->info.db_props.sampledImageDescriptorSize;
                samplers += screen->info.db_props.samplerDescriptorSize;
             }
@@ -1219,7 +1238,7 @@ zink_descriptors_update_masked_buffer(struct zink_context *ctx, enum zink_pipeli
                for (unsigned j = 0; j < key->bindings[i].descriptorCount; j++) {
                   /* VkDescriptorDataEXT is a union of pointers; the member doesn't matter */
                   info.data.pSampler = (void*)(((uint8_t*)ctx) + pg->dd.db_template[type][i].offset + j * pg->dd.db_template[type][i].stride);
-                  VKSCR(GetDescriptorEXT)(screen->dev, &info, pg->dd.db_template[type][i].db_size, bs->dd.db_map + desc_offset + j * pg->dd.db_template[type][i].db_size);
+                  bc250_descriptor_get(screen, bs->dd.db_xfer, &info, pg->dd.db_template[type][i].db_size, bs->dd.db_map + desc_offset + j * pg->dd.db_template[type][i].db_size, __func__);
                }
             } else {
                assert(key->bindings[i].descriptorType == VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER);
@@ -1237,8 +1256,8 @@ zink_descriptors_update_masked_buffer(struct zink_context *ctx, enum zink_pipeli
                    * 
                    * which means each descriptor's data must be split
                    */
-                  memcpy(db, buf, screen->info.db_props.samplerDescriptorSize);
-                  memcpy(samplers, &buf[screen->info.db_props.samplerDescriptorSize], screen->info.db_props.sampledImageDescriptorSize);
+                  bc250_descriptor_copy(bs->dd.db_xfer, db, buf, screen->info.db_props.samplerDescriptorSize, __func__);
+                  bc250_descriptor_copy(bs->dd.db_xfer, samplers, &buf[screen->info.db_props.samplerDescriptorSize], screen->info.db_props.sampledImageDescriptorSize, __func__);
                   db += screen->info.db_props.sampledImageDescriptorSize;
                   samplers += screen->info.db_props.samplerDescriptorSize;
                }
@@ -1423,8 +1442,7 @@ zink_descriptors_update(struct zink_context *ctx, enum zink_pipeline_idx pidx)
                enum mesa_shader_stage stage = is_compute ? MESA_SHADER_COMPUTE : is_mesh && i <= MESA_SHADER_TESS_CTRL ? i + MESA_SHADER_TASK : i;
                info.data.pUniformBuffer = &ctx->di.db.ubos[stage][0];
                uint64_t stage_offset = offset + (is_compute ? 0 : ctx->dd.db_offset[i]);
-               VKSCR(GetDescriptorEXT)(screen->dev, &info, screen->info.db_props.robustUniformBufferDescriptorSize,
-                                                           bs->dd.db_map + stage_offset);
+               bc250_descriptor_get(screen, bs->dd.db_xfer, &info, screen->info.db_props.robustUniformBufferDescriptorSize, bs->dd.db_map + stage_offset, __func__);
             }
             if (!is_compute && ctx->dd.has_fbfetch) {
                uint64_t stage_offset = offset + ctx->dd.db_offset[MESA_SHADER_FRAGMENT + 1];
@@ -1435,11 +1453,10 @@ zink_descriptors_update(struct zink_context *ctx, enum zink_pipeline_idx pidx)
                   info.pNext = NULL;
                   info.type = VK_DESCRIPTOR_TYPE_INPUT_ATTACHMENT;
                   info.data.pInputAttachmentImage = &ctx->di.fbfetch;
-                  VKSCR(GetDescriptorEXT)(screen->dev, &info, screen->info.db_props.inputAttachmentDescriptorSize,
-                                                            bs->dd.db_map + stage_offset);
+                  bc250_descriptor_get(screen, bs->dd.db_xfer, &info, screen->info.db_props.inputAttachmentDescriptorSize, bs->dd.db_map + stage_offset, __func__);
                } else {
                   /* reuse cached dummy descriptor */
-                  memcpy(bs->dd.db_map + stage_offset, ctx->di.fbfetch_db, screen->info.db_props.inputAttachmentDescriptorSize);
+                  bc250_descriptor_copy(bs->dd.db_xfer, bs->dd.db_map + stage_offset, ctx->di.fbfetch_db, screen->info.db_props.inputAttachmentDescriptorSize, __func__);
                }
             }
             bs->dd.cur_db_offset[ZINK_DESCRIPTOR_TYPE_UNIFORMS] = bs->dd.db_offset;
@@ -1890,13 +1907,13 @@ zink_descriptors_update_bindless(struct zink_context *ctx)
                size_t size = i ? screen->info.db_props.robustStorageTexelBufferDescriptorSize : screen->info.db_props.robustUniformTexelBufferDescriptorSize;
                info.type = i ? VK_DESCRIPTOR_TYPE_STORAGE_TEXEL_BUFFER : VK_DESCRIPTOR_TYPE_UNIFORM_TEXEL_BUFFER;
                info.data.pSampler = (void*)&ctx->di.bindless[i].db.buffer_infos[handle - ZINK_MAX_BINDLESS_HANDLES];
-               VKSCR(GetDescriptorEXT)(screen->dev, &info, size, ctx->dd.db.bindless_db_map + ctx->dd.db.bindless_db_offsets[binding] + handle * size);
+               bc250_descriptor_get(screen, ctx->dd.db.bindless_db_xfer, &info, size, ctx->dd.db.bindless_db_map + ctx->dd.db.bindless_db_offsets[binding] + handle * size, __func__);
             } else {
                info.type = i ? VK_DESCRIPTOR_TYPE_STORAGE_IMAGE : VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
                if (screen->info.db_props.combinedImageSamplerDescriptorSingleArray || i) {
                   size_t size = i ? screen->info.db_props.storageImageDescriptorSize : screen->info.db_props.combinedImageSamplerDescriptorSize;
                   info.data.pSampler = (void*)&ctx->di.bindless[i].img_infos[handle];
-                  VKSCR(GetDescriptorEXT)(screen->dev, &info, size, ctx->dd.db.bindless_db_map + ctx->dd.db.bindless_db_offsets[binding] + handle * size);
+                  bc250_descriptor_get(screen, ctx->dd.db.bindless_db_xfer, &info, size, ctx->dd.db.bindless_db_map + ctx->dd.db.bindless_db_offsets[binding] + handle * size, __func__);
                } else {
                   /* drivers that don't support combinedImageSamplerDescriptorSingleArray must have sampler arrays written in memory as
                    *
@@ -1908,10 +1925,10 @@ zink_descriptors_update_bindless(struct zink_context *ctx)
                   size_t size = screen->info.db_props.combinedImageSamplerDescriptorSize;
                   info.data.pSampler = (void*)&ctx->di.bindless[i].img_infos[handle];
                   VKSCR(GetDescriptorEXT)(screen->dev, &info, size, buf);
-                  memcpy(ctx->dd.db.bindless_db_map + ctx->dd.db.bindless_db_offsets[binding] + handle * screen->info.db_props.samplerDescriptorSize, buf, screen->info.db_props.samplerDescriptorSize);
+                  bc250_descriptor_copy(ctx->dd.db.bindless_db_xfer, ctx->dd.db.bindless_db_map + ctx->dd.db.bindless_db_offsets[binding] + handle * screen->info.db_props.samplerDescriptorSize, buf, screen->info.db_props.samplerDescriptorSize, __func__);
                   size_t offset = screen->info.db_props.samplerDescriptorSize * ZINK_MAX_BINDLESS_HANDLES;
                   offset += handle * screen->info.db_props.sampledImageDescriptorSize;
-                  memcpy(ctx->dd.db.bindless_db_map + ctx->dd.db.bindless_db_offsets[binding] + offset, &buf[screen->info.db_props.samplerDescriptorSize], screen->info.db_props.sampledImageDescriptorSize);
+                  bc250_descriptor_copy(ctx->dd.db.bindless_db_xfer, ctx->dd.db.bindless_db_map + ctx->dd.db.bindless_db_offsets[binding] + offset, &buf[screen->info.db_props.samplerDescriptorSize], screen->info.db_props.sampledImageDescriptorSize, __func__);
                }
             }
          } else {

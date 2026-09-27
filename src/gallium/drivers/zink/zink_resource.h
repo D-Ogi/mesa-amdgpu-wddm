@@ -205,6 +205,14 @@ zink_batch_resource_usage_set(struct zink_batch_state *bs, struct zink_resource 
 bool
 zink_bc250_audit_map_checkpoint(bool sampled);
 
+uint64_t
+zink_bc250_audit_store_begin(struct pipe_transfer *transfer, const void *dst,
+                             size_t bytes, const char *writer, const char *kind);
+
+void
+zink_bc250_audit_store_end(uint64_t store);
+
+
 void
 zink_debug_mem_print_stats(struct zink_screen *screen);
 

@@ -2700,8 +2700,10 @@ bc250_audit_map_result(uint64_t id, struct zink_transfer *trans,
 {
    if (!id)
       return;
-   if (ptr)
+   if (ptr) {
       trans->bc250_audit_map_id = id;
+      trans->bc250_audit_map_ptr = (uintptr_t)ptr;
+   }
    simple_mtx_lock(&bc250_audit_lifetime_lock);
    if (ptr)
       bc250_audit_successful++;
@@ -2716,6 +2718,44 @@ bc250_audit_map_result(uint64_t id, struct zink_transfer *trans,
            trans && trans->staging_res != NULL,
            trans ? trans->base.b.stride : 0,
            (unsigned long long)(trans ? trans->base.b.layer_stride : 0));
+   simple_mtx_unlock(&bc250_audit_lifetime_lock);
+}
+
+uint64_t
+zink_bc250_audit_store_begin(struct pipe_transfer *transfer, const void *dst,
+                             size_t bytes, const char *writer, const char *kind)
+{
+   if (!debug_get_option_bc250_map_lifetime())
+      return 0;
+   struct zink_transfer *trans = (struct zink_transfer *)transfer;
+   uintptr_t address = (uintptr_t)dst;
+   uintptr_t base = trans ? trans->bc250_audit_map_ptr : 0;
+   uint64_t map = trans ? trans->bc250_audit_map_id : 0;
+   uint64_t capacity = transfer && transfer->box.width > 0 ? transfer->box.width : 0;
+   uint64_t offset = address >= base ? address - base : UINT64_MAX;
+   bool valid = map && base && transfer->resource->target == PIPE_BUFFER &&
+                offset <= capacity && bytes <= capacity - offset;
+   uint64_t store = bc250_audit_id();
+   simple_mtx_lock(&bc250_audit_lifetime_lock);
+   fprintf(stderr, "BC250 audit store event=begin seq=%llu store=%llu map=%llu time_ns=%llu writer=%s kind=%s offset=%llu bytes=%llu capacity=%llu valid=%u\n",
+           (unsigned long long)++bc250_audit_event_sequence,
+           (unsigned long long)store, (unsigned long long)map,
+           (unsigned long long)os_time_get_nano(), writer, kind,
+           (unsigned long long)offset, (unsigned long long)bytes,
+           (unsigned long long)capacity, valid);
+   simple_mtx_unlock(&bc250_audit_lifetime_lock);
+   return store;
+}
+
+void
+zink_bc250_audit_store_end(uint64_t store)
+{
+   if (!store)
+      return;
+   simple_mtx_lock(&bc250_audit_lifetime_lock);
+   fprintf(stderr, "BC250 audit store event=end seq=%llu store=%llu time_ns=%llu\n",
+           (unsigned long long)++bc250_audit_event_sequence,
+           (unsigned long long)store, (unsigned long long)os_time_get_nano());
    simple_mtx_unlock(&bc250_audit_lifetime_lock);
 }
 
