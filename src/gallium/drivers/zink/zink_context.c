@@ -103,7 +103,9 @@ bc250_audit_maps(struct zink_context *ctx, bool final)
    if (!ctx->bc250_audit) return;
    simple_mtx_lock(&ctx->bc250_audit_lock);
    uint64_t sequence = ++ctx->bc250_audit_flushes;
-   if (!final && sequence > 8 && sequence % 64) {
+   bool sampled = final || sequence <= 8 || sequence % 64 == 0;
+   bool requested = zink_bc250_audit_map_checkpoint(sampled);
+   if (!sampled && !requested) {
       simple_mtx_unlock(&ctx->bc250_audit_lock);
       return;
    }
