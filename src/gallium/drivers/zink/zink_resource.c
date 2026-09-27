@@ -2679,9 +2679,13 @@ bc250_audit_map_begin(struct zink_context *ctx, struct pipe_resource *pres,
    uint64_t id = bc250_audit_id();
    simple_mtx_lock(&bc250_audit_lifetime_lock);
    bc250_audit_requests++;
-   fprintf(stderr, "BC250 audit lifetime event=begin seq=%llu map=%llu time_ns=%llu ctx=%p resource=%p resource_id=%llu object_id=%llu target=%u width=%u height=%u depth=%u format=%u bind=%x level=%u usage=%x user_ptr=%u runtime=%u x=%d y=%d z=%d box_width=%d box_height=%d box_depth=%d\n",
+   unsigned long audit_tid = 0;
+#ifdef _WIN32
+   audit_tid = GetCurrentThreadId();
+#endif
+   fprintf(stderr, "BC250 audit lifetime event=begin seq=%llu map=%llu tid=%lu time_ns=%llu ctx=%p resource=%p resource_id=%llu object_id=%llu target=%u width=%u height=%u depth=%u format=%u bind=%x level=%u usage=%x user_ptr=%u runtime=%u x=%d y=%d z=%d box_width=%d box_height=%d box_depth=%d\n",
            (unsigned long long)++bc250_audit_event_sequence,
-           (unsigned long long)id, (unsigned long long)os_time_get_nano(), (void *)ctx, (void *)pres,
+           (unsigned long long)id, audit_tid, (unsigned long long)os_time_get_nano(), (void *)ctx, (void *)pres,
            (unsigned long long)res->bc250_audit_id, (unsigned long long)res->obj->bc250_audit_id,
            pres->target, pres->width0, pres->height0, pres->depth0, pres->format, pres->bind,
            level, usage, res->base.is_user_ptr, res->obj->bc250_runtime,

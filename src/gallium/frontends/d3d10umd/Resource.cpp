@@ -43,6 +43,40 @@
 #include "util/u_surface.h"
 #include "frontend/winsys_handle.h"
 
+#include "util/os_time.h"
+
+class Bc250DdiMapAudit {
+   bool enabled;
+   unsigned long long id;
+public:
+   Bc250DdiMapAudit(const char *origin, struct pipe_context *pipe,
+                   struct pipe_resource *resource, unsigned level,
+                   unsigned usage, const struct pipe_box &box) {
+      static const bool active = debug_get_bool_option("BC250_HOST_AUDIT", false);
+      enabled = active;
+      id = 0;
+      if (!enabled)
+         return;
+      alignas(8) static LONG64 sequence = 0;
+      id = (unsigned long long)InterlockedIncrement64(&sequence);
+      fprintf(stderr, "BC250 audit ddi event=begin id=%llu tid=%lu time_ns=%llu origin=%s ctx=%p resource=%p level=%u usage=%x x=%d y=%d z=%d box_width=%d box_height=%d box_depth=%d\n",
+              id, GetCurrentThreadId(), (unsigned long long)os_time_get_nano(),
+              origin, (void *)pipe, (void *)resource, level, usage,
+              box.x, box.y, box.z, box.width, box.height, box.depth);
+   }
+   void Copied() {
+      if (enabled)
+         fprintf(stderr, "BC250 audit ddi event=copy_complete id=%llu tid=%lu time_ns=%llu\n",
+                 id, GetCurrentThreadId(), (unsigned long long)os_time_get_nano());
+   }
+   ~Bc250DdiMapAudit() {
+      if (enabled)
+         fprintf(stderr, "BC250 audit ddi event=end id=%llu tid=%lu time_ns=%llu\n",
+                 id, GetCurrentThreadId(), (unsigned long long)os_time_get_nano());
+   }
+};
+
+
 
 /*
  * ----------------------------------------------------------------------
@@ -365,6 +399,8 @@ CreateResource(D3D10DDI_HDEVICE hDevice,                                // IN
          struct pipe_box box;
          subResourceBox(pResource->resource, 0, &level, &box);
 
+         Bc250DdiMapAudit audit("initial_data", pipe, pResource->resource, level,
+                                PIPE_MAP_WRITE | PIPE_MAP_UNSYNCHRONIZED, box);
          struct pipe_transfer *transfer;
          void *map;
          map = pipe->buffer_map(pipe,
@@ -377,6 +413,7 @@ CreateResource(D3D10DDI_HDEVICE hDevice,                                // IN
          assert(map);
          if (map) {
             memcpy(map, pInitialDataUP->pSysMem, box.width);
+            audit.Copied();
             pipe_buffer_unmap(pipe, transfer);
          }
       } else {
@@ -388,6 +425,8 @@ CreateResource(D3D10DDI_HDEVICE hDevice,                                // IN
             struct pipe_box box;
             subResourceBox(pResource->resource, SubResource, &level, &box);
 
+            Bc250DdiMapAudit audit("initial_data", pipe, pResource->resource, level,
+                                   PIPE_MAP_WRITE | PIPE_MAP_UNSYNCHRONIZED, box);
             struct pipe_transfer *transfer;
             void *map;
             map = pipe->texture_map(pipe,
@@ -410,6 +449,7 @@ CreateResource(D3D10DDI_HDEVICE hDevice,                                // IN
                                  pInitialDataUP->SysMemPitch,
                                  0, 0);
                }
+               audit.Copied();
                pipe_texture_unmap(pipe, transfer);
             }
          }
@@ -642,6 +682,7 @@ ResourceMap(D3D10DDI_HDEVICE hDevice,                                // IN
    subResourceBox(resource, SubResource, &level, &box);
 
    assert(!pResource->transfers[SubResource]);
+   Bc250DdiMapAudit audit("resource_map", pipe, resource, level, usage, box);
 
    void *map;
    if (pResource->buffer) {
@@ -1018,6 +1059,8 @@ ResourceUpdateSubResourceUP(D3D10DDI_HDEVICE hDevice,                // IN
       subResourceBox(dst_resource, DstSubResource, &level, &box);
    }
 
+   Bc250DdiMapAudit audit("update_subresource", pipe, dst_resource, level,
+                          PIPE_MAP_WRITE | PIPE_MAP_DISCARD_RANGE, box);
    struct pipe_transfer *transfer;
    void *map;
    if (pDstResource->buffer) {
@@ -1048,6 +1091,7 @@ ResourceUpdateSubResourceUP(D3D10DDI_HDEVICE hDevice,                // IN
                         RowPitch,
                         0, 0);
       }
+      audit.Copied();
       if (pDstResource->buffer) {
          pipe_buffer_unmap(pipe, transfer);
       } else {
