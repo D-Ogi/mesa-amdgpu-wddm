@@ -101,8 +101,12 @@ static void
 bc250_audit_maps(struct zink_context *ctx, bool final)
 {
    if (!ctx->bc250_audit) return;
+   simple_mtx_lock(&ctx->bc250_audit_lock);
    uint64_t sequence = ++ctx->bc250_audit_flushes;
-   if (!final && sequence > 8 && sequence % 64) return;
+   if (!final && sequence > 8 && sequence % 64) {
+      simple_mtx_unlock(&ctx->bc250_audit_lock);
+      return;
+   }
    fprintf(stderr, "BC250 audit maps ctx=%p final=%u sample=%llu image_calls=%llu image_request_bytes=%llu buffer_calls=%llu buffer_request_bytes=%llu persistent_calls=%llu\n",
            (void *)ctx, final, (unsigned long long)sequence,
            (unsigned long long)ctx->bc250_image_maps, (unsigned long long)ctx->bc250_image_map_bytes,
@@ -110,7 +114,7 @@ bc250_audit_maps(struct zink_context *ctx, bool final)
            (unsigned long long)ctx->bc250_persistent_maps);
    fprintf(stderr, "BC250 audit bucket_summary ctx=%p sample=%llu overflow=%llu\n",
            (void *)ctx, (unsigned long long)sequence, (unsigned long long)ctx->bc250_map_overflow);
-   for (unsigned i=0; i<ARRAY_SIZE(ctx->bc250_map_buckets); ++i) {
+   for (unsigned i=0; i<ctx->bc250_map_bucket_count; ++i) {
       const struct zink_bc250_map_bucket *b=&ctx->bc250_map_buckets[i];
       if (!b->calls) break;
       fprintf(stderr, "BC250 audit bucket ctx=%p sample=%llu id=%u target=%u size=%ux%ux%u format=%u bind=%x usage=%x box=%ux%ux%u runtime=%u user_ptr=%u calls=%llu bytes=%llu\n",
@@ -119,7 +123,7 @@ bc250_audit_maps(struct zink_context *ctx, bool final)
               b->box_width, b->box_height, b->box_depth, b->runtime, b->user_ptr,
               (unsigned long long)b->calls, (unsigned long long)b->bytes);
    }
-
+   simple_mtx_unlock(&ctx->bc250_audit_lock);
 }
 
 static void
@@ -290,6 +294,9 @@ zink_context_destroy(struct pipe_context *pctx)
    }
    util_dynarray_fini(&ctx->di.global_bindings);
 
+   free(ctx->bc250_map_buckets);
+   if (ctx->bc250_audit)
+      simple_mtx_destroy(&ctx->bc250_audit_lock);
    ralloc_free(ctx);
 }
 
@@ -5873,6 +5880,8 @@ zink_context_create(struct pipe_screen *pscreen, void *priv, unsigned flags)
       goto fail;
 
    ctx->bc250_audit = debug_get_bool_option("BC250_HOST_AUDIT", false);
+   if (ctx->bc250_audit)
+      simple_mtx_init(&ctx->bc250_audit_lock, mtx_plain);
    ctx->flags = flags;
    memset(ctx->pipeline_changed, 1, sizeof(ctx->pipeline_changed));
    ctx->gfx_pipeline_state.dirty = ctx->gfx_pipeline_state.mesh_dirty = true;

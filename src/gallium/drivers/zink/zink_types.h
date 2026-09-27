@@ -66,6 +66,7 @@
 
 #include "vk_util.h"
 
+#include "zink_bc250_map_audit.h"
 #include "zink_device_info.h"
 #include "zink_instance.h"
 #include "zink_shader_keys.h"
@@ -1732,16 +1733,13 @@ enum zink_ds3_state {
    ZINK_DS3_BLEND_LOGIC,
 };
 
-struct zink_bc250_map_bucket {
-   unsigned target, width, height, depth, format, bind, usage;
-   unsigned box_width, box_height, box_depth, runtime, user_ptr;
-   uint64_t calls, bytes;
-};
 
 struct zink_context {
    struct pipe_context base;
    bool bc250_audit;
-   struct zink_bc250_map_bucket bc250_map_buckets[128];
+   struct zink_bc250_map_bucket *bc250_map_buckets;
+   unsigned bc250_map_bucket_count, bc250_map_bucket_capacity;
+   simple_mtx_t bc250_audit_lock;
    uint64_t bc250_map_overflow;
    uint64_t bc250_audit_flushes, bc250_image_maps, bc250_image_map_bytes;
    uint64_t bc250_buffer_maps, bc250_buffer_map_bytes, bc250_persistent_maps;

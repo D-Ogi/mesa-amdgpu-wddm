@@ -2652,15 +2652,21 @@ bc250_audit_map_bucket(struct zink_context *ctx, struct pipe_resource *pres,
    key.usage=usage | (res->base.is_user_ptr ? PIPE_MAP_PERSISTENT : 0);
    key.box_width=box->width; key.box_height=box->height; key.box_depth=box->depth;
    key.runtime=res->obj->bc250_runtime; key.user_ptr=res->base.is_user_ptr;
-   for (unsigned i=0; i<ARRAY_SIZE(ctx->bc250_map_buckets); ++i) {
-      struct zink_bc250_map_bucket *bucket=&ctx->bc250_map_buckets[i];
-      if (!bucket->calls) *bucket=key;
-      if (!memcmp(bucket, &key, offsetof(struct zink_bc250_map_bucket, calls))) {
-         bucket->calls++; bucket->bytes+=bytes;
-         return;
-      }
+   simple_mtx_lock(&ctx->bc250_audit_lock);
+   if (pres->target == PIPE_BUFFER) {
+      ctx->bc250_buffer_maps++;
+      ctx->bc250_buffer_map_bytes += bytes;
+   } else {
+      ctx->bc250_image_maps++;
+      ctx->bc250_image_map_bytes += bytes;
    }
-   ctx->bc250_map_overflow++;
+   if ((usage & PIPE_MAP_PERSISTENT) || res->base.is_user_ptr)
+      ctx->bc250_persistent_maps++;
+   if (!zink_bc250_map_record(&ctx->bc250_map_buckets,
+                             &ctx->bc250_map_bucket_count,
+                             &ctx->bc250_map_bucket_capacity, &key, bytes, realloc))
+      ctx->bc250_map_overflow++;
+   simple_mtx_unlock(&ctx->bc250_audit_lock);
 }
 
 static void *
@@ -2674,10 +2680,7 @@ zink_buffer_map(struct pipe_context *pctx,
    MESA_TRACE_FUNC();
    struct zink_context *ctx = zink_context(pctx);
    if (ctx->bc250_audit) {
-      ctx->bc250_buffer_maps++;
-      ctx->bc250_buffer_map_bytes += (uint64_t)box->width;
       bc250_audit_map_bucket(ctx, pres, usage, box, (uint64_t)box->width);
-      if ((usage & PIPE_MAP_PERSISTENT) || zink_resource(pres)->base.is_user_ptr) ctx->bc250_persistent_maps++;
    }
    struct zink_screen *screen = zink_screen(pctx->screen);
    struct zink_resource *res = zink_resource(pres);
@@ -2889,10 +2892,7 @@ zink_image_map(struct pipe_context *pctx,
    MESA_TRACE_FUNC();
    struct zink_context *ctx = zink_context(pctx);
    if (ctx->bc250_audit) {
-      ctx->bc250_image_maps++;
-      ctx->bc250_image_map_bytes += (uint64_t)util_format_get_2d_size(pres->format, util_format_get_stride(pres->format, box->width), box->height) * box->depth;
       bc250_audit_map_bucket(ctx, pres, usage, box, (uint64_t)util_format_get_2d_size(pres->format, util_format_get_stride(pres->format, box->width), box->height) * box->depth);
-      if ((usage & PIPE_MAP_PERSISTENT) || zink_resource(pres)->base.is_user_ptr) ctx->bc250_persistent_maps++;
    }
    struct zink_screen *screen = zink_screen(pctx->screen);
    struct zink_resource *res = zink_resource(pres);
