@@ -99,13 +99,22 @@ vk_wddm2_monitored_fence_init(struct vk_device *device,
    struct vk_wddm2_monitored_fence *fence = to_wddm2_monitored_fence(sync);
    NTSTATUS status;
 
+   /* An exportable semaphore (VkExportSemaphoreCreateInfo) arrives here with
+    * VK_SYNC_IS_SHAREABLE only; the runtime sets VK_SYNC_IS_SHARED after the
+    * first successful export. D3DKMTShareObjects needs NtSecuritySharing at
+    * creation time, so the object must be created shareable now, otherwise
+    * the export below has no NT handle to duplicate (vkd3d-proton's
+    * D3D12_FENCE export then failed with VK_ERROR_UNKNOWN).
+    */
+   const bool shareable = (sync->flags & VK_SYNC_IS_SHAREABLE) != 0;
+
    D3DKMT_CREATESYNCHRONIZATIONOBJECT2 create = {
       .hDevice = device->wddm2_handle,
       .Info = {
          .Type = D3DDDI_MONITORED_FENCE,
          .Flags = {
-            .Shared = (sync->flags & VK_SYNC_IS_SHARED) != 0,
-            .NtSecuritySharing = (sync->flags & VK_SYNC_IS_SHARED) != 0,
+            .Shared = shareable,
+            .NtSecuritySharing = shareable,
             /* This gets us 64-bit fences */
             .NoGPUAccess = false,
          },
@@ -122,16 +131,23 @@ vk_wddm2_monitored_fence_init(struct vk_device *device,
    fence->handle = create.hSyncObject;
    fence->value_map = create.Info.MonitoredFence.FenceValueCPUVirtualAddress;
 #ifdef _WIN32
-   {
-      if (!device->bc250_host.dispatch) {
+   if (shareable && !device->bc250_host.dispatch) {
       OBJECT_ATTRIBUTES oa = { sizeof(OBJECT_ATTRIBUTES) };
-      WDDM2_DISPATCH(ShareObjects(
+      status = WDDM2_DISPATCH(ShareObjects(
          1,
          &fence->handle,
          &oa,
          D3DDDI_SYNC_OBJECT_ALL_ACCESS,
          &fence->shared_handle
       ));
+      if (unlikely(!NT_SUCCESS(status))) {
+         const D3DKMT_DESTROYSYNCHRONIZATIONOBJECT destroy = {
+            .hSyncObject = fence->handle,
+         };
+         BC250_WDDM_CALL(&device->bc250_host, DestroySynchronizationObject, &destroy);
+         fence->handle = 0;
+         fence->shared_handle = NULL;
+         return NTSTATUS_to_VkResult(device, status);
       }
    }
 #endif
@@ -337,6 +353,10 @@ vk_wddm2_monitored_fence_export_opaque_win32_handle(struct vk_device *device,
                                                     void **handle)
 {
    struct vk_wddm2_monitored_fence *fence = to_wddm2_monitored_fence(sync);
+
+   if (!fence->shared_handle)
+      return vk_errorf(device, VK_ERROR_FEATURE_NOT_PRESENT,
+                       "monitored fence was not created shareable");
 
    HANDLE process = GetCurrentProcess();
    BOOL ok = DuplicateHandle(process, (HANDLE)fence->shared_handle,
