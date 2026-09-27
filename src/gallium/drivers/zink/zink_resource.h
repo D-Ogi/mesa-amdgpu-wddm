@@ -203,7 +203,7 @@ zink_batch_resource_usage_set(struct zink_batch_state *bs, struct zink_resource 
 }
 
 bool
-zink_bc250_audit_map_checkpoint(bool sampled);
+zink_bc250_audit_map_checkpoint(bool sampled, const struct bc250_host *host);
 
 uint64_t
 zink_bc250_audit_store_begin(struct pipe_transfer *transfer, const void *dst,

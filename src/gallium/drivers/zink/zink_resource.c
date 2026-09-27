@@ -2831,7 +2831,7 @@ bc250_audit_read_marker(void)
 }
 
 bool
-zink_bc250_audit_map_checkpoint(bool sampled)
+zink_bc250_audit_map_checkpoint(bool sampled, const struct bc250_host *host)
 {
    if (!debug_get_option_bc250_map_lifetime())
       return false;
@@ -2841,6 +2841,16 @@ zink_bc250_audit_map_checkpoint(bool sampled)
    if (sampled || requested) {
       if (requested)
          bc250_audit_last_marker = marker;
+      struct bc250_host_present_audit present = {0};
+      present.size=sizeof(present); present.version=1;
+      int32_t status=host && host->dispatch ?
+         host->dispatch(host->userdata, BC250_HOST_AUDIT_PRESENT, &present) : -1;
+      fprintf(stderr, "BC250 audit present event=snapshot device=%p checkpoint_seq=%llu marker=%llu status=%x completed=%llu signaled=%llu sync=%x\n",
+              host ? host->identity : NULL,
+              (unsigned long long)(bc250_audit_event_sequence+1),
+              (unsigned long long)(requested ? marker : 0), (unsigned)status,
+              (unsigned long long)present.completed, (unsigned long long)present.signaled,
+              present.sync);
       fprintf(stderr, "BC250 audit lifetime event=checkpoint seq=%llu time_ns=%llu marker=%llu requests=%llu successful=%llu failed=%llu ended=%llu pending=%llu live=%llu stores_begun=%llu stores_ended=%llu runtime_events=%llu\n",
               (unsigned long long)++bc250_audit_event_sequence,
               (unsigned long long)os_time_get_nano(),

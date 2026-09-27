@@ -72,6 +72,17 @@ static void stub_GetDescriptorEXT(unsigned dev, const VkDescriptorGetInfoEXT *in
    get_calls++;
 }
 """
+    preamble += '\n#include "' + str(root.parents[2] / "util/bc250_host_bootstrap.h").replace("\\", "/") + '"\n'
+    preamble += r"""
+static int32_t audit_query(void *userdata, uint32_t op, void *arg) {
+   (void)userdata;
+   struct bc250_host_present_audit *a=arg;
+   assert(op==BC250_HOST_AUDIT_PRESENT && a->size==sizeof(*a) && a->version==1);
+   a->completed=29; a->signaled=29; a->sync=0x1000;
+   return 0;
+}
+static struct bc250_host audit_host={.identity=(void *)(uintptr_t)0x2000,.dispatch=audit_query};
+"""
     code = preamble
     code += "\nuint64_t\n" + function(resource, "zink_bc250_audit_store_begin")
     code += "\nvoid\n" + function(resource, "zink_bc250_audit_store_end")
@@ -99,7 +110,7 @@ int main(void)
    zink_bc250_audit_store_end(0);
    assert(bc250_audit_event_sequence == 0);
    enabled = true;
-   zink_bc250_audit_map_checkpoint(true);
+   zink_bc250_audit_map_checkpoint(true, &audit_host);
    unsigned char dst[128] = {0};
    struct pipe_resource resource = {PIPE_BUFFER};
    struct zink_transfer trans = {{{&resource, {128, 0}, PIPE_MAP_WRITE}}, 42, (uintptr_t)dst, NULL, 0};
@@ -142,7 +153,7 @@ int main(void)
    assert(WaitForMultipleObjects(2, threads, TRUE, INFINITE) == WAIT_OBJECT_0);
    for (unsigned i = 0; i < 2; i++) CloseHandle(threads[i]);
    zink_bc250_audit_store_begin(&trans.base.b, dst, 1, "unfinished", "bounds");
-   zink_bc250_audit_map_checkpoint(true);
+   zink_bc250_audit_map_checkpoint(true, &audit_host);
    return 0;
 }
 """
@@ -155,6 +166,13 @@ int main(void)
     complete = []
     invalid = []
     rows = result.stderr.decode().splitlines()
+    snapshots=[(i,dict(re.findall(r"(\w+)=(\S+)",line))) for i,line in enumerate(rows) if "event=snapshot" in line]
+    assert snapshots
+    for i,row in snapshots:
+        assert row["status"]=="0" and row["completed"]=="29" and row["signaled"]=="29" and row["sync"]=="1000"
+        next_row=dict(re.findall(r"(\w+)=(\S+)",rows[i+1]))
+        assert next_row["event"]=="checkpoint" and next_row["seq"]==row["checkpoint_seq"] and next_row["marker"]==row["marker"]
+    rows=[line for line in rows if "event=snapshot" not in line]
     for seq, line in enumerate(rows, 1):
         row = dict(re.findall(r"(\w+)=(\S+)", line))
         assert int(row["seq"]) == seq

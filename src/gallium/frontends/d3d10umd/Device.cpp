@@ -158,6 +158,15 @@ static HRESULT Bc250HostOperation(Bc250HostProbeState *s, uint32_t op, void *arg
    if (!argument) return E_INVALIDARG;
 #define HOST_CALL(name, arg) (cb.pfn##name##Cb ? cb.pfn##name##Cb(rt, arg) : E_NOTIMPL)
    switch (op) {
+   case BC250_HOST_AUDIT_PRESENT: {
+      auto *a=(bc250_host_present_audit *)argument;
+      static_assert(sizeof(*a)==32, "present audit ABI");
+      if (a->size!=sizeof(*a) || a->version!=1 || a->reserved) return E_INVALIDARG;
+      a->completed=s->device->profilePresents;
+      a->signaled=s->present_value;
+      a->sync=s->present_sync;
+      return S_OK;
+   }
    case BC250_HOST_PUBLISH_PROGRESS: {
       auto *a=(bc250_host_progress *)argument;
       if (!Bc250HostContext(s,a->context) || !a->sync || !a->value || !a->cpu_address || a->value==UINT64_MAX) return E_INVALIDARG;

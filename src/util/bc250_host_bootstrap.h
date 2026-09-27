@@ -21,6 +21,12 @@ struct bc250_host_import {
 #define BC250_HOST_PUBLISH_PROGRESS 3u
 #define BC250_HOST_CHECK_STATUS 4u
 #define BC250_HOST_REPORT_LOST 5u
+#define BC250_HOST_AUDIT_PRESENT 6u
+struct bc250_host_present_audit {
+   uint32_t size, version;
+   uint64_t completed, signaled;
+   uint32_t sync, reserved;
+};
 struct bc250_host_progress {
    uint32_t context, sync;
    uint64_t value;
