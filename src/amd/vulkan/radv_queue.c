@@ -2181,13 +2181,73 @@ radv_queue_finish(struct radv_queue *queue)
       device->ws->ctx_destroy(queue->hw_ctx);
 }
 
+/* The bind and unbind entry points of struct bc250_host_queue_funcs
+ * (draft). The embedder calls them on the thread of its own call and
+ * synchronizes them with every other use of the VkQueue, as it does for
+ * vkQueueSubmit; they also take the queue lock that submission takes.
+ */
+int32_t
+radv_bc250_bind_queue(void *vk_queue, void *cookie)
+{
+   if (!vk_queue)
+      return VK_ERROR_INITIALIZATION_FAILED;
+
+   VK_FROM_HANDLE(radv_queue, queue, (VkQueue)vk_queue);
+   struct radv_device *device = radv_queue_device(queue);
+   VkResult result = VK_ERROR_INITIALIZATION_FAILED;
+
+   if (!queue->bindable)
+      return VK_ERROR_INITIALIZATION_FAILED;
+   if (vk_device_is_lost(&device->vk))
+      return VK_ERROR_DEVICE_LOST;
+   /* A bound queue submits only in the call that submits. */
+   if (queue->vk.submit.mode != VK_QUEUE_SUBMIT_MODE_IMMEDIATE)
+      return VK_ERROR_FEATURE_NOT_PRESENT;
+
+   vk_queue_lock(&queue->vk);
+   if (!queue->bound) {
+      result = device->ws->ctx_bind(queue->hw_ctx, cookie);
+      queue->bound = result == VK_SUCCESS;
+   }
+   vk_queue_unlock(&queue->vk);
+   return result;
+}
+
+int32_t
+radv_bc250_unbind_queue(void *vk_queue)
+{
+   if (!vk_queue)
+      return VK_ERROR_INITIALIZATION_FAILED;
+
+   VK_FROM_HANDLE(radv_queue, queue, (VkQueue)vk_queue);
+   struct radv_device *device = radv_queue_device(queue);
+   VkResult result = VK_ERROR_INITIALIZATION_FAILED;
+
+   if (!queue->bindable)
+      return VK_ERROR_INITIALIZATION_FAILED;
+
+   vk_queue_lock(&queue->vk);
+   if (queue->bound) {
+      /* Releases the queue's objects once its work retired. Otherwise, or
+       * when the host fails to destroy one, the context keeps what it could
+       * not release, and the queue is never bound again. */
+      result = device->ws->ctx_unbind(queue->hw_ctx);
+      queue->bound = false;
+      if (result == VK_ERROR_DEVICE_LOST)
+         vk_queue_set_lost(&queue->vk, "queue unbound before its last submission retired");
+   }
+   vk_queue_unlock(&queue->vk);
+   return result;
+}
+
 VKAPI_ATTR VkResult VKAPI_CALL
 radv_QueueWaitIdle(VkQueue _queue)
 {
    VK_FROM_HANDLE(radv_queue, queue, _queue);
 
    /* An unbound queue has nothing in flight: unbinding retired its last
-    * submission, and it cannot submit again before the next bind. Waiting
+    * submission, or else lost the queue, and it cannot submit again before
+    * the next bind. Waiting
     * the common way would itself be a submission. vkDeviceWaitIdle comes
     * here for every queue of the device, bound or not. */
    if (radv_queue_is_unbound(queue))

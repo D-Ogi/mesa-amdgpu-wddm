@@ -185,57 +185,122 @@ submit_pdd_writer_reserve(struct submit_pdd_writer *writer, unsigned size)
 
 static bool vk_wddm2_fence_wait(struct radv_wddm2_winsys *ws, struct vk_wddm2_fence *fence);
 
+/* Whether the queue's work retired: a bounded CPU wait for its last
+ * submission and its last mapping update. A lost device, a failed or
+ * timed-out wait and a submission the queue could not track leave the
+ * answer unknown, and unknown is not retired.
+ */
+static bool
+radv_wddm2_queue_retired(struct radv_wddm2_queue *queue)
+{
+   if (queue->bc250_submit_failed)
+      return false;
+   if (queue->bc250_progress.handle && queue->bc250_progress.wait_value &&
+       !vk_wddm2_fence_wait(queue->bc250_ws, &queue->bc250_progress))
+      return false;
+   if (queue->vm_fence.handle && queue->vm_fence.value_map && queue->vm_fence.wait_value &&
+       !vk_wddm2_fence_wait(queue->bc250_ws, &queue->vm_fence))
+      return false;
+   return true;
+}
+
+/* Whether the queue still owns a kernel object. */
+static bool
+radv_wddm2_queue_holds(const struct radv_wddm2_queue *queue)
+{
+   bool holds = queue->bc250_progress.handle || queue->vm_fence.handle || queue->context_h || queue->handle;
+   for (unsigned i = 0; i < BC250_GATHER_SLOTS; i++)
+      holds |= queue->bc250_gather[i].bo != NULL;
+   return holds;
+}
+
+/* A fence stays with the queue, handle and all, if the host fails to
+ * destroy it. */
 static void
-radv_wddm2_queue_destroy(struct radv_wddm2_queue *queue)
+radv_wddm2_release_sync(struct radv_wddm2_winsys *ws, uint32_t *handle)
+{
+   if (!*handle)
+      return;
+   D3DKMT_DESTROYSYNCHRONIZATIONOBJECT destroy = {
+      .hSyncObject = *handle,
+   };
+   if (NT_SUCCESS(BC250_WDDM_CALL(&ws->host, DestroySynchronizationObject, &destroy)))
+      *handle = 0;
+}
+
+/* Releases the queue's kernel objects, once its work retired, in this
+ * order: the progress fence, the gather BOs, the companion fence, the
+ * context, the hardware queue. A context from the embedder's queue goes
+ * back through BC250_HOST_DESTROY_QUEUE_CONTEXT with its cookie, and only
+ * while the bind or unbind of that queue runs (in_scope); out of scope it
+ * is abandoned to the embedder's queue. Work that did not retire keeps
+ * everything, since the GPU may still use any of it. An object the host
+ * fails to destroy stays too, and its handle with it. Only CPU memory goes
+ * either way. Returns false when the queue still owns anything; *retired,
+ * if given, tells whether its work retired.
+ */
+static bool
+radv_wddm2_queue_release(struct radv_wddm2_queue *queue, bool in_scope, bool *retired)
 {
    struct radv_wddm2_winsys *ws = queue->bc250_ws;
    radv_wddm2_sparse_groups_clear(queue);
    util_dynarray_fini(&queue->sparse_ops);
-   if (queue->bc250_progress.handle) {
-      if (queue->bc250_progress.wait_value)
-         vk_wddm2_fence_wait(queue->bc250_ws, &queue->bc250_progress);
-      D3DKMT_DESTROYSYNCHRONIZATIONOBJECT destroy_progress = {
-         .hSyncObject = queue->bc250_progress.handle,
-      };
-      BC250_WDDM_CALL(&ws->host, DestroySynchronizationObject, &destroy_progress);
-      queue->bc250_progress.handle = 0;
-   }
    free(queue->bc250_ibs);
    queue->bc250_ibs = NULL;
    queue->bc250_ib_capacity = 0;
+
+   const bool work_retired = radv_wddm2_queue_retired(queue);
+   if (retired)
+      *retired = work_retired;
+   if (!work_retired)
+      return false;
+
+   radv_wddm2_release_sync(ws, &queue->bc250_progress.handle);
    for (unsigned i = 0; i < BC250_GATHER_SLOTS; i++) {
+      /* buffer_destroy reports no status. */
       if (queue->bc250_gather[i].bo)
-         queue->bc250_ws->base.buffer_destroy(&queue->bc250_ws->base, queue->bc250_gather[i].bo);
+         ws->base.buffer_destroy(&ws->base, queue->bc250_gather[i].bo);
       queue->bc250_gather[i].bo = NULL;
       queue->bc250_gather[i].map = NULL;
    }
-   if (queue->vm_fence.handle) {
-      D3DKMT_DESTROYSYNCHRONIZATIONOBJECT destroy_fence = {
-         .hSyncObject = queue->vm_fence.handle,
-      };
-      BC250_WDDM_CALL(&ws->host, DestroySynchronizationObject, &destroy_fence);
-      queue->vm_fence.handle = 0;
-   }
-   if (queue->context_h) {
+   radv_wddm2_release_sync(ws, &queue->vm_fence.handle);
+   if (queue->context_h && (in_scope || !queue->bc250_queue_context)) {
       D3DKMT_DESTROYCONTEXT context_destroy = {
          .hContext = queue->context_h,
       };
-      BC250_WDDM_CALL(&ws->host, DestroyContext, &context_destroy);
-      queue->context_h = 0;
+      NTSTATUS status;
+      if (queue->bc250_queue_context) {
+         struct bc250_host_queue_context args = {
+            .queue = queue->bc250_queue_cookie,
+            .arguments = &context_destroy,
+         };
+         status = ws->host.dispatch(ws->host.userdata, BC250_HOST_DESTROY_QUEUE_CONTEXT, &args);
+      } else {
+         status = BC250_WDDM_CALL(&ws->host, DestroyContext, &context_destroy);
+      }
+      if (NT_SUCCESS(status)) {
+         queue->context_h = 0;
+         queue->bc250_queue_context = false;
+         queue->bc250_queue_cookie = NULL;
+      }
    }
    if (queue->handle) {
       D3DKMT_DESTROYHWQUEUE queue_destroy = {
          .hHwQueue = queue->handle,
       };
-      BC250_WDDM_CALL(&ws->host, DestroyHwQueue, &queue_destroy);
-      queue->handle = 0;
+      if (NT_SUCCESS(BC250_WDDM_CALL(&ws->host, DestroyHwQueue, &queue_destroy)))
+         queue->handle = 0;
    }
+   return !radv_wddm2_queue_holds(queue);
 }
 
+/* With queue_context set, the context comes from the embedder's queue
+ * named by cookie; everything else is created the same way.
+ */
 static VkResult
 radv_wddm2_queue_init(struct radv_wddm2_winsys *ws, enum amd_ip_type hw_ip,
                       enum radeon_ctx_priority priority, struct radv_wddm2_queue *parent,
-                      struct radv_wddm2_queue *queue)
+                      struct radv_wddm2_queue *queue, bool queue_context, void *cookie)
 {
    NTSTATUS status;
    uint32_t node;
@@ -295,12 +360,22 @@ radv_wddm2_queue_init(struct radv_wddm2_winsys *ws, enum amd_ip_type hw_ip,
       .ClientHint = D3DKMT_CLIENTHINT_VULKAN,
    };
 
-   status = BC250_WDDM_CALL(&ws->host, CreateContextVirtual, &create_context);
-   if (!NT_SUCCESS(status)) {
+   if (queue_context) {
+      struct bc250_host_queue_context args = {
+         .queue = cookie,
+         .arguments = &create_context,
+      };
+      status = ws->host.dispatch(ws->host.userdata, BC250_HOST_CREATE_QUEUE_CONTEXT, &args);
+   } else {
+      status = BC250_WDDM_CALL(&ws->host, CreateContextVirtual, &create_context);
+   }
+   if (!NT_SUCCESS(status) || !create_context.hContext) {
       fprintf(stderr, "Create context failed 0x%X for IP %i and device 0x%x\n", status, hw_ip, ws->device_h);
       return VK_ERROR_INITIALIZATION_FAILED;
    }
    queue->context_h = create_context.hContext;
+   queue->bc250_queue_context = queue_context;
+   queue->bc250_queue_cookie = cookie;
    queue->bc250_ws = ws;
 
    /* bc250kmd has no hardware-queue DDIs. SubmitCommand is the packet path. */
@@ -376,7 +451,8 @@ radv_wddm2_queue_init(struct radv_wddm2_winsys *ws, enum amd_ip_type hw_ip,
    return VK_SUCCESS;
 
 failed:
-   radv_wddm2_queue_destroy(queue);
+   /* Nothing was submitted: release what was created, within the call. */
+   radv_wddm2_queue_release(queue, queue_context, NULL);
    return VK_ERROR_INITIALIZATION_FAILED;
 }
 
@@ -396,7 +472,7 @@ radv_wddm2_ctx_create(struct radeon_winsys *_ws, enum radeon_ctx_priority priori
    ctx->ws = ws;
 
    for (uint32_t ip = 0; ip < AMD_NUM_IP_TYPES; ip++) {
-      result = radv_wddm2_queue_init(ws, ip, priority, NULL, &ctx->per_ip[ip].queue);
+      result = radv_wddm2_queue_init(ws, ip, priority, NULL, &ctx->per_ip[ip].queue, false, NULL);
       if (result != VK_SUCCESS)
          goto fail_contexts;
    }
@@ -406,10 +482,23 @@ radv_wddm2_ctx_create(struct radeon_winsys *_ws, enum radeon_ctx_priority priori
 
 fail_contexts:
    for (uint32_t ip = 0; ip < AMD_NUM_IP_TYPES; ip++)
-      radv_wddm2_queue_destroy(&ctx->per_ip[ip].queue);
+      radv_wddm2_queue_release(&ctx->per_ip[ip].queue, false, NULL);
 
    FREE(ctx);
    return result;
+}
+
+/* An unbound queue: no kernel object and no state of an earlier bind, so
+ * that the next bind starts its fences and gather slots from zero.
+ */
+static void
+radv_wddm2_queue_reset_unbound(struct radv_wddm2_winsys *ws, enum amd_ip_type hw_ip,
+                               struct radv_wddm2_queue *queue)
+{
+   memset(queue, 0, sizeof(*queue));
+   queue->hw_ip = hw_ip;
+   queue->bc250_ws = ws;
+   util_dynarray_init(&queue->sparse_ops, NULL);
 }
 
 /* The context of one runtime-bound VkQueue. It starts with no kernel
@@ -431,27 +520,103 @@ radv_wddm2_ctx_create_bindable(struct radeon_winsys *_ws, enum radeon_ctx_priori
       return VK_ERROR_OUT_OF_HOST_MEMORY;
    ctx->ws = ws;
    ctx->bindable = true;
+   ctx->priority = priority;
 
-   for (uint32_t ip = 0; ip < AMD_NUM_IP_TYPES; ip++) {
-      struct radv_wddm2_queue *queue = &ctx->per_ip[ip].queue;
-      queue->hw_ip = ip;
-      queue->bc250_ws = ws;
-      util_dynarray_init(&queue->sparse_ops, NULL);
-   }
-   util_dynarray_init(&ctx->ace_queue.sparse_ops, NULL);
+   for (uint32_t ip = 0; ip < AMD_NUM_IP_TYPES; ip++)
+      radv_wddm2_queue_reset_unbound(ws, ip, &ctx->per_ip[ip].queue);
+   radv_wddm2_queue_reset_unbound(ws, AMD_IP_COMPUTE, &ctx->ace_queue);
 
    *rctx = (struct radeon_winsys_ctx *)ctx;
    return VK_SUCCESS;
+}
+
+/* Called inside the embedder's bind of the queue that cookie names (NULL
+ * for the engine's internal queue). The context comes from that queue,
+ * the progress and companion fences from the device. On failure whatever
+ * was created is released within this call, the context through the same
+ * cookie, and the context can be bound again, unless the host failed to
+ * destroy something: then the context keeps it and is never bound again.
+ */
+static VkResult
+radv_wddm2_ctx_bind(struct radeon_winsys_ctx *rwctx, void *cookie)
+{
+   struct radv_wddm2_ctx *ctx = radv_wddm2_ctx(rwctx);
+   struct radv_wddm2_winsys *ws = ctx->ws;
+   struct radv_wddm2_queue *queue = &ctx->per_ip[AMD_IP_GFX].queue;
+
+   if (!ctx->bindable || ctx->bound || ctx->kept)
+      return VK_ERROR_INITIALIZATION_FAILED;
+   /* A lost device gets no new context. */
+   if (bc250_host_check_status(&ws->host) < 0)
+      return VK_ERROR_DEVICE_LOST;
+
+   radv_wddm2_queue_reset_unbound(ws, AMD_IP_GFX, queue);
+   memset(&ctx->per_ip[AMD_IP_GFX].last_submission, 0, sizeof(ctx->per_ip[AMD_IP_GFX].last_submission));
+
+   VkResult result = radv_wddm2_queue_init(ws, AMD_IP_GFX, ctx->priority, NULL, queue, true, cookie);
+   if (result != VK_SUCCESS) {
+      if (radv_wddm2_queue_holds(queue))
+         ctx->kept = true;
+      else
+         radv_wddm2_queue_reset_unbound(ws, AMD_IP_GFX, queue);
+      return result;
+   }
+
+   ctx->bound = true;
+   return VK_SUCCESS;
+}
+
+/* Called inside the embedder's unbind, once the queue is idle for the
+ * engine. Once the queue's work retired its objects are released within
+ * this call, and no host call names the context or the cookie afterwards.
+ * Otherwise the context keeps what it could not release and is never bound
+ * again: VK_ERROR_DEVICE_LOST when the work did not retire (everything
+ * kept), VK_ERROR_UNKNOWN when the host failed to destroy an object.
+ */
+static VkResult
+radv_wddm2_ctx_unbind(struct radeon_winsys_ctx *rwctx)
+{
+   struct radv_wddm2_ctx *ctx = radv_wddm2_ctx(rwctx);
+   struct radv_wddm2_winsys *ws = ctx->ws;
+   struct radv_wddm2_queue *queue = &ctx->per_ip[AMD_IP_GFX].queue;
+
+   if (!ctx->bindable || !ctx->bound)
+      return VK_ERROR_INITIALIZATION_FAILED;
+
+   bool retired;
+   const bool released = radv_wddm2_queue_release(queue, true, &retired);
+   ctx->bound = false;
+   memset(&ctx->per_ip[AMD_IP_GFX].last_submission, 0, sizeof(ctx->per_ip[AMD_IP_GFX].last_submission));
+
+   if (released) {
+      radv_wddm2_queue_reset_unbound(ws, AMD_IP_GFX, queue);
+      return VK_SUCCESS;
+   }
+   ctx->kept = true;
+   ctx->unretired = !retired;
+   return retired ? VK_ERROR_UNKNOWN : VK_ERROR_DEVICE_LOST;
 }
 
 static void
 radv_wddm2_ctx_destroy(struct radeon_winsys_ctx *rwctx)
 {
    struct radv_wddm2_ctx *ctx = radv_wddm2_ctx(rwctx);
+   bool abandoned = false;
 
+   /* What an unbind or a failed bind kept is left to the device: that
+    * call has returned, and the context makes no host call for it. Still
+    * bound, the embedder's queue may be gone already, so its context is
+    * left to it rather than destroyed through a cookie that may be stale;
+    * the device's fences and gather BOs go if the queue's work retired and
+    * are kept otherwise.
+    */
    for (uint32_t ip = 0; ip < AMD_NUM_IP_TYPES; ip++)
-      radv_wddm2_queue_destroy(&ctx->per_ip[ip].queue);
-   radv_wddm2_queue_destroy(&ctx->ace_queue);
+      abandoned |= ctx->kept || !radv_wddm2_queue_release(&ctx->per_ip[ip].queue, false, NULL);
+   abandoned |= ctx->kept || !radv_wddm2_queue_release(&ctx->ace_queue, false, NULL);
+
+   if (abandoned)
+      fprintf(stderr, "radv/wddm2: queue destroyed %s, its kernel objects are left to the device\n",
+              ctx->bound ? "while bound" : "after a failed release");
 
    FREE(ctx);
 }
@@ -519,9 +684,10 @@ radv_wddm2_ctx_wait_idle(struct radeon_winsys_ctx *rwctx, enum amd_ip_type ip_ty
    struct radv_wddm2_ctx *ctx = radv_wddm2_ctx(rwctx);
    bool ret = true;
 
-   /* Nothing of an unbound context is in flight: unbinding retired it. */
+   /* Nothing of an unbound context is in flight, unless its unbind could
+    * not retire its work. */
    if (radv_wddm2_ctx_unbound(ctx))
-      return true;
+      return !ctx->unretired;
 
    if (ctx->per_ip[ip_type].last_submission.handle)
       ret = vk_wddm2_fence_wait(ctx->ws, &ctx->per_ip[ip_type].last_submission);
@@ -1027,7 +1193,7 @@ radv_wddm2_cs_submit(struct radeon_winsys_ctx *_ctx,
 
    if (submit->is_gang && ace_queue->handle == 0) {
       assert(submit->ip_type == AMD_IP_GFX);
-      radv_wddm2_queue_init(ctx->ws, AMD_IP_COMPUTE, 0, queue, ace_queue);
+      radv_wddm2_queue_init(ctx->ws, AMD_IP_COMPUTE, 0, queue, ace_queue, false, NULL);
       if (ace_queue->handle == 0)
          return VK_ERROR_DEVICE_LOST;
    }
@@ -1212,8 +1378,11 @@ radv_wddm2_cs_init_functions(struct radv_wddm2_winsys *ws)
 {
    ws->base.ctx_create = radv_wddm2_ctx_create;
    ws->base.ctx_destroy = radv_wddm2_ctx_destroy;
-   if (ws->bc250 && ws->host.dispatch)
+   if (ws->bc250 && ws->host.dispatch) {
       ws->base.ctx_create_bindable = radv_wddm2_ctx_create_bindable;
+      ws->base.ctx_bind = radv_wddm2_ctx_bind;
+      ws->base.ctx_unbind = radv_wddm2_ctx_unbind;
+   }
    ws->base.ctx_wait_idle = radv_wddm2_ctx_wait_idle;
    ws->base.cs_domain = radv_wddm2_cs_domain;
    ws->base.cs_create = radv_wddm2_cs_create;

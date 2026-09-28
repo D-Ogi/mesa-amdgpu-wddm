@@ -45,6 +45,34 @@ struct bc250_host {
  * of its own that exists only while the embedder has the queue bound, and
  * the GENERAL family offers a bounded number of queues instead of one.
  * vkCreateInstance validates the structure and fills *funcs.
+ *
+ * bind(vk_queue, queue) runs on the calling thread and creates the queue's
+ * context through BC250_HOST_CREATE_QUEUE_CONTEXT with queue, the embedder's
+ * cookie (NULL for the engine's internal queue), then its two monitored
+ * fences through CreateSynchronizationObject2. A failure releases, within
+ * the call, whatever was created and leaves the queue unbound; a lost device
+ * or an already bound queue is refused.
+ *
+ * unbind(vk_queue) runs on the calling thread once the queue is idle for its
+ * user. It waits, bounded and not on a lost device, for the queue's last
+ * submission and mapping update. Once they retired it releases the fences
+ * and gather BOs and destroys the context through
+ * BC250_HOST_DESTROY_QUEUE_CONTEXT with the same cookie, and returns
+ * VK_SUCCESS. Otherwise RADV keeps ownership and destroys or forgets
+ * nothing it could not release:
+ * - VK_ERROR_DEVICE_LOST: the work did not retire (a failed or timed-out
+ *   wait, a lost device). Nothing is released, the context included, and
+ *   the queue is lost.
+ * - VK_ERROR_UNKNOWN: the host failed a destroy; that object is kept.
+ * The same holds for a failed bind. After either the queue is never bound
+ * again and no call names its context or its cookie: what RADV kept stays
+ * until the host's device goes, and vkDestroyDevice makes no call for it.
+ *
+ * Unbound, a queue makes no host call: vkQueueSubmit and vkQueueBindSparse
+ * fail with VK_ERROR_VALIDATION_FAILED and vkQueueWaitIdle returns at once.
+ * A queue still bound at vkDestroyDevice abandons its context to the
+ * embedder's queue, without a call through the cookie; its fences and
+ * gather BOs are released once its work retired, and kept otherwise.
  */
 #define BC250_HOST_QUEUE_BINDING_STYPE 0x42434833u
 #define BC250_HOST_QUEUE_BINDING_VERSION 1u
@@ -53,6 +81,12 @@ struct bc250_host_queue_funcs {
    /* out: both return a VkResult; vk_queue is a VkQueue of the instance */
    int32_t (*bind)(void *vk_queue, void *queue);
    int32_t (*unbind)(void *vk_queue);
+};
+#define BC250_HOST_CREATE_QUEUE_CONTEXT 6u  /* arguments: D3DKMT_CREATECONTEXTVIRTUAL */
+#define BC250_HOST_DESTROY_QUEUE_CONTEXT 7u /* arguments: D3DKMT_DESTROYCONTEXT */
+struct bc250_host_queue_context {
+   void *queue; /* the cookie given to bind */
+   void *arguments;
 };
 struct bc250_host_queue_binding {
    uint32_t sType;
