@@ -1265,6 +1265,9 @@ radv_wddm2_virtual_bind_begin(struct radeon_winsys *_ws, struct radeon_winsys_ct
    struct radv_wddm2_ctx *ctx = (struct radv_wddm2_ctx *)_ctx;
    struct radv_wddm2_queue *queue = &ctx->per_ip[ip_type].queue;
 
+   if (radv_wddm2_ctx_unbound(ctx))
+      return VK_ERROR_VALIDATION_FAILED;
+
    /* RADV externally serializes submission to each advertised hardware queue. */
    if (queue->sparse_batch_active || !queue->context_h || !queue->vm_fence.handle)
       return VK_ERROR_DEVICE_LOST;

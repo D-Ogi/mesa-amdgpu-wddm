@@ -1572,23 +1572,40 @@ radv_CreateDevice(VkPhysicalDevice physicalDevice, const VkDeviceCreateInfo *pCr
    bool video_dec_queue = false;
    bool video_enc_queue = false;
 
-   if (radv_bound_queues_enabled(pdev)) {
+   const bool bound_queues = radv_bound_queues_enabled(pdev);
+   if (bound_queues) {
       /* Admission matches consumption: each bound queue takes one context
        * of the embedder's, so never create more than were reported. */
       uint32_t general_queues = 0;
       for (unsigned i = 0; i < pCreateInfo->queueCreateInfoCount; i++) {
          const VkDeviceQueueCreateInfo *queue_create = &pCreateInfo->pQueueCreateInfos[i];
-         if (vk_queue_to_radv(pdev, queue_create->queueFamilyIndex) == RADV_QUEUE_GENERAL)
+         const enum radv_queue_family qf = vk_queue_to_radv(pdev, queue_create->queueFamilyIndex);
+
+         /* Binding creates a graphics context only. */
+         if (qf != RADV_QUEUE_GENERAL && qf != RADV_QUEUE_SPARSE) {
+            result = VK_ERROR_FEATURE_NOT_PRESENT;
+            goto fail;
+         }
+         if (qf == RADV_QUEUE_GENERAL)
             general_queues += queue_create->queueCount;
       }
       if (general_queues > radv_general_queue_count(pdev)) {
          result = VK_ERROR_INITIALIZATION_FAILED;
          goto fail;
       }
+
+      /* Every submission must happen inside the embedder's call that made
+       * it: no submit thread, and nothing submitted at queue creation,
+       * which register shadowing would do before any bind. */
+      if (device->vk.submit_mode != VK_QUEUE_SUBMIT_MODE_IMMEDIATE || device->uses_shadow_regs) {
+         result = VK_ERROR_FEATURE_NOT_PRESENT;
+         goto fail;
+      }
    }
 
-   /* Create one context per queue priority. */
-   for (unsigned i = 0; i < pCreateInfo->queueCreateInfoCount; i++) {
+   /* Create one context per queue priority. Queues of a bound instance
+    * own theirs instead (radv_queue_init). */
+   for (unsigned i = 0; !bound_queues && i < pCreateInfo->queueCreateInfoCount; i++) {
       const VkDeviceQueueCreateInfo *queue_create = &pCreateInfo->pQueueCreateInfos[i];
       const VkDeviceQueueGlobalPriorityCreateInfo *global_priority =
          vk_find_struct_const(queue_create->pNext, DEVICE_QUEUE_GLOBAL_PRIORITY_CREATE_INFO);
@@ -1642,7 +1659,9 @@ radv_CreateDevice(VkPhysicalDevice physicalDevice, const VkDeviceCreateInfo *pCr
 
    device->shader_use_invisible_vram = (instance->perftest_flags & RADV_PERFTEST_DMA_SHADERS) &&
                                        /* SDMA buffer copy is only implemented for GFX7+. */
-                                       pdev->info.gfx_level >= GFX7;
+                                       pdev->info.gfx_level >= GFX7 &&
+                                       /* The upload queue's context would have no runtime queue. */
+                                       !bound_queues;
    result = radv_init_shader_upload_queue(device);
    if (result != VK_SUCCESS)
       goto fail;

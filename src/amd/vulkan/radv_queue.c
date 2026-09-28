@@ -1879,6 +1879,9 @@ radv_queue_sparse_submit(struct vk_queue *vqueue, struct vk_queue_submit *submis
    struct radv_device *device = radv_queue_device(queue);
    VkResult result;
 
+   if (radv_queue_is_unbound(queue))
+      return vk_errorf(queue, VK_ERROR_VALIDATION_FAILED, "vkQueueBindSparse() on an unbound queue");
+
    result = radv_queue_submit_bind_sparse_memory(queue, submission);
    if (result != VK_SUCCESS)
       goto fail;
@@ -1927,6 +1930,11 @@ radv_queue_submit(struct vk_queue *vqueue, struct vk_queue_submit *submission)
 {
    struct radv_queue *queue = (struct radv_queue *)vqueue;
 
+   /* Refused without a host call and without losing the device: nothing
+    * was queued, and the queue may still be bound later. */
+   if (radv_queue_is_unbound(queue))
+      return vk_errorf(queue, VK_ERROR_VALIDATION_FAILED, "vkQueueSubmit() on an unbound queue");
+
    VkResult result = radv_queue_submit_bind_sparse_memory(queue, submission);
    if (result != VK_SUCCESS)
       goto fail;
@@ -1974,6 +1982,9 @@ radv_queue_internal_submit(struct radv_queue *queue, struct ac_cmdbuf *cs)
       .cs_count = 1,
    };
 
+   if (radv_queue_is_unbound(queue))
+      return false;
+
    VkResult result = device->ws->cs_submit(ctx, &submit, 0, NULL, 0, NULL);
    if (result != VK_SUCCESS)
       return false;
@@ -2001,7 +2012,20 @@ radv_queue_init(struct radv_device *device, struct radv_queue *queue, int idx,
       return result;
 
    queue->owns_hw_ctx = false;
-   if (queue->state.qf == RADV_QUEUE_SPARSE && device->ws->buffer_virtual_bind_end) {
+   if (radv_bound_queues_enabled(pdev)) {
+      /* Every queue of a bound instance owns its context, which gets its
+       * kernel objects from the embedder's queue when bound. No two
+       * VkQueues share one, and none exists before the bind. */
+      struct radeon_winsys_ctx *bound_ctx = NULL;
+      result = device->ws->ctx_create_bindable(device->ws, queue->priority, &bound_ctx);
+      if (result != VK_SUCCESS)
+         goto fail;
+      queue->hw_ctx = bound_ctx;
+      queue->owns_hw_ctx = true;
+      queue->bindable = true;
+      /* Binding and submission take the queue lock. */
+      queue->vk.internally_synchronized = true;
+   } else if (queue->state.qf == RADV_QUEUE_SPARSE && device->ws->buffer_virtual_bind_end) {
       /* WDDM queues mapping waits and signals through its companion context.
        * A distinct render context keeps waits on this sparse queue from
        * blocking a signal submitted later to the graphics queue. */
@@ -2154,6 +2178,21 @@ radv_queue_finish(struct radv_queue *queue)
    vk_queue_finish(&queue->vk);
    if (queue->owns_hw_ctx)
       device->ws->ctx_destroy(queue->hw_ctx);
+}
+
+VKAPI_ATTR VkResult VKAPI_CALL
+radv_QueueWaitIdle(VkQueue _queue)
+{
+   VK_FROM_HANDLE(radv_queue, queue, _queue);
+
+   /* An unbound queue has nothing in flight: unbinding retired its last
+    * submission, and it cannot submit again before the next bind. Waiting
+    * the common way would itself be a submission. vkDeviceWaitIdle comes
+    * here for every queue of the device, bound or not. */
+   if (radv_queue_is_unbound(queue))
+      return vk_device_is_lost(&radv_queue_device(queue)->vk) ? VK_ERROR_DEVICE_LOST : VK_SUCCESS;
+
+   return vk_common_QueueWaitIdle(_queue);
 }
 
 enum amd_ip_type

@@ -85,6 +85,10 @@ struct radv_queue {
    struct vk_queue vk;
    struct radeon_winsys_ctx *hw_ctx;
    bool owns_hw_ctx; /* WDDM dedicated sparse queue owns an independent context. */
+   /* Hosted queue binding (draft): hw_ctx is this queue's own and reaches
+    * the host only while the embedder has the queue bound. */
+   bool bindable;
+   bool bound;
    enum radeon_ctx_priority priority;
    struct radv_queue_state state;
    struct radv_queue_state *follower_state;
@@ -102,6 +106,12 @@ static inline struct radv_device *
 radv_queue_device(const struct radv_queue *queue)
 {
    return (struct radv_device *)queue->vk.base.device;
+}
+
+static inline bool
+radv_queue_is_unbound(const struct radv_queue *queue)
+{
+   return queue->bindable && !queue->bound;
 }
 
 #define radv_queue_set_lost(queue, ...)                                                                                \
