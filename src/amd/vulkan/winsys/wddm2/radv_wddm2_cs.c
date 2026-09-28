@@ -412,6 +412,38 @@ fail_contexts:
    return result;
 }
 
+/* The context of one runtime-bound VkQueue. It starts with no kernel
+ * object, so creating and destroying it unbound never reaches the host.
+ */
+static VkResult
+radv_wddm2_ctx_create_bindable(struct radeon_winsys *_ws, enum radeon_ctx_priority priority,
+                               struct radeon_winsys_ctx **rctx)
+{
+   struct radv_wddm2_winsys *ws = radv_wddm2_winsys(_ws);
+
+   if (!ws->bc250 || !ws->host.dispatch)
+      return VK_ERROR_FEATURE_NOT_PRESENT;
+   if (priority < RADEON_CTX_PRIORITY_LOW || priority > RADEON_CTX_PRIORITY_HIGH)
+      return VK_ERROR_NOT_PERMITTED;
+
+   struct radv_wddm2_ctx *ctx = CALLOC_STRUCT(radv_wddm2_ctx);
+   if (!ctx)
+      return VK_ERROR_OUT_OF_HOST_MEMORY;
+   ctx->ws = ws;
+   ctx->bindable = true;
+
+   for (uint32_t ip = 0; ip < AMD_NUM_IP_TYPES; ip++) {
+      struct radv_wddm2_queue *queue = &ctx->per_ip[ip].queue;
+      queue->hw_ip = ip;
+      queue->bc250_ws = ws;
+      util_dynarray_init(&queue->sparse_ops, NULL);
+   }
+   util_dynarray_init(&ctx->ace_queue.sparse_ops, NULL);
+
+   *rctx = (struct radeon_winsys_ctx *)ctx;
+   return VK_SUCCESS;
+}
+
 static void
 radv_wddm2_ctx_destroy(struct radeon_winsys_ctx *rwctx)
 {
@@ -486,6 +518,10 @@ radv_wddm2_ctx_wait_idle(struct radeon_winsys_ctx *rwctx, enum amd_ip_type ip_ty
 {
    struct radv_wddm2_ctx *ctx = radv_wddm2_ctx(rwctx);
    bool ret = true;
+
+   /* Nothing of an unbound context is in flight: unbinding retired it. */
+   if (radv_wddm2_ctx_unbound(ctx))
+      return true;
 
    if (ctx->per_ip[ip_type].last_submission.handle)
       ret = vk_wddm2_fence_wait(ctx->ws, &ctx->per_ip[ip_type].last_submission);
@@ -984,6 +1020,9 @@ radv_wddm2_cs_submit(struct radeon_winsys_ctx *_ctx,
    struct radv_wddm2_queue *ace_queue = &ctx->ace_queue;
    NTSTATUS status;
 
+   if (radv_wddm2_ctx_unbound(ctx))
+      return VK_ERROR_VALIDATION_FAILED;
+
    assert(queue->context_h != 0 && "Unsupported IP type");
 
    if (submit->is_gang && ace_queue->handle == 0) {
@@ -1173,6 +1212,8 @@ radv_wddm2_cs_init_functions(struct radv_wddm2_winsys *ws)
 {
    ws->base.ctx_create = radv_wddm2_ctx_create;
    ws->base.ctx_destroy = radv_wddm2_ctx_destroy;
+   if (ws->bc250 && ws->host.dispatch)
+      ws->base.ctx_create_bindable = radv_wddm2_ctx_create_bindable;
    ws->base.ctx_wait_idle = radv_wddm2_ctx_wait_idle;
    ws->base.cs_domain = radv_wddm2_cs_domain;
    ws->base.cs_create = radv_wddm2_cs_create;

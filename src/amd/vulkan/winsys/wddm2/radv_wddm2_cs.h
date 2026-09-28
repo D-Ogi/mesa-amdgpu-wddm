@@ -68,6 +68,12 @@ struct radv_wddm2_queue {
 struct radv_wddm2_ctx {
    struct radv_wddm2_winsys *ws;
 
+   /* Hosted queue binding (draft). A bindable context belongs to one
+    * VkQueue and holds kernel objects only while bound; unbound, it makes
+    * no host call at all. */
+   bool bindable;
+   bool bound;
+
    struct radv_wddm2_queue ace_queue;
 
    struct {
@@ -80,6 +86,13 @@ static inline struct radv_wddm2_ctx *
 radv_wddm2_ctx(struct radeon_winsys_ctx *base)
 {
    return (struct radv_wddm2_ctx *)base;
+}
+
+/* Outside the embedder's bind scope a bindable context reaches no host. */
+static inline bool
+radv_wddm2_ctx_unbound(const struct radv_wddm2_ctx *ctx)
+{
+   return ctx->bindable && !ctx->bound;
 }
 
 void radv_wddm2_cs_init_functions(struct radv_wddm2_winsys *ws);
