@@ -63,6 +63,11 @@ struct radv_wddm2_queue {
    struct radv_winsys_ib *bc250_ibs;
    unsigned bc250_ib_capacity;
    struct vk_wddm2_fence bc250_progress;
+   /* context_h came from the embedder's queue (BC250_HOST_CREATE_QUEUE_CONTEXT)
+    * and goes back through it, with the cookie it was bound with: NULL for
+    * the engine's internal queue. */
+   bool bc250_queue_context;
+   void *bc250_queue_cookie;
 };
 
 struct radv_wddm2_ctx {
@@ -70,9 +75,15 @@ struct radv_wddm2_ctx {
 
    /* Hosted queue binding (draft). A bindable context belongs to one
     * VkQueue and holds kernel objects only while bound; unbound, it makes
-    * no host call at all. */
+    * no host call at all. Binding fills per_ip[AMD_IP_GFX] only. */
    bool bindable;
    bool bound;
+   /* A bind or unbind could not release everything: per_ip[AMD_IP_GFX]
+    * still owns what it names, the context is never bound again, and its
+    * destruction makes no host call. unretired: its work did not retire. */
+   bool kept;
+   bool unretired;
+   enum radeon_ctx_priority priority;
 
    struct radv_wddm2_queue ace_queue;
 

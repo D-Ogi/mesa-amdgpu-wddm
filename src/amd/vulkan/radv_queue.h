@@ -125,6 +125,10 @@ int radv_queue_init(struct radv_device *device, struct radv_queue *queue, int id
 
 void radv_queue_finish(struct radv_queue *queue);
 
+int32_t radv_bc250_bind_queue(void *vk_queue, void *cookie);
+
+int32_t radv_bc250_unbind_queue(void *vk_queue);
+
 enum radeon_ctx_priority radv_get_queue_global_priority(const VkDeviceQueueGlobalPriorityCreateInfo *pObj);
 
 void radv_emit_graphics(struct radv_device *device, struct radv_cmd_stream *cs);

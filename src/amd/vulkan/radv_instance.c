@@ -20,6 +20,7 @@
 #include "tools/radv_debug_hang.h"
 #include "radv_entrypoints.h"
 #include "radv_instance.h"
+#include "radv_queue.h"
 #include "radv_wsi.h"
 
 #include "util/bitset.h"
@@ -282,6 +283,8 @@ radv_instance_parse_bc250(struct radv_instance *instance, const VkInstanceCreate
       return VK_ERROR_INITIALIZATION_FAILED;
 
    instance->bc250_bound_queues = true;
+   queue_funcs->bind = radv_bc250_bind_queue;
+   queue_funcs->unbind = radv_bc250_unbind_queue;
    return VK_SUCCESS;
 }
 
