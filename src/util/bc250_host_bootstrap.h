@@ -39,6 +39,27 @@ struct bc250_host {
    void *userdata;
    int32_t (*dispatch)(void *userdata, uint32_t operation, void *argument);
 };
+/* Queue binding, a draft of engine ABI 1.1 that T0 may still change.
+ * Chained to VkInstanceCreateInfo next to struct bc250_host, it opts the
+ * instance into runtime-bound queues: every VkQueue then gets a WDDM context
+ * of its own that exists only while the embedder has the queue bound, and
+ * the GENERAL family offers a bounded number of queues instead of one.
+ * vkCreateInstance validates the structure and fills *funcs.
+ */
+#define BC250_HOST_QUEUE_BINDING_STYPE 0x42434833u
+#define BC250_HOST_QUEUE_BINDING_VERSION 1u
+struct bc250_host_queue_funcs {
+   uint32_t size; /* in: sizeof(struct bc250_host_queue_funcs) */
+   /* out: both return a VkResult; vk_queue is a VkQueue of the instance */
+   int32_t (*bind)(void *vk_queue, void *queue);
+   int32_t (*unbind)(void *vk_queue);
+};
+struct bc250_host_queue_binding {
+   uint32_t sType;
+   const void *pNext;
+   uint32_t version, size;
+   struct bc250_host_queue_funcs *funcs;
+};
 static inline int32_t bc250_host_check_status(const struct bc250_host *host)
 {
    return host->dispatch ? host->dispatch(host->userdata, BC250_HOST_CHECK_STATUS, 0) : 0;

@@ -111,6 +111,23 @@ radv_sparse_enabled(const struct radv_physical_device *pdev)
 }
 
 bool
+radv_bound_queues_enabled(const struct radv_physical_device *pdev)
+{
+   const struct radv_instance *instance = radv_physical_device_instance(pdev);
+
+   return instance->bc250_bound_queues && pdev->ws->ctx_create_bindable;
+}
+
+/* Admission follows consumption: every GENERAL queue that a device may
+ * create gets its own context when bound, so no two VkQueues ever share one.
+ */
+uint32_t
+radv_general_queue_count(const struct radv_physical_device *pdev)
+{
+   return radv_bound_queues_enabled(pdev) ? RADV_BC250_BOUND_GENERAL_QUEUES : 1;
+}
+
+bool
 radv_transfer_queue_enabled(const struct radv_physical_device *pdev)
 {
    const struct radv_instance *instance = radv_physical_device_instance(pdev);
@@ -3083,7 +3100,7 @@ radv_get_physical_device_queue_family_properties(struct radv_physical_device *pd
             VK_QUEUE_GRAPHICS_BIT | VK_QUEUE_COMPUTE_BIT | VK_QUEUE_TRANSFER_BIT | VK_QUEUE_SPARSE_BINDING_BIT;
          *pQueueFamilyProperties[idx] = (VkQueueFamilyProperties){
             .queueFlags = gfx_flags | radv_queue_family_protected_flag(pdev, RADV_QUEUE_GENERAL),
-            .queueCount = 1,
+            .queueCount = radv_general_queue_count(pdev),
             .timestampValidBits = 64,
             .minImageTransferGranularity = (VkExtent3D){1, 1, 1},
          };

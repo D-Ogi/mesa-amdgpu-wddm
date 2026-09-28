@@ -222,6 +222,17 @@ VK_DEFINE_HANDLE_CASTS(radv_physical_device, vk.base, VkPhysicalDevice, VK_OBJEC
 
 bool radv_sparse_enabled(const struct radv_physical_device *pdev);
 
+/* GENERAL queues of a hosted instance whose queues the embedder binds
+ * (draft): the engine's internal queue plus seven application queues. Each
+ * bound queue holds one WDDM context, two monitored fences and at most
+ * BC250_GATHER_SLOTS gather BOs, so this also bounds those per device.
+ */
+#define RADV_BC250_BOUND_GENERAL_QUEUES 8
+
+bool radv_bound_queues_enabled(const struct radv_physical_device *pdev);
+
+uint32_t radv_general_queue_count(const struct radv_physical_device *pdev);
+
 static inline struct radv_instance *
 radv_physical_device_instance(const struct radv_physical_device *pdev)
 {
