@@ -248,6 +248,43 @@ radv_parse_pstate(const char *str)
    }
 }
 
+/* Private BC250 structures of the instance chain. Both are validated
+ * strictly: a mismatched size or version means the embedder was built
+ * against another contract.
+ */
+static VkResult
+radv_instance_parse_bc250(struct radv_instance *instance, const VkInstanceCreateInfo *pCreateInfo)
+{
+   struct bc250_host_queue_funcs *queue_funcs = NULL;
+
+   for (const VkBaseInStructure *ext = pCreateInfo->pNext; ext; ext = ext->pNext) {
+      if ((uint32_t)ext->sType == BC250_HOST_STYPE) {
+         const struct bc250_host *host = (const void *)ext;
+         if (host->version != BC250_HOST_VERSION || host->size != sizeof(*host) ||
+             !host->identity || !host->dispatch || !host->adapter_luid)
+            return VK_ERROR_INITIALIZATION_FAILED;
+         instance->bc250_host = *host;
+         instance->bc250_host.pNext = NULL;
+      } else if ((uint32_t)ext->sType == BC250_HOST_QUEUE_BINDING_STYPE) {
+         const struct bc250_host_queue_binding *binding = (const void *)ext;
+         if (binding->version != BC250_HOST_QUEUE_BINDING_VERSION || binding->size != sizeof(*binding) ||
+             !binding->funcs || binding->funcs->size != sizeof(*binding->funcs))
+            return VK_ERROR_INITIALIZATION_FAILED;
+         queue_funcs = binding->funcs;
+      }
+   }
+
+   if (!queue_funcs)
+      return VK_SUCCESS;
+
+   /* Only the host can create the contexts that binding hands out. */
+   if (!instance->bc250_host.dispatch)
+      return VK_ERROR_INITIALIZATION_FAILED;
+
+   instance->bc250_bound_queues = true;
+   return VK_SUCCESS;
+}
+
 VKAPI_ATTR VkResult VKAPI_CALL
 radv_CreateInstance(const VkInstanceCreateInfo *pCreateInfo, const VkAllocationCallbacks *pAllocator,
                     VkInstance *pInstance)
@@ -273,18 +310,11 @@ radv_CreateInstance(const VkInstanceCreateInfo *pCreateInfo, const VkAllocationC
       return vk_error(NULL, result);
    }
 
-   for (const VkBaseInStructure *ext = pCreateInfo->pNext; ext; ext = ext->pNext) {
-      if ((uint32_t)ext->sType == BC250_HOST_STYPE) {
-         const struct bc250_host *host = (const void *)ext;
-         if (host->version != BC250_HOST_VERSION || host->size != sizeof(*host) ||
-             !host->identity || !host->dispatch || !host->adapter_luid) {
-            vk_instance_finish(&instance->vk);
-            vk_free(pAllocator, instance);
-            return VK_ERROR_INITIALIZATION_FAILED;
-         }
-         instance->bc250_host = *host;
-         instance->bc250_host.pNext = NULL;
-      }
+   result = radv_instance_parse_bc250(instance, pCreateInfo);
+   if (result != VK_SUCCESS) {
+      vk_instance_finish(&instance->vk);
+      vk_free(pAllocator, instance);
+      return result;
    }
 
    vk_instance_add_driver_trace_modes(&instance->vk, trace_options);

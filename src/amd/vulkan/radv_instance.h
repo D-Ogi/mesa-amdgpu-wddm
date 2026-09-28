@@ -167,6 +167,8 @@ enum radv_trace_mode {
 struct radv_instance {
    struct vk_instance vk;
    struct bc250_host bc250_host;
+   /* The embedder binds every queue to a runtime queue context (draft). */
+   bool bc250_bound_queues;
 
    VkAllocationCallbacks alloc;
 

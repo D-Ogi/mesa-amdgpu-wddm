@@ -1588,6 +1588,21 @@ radv_CreateDevice(VkPhysicalDevice physicalDevice, const VkDeviceCreateInfo *pCr
    bool video_dec_queue = false;
    bool video_enc_queue = false;
 
+   if (radv_bound_queues_enabled(pdev)) {
+      /* Admission matches consumption: each bound queue takes one context
+       * of the embedder's, so never create more than were reported. */
+      uint32_t general_queues = 0;
+      for (unsigned i = 0; i < pCreateInfo->queueCreateInfoCount; i++) {
+         const VkDeviceQueueCreateInfo *queue_create = &pCreateInfo->pQueueCreateInfos[i];
+         if (vk_queue_to_radv(pdev, queue_create->queueFamilyIndex) == RADV_QUEUE_GENERAL)
+            general_queues += queue_create->queueCount;
+      }
+      if (general_queues > radv_general_queue_count(pdev)) {
+         result = VK_ERROR_INITIALIZATION_FAILED;
+         goto fail;
+      }
+   }
+
    /* Create one context per queue priority. */
    for (unsigned i = 0; i < pCreateInfo->queueCreateInfoCount; i++) {
       const VkDeviceQueueCreateInfo *queue_create = &pCreateInfo->pQueueCreateInfos[i];
