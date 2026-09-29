@@ -53,3 +53,11 @@ executable('bc250_lp_test_arit',
  dependencies: [dep_llvm, dep_dl, dep_clock, idep_mesautil],
  include_directories: [inc_gallium, inc_gallium_aux, inc_include, inc_src],
  link_with: [libllvmpipe, libgallium])
+
+executable('bc250_surface_format_test',
+ ['bc250_surface_format_test.cpp', 'd3d10_gdi.c'],
+ include_directories: [
+   inc_include, inc_src, inc_gallium, inc_gallium_aux, inc_d3d10umd, inc_gallium_winsys, inc_gallium_winsys_sw, inc_gallium_drivers, inc_winddk
+ ],
+ link_with: [libd3d10umd, libgallium, libwsgdi],
+ dependencies: [dep_ws2_32, idep_nir, driver_swrast, idep_mesautil])
