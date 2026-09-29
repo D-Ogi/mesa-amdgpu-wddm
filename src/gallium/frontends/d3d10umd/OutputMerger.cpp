@@ -236,7 +236,6 @@ ClearRenderTargetView(D3D10DDI_HDEVICE hDevice,                      // IN
       clear_color.f[3] = pColorRGBA[3];
    }
 
-   Bc250ShadowWritten(CastDevice(hDevice), surface->texture);
    pipe->clear_render_target(pipe,
                              surface,
                              &clear_color,
