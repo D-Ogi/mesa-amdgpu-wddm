@@ -76,21 +76,27 @@ HRESULT Bc250EnsureSurface(Device *device, Resource *resource)
       device->pagingQueue = queue.hPagingQueue;
       device->pagingFence = (volatile UINT64 *)queue.FenceValueCPUVirtualAddress;
    }
-   UINT format;
-   switch (resource->Format) {
-   case DXGI_FORMAT_B8G8R8A8_UNORM: format = D3DDDIFMT_A8R8G8B8; break;
-   case DXGI_FORMAT_B8G8R8X8_UNORM: format = D3DDDIFMT_X8R8G8B8; break;
-   case DXGI_FORMAT_R8G8B8A8_UNORM: format = D3DDDIFMT_A8B8G8R8; break;
-   default: return E_NOTIMPL;
+   // A surface this UMD allocates stays 8-bit: _Present and the KMD blit copy
+   // 8-bit formats only. An opened surface (allocation set by OpenResource)
+   // was admitted there by the shared surface format table.
+   UINT format = 0;
+   if (!resource->allocation) {
+      switch (resource->Format) {
+      case DXGI_FORMAT_B8G8R8A8_UNORM: format = D3DDDIFMT_A8R8G8B8; break;
+      case DXGI_FORMAT_B8G8R8X8_UNORM: format = D3DDDIFMT_X8R8G8B8; break;
+      case DXGI_FORMAT_R8G8B8A8_UNORM: format = D3DDDIFMT_A8B8G8R8; break;
+      default: return E_NOTIMPL;
+      }
    }
+   const UINT bpp = util_format_get_blocksize(resource->resource->format);
    struct SurfacePrivate { UINT magic, version, width, height, pitch, format; UINT64 size; };
    static_assert(sizeof(SurfacePrivate) == 32, "LB7A ABI");
    const UINT pitchAlignment = 256u;
    const UINT pitch = resource->allocation ? resource->surfacePitch :
-      (width * 4 + pitchAlignment - 1) & ~(pitchAlignment - 1);
+      (width * bpp + pitchAlignment - 1) & ~(pitchAlignment - 1);
    const UINT64 bytes = resource->allocation ? resource->surfaceBytes :
       UINT64(pitch) * ((height + 3u) & ~3u);
-   if ((pitch & 15u) || pitch < ((width + 3u) & ~3u) * 4 ||
+   if ((pitch & 15u) || pitch < ((width + 3u) & ~3u) * bpp ||
        bytes < UINT64(pitch) * ((height + 3u) & ~3u))
       return E_INVALIDARG;
    SurfacePrivate data = {0x4137424c, 1, width, height, pitch, format, bytes};
