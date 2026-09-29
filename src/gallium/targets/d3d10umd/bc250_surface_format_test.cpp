@@ -438,12 +438,16 @@ static void *FailingTextureMap(struct pipe_context *pipe, struct pipe_resource *
 
 // A shader object that only declares the given sampler view slots (no pipe
 // state: binding it binds the empty shader), for the declared-slot check.
-static void ViewShader(Shader *shader, mesa_shader_stage stage, const UINT *slots, UINT count)
+// `legacy` declares them the way old texture ops do: as SAMPLERs only.
+static void ViewShader(Shader *shader, mesa_shader_stage stage, const UINT *slots, UINT count, bool legacy = false)
 {
    struct ureg_program *ureg = ureg_create(stage);
    for (UINT i = 0; i < count; ++i)
-      ureg_DECL_sampler_view(ureg, slots[i], TGSI_TEXTURE_2D, TGSI_RETURN_TYPE_FLOAT, TGSI_RETURN_TYPE_FLOAT,
-                             TGSI_RETURN_TYPE_FLOAT, TGSI_RETURN_TYPE_FLOAT);
+      if (legacy)
+         ureg_DECL_sampler(ureg, slots[i]);
+      else
+         ureg_DECL_sampler_view(ureg, slots[i], TGSI_TEXTURE_2D, TGSI_RETURN_TYPE_FLOAT, TGSI_RETURN_TYPE_FLOAT,
+                                TGSI_RETURN_TYPE_FLOAT, TGSI_RETURN_TYPE_FLOAT);
    ureg_END(ureg);
    memset(shader, 0, sizeof *shader);
    shader->type = stage;
@@ -495,13 +499,17 @@ static void TestShadow(Device *device)
    CHECK(plainView.handle && plainView.handle->texture == other.resource && !plainView.shadowOf,
          "view of ordinary memory samples the resource");
 
-   const UINT psSlots[] = {3, 4, 5}, psOtherSlots[] = {7}, vsSlots[] = {0}, psHighSlots[] = {40};
-   Shader ps, psOther, vs, psHigh;
+   const UINT psSlots[] = {3, 4, 5}, psOtherSlots[] = {7}, vsSlots[] = {0}, psHighSlots[] = {40}, legacySlots[] = {6},
+              gsSlots[] = {2};
+   Shader ps, psOther, vs, psHigh, psLegacy, gs;
    ViewShader(&ps, MESA_SHADER_FRAGMENT, psSlots, 3);
    ViewShader(&psOther, MESA_SHADER_FRAGMENT, psOtherSlots, 1);
    ViewShader(&vs, MESA_SHADER_VERTEX, vsSlots, 1);
    ViewShader(&psHigh, MESA_SHADER_FRAGMENT, psHighSlots, 1);
-   D3D10DDI_HSHADER hPs = {&ps}, hPsOther = {&psOther}, hVs = {&vs}, hPsHigh = {&psHigh};
+   ViewShader(&psLegacy, MESA_SHADER_FRAGMENT, legacySlots, 1, true);
+   ViewShader(&gs, MESA_SHADER_GEOMETRY, gsSlots, 1);
+   D3D10DDI_HSHADER hPs = {&ps}, hPsOther = {&psOther}, hVs = {&vs}, hPsHigh = {&psHigh}, hPsLegacy = {&psLegacy},
+                    hGs = {&gs};
 
    CHECK(Bc250ShadowPrepareDraw(device) && device->profileShadowRefreshes == 0, "unbound shadow is not copied");
    bool intact = false;
@@ -578,13 +586,36 @@ static void TestShadow(Device *device)
    PsSetShader(hDevice, hPsHigh);
    CHECK(Bc250ShadowPrepareDraw(device) && device->profileShadowRefreshes == 5, "slot 40 declared: one copy");
    PsSetShaderResources(hDevice, 40, 1, &none);
+   // Old texture ops (ST_DEBUG_OLD_TEX_OPS) declare the resource as a SAMPLER
+   // and no SAMPLER_VIEW: still read, so still copied, with the new contents.
+   PsSetShaderResources(hDevice, 6, 1, &hView);
+   PsSetShader(hDevice, hPsLegacy);
+   FillSurface(wc->memory, pitch, width, height, 4);
+   CHECK(Bc250ShadowPrepareDraw(device) && device->profileShadowRefreshes == 6 &&
+         ShadowMatches(device, &src, pitch, width, height), "old texture ops: SAMPLER declaration copies B->D");
+   // A NULL pixel shader reads nothing.
+   D3D10DDI_HSHADER noShader = {NULL};
+   PsSetShader(hDevice, noShader);
+   CHECK(!device->shadowShaders[MESA_SHADER_FRAGMENT] && Bc250ShadowPrepareDraw(device) &&
+         device->profileShadowRefreshes == 6, "NULL pixel shader: no copy");
+   PsSetShaderResources(hDevice, 6, 1, &none);
+   // The geometry stage counts like the others.
+   GsSetShaderResources(hDevice, 2, 1, &hView);
+   CHECK(Bc250ShadowPrepareDraw(device) && device->profileShadowRefreshes == 6, "GS slot without a GS: no copy");
+   GsSetShader(hDevice, hGs);
+   CHECK(Bc250ShadowPrepareDraw(device) && device->profileShadowRefreshes == 7, "GS declaring slot 2: one copy");
+   GsSetShaderResources(hDevice, 2, 1, &none);
+   GsSetShader(hDevice, noShader);
    // A destroyed shader is no longer consulted.
+   PsSetShader(hDevice, hPsHigh);
    DestroyShader(hDevice, hPsHigh);
    DestroyShader(hDevice, hVs);
    CHECK(!device->shadowShaders[MESA_SHADER_FRAGMENT] && !device->shadowShaders[MESA_SHADER_VERTEX],
          "destroyed shaders leave the bound set");
    DestroyShader(hDevice, hPs);
    DestroyShader(hDevice, hPsOther);
+   DestroyShader(hDevice, hPsLegacy);
+   DestroyShader(hDevice, hGs);
 
    PsSetShaderResources(hDevice, 5, 1, &hView);
    DestroyShaderResourceView(hDevice, hView);
