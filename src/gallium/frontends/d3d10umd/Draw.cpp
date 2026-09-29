@@ -86,7 +86,7 @@ update_velems(Device *pDevice)
  * state are incorrect and we need to remap them back to the correct
  * state.
  */
-static void
+static bool
 ResolveState(Device *pDevice)
 {
    if (pDevice->bound_empty_gs && pDevice->bound_vs &&
@@ -119,7 +119,8 @@ ResolveState(Device *pDevice)
       pDevice->vbuffers_changed = false;
    }
 
-   Bc250ShadowPrepareDraw(pDevice);
+   // False: a shadow copy failed and the draw must not run.
+   return Bc250ShadowPrepareDraw(pDevice);
 }
 
 
@@ -167,7 +168,7 @@ Draw(D3D10DDI_HDEVICE hDevice,   // IN
    Device *pDevice = CastDevice(hDevice);
    Bc250DrawTimer timer(pDevice);
 
-   ResolveState(pDevice);
+   if (!ResolveState(pDevice)) return;
 
    assert(pDevice->primitive < MESA_PRIM_COUNT);
    util_draw_arrays(pDevice->pipe,
@@ -214,7 +215,7 @@ DrawIndexed(D3D10DDI_HDEVICE hDevice,  // IN
                                   &restart_index, &index_size, &ib_offset);
    }
 
-   ResolveState(pDevice);
+   if (!ResolveState(pDevice)) return;
 
    util_draw_init_info(&info);
    info.index_size = index_size;
@@ -261,7 +262,7 @@ DrawInstanced(D3D10DDI_HDEVICE hDevice,      // IN
       return;
    }
 
-   ResolveState(pDevice);
+   if (!ResolveState(pDevice)) return;
 
    assert(pDevice->primitive < MESA_PRIM_COUNT);
    util_draw_arrays_instanced(pDevice->pipe,
@@ -317,7 +318,7 @@ DrawIndexedInstanced(D3D10DDI_HDEVICE hDevice,   // IN
                                   &restart_index, &index_size, &ib_offset);
    }
 
-   ResolveState(pDevice);
+   if (!ResolveState(pDevice)) return;
 
    util_draw_init_info(&info);
    info.index_size = index_size;
@@ -372,7 +373,7 @@ DrawAuto(D3D10DDI_HDEVICE hDevice)  // IN
 
    assert(pDevice->primitive < MESA_PRIM_COUNT);
 
-   ResolveState(pDevice);
+   if (!ResolveState(pDevice)) return;
 
    util_draw_init_info(&info);
    info.mode = pDevice->primitive;

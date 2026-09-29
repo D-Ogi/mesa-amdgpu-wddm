@@ -61,14 +61,17 @@ extern "C" {
  *    texel uncached: about 25 MiB/s on unit A, where MOVNTDQA streaming
  *    loads copy the same mapping at about 3.3 GiB/s (lab bench wc-read 001).
  *    Such a surface gets an ordinary cached llvmpipe texture that its shader
- *    resource views sample. Before a draw that samples it, the shadow is
- *    copied again when a Present of this device happened since its last copy
- *    or when this UMD wrote the surface since. Render targets, copies, Blt,
- *    Map and Present keep using the imported surface itself.
+ *    resource views sample, and every draw that samples it copies the
+ *    surface into it first. There is no cheaper boundary to key on: this
+ *    device's own Present does not tell when the producer wrote the surface
+ *    again. Render targets, copies, Blt, Map and Present keep using the
+ *    imported surface itself.
  *
  *    Producer ordering is unchanged: the runtime orders the other process's
  *    GPU work before this device's use of the surface, exactly as it did
- *    when llvmpipe sampled the mapping directly.
+ *    when llvmpipe sampled the mapping directly. The maps are synchronized:
+ *    the surface's map waits for this context's queued writes to it, the
+ *    shadow's map for queued draws that still sample the previous copy.
  *
  * ----------------------------------------------------------------------
  */
@@ -78,12 +81,20 @@ Bc250ShadowCreate(Device *device, Resource *resource)
 {
    struct pipe_resource *r = resource->resource;
    MEMORY_BASIC_INFORMATION m;
+   // Only write-combined mappings: streaming loads are what makes the copy
+   // cheap there, and nothing shows they help an uncached one.
    if (!r || !resource->cpuMapping || resource->shadow || r->target != PIPE_TEXTURE_2D ||
-       r->last_level || r->array_size != 1 || r->nr_samples > 1 ||
-       device->shadowedCount >= BC250_MAX_SHADOWS ||
+       r->last_level || r->array_size != 1 || r->depth0 != 1 || r->nr_samples > 1 ||
+       util_format_get_blocksize(r->format) != 4 || device->shadowedCount >= BC250_MAX_SHADOWS ||
        VirtualQuery(resource->cpuMapping, &m, sizeof(m)) != sizeof(m) ||
-       !(m.Protect & (PAGE_WRITECOMBINE | PAGE_NOCACHE)))
+       (m.Protect & PAGE_NOCACHE) || !(m.Protect & PAGE_WRITECOMBINE))
       return;
+   const UINT64 bytes = (UINT64)util_format_get_stride(r->format, r->width0) * r->height0;
+   if (device->shadowBytes + bytes > BC250_MAX_SHADOW_BYTES) {
+      DebugPrintf("BC250 Shadow handle %x %ux%u over the budget, sampled in place\n", resource->allocation,
+                  r->width0, r->height0);
+      return;
+   }
    struct pipe_resource templ = *r;
    templ.next = NULL;
    templ.bind = PIPE_BIND_SAMPLER_VIEW;
@@ -93,8 +104,9 @@ Bc250ShadowCreate(Device *device, Resource *resource)
    DebugPrintf("BC250 Shadow handle %x %ux%u %s protect %lx: %s\n", resource->allocation, r->width0,
                r->height0, util_format_short_name(r->format), m.Protect, resource->shadow ? "created" : "failed");
    if (!resource->shadow) return;
-   resource->shadowStale = true;
+   resource->shadowBytes = bytes;
    resource->shadowBindings = 0;
+   device->shadowBytes += bytes;
    device->shadowed[device->shadowedCount++] = resource;
 }
 
@@ -111,6 +123,8 @@ Bc250ShadowRelease(Device *device, Resource *resource)
       for (UINT i = 0; i < PIPE_MAX_SHADER_SAMPLER_VIEWS; ++i)
          if (device->shadowSlots[sh][i] == resource) device->shadowSlots[sh][i] = NULL;
    resource->shadowBindings = 0;
+   device->shadowBytes -= resource->shadowBytes;
+   resource->shadowBytes = 0;
    pipe_resource_reference(&resource->shadow, NULL);
 }
 
@@ -125,14 +139,7 @@ Bc250ShadowBind(Device *device, UINT stage, UINT slot, ShaderResourceView *view)
    *bound = owner;
 }
 
-void
-Bc250ShadowWritten(Device *device, const struct pipe_resource *texture)
-{
-   for (UINT i = 0; device && texture && i < device->shadowedCount; ++i)
-      if (device->shadowed[i]->resource == texture) device->shadowed[i]->shadowStale = true;
-}
-
-static void
+static bool
 Bc250ShadowRefresh(Device *device, Resource *resource)
 {
    struct pipe_context *pipe = device->pipe;
@@ -150,10 +157,9 @@ Bc250ShadowRefresh(Device *device, Resource *resource)
    if (d) {
       const size_t row = util_format_get_stride(src->format, src->width0);
       const unsigned rows = util_format_get_nblocksy(src->format, src->height0);
+      // Visible bytes of each row, each side at its own stride.
       for (unsigned y = 0; y < rows; ++y)
          util_streaming_load_memcpy(d + (size_t)y * to->stride, s + (size_t)y * from->stride, row);
-      resource->shadowFrame = device->frame;
-      resource->shadowStale = false;
       device->profileShadowRefreshes++;
       device->profileShadowBytes += (UINT64)row * rows;
    } else {
@@ -163,20 +169,20 @@ Bc250ShadowRefresh(Device *device, Resource *resource)
    if (from) pipe->texture_unmap(pipe, from);
    QueryPerformanceCounter(&end);
    device->profileShadowTicks += end.QuadPart - start.QuadPart;
+   return d != NULL;
 }
 
-void
+// Copies every bound shadow once, however many stages and slots bind views
+// of it. False when a copy failed: the draw must not sample an old copy.
+bool
 Bc250ShadowPrepareDraw(Device *device)
 {
-   if (!device->shadowedCount) return;
+   bool ok = true;
    for (UINT i = 0; i < device->shadowedCount; ++i) {
       Resource *r = device->shadowed[i];
-      if (r->shadowBindings && (r->shadowStale || r->shadowFrame != device->frame))
-         Bc250ShadowRefresh(device, r);
+      if (r->shadowBindings && !Bc250ShadowRefresh(device, r)) ok = false;
    }
-   // The draw about to run writes its render targets.
-   for (UINT i = 0; i < device->fb.nr_cbufs; ++i)
-      Bc250ShadowWritten(device, device->fb.cbufs[i].texture);
+   return ok;
 }
 
 
@@ -374,8 +380,6 @@ _Present(DXGI_DDI_ARG_PRESENT *pPresentData)
    device->profileLastPresent=presentEnd.QuadPart;
    device->profileDrawTicks=device->profileDrawMax=device->profileDrawCalls=0;
    device->profileShadowTicks=device->profileShadowBytes=device->profileShadowRefreshes=0;
-   // A new frame: shadows sampled from here on are copied again.
-   device->frame++;
 
    DebugPrintf("BC250 PresentCb %08lx\n", hr);
    return hr;
@@ -605,7 +609,6 @@ _Blt(DXGI_DDI_ARG_BLT *Blt)
    info.dst.box.width = Blt->DstRight - Blt->DstLeft;
    info.dst.box.height = Blt->DstBottom - Blt->DstTop; info.dst.box.depth = 1;
    info.mask = PIPE_MASK_RGBA; info.filter = PIPE_TEX_FILTER_NEAREST;
-   Bc250ShadowWritten(CastDevice(Blt->hDevice), dst);
    pipe->blit(pipe, &info);
    pipe->flush(pipe, NULL, 0);
    MemoryBarrier();

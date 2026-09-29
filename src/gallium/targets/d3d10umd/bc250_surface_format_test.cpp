@@ -368,9 +368,66 @@ static bool ShadowMatches(Device *device, Resource *r, UINT pitch, UINT width, U
    return same;
 }
 
-// An opened write-combined surface is sampled through a cached shadow copied
-// at the first draw of each frame that samples it, and after a write by this
-// UMD; a surface in ordinary memory keeps sampling its own storage.
+// Writes (set) or checks (!set) a byte pattern in the row padding of a texture;
+// returns the stride, or 0 when it has no padding or the map failed.
+static UINT Padding(Device *device, struct pipe_resource *texture, bool set, bool *intact)
+{
+   struct pipe_box box;
+   u_box_2d(0, 0, texture->width0, texture->height0, &box);
+   struct pipe_transfer *transfer;
+   char *map = (char *)device->pipe->texture_map(device->pipe, texture, 0,
+                                                 set ? PIPE_MAP_READ | PIPE_MAP_WRITE : PIPE_MAP_READ, &box, &transfer);
+   if (!map) return 0;
+   const UINT used = texture->width0 * 4, stride = transfer->stride;
+   *intact = true;
+   for (UINT y = 0; y < texture->height0; ++y)
+      for (UINT b = used; b < stride; ++b) {
+         char want = (char)(0xa5 ^ b ^ y);
+         if (set) map[y * stride + b] = want;
+         else if (map[y * stride + b] != want) *intact = false;
+      }
+   device->pipe->texture_unmap(device->pipe, transfer);
+   return stride > used ? stride : 0;
+}
+
+// The R8G8B8A8 value a B8G8R8A8 texel converts to.
+static UINT Rgba(UINT bgra)
+{
+   return ((bgra >> 16) & 0xff) | (bgra & 0xff00ff00u) | ((bgra & 0xff) << 16);
+}
+
+// A queued draw-based blit from the shadow into an R8G8B8A8 target (a format
+// change, so llvmpipe cannot take the immediate copy path).
+static void BlitShadow(Device *device, Resource *src, Resource *dst)
+{
+   struct pipe_blit_info info = {};
+   info.src.resource = src->shadow; info.src.format = src->shadow->format;
+   info.src.box.width = src->shadow->width0; info.src.box.height = src->shadow->height0; info.src.box.depth = 1;
+   info.dst.resource = dst->resource; info.dst.format = dst->resource->format;
+   info.dst.box = info.src.box;
+   info.mask = PIPE_MASK_RGBA; info.filter = PIPE_TEX_FILTER_NEAREST;
+   device->pipe->blit(device->pipe, &info);
+}
+
+// Every texel of dst is the R8G8B8A8 form of the surface pattern with seed.
+static bool Holds(Device *device, Resource *dst, UINT width, UINT height, UINT seed)
+{
+   struct pipe_box box;
+   u_box_2d(0, 0, width, height, &box);
+   struct pipe_transfer *transfer;
+   const char *map = (const char *)device->pipe->texture_map(device->pipe, dst->resource, 0, PIPE_MAP_READ, &box,
+                                                             &transfer);
+   bool same = map != NULL;
+   for (UINT y = 0; same && y < height; ++y)
+      for (UINT x = 0; same && x < width; ++x)
+         same = ((const UINT *)(map + y * transfer->stride))[x] == Rgba((x * 2654435761u) ^ (y * 40503u) ^ seed);
+   if (map) device->pipe->texture_unmap(device->pipe, transfer);
+   return same;
+}
+
+// An opened write-combined surface is sampled through a cached shadow that
+// every draw sampling it copies first; a surface in ordinary memory keeps
+// sampling its own storage.
 static void TestShadow(Device *device)
 {
    D3D10DDI_HDEVICE hDevice = {device};
@@ -382,69 +439,93 @@ static void TestShadow(Device *device)
    if (!wc->memory) return;
    FillSurface(wc->memory, pitch, width, height, 1);
 
-   Resource src, other;
+   Resource src, other, over;
    HRESULT hr = Open(hDevice, &src, data, wc->handle);
-   CHECK(hr == S_OK && src.shadow && src.shadow->format == src.resource->format &&
-         src.shadow->width0 == width && device->shadowedCount == 1, "shadow for the write-combined surface: %08lx", hr);
+   CHECK(hr == S_OK && src.shadow && src.shadow->format == src.resource->format && src.shadow->width0 == width &&
+         device->shadowedCount == 1 && device->shadowBytes == UINT64(width) * 4 * height,
+         "shadow for the write-combined surface: %08lx", hr);
    hr = Open(hDevice, &other, data, plain->handle);
    CHECK(hr == S_OK && !other.shadow && device->shadowedCount == 1, "no shadow for ordinary memory: %08lx", hr);
    if (!src.shadow) return;
+   // Over the byte budget the surface is sampled in place.
+   const UINT64 charged = device->shadowBytes;
+   device->shadowBytes = BC250_MAX_SHADOW_BYTES - 1;
+   hr = Open(hDevice, &over, data, wc->handle);
+   CHECK(hr == S_OK && !over.shadow && device->shadowedCount == 1, "no shadow over the budget: %08lx", hr);
+   device->shadowBytes = charged;
+   if (SUCCEEDED(hr)) Destroy(hDevice, &over);
 
-   ShaderResourceView view = {}, plainView = {};
+   ShaderResourceView view = {}, second = {}, plainView = {};
    D3D10_1DDIARG_CREATESHADERRESOURCEVIEW create = {};
    create.Format = DXGI_FORMAT_B8G8R8A8_UNORM; create.ResourceDimension = D3D10DDIRESOURCE_TEXTURE2D;
    create.Tex2D.MipLevels = 1; create.Tex2D.ArraySize = 1;
    create.hDrvResource.pDrvPrivate = &src;
-   D3D10DDI_HSHADERRESOURCEVIEW hView = {&view}, hPlainView = {&plainView};
+   D3D10DDI_HSHADERRESOURCEVIEW hView = {&view}, hSecond = {&second}, hPlainView = {&plainView};
    CreateShaderResourceView1(hDevice, &create, hView, {(HANDLE)0x70000020});
+   CreateShaderResourceView1(hDevice, &create, hSecond, {(HANDLE)0x70000028});
    create.hDrvResource.pDrvPrivate = &other;
    CreateShaderResourceView1(hDevice, &create, hPlainView, {(HANDLE)0x70000030});
    CHECK(view.handle && view.handle->texture == src.shadow && view.shadowOf == &src, "view samples the shadow");
    CHECK(plainView.handle && plainView.handle->texture == other.resource && !plainView.shadowOf,
          "view of ordinary memory samples the resource");
 
-   Bc250ShadowPrepareDraw(device);
-   CHECK(device->profileShadowRefreshes == 0, "unbound shadow is not copied");
+   CHECK(Bc250ShadowPrepareDraw(device) && device->profileShadowRefreshes == 0, "unbound shadow is not copied");
+   bool intact = false;
+   const UINT stride = Padding(device, src.shadow, true, &intact);
    PsSetShaderResources(hDevice, 3, 1, &hView);
    CHECK(src.shadowBindings == 1, "bound once");
-   Bc250ShadowPrepareDraw(device);
-   CHECK(device->profileShadowRefreshes == 1 && ShadowMatches(device, &src, pitch, width, height),
-         "first draw copies the surface");
+   CHECK(Bc250ShadowPrepareDraw(device) && device->profileShadowRefreshes == 1 &&
+         ShadowMatches(device, &src, pitch, width, height), "a draw copies the surface");
+   Padding(device, src.shadow, false, &intact);
+   CHECK(stride && stride != pitch && intact, "rows copied at their own strides (%u and %u), padding untouched",
+         stride, pitch);
+
+   // Producer writes B with no Present of this device in between: the next draw sees B.
    FillSurface(wc->memory, pitch, width, height, 2);
-   Bc250ShadowPrepareDraw(device);
-   CHECK(device->profileShadowRefreshes == 1, "same frame: no second copy");
-   device->frame++;
-   Bc250ShadowPrepareDraw(device);
-   CHECK(device->profileShadowRefreshes == 2 && ShadowMatches(device, &src, pitch, width, height),
-         "next frame copies the new contents");
-   FillSurface(wc->memory, pitch, width, height, 3);
-   Bc250ShadowWritten(device, src.resource);
-   Bc250ShadowPrepareDraw(device);
-   CHECK(device->profileShadowRefreshes == 3 && ShadowMatches(device, &src, pitch, width, height),
-         "a write by this UMD makes the shadow stale");
-   device->fb.nr_cbufs = 1; device->fb.cbufs[0].texture = src.resource;
-   Bc250ShadowPrepareDraw(device);
-   CHECK(device->profileShadowRefreshes == 3 && src.shadowStale, "a draw into the surface marks it stale");
-   memset(&device->fb, 0, sizeof(device->fb));
-   Bc250ShadowPrepareDraw(device);
-   CHECK(device->profileShadowRefreshes == 4, "the next draw copies it again");
+   CHECK(Bc250ShadowPrepareDraw(device) && device->profileShadowRefreshes == 2 &&
+         ShadowMatches(device, &src, pitch, width, height), "the next draw copies the new contents");
+
+   // Several views of one surface in several stages and slots: one copy per draw.
+   PsSetShaderResources(hDevice, 4, 1, &hSecond);
+   VsSetShaderResources(hDevice, 0, 1, &hView);
+   CHECK(src.shadowBindings == 3 && Bc250ShadowPrepareDraw(device) && device->profileShadowRefreshes == 3,
+         "three bindings, one copy");
+
+   // A draw queued from copy B still reads B after the next copy writes C.
+   Resource out1, out2;
+   hr = Create(hDevice, &out1, DXGI_FORMAT_R8G8B8A8_UNORM, width, height, 0, NULL);
+   HRESULT hr2 = Create(hDevice, &out2, DXGI_FORMAT_R8G8B8A8_UNORM, width, height, 0, NULL);
+   CHECK(hr == S_OK && hr2 == S_OK, "blit targets %08lx %08lx", hr, hr2);
+   if (SUCCEEDED(hr) && SUCCEEDED(hr2)) {
+      BlitShadow(device, &src, &out1);
+      FillSurface(wc->memory, pitch, width, height, 3);
+      CHECK(Bc250ShadowPrepareDraw(device) && device->profileShadowRefreshes == 4, "copy C");
+      BlitShadow(device, &src, &out2);
+      device->pipe->flush(device->pipe, NULL, 0);
+      CHECK(Holds(device, &out1, width, height, 2), "the queued draw read copy B");
+      CHECK(Holds(device, &out2, width, height, 3), "the later draw read copy C");
+      Destroy(hDevice, &out1);
+      Destroy(hDevice, &out2);
+   }
    CHECK(device->profileShadowBytes == 4ull * width * 4 * height, "bytes copied: %llu", device->profileShadowBytes);
 
    D3D10DDI_HSHADERRESOURCEVIEW none = {NULL};
    PsSetShaderResources(hDevice, 3, 1, &none);
-   device->frame++;
-   Bc250ShadowPrepareDraw(device);
-   CHECK(src.shadowBindings == 0 && device->profileShadowRefreshes == 4, "unbound again: no copy");
+   PsSetShaderResources(hDevice, 4, 1, &none);
+   VsSetShaderResources(hDevice, 0, 1, &none);
+   CHECK(src.shadowBindings == 0 && Bc250ShadowPrepareDraw(device) && device->profileShadowRefreshes == 4,
+         "unbound again: no copy");
 
    PsSetShaderResources(hDevice, 5, 1, &hView);
    DestroyShaderResourceView(hDevice, hView);
+   DestroyShaderResourceView(hDevice, hSecond);
    DestroyShaderResourceView(hDevice, hPlainView);
    Destroy(hDevice, &src);
-   CHECK(!src.shadow && device->shadowedCount == 0 && !device->shadowSlots[MESA_SHADER_FRAGMENT][5],
-         "destroy releases the shadow and its slot");
+   CHECK(!src.shadow && device->shadowedCount == 0 && device->shadowBytes == 0 &&
+         !device->shadowSlots[MESA_SHADER_FRAGMENT][5], "destroy releases the shadow, its bytes and its slot");
    Destroy(hDevice, &other);
-   printf("shadow: write-combined surface sampled through a cached copy, %llu copies\n",
-          device->profileShadowRefreshes);
+   printf("shadow: write-combined surface sampled through a cached copy, %llu copies, strides %u/%u\n",
+          device->profileShadowRefreshes, stride, pitch);
    device->profileShadowRefreshes = device->profileShadowBytes = device->profileShadowTicks = 0;
 }
 
