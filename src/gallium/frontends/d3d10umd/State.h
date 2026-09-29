@@ -73,6 +73,16 @@ struct Resource;
 #define BC250_MAX_SHADOWS 16
 #define BC250_MAX_SHADOW_BYTES (128ull << 20)
 
+// What a 4-byte shadow is charged against that budget: at least its backing,
+// which llvmpipe rounds to its 4-pixel raster block in both directions and,
+// per row, to a cache line (at most 128 bytes), then pages.
+static inline UINT64
+Bc250ShadowCharge(UINT width, UINT height)
+{
+   const UINT64 row = ((UINT64)((width + 3u) & ~3u) * 4 + 127) & ~127ull;
+   return (row * ((height + 3u) & ~3u) + 4095) & ~4095ull;
+}
+
 struct Device
 {
    UINT64 profileDrawTicks, profileDrawMax, profileDrawCalls, profileLastPresent;

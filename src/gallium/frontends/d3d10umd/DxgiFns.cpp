@@ -89,7 +89,7 @@ Bc250ShadowCreate(Device *device, Resource *resource)
        VirtualQuery(resource->cpuMapping, &m, sizeof(m)) != sizeof(m) ||
        (m.Protect & PAGE_NOCACHE) || !(m.Protect & PAGE_WRITECOMBINE))
       return;
-   const UINT64 bytes = (UINT64)util_format_get_stride(r->format, r->width0) * r->height0;
+   const UINT64 bytes = Bc250ShadowCharge(r->width0, r->height0);
    if (device->shadowBytes + bytes > BC250_MAX_SHADOW_BYTES) {
       DebugPrintf("BC250 Shadow handle %x %ux%u over the budget, sampled in place\n", resource->allocation,
                   r->width0, r->height0);
@@ -173,7 +173,8 @@ Bc250ShadowRefresh(Device *device, Resource *resource)
 }
 
 // Copies every bound shadow once, however many stages and slots bind views
-// of it. False when a copy failed: the draw must not sample an old copy.
+// of it. False when a copy failed: the draw must not sample an old copy, and
+// the runtime hears of it (a failed llvmpipe map is out of memory).
 bool
 Bc250ShadowPrepareDraw(Device *device)
 {
@@ -181,6 +182,10 @@ Bc250ShadowPrepareDraw(Device *device)
    for (UINT i = 0; i < device->shadowedCount; ++i) {
       Resource *r = device->shadowed[i];
       if (r->shadowBindings && !Bc250ShadowRefresh(device, r)) ok = false;
+   }
+   if (!ok) {
+      DebugPrintf("BC250 SetError %08lx: draw skipped\n", E_OUTOFMEMORY);
+      device->UMCallbacks.pfnSetErrorCb(device->hRTCoreLayer, E_OUTOFMEMORY);
    }
    return ok;
 }

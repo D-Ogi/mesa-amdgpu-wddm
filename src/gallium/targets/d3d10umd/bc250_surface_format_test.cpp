@@ -425,6 +425,16 @@ static bool Holds(Device *device, Resource *dst, UINT width, UINT height, UINT s
    return same;
 }
 
+// A llvmpipe map that fails for one texture, to exercise a failed copy.
+static decltype(pipe_context::texture_map) realTextureMap;
+static struct pipe_resource *failingTexture;
+static void *FailingTextureMap(struct pipe_context *pipe, struct pipe_resource *resource, unsigned level,
+                               unsigned usage, const struct pipe_box *box, struct pipe_transfer **transfer)
+{
+   if (resource == failingTexture) { *transfer = NULL; return NULL; }
+   return realTextureMap(pipe, resource, level, usage, box, transfer);
+}
+
 // An opened write-combined surface is sampled through a cached shadow that
 // every draw sampling it copies first; a surface in ordinary memory keeps
 // sampling its own storage.
@@ -442,7 +452,7 @@ static void TestShadow(Device *device)
    Resource src, other, over;
    HRESULT hr = Open(hDevice, &src, data, wc->handle);
    CHECK(hr == S_OK && src.shadow && src.shadow->format == src.resource->format && src.shadow->width0 == width &&
-         device->shadowedCount == 1 && device->shadowBytes == UINT64(width) * 4 * height,
+         device->shadowedCount == 1 && device->shadowBytes == Bc250ShadowCharge(width, height),
          "shadow for the write-combined surface: %08lx", hr);
    hr = Open(hDevice, &other, data, plain->handle);
    CHECK(hr == S_OK && !other.shadow && device->shadowedCount == 1, "no shadow for ordinary memory: %08lx", hr);
@@ -479,6 +489,8 @@ static void TestShadow(Device *device)
    Padding(device, src.shadow, false, &intact);
    CHECK(stride && stride != pitch && intact, "rows copied at their own strides (%u and %u), padding untouched",
          stride, pitch);
+   CHECK(Bc250ShadowCharge(width, height) >= UINT64(stride) * ((height + 3) & ~3u),
+         "the budget charge covers the backing");
 
    // Producer writes B with no Present of this device in between: the next draw sees B.
    FillSurface(wc->memory, pitch, width, height, 2);
@@ -508,6 +520,18 @@ static void TestShadow(Device *device)
       Destroy(hDevice, &out2);
    }
    CHECK(device->profileShadowBytes == 4ull * width * 4 * height, "bytes copied: %llu", device->profileShadowBytes);
+
+   // A failed copy skips the draw and reports out of memory to the runtime.
+   realTextureMap = device->pipe->texture_map;
+   device->pipe->texture_map = FailingTextureMap;
+   failingTexture = src.shadow;
+   lastError = S_OK;
+   bool prepared = Bc250ShadowPrepareDraw(device);
+   device->pipe->texture_map = realTextureMap;
+   failingTexture = NULL;
+   CHECK(!prepared && lastError == E_OUTOFMEMORY && device->profileShadowRefreshes == 4,
+         "failed copy: draw skipped, %08lx reported", lastError);
+   lastError = S_OK;
 
    D3D10DDI_HSHADERRESOURCEVIEW none = {NULL};
    PsSetShaderResources(hDevice, 3, 1, &none);
