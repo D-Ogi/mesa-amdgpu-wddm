@@ -42,6 +42,23 @@
 #include "util/u_rect.h"
 #include "util/u_surface.h"
 
+// Byte-identical copy of bc250-win driver/contract/amdgpu_wddm_surface_format.h.
+#include "amdgpu_wddm_surface_format.h"
+
+static_assert(AMDGPU_WDDM_D3DDDI_A8R8G8B8 == D3DDDIFMT_A8R8G8B8 &&
+              AMDGPU_WDDM_D3DDDI_X8R8G8B8 == D3DDDIFMT_X8R8G8B8 &&
+              AMDGPU_WDDM_D3DDDI_A2B10G10R10 == D3DDDIFMT_A2B10G10R10 &&
+              AMDGPU_WDDM_D3DDDI_A8B8G8R8 == D3DDDIFMT_A8B8G8R8 &&
+              AMDGPU_WDDM_D3DDDI_A16B16G16R16F == D3DDDIFMT_A16B16G16R16F,
+              "surface format table: D3DDDIFORMAT values");
+static_assert(AMDGPU_WDDM_DXGI_R16G16B16A16_FLOAT == DXGI_FORMAT_R16G16B16A16_FLOAT &&
+              AMDGPU_WDDM_DXGI_R10G10B10A2_UNORM == DXGI_FORMAT_R10G10B10A2_UNORM &&
+              AMDGPU_WDDM_DXGI_R8G8B8A8_UNORM == DXGI_FORMAT_R8G8B8A8_UNORM &&
+              AMDGPU_WDDM_DXGI_R8G8B8A8_UNORM_SRGB == DXGI_FORMAT_R8G8B8A8_UNORM_SRGB &&
+              AMDGPU_WDDM_DXGI_B8G8R8A8_UNORM == DXGI_FORMAT_B8G8R8A8_UNORM &&
+              AMDGPU_WDDM_DXGI_B8G8R8A8_UNORM_SRGB == DXGI_FORMAT_B8G8R8A8_UNORM_SRGB,
+              "surface format table: DXGI_FORMAT values");
+
 
 /*
  * ----------------------------------------------------------------------
@@ -439,17 +456,20 @@ OpenResource(D3D10DDI_HDEVICE hDevice,                            // IN
    }
    SurfacePrivate data;
    memcpy(&data, info->pPrivateDriverData, sizeof(data));
+   // The compositor opens and samples the formats the shared table marks
+   // COMPOSED. X8R8G8B8 is a kernel/GDI row there; this UMD has always
+   // opened it as B8G8R8X8. A refused format keeps the 4-byte geometry check,
+   // so its error codes are the ones it had before the table.
+   const AMDGPU_WDDM_SURFACE_FORMAT *row = amdgpu_wddm_surface_admit(
+      amdgpu_wddm_surface_format_by_d3dddi(data.format), AMDGPU_WDDM_SURFACE_COMPOSED);
+   const DXGI_FORMAT format = row ? (DXGI_FORMAT)row->dxgi :
+      data.format == D3DDDIFMT_X8R8G8B8 ? DXGI_FORMAT_B8G8R8X8_UNORM : DXGI_FORMAT_UNKNOWN;
+   const UINT bpp = row ? row->bytes_per_pixel : 4;
    if (data.magic != 0x4137424c || data.version != 1 || !data.width || !data.height ||
        data.width > 8192 || data.height > 8192 || (data.pitch & 15u) ||
-       data.pitch < ((data.width + 3u) & ~3u) * 4 ||
+       data.pitch < ((data.width + 3u) & ~3u) * bpp ||
        data.size < UINT64(data.pitch) * ((data.height + 3u) & ~3u)) { SetError(hDevice, E_INVALIDARG); return; }
-   DXGI_FORMAT format;
-   switch (data.format) {
-   case D3DDDIFMT_A8R8G8B8: format = DXGI_FORMAT_B8G8R8A8_UNORM; break;
-   case D3DDDIFMT_X8R8G8B8: format = DXGI_FORMAT_B8G8R8X8_UNORM; break;
-   case D3DDDIFMT_A8B8G8R8: format = DXGI_FORMAT_R8G8B8A8_UNORM; break;
-   default: SetError(hDevice, E_NOTIMPL); return;
-   }
+   if (format == DXGI_FORMAT_UNKNOWN) { SetError(hDevice, E_NOTIMPL); return; }
    D3D10DDI_MIPINFO mip = {};
    mip.TexelWidth = mip.PhysicalWidth = data.width;
    mip.TexelHeight = mip.PhysicalHeight = data.height;
