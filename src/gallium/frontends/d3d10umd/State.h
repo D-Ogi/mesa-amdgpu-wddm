@@ -59,8 +59,9 @@ struct Shader
    struct pipe_shader_state state;
    unsigned output_mapping[PIPE_MAX_SHADER_OUTPUTS];
    bool output_resolved;
-   // Shader resource view slots the TGSI declares (bit i: slot i < 32; slots from 32 up to viewsMax
-   // count as declared), filled on first use by Bc250ShadowPrepareDraw.
+   // Shader resource view slots the TGSI may read, as SAMPLER_VIEW or (old texture ops) SAMPLER
+   // declarations (bit i: slot i < 32; slots from 32 up to viewsMax count as declared), filled on
+   // first use by Bc250ShadowPrepareDraw.
    bool viewsScanned;
    uint32_t viewsDeclared;
    int viewsMax;

@@ -176,8 +176,11 @@ Bc250ShadowRefresh(Device *device, Resource *resource)
    return d != NULL;
 }
 
-// Whether a shader declares shader resource view `slot` (the translator
-// declares a sampler view for every DCL_RESOURCE, so every slot it can read).
+// Whether a shader may read shader resource view `slot`. The translator
+// declares a sampler view for every DCL_RESOURCE, but with ST_DEBUG_OLD_TEX_OPS
+// its texture instructions declare a SAMPLER at the resource index instead
+// (ShaderTGSI.c), so both files count; a sampler-state index that is not also
+// a view slot only costs a spare copy.
 static bool
 Bc250ShaderDeclaresView(Shader *shader, UINT slot)
 {
@@ -185,8 +188,8 @@ Bc250ShaderDeclaresView(Shader *shader, UINT slot)
    if (!shader->viewsScanned) {
       struct tgsi_shader_info info;
       tgsi_scan_shader(shader->state.tokens, &info);
-      shader->viewsDeclared = info.file_mask[TGSI_FILE_SAMPLER_VIEW];
-      shader->viewsMax = info.file_max[TGSI_FILE_SAMPLER_VIEW];
+      shader->viewsDeclared = info.file_mask[TGSI_FILE_SAMPLER_VIEW] | info.file_mask[TGSI_FILE_SAMPLER];
+      shader->viewsMax = MAX2(info.file_max[TGSI_FILE_SAMPLER_VIEW], info.file_max[TGSI_FILE_SAMPLER]);
       shader->viewsScanned = true;
    }
    return slot < 32 ? ((shader->viewsDeclared >> slot) & 1) != 0 : (int)slot <= shader->viewsMax;
