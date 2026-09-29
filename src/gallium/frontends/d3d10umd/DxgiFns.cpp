@@ -43,6 +43,7 @@
 #include "util/u_inlines.h"
 #include "util/os_time.h"
 #include "util/box.h"
+#include "tgsi/tgsi_scan.h"
 #include "c99_compat.h"
 extern "C" {
 #include "util/streaming-load-memcpy.h"
@@ -61,11 +62,14 @@ extern "C" {
  *    texel uncached: about 25 MiB/s on unit A, where MOVNTDQA streaming
  *    loads copy the same mapping at about 3.3 GiB/s (lab bench wc-read 001).
  *    Such a surface gets an ordinary cached llvmpipe texture that its shader
- *    resource views sample, and every draw that samples it copies the
- *    surface into it first. There is no cheaper boundary to key on: this
- *    device's own Present does not tell when the producer wrote the surface
- *    again. Render targets, copies, Blt, Map and Present keep using the
- *    imported surface itself.
+ *    resource views sample, and every draw that can sample it copies the
+ *    surface into it first: a draw whose bound VS, GS or PS declares a slot
+ *    holding one of its views. A view left bound under shaders that do not
+ *    declare its slot costs nothing (DWM keeps the game's view bound across
+ *    many such draws; copying on those made 106 composite at ~7 frames/s).
+ *    There is no cheaper boundary to key on: this device's own Present does
+ *    not tell when the producer wrote the surface again. Render targets,
+ *    copies, Blt, Map and Present keep using the imported surface itself.
  *
  *    Producer ordering is unchanged: the runtime orders the other process's
  *    GPU work before this device's use of the surface, exactly as it did
@@ -172,16 +176,46 @@ Bc250ShadowRefresh(Device *device, Resource *resource)
    return d != NULL;
 }
 
-// Copies every bound shadow once, however many stages and slots bind views
-// of it. False when a copy failed: the draw must not sample an old copy, and
-// the runtime hears of it (a failed llvmpipe map is out of memory).
+// Whether a shader declares shader resource view `slot` (the translator
+// declares a sampler view for every DCL_RESOURCE, so every slot it can read).
+static bool
+Bc250ShaderDeclaresView(Shader *shader, UINT slot)
+{
+   if (!shader || !shader->state.tokens) return false;
+   if (!shader->viewsScanned) {
+      struct tgsi_shader_info info;
+      tgsi_scan_shader(shader->state.tokens, &info);
+      shader->viewsDeclared = info.file_mask[TGSI_FILE_SAMPLER_VIEW];
+      shader->viewsMax = info.file_max[TGSI_FILE_SAMPLER_VIEW];
+      shader->viewsScanned = true;
+   }
+   return slot < 32 ? ((shader->viewsDeclared >> slot) & 1) != 0 : (int)slot <= shader->viewsMax;
+}
+
+static bool
+Bc250ShadowSampled(Device *device, Resource *resource)
+{
+   for (UINT stage = 0; stage < MESA_SHADER_STAGES; ++stage) {
+      Shader *shader = device->shadowShaders[stage];
+      if (!shader || !shader->state.tokens) continue;
+      for (UINT slot = 0; slot < PIPE_MAX_SHADER_SAMPLER_VIEWS; ++slot)
+         if (device->shadowSlots[stage][slot] == resource && Bc250ShaderDeclaresView(shader, slot))
+            return true;
+   }
+   return false;
+}
+
+// Copies every shadow the bound shaders can sample once, however many stages
+// and slots bind views of it. False when a copy failed: the draw must not
+// sample an old copy, and the runtime hears of it (a failed llvmpipe map is
+// out of memory).
 bool
 Bc250ShadowPrepareDraw(Device *device)
 {
    bool ok = true;
    for (UINT i = 0; i < device->shadowedCount; ++i) {
       Resource *r = device->shadowed[i];
-      if (r->shadowBindings && !Bc250ShadowRefresh(device, r)) ok = false;
+      if (r->shadowBindings && Bc250ShadowSampled(device, r) && !Bc250ShadowRefresh(device, r)) ok = false;
    }
    if (!ok) {
       DebugPrintf("BC250 SetError %08lx: draw skipped\n", E_OUTOFMEMORY);
