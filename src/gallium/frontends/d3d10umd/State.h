@@ -66,11 +66,21 @@ struct ElementLayout;
 
 struct RenderTargetView;
 struct ShaderResourceView;
+struct Resource;
+
+// Opened surfaces whose CPU mapping is write-combined or uncached get a cached
+// shadow texture that llvmpipe samples instead (DxgiFns.cpp, Bc250Shadow*).
+#define BC250_MAX_SHADOWS 16
 
 struct Device
 {
    UINT64 profileDrawTicks, profileDrawMax, profileDrawCalls, profileLastPresent;
    UINT profilePresents;
+   UINT64 profileShadowTicks, profileShadowBytes, profileShadowRefreshes;
+   UINT64 frame;
+   Resource *shadowed[BC250_MAX_SHADOWS];
+   UINT shadowedCount;
+   Resource *shadowSlots[MESA_SHADER_STAGES][PIPE_MAX_SHADER_SAMPLER_VIEWS];
    RenderTargetView *renderTargetViews;
    ShaderResourceView *shaderResourceViews;
    struct pipe_context *pipe;
@@ -178,12 +188,24 @@ struct Resource
    UINT NumSubResources;
    bool buffer;
    struct pipe_resource *resource;
+   // Cached copy of an opened write-combined surface, the frame it was last
+   // refreshed in, whether a write since then made it stale, and how many
+   // bound shader resource slots sample it.
+   struct pipe_resource *shadow;
+   UINT64 shadowFrame;
+   bool shadowStale;
+   UINT shadowBindings;
    struct pipe_transfer **transfers;
    struct pipe_stream_output_target *so_target;
 };
 
 
 HRESULT Bc250EnsureSurface(Device *device, Resource *resource);
+void Bc250ShadowCreate(Device *device, Resource *resource);
+void Bc250ShadowRelease(Device *device, Resource *resource);
+void Bc250ShadowBind(Device *device, UINT stage, UINT slot, ShaderResourceView *view);
+void Bc250ShadowWritten(Device *device, const struct pipe_resource *texture);
+void Bc250ShadowPrepareDraw(Device *device);
 
 static inline Resource *
 CastResource(D3D10DDI_HRESOURCE hResource)
@@ -386,6 +408,7 @@ struct ShaderResourceView
 {
    ShaderResourceView *next;
    struct pipe_sampler_view *handle;
+   Resource *shadowOf;   // the opened resource whose shadow this view samples
 };
 
 

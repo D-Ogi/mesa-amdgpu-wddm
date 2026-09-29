@@ -487,7 +487,9 @@ OpenResource(D3D10DDI_HDEVICE hDevice,                            // IN
    resource->surfacePitch = data.pitch;
    resource->surfaceBytes = data.size;
    HRESULT hr = Bc250EnsureSurface(CastDevice(hDevice), resource);
-   DebugPrintf("BC250 OpenResource %08lx handle %x\n", hr, resource->allocation);
+   if (SUCCEEDED(hr)) Bc250ShadowCreate(CastDevice(hDevice), resource);
+   DebugPrintf("BC250 OpenResource %08lx handle %x shadow %u\n", hr, resource->allocation,
+               resource->shadow != NULL);
    SetError(hDevice, hr);
 }
 
@@ -550,6 +552,7 @@ DestroyResource(D3D10DDI_HDEVICE hDevice,       // IN
    }
    free(pResource->transfers);
 
+   Bc250ShadowRelease(CastDevice(hDevice), pResource);
    pipe_resource_reference(&pResource->resource, NULL);
 }
 
@@ -606,6 +609,7 @@ ResourceMap(D3D10DDI_HDEVICE hDevice,                                // IN
    }
 
    assert(SubResource < pResource->NumSubResources);
+   if (usage & PIPE_MAP_WRITE) Bc250ShadowWritten(CastDevice(hDevice), resource);
 
    unsigned level;
    struct pipe_box box;
@@ -757,6 +761,7 @@ ResourceCopy(D3D10DDI_HDEVICE hDevice,          // IN
    Resource *pSrcResource = CastResource(hSrcResource);
    struct pipe_resource *dst_resource = pDstResource->resource;
    struct pipe_resource *src_resource = pSrcResource->resource;
+   Bc250ShadowWritten(pDevice, dst_resource);
    bool compatible;
 
    assert(dst_resource->target == src_resource->target);
@@ -831,6 +836,7 @@ ResourceCopyRegion(D3D10DDI_HDEVICE hDevice,                // IN
    Resource *pSrcResource = CastResource(hSrcResource);
    struct pipe_resource *dst_resource = pDstResource->resource;
    struct pipe_resource *src_resource = pSrcResource->resource;
+   Bc250ShadowWritten(pDevice, dst_resource);
 
    unsigned dst_level = DstSubResource % (dst_resource->last_level + 1);
    unsigned dst_layer = DstSubResource / (dst_resource->last_level + 1);
@@ -970,6 +976,7 @@ ResourceUpdateSubResourceUP(D3D10DDI_HDEVICE hDevice,                // IN
    struct pipe_context *pipe = pDevice->pipe;
    Resource *pDstResource = CastResource(hDstResource);
    struct pipe_resource *dst_resource = pDstResource->resource;
+   Bc250ShadowWritten(pDevice, dst_resource);
 
    unsigned level;
    struct pipe_box box;
