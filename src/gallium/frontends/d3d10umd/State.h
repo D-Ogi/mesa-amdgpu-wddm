@@ -59,6 +59,11 @@ struct Shader
    struct pipe_shader_state state;
    unsigned output_mapping[PIPE_MAX_SHADER_OUTPUTS];
    bool output_resolved;
+   // Shader resource view slots the TGSI declares (bit i: slot i < 32; slots from 32 up to viewsMax
+   // count as declared), filled on first use by Bc250ShadowPrepareDraw.
+   bool viewsScanned;
+   uint32_t viewsDeclared;
+   int viewsMax;
 };
 
 struct Query;
@@ -92,6 +97,7 @@ struct Device
    UINT shadowedCount;
    UINT64 shadowBytes;
    Resource *shadowSlots[MESA_SHADER_STAGES][PIPE_MAX_SHADER_SAMPLER_VIEWS];
+   Shader *shadowShaders[MESA_SHADER_STAGES];   // bound VS/GS/PS, for their declared views
    RenderTargetView *renderTargetViews;
    ShaderResourceView *shaderResourceViews;
    struct pipe_context *pipe;

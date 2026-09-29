@@ -298,6 +298,10 @@ DestroyShader(D3D10DDI_HDEVICE hDevice,   // IN
 
    struct pipe_context *pipe = CastPipeContext(hDevice);
    Shader *pShader = CastShader(hShader);
+   Device *pDevice = CastDevice(hDevice);
+
+   for (unsigned stage = 0; stage < MESA_SHADER_STAGES; ++stage)
+      if (pDevice->shadowShaders[stage] == pShader) pDevice->shadowShaders[stage] = NULL;
 
    if (pShader->handle) {
       switch (pShader->type) {
@@ -546,6 +550,7 @@ CreateVertexShader(D3D10DDI_HDEVICE hDevice,                                  //
    Shader *pShader = CastShader(hShader);
 
    pShader->type = MESA_SHADER_VERTEX;
+   pShader->viewsScanned = false;
    pShader->output_resolved = true;
 
    memset(&pShader->state, 0, sizeof pShader->state);
@@ -579,6 +584,7 @@ VsSetShader(D3D10DDI_HDEVICE hDevice,  // IN
    void *state = CastPipeShader(hShader);
 
    pDevice->bound_vs = pShader;
+   pDevice->shadowShaders[MESA_SHADER_VERTEX] = pShader;
    if (!state) {
       state = pDevice->empty_vs;
    }
@@ -682,6 +688,7 @@ CreateGeometryShader(D3D10DDI_HDEVICE hDevice,                                //
    Shader *pShader = CastShader(hShader);
 
    pShader->type = MESA_SHADER_GEOMETRY;
+   pShader->viewsScanned = false;
    pShader->output_resolved = true;
 
    memset(&pShader->state, 0, sizeof pShader->state);
@@ -715,6 +722,7 @@ GsSetShader(D3D10DDI_HDEVICE hDevice,  // IN
 
    assert(pipe->bind_gs_state);
 
+   pDevice->shadowShaders[MESA_SHADER_GEOMETRY] = pShader;
    if (pShader && !pShader->state.tokens) {
       pDevice->bound_empty_gs = pShader;
    } else {
@@ -846,6 +854,7 @@ CreateGeometryShaderWithStreamOutput(
    bool all_slot_zero = true;
 
    pShader->type = MESA_SHADER_GEOMETRY;
+   pShader->viewsScanned = false;
 
    memset(&pShader->state, 0, sizeof pShader->state);
    if (pData->pShaderCode) {
@@ -998,6 +1007,7 @@ CreatePixelShader(D3D10DDI_HDEVICE hDevice,                                // IN
    Shader *pShader = CastShader(hShader);
 
    pShader->type = MESA_SHADER_FRAGMENT;
+   pShader->viewsScanned = false;
    pShader->output_resolved = true;
 
    memset(&pShader->state, 0, sizeof pShader->state);
@@ -1030,6 +1040,7 @@ PsSetShader(D3D10DDI_HDEVICE hDevice,  // IN
    struct pipe_context *pipe = pDevice->pipe;
    void *state = CastPipeShader(hShader);
 
+   pDevice->shadowShaders[MESA_SHADER_FRAGMENT] = CastShader(hShader);
    if (!state) {
       state = pDevice->empty_fs;
    }

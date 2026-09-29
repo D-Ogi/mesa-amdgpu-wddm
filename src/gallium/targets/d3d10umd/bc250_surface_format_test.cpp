@@ -24,6 +24,7 @@
 
 #include "util/format/u_format.h"
 #include "util/box.h"
+#include "tgsi/tgsi_ureg.h"
 
 EXTERN_C struct pipe_screen *d3d10_create_screen(void);
 
@@ -435,9 +436,24 @@ static void *FailingTextureMap(struct pipe_context *pipe, struct pipe_resource *
    return realTextureMap(pipe, resource, level, usage, box, transfer);
 }
 
+// A shader object that only declares the given sampler view slots (no pipe
+// state: binding it binds the empty shader), for the declared-slot check.
+static void ViewShader(Shader *shader, mesa_shader_stage stage, const UINT *slots, UINT count)
+{
+   struct ureg_program *ureg = ureg_create(stage);
+   for (UINT i = 0; i < count; ++i)
+      ureg_DECL_sampler_view(ureg, slots[i], TGSI_TEXTURE_2D, TGSI_RETURN_TYPE_FLOAT, TGSI_RETURN_TYPE_FLOAT,
+                             TGSI_RETURN_TYPE_FLOAT, TGSI_RETURN_TYPE_FLOAT);
+   ureg_END(ureg);
+   memset(shader, 0, sizeof *shader);
+   shader->type = stage;
+   shader->state.tokens = ureg_get_tokens(ureg, NULL);
+   ureg_destroy(ureg);
+}
+
 // An opened write-combined surface is sampled through a cached shadow that
-// every draw sampling it copies first; a surface in ordinary memory keeps
-// sampling its own storage.
+// every draw whose shaders can sample it copies first; a surface in ordinary
+// memory keeps sampling its own storage.
 static void TestShadow(Device *device)
 {
    D3D10DDI_HDEVICE hDevice = {device};
@@ -479,11 +495,26 @@ static void TestShadow(Device *device)
    CHECK(plainView.handle && plainView.handle->texture == other.resource && !plainView.shadowOf,
          "view of ordinary memory samples the resource");
 
+   const UINT psSlots[] = {3, 4, 5}, psOtherSlots[] = {7}, vsSlots[] = {0}, psHighSlots[] = {40};
+   Shader ps, psOther, vs, psHigh;
+   ViewShader(&ps, MESA_SHADER_FRAGMENT, psSlots, 3);
+   ViewShader(&psOther, MESA_SHADER_FRAGMENT, psOtherSlots, 1);
+   ViewShader(&vs, MESA_SHADER_VERTEX, vsSlots, 1);
+   ViewShader(&psHigh, MESA_SHADER_FRAGMENT, psHighSlots, 1);
+   D3D10DDI_HSHADER hPs = {&ps}, hPsOther = {&psOther}, hVs = {&vs}, hPsHigh = {&psHigh};
+
    CHECK(Bc250ShadowPrepareDraw(device) && device->profileShadowRefreshes == 0, "unbound shadow is not copied");
    bool intact = false;
    const UINT stride = Padding(device, src.shadow, true, &intact);
    PsSetShaderResources(hDevice, 3, 1, &hView);
    CHECK(src.shadowBindings == 1, "bound once");
+   // Bound, but the bound shaders cannot read slot 3: no copy (106: DWM keeps
+   // the view bound across many such draws).
+   CHECK(Bc250ShadowPrepareDraw(device) && device->profileShadowRefreshes == 0, "no shader bound: no copy");
+   PsSetShader(hDevice, hPsOther);
+   CHECK(device->shadowShaders[MESA_SHADER_FRAGMENT] == &psOther && Bc250ShadowPrepareDraw(device) &&
+         device->profileShadowRefreshes == 0, "bound under a shader that does not declare the slot: no copy");
+   PsSetShader(hDevice, hPs);
    CHECK(Bc250ShadowPrepareDraw(device) && device->profileShadowRefreshes == 1 &&
          ShadowMatches(device, &src, pitch, width, height), "a draw copies the surface");
    Padding(device, src.shadow, false, &intact);
@@ -500,6 +531,7 @@ static void TestShadow(Device *device)
    // Several views of one surface in several stages and slots: one copy per draw.
    PsSetShaderResources(hDevice, 4, 1, &hSecond);
    VsSetShaderResources(hDevice, 0, 1, &hView);
+   VsSetShader(hDevice, hVs);
    CHECK(src.shadowBindings == 3 && Bc250ShadowPrepareDraw(device) && device->profileShadowRefreshes == 3,
          "three bindings, one copy");
 
@@ -539,6 +571,20 @@ static void TestShadow(Device *device)
    VsSetShaderResources(hDevice, 0, 1, &none);
    CHECK(src.shadowBindings == 0 && Bc250ShadowPrepareDraw(device) && device->profileShadowRefreshes == 4,
          "unbound again: no copy");
+
+   // Slots from 32 up are declared through the highest declared index.
+   PsSetShaderResources(hDevice, 40, 1, &hView);
+   CHECK(Bc250ShadowPrepareDraw(device) && device->profileShadowRefreshes == 4, "slot 40 undeclared: no copy");
+   PsSetShader(hDevice, hPsHigh);
+   CHECK(Bc250ShadowPrepareDraw(device) && device->profileShadowRefreshes == 5, "slot 40 declared: one copy");
+   PsSetShaderResources(hDevice, 40, 1, &none);
+   // A destroyed shader is no longer consulted.
+   DestroyShader(hDevice, hPsHigh);
+   DestroyShader(hDevice, hVs);
+   CHECK(!device->shadowShaders[MESA_SHADER_FRAGMENT] && !device->shadowShaders[MESA_SHADER_VERTEX],
+         "destroyed shaders leave the bound set");
+   DestroyShader(hDevice, hPs);
+   DestroyShader(hDevice, hPsOther);
 
    PsSetShaderResources(hDevice, 5, 1, &hView);
    DestroyShaderResourceView(hDevice, hView);
