@@ -17,6 +17,7 @@
 
 #include "State.h"
 #include "Resource.h"
+#include "Shader.h"
 #include "DxgiFns.h"
 #include "Format.h"
 #include "amdgpu_wddm_surface_format.h"
@@ -336,6 +337,117 @@ static void TestCreateShared(Device *device)
    printf("create shared: %u cases\n", (UINT)(sizeof(cases) / sizeof(cases[0])) + 1);
 }
 
+static FakeAllocation *AddWriteCombinedAllocation(UINT64 size)
+{
+   FakeAllocation *a = &allocations[allocationCount++];
+   a->handle = 0x40000000u + allocationCount * 4;
+   a->memory = VirtualAlloc(NULL, (SIZE_T)size, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE | PAGE_WRITECOMBINE);
+   a->size = size;
+   return a;
+}
+
+static void FillSurface(void *memory, UINT pitch, UINT width, UINT height, UINT seed)
+{
+   for (UINT y = 0; y < height; ++y)
+      for (UINT x = 0; x < width; ++x)
+         ((UINT *)((char *)memory + y * pitch))[x] = (x * 2654435761u) ^ (y * 40503u) ^ seed;
+}
+
+// Rows of the shadow equal the surface's rows (the pixels, not the padding).
+static bool ShadowMatches(Device *device, Resource *r, UINT pitch, UINT width, UINT height)
+{
+   struct pipe_box box;
+   u_box_2d(0, 0, width, height, &box);
+   struct pipe_transfer *transfer;
+   const char *map = (const char *)device->pipe->texture_map(device->pipe, r->shadow, 0, PIPE_MAP_READ, &box,
+                                                             &transfer);
+   bool same = map != NULL;
+   for (UINT y = 0; same && y < height; ++y)
+      same = !memcmp(map + y * transfer->stride, (const char *)r->cpuMapping + y * pitch, width * 4);
+   if (map) device->pipe->texture_unmap(device->pipe, transfer);
+   return same;
+}
+
+// An opened write-combined surface is sampled through a cached shadow copied
+// at the first draw of each frame that samples it, and after a write by this
+// UMD; a surface in ordinary memory keeps sampling its own storage.
+static void TestShadow(Device *device)
+{
+   D3D10DDI_HDEVICE hDevice = {device};
+   const UINT width = 67, height = 65, pitch = (width * 4 + 255) & ~255u;
+   Lb7a data = {0x4137424c, 1, width, height, pitch, 21, UINT64(pitch) * ((height + 3) & ~3u)};
+   FakeAllocation *wc = AddWriteCombinedAllocation(data.size);
+   FakeAllocation *plain = AddAllocation(data.size);
+   CHECK(wc->memory != NULL, "write-combined test memory");
+   if (!wc->memory) return;
+   FillSurface(wc->memory, pitch, width, height, 1);
+
+   Resource src, other;
+   HRESULT hr = Open(hDevice, &src, data, wc->handle);
+   CHECK(hr == S_OK && src.shadow && src.shadow->format == src.resource->format &&
+         src.shadow->width0 == width && device->shadowedCount == 1, "shadow for the write-combined surface: %08lx", hr);
+   hr = Open(hDevice, &other, data, plain->handle);
+   CHECK(hr == S_OK && !other.shadow && device->shadowedCount == 1, "no shadow for ordinary memory: %08lx", hr);
+   if (!src.shadow) return;
+
+   ShaderResourceView view = {}, plainView = {};
+   D3D10_1DDIARG_CREATESHADERRESOURCEVIEW create = {};
+   create.Format = DXGI_FORMAT_B8G8R8A8_UNORM; create.ResourceDimension = D3D10DDIRESOURCE_TEXTURE2D;
+   create.Tex2D.MipLevels = 1; create.Tex2D.ArraySize = 1;
+   create.hDrvResource.pDrvPrivate = &src;
+   D3D10DDI_HSHADERRESOURCEVIEW hView = {&view}, hPlainView = {&plainView};
+   CreateShaderResourceView1(hDevice, &create, hView, {(HANDLE)0x70000020});
+   create.hDrvResource.pDrvPrivate = &other;
+   CreateShaderResourceView1(hDevice, &create, hPlainView, {(HANDLE)0x70000030});
+   CHECK(view.handle && view.handle->texture == src.shadow && view.shadowOf == &src, "view samples the shadow");
+   CHECK(plainView.handle && plainView.handle->texture == other.resource && !plainView.shadowOf,
+         "view of ordinary memory samples the resource");
+
+   Bc250ShadowPrepareDraw(device);
+   CHECK(device->profileShadowRefreshes == 0, "unbound shadow is not copied");
+   PsSetShaderResources(hDevice, 3, 1, &hView);
+   CHECK(src.shadowBindings == 1, "bound once");
+   Bc250ShadowPrepareDraw(device);
+   CHECK(device->profileShadowRefreshes == 1 && ShadowMatches(device, &src, pitch, width, height),
+         "first draw copies the surface");
+   FillSurface(wc->memory, pitch, width, height, 2);
+   Bc250ShadowPrepareDraw(device);
+   CHECK(device->profileShadowRefreshes == 1, "same frame: no second copy");
+   device->frame++;
+   Bc250ShadowPrepareDraw(device);
+   CHECK(device->profileShadowRefreshes == 2 && ShadowMatches(device, &src, pitch, width, height),
+         "next frame copies the new contents");
+   FillSurface(wc->memory, pitch, width, height, 3);
+   Bc250ShadowWritten(device, src.resource);
+   Bc250ShadowPrepareDraw(device);
+   CHECK(device->profileShadowRefreshes == 3 && ShadowMatches(device, &src, pitch, width, height),
+         "a write by this UMD makes the shadow stale");
+   device->fb.nr_cbufs = 1; device->fb.cbufs[0].texture = src.resource;
+   Bc250ShadowPrepareDraw(device);
+   CHECK(device->profileShadowRefreshes == 3 && src.shadowStale, "a draw into the surface marks it stale");
+   memset(&device->fb, 0, sizeof(device->fb));
+   Bc250ShadowPrepareDraw(device);
+   CHECK(device->profileShadowRefreshes == 4, "the next draw copies it again");
+   CHECK(device->profileShadowBytes == 4ull * width * 4 * height, "bytes copied: %llu", device->profileShadowBytes);
+
+   D3D10DDI_HSHADERRESOURCEVIEW none = {NULL};
+   PsSetShaderResources(hDevice, 3, 1, &none);
+   device->frame++;
+   Bc250ShadowPrepareDraw(device);
+   CHECK(src.shadowBindings == 0 && device->profileShadowRefreshes == 4, "unbound again: no copy");
+
+   PsSetShaderResources(hDevice, 5, 1, &hView);
+   DestroyShaderResourceView(hDevice, hView);
+   DestroyShaderResourceView(hDevice, hPlainView);
+   Destroy(hDevice, &src);
+   CHECK(!src.shadow && device->shadowedCount == 0 && !device->shadowSlots[MESA_SHADER_FRAGMENT][5],
+         "destroy releases the shadow and its slot");
+   Destroy(hDevice, &other);
+   printf("shadow: write-combined surface sampled through a cached copy, %llu copies\n",
+          device->profileShadowRefreshes);
+   device->profileShadowRefreshes = device->profileShadowBytes = device->profileShadowTicks = 0;
+}
+
 int main(void)
 {
    _set_error_mode(_OUT_TO_STDERR);
@@ -360,6 +472,7 @@ int main(void)
    TestOpenAndCompose(device, 31, PIPE_FORMAT_R10G10B10A2_UNORM);
    TestOpenRefusals(device);
    TestCreateShared(device);
+   TestShadow(device);
 
    device->pipe->destroy(device->pipe);
    screen->destroy(screen);

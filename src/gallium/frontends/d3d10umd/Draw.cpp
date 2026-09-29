@@ -118,6 +118,8 @@ ResolveState(Device *pDevice)
       cso_set_vertex_buffers(pDevice->cso, PIPE_MAX_ATTRIBS, pDevice->vertex_buffers);
       pDevice->vbuffers_changed = false;
    }
+
+   Bc250ShadowPrepareDraw(pDevice);
 }
 
 

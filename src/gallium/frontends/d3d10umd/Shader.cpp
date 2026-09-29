@@ -237,6 +237,8 @@ SetShaderResources(mesa_shader_stage shader_type,                  // IN
             CastPipeShaderResourceView(phShaderResourceViews[i]);
       if (Offset + i < PIPE_MAX_SHADER_SAMPLER_VIEWS) {
          sampler_views[Offset + i] = sampler_view;
+         Bc250ShadowBind(pDevice, shader_type, Offset + i,
+                         CastShaderResourceView(phShaderResourceViews[i]));
       } else {
          if (sampler_view) {
             LOG_UNSUPPORTED(true);
@@ -1175,6 +1177,19 @@ CalcPrivateShaderResourceViewSize1(
 
 
 /*
+ * A view of an opened write-combined surface samples its cached shadow
+ * (DxgiFns.cpp); every other view samples the resource itself.
+ */
+static struct pipe_resource *
+SampledResource(D3D10DDI_HRESOURCE hResource, ShaderResourceView *pSRView)
+{
+   Resource *owner = CastResource(hResource);
+   pSRView->shadowOf = owner && owner->shadow ? owner : NULL;
+   return pSRView->shadowOf ? owner->shadow : owner ? owner->resource : NULL;
+}
+
+
+/*
  * ----------------------------------------------------------------------
  *
  * CreateShaderResourceView --
@@ -1201,7 +1216,7 @@ CreateShaderResourceView(
 
    struct pipe_sampler_view desc;
    memset(&desc, 0, sizeof desc);
-   resource = CastPipeResource(pCreateSRView->hDrvResource);
+   resource = SampledResource(pCreateSRView->hDrvResource, pSRView);
    format = FormatTranslate(pCreateSRView->Format, false);
 
    u_sampler_view_default_template(&desc,
@@ -1284,7 +1299,7 @@ CreateShaderResourceView1(
 
    struct pipe_sampler_view desc;
    memset(&desc, 0, sizeof desc);
-   resource = CastPipeResource(pCreateSRView->hDrvResource);
+   resource = SampledResource(pCreateSRView->hDrvResource, pSRView);
    format = FormatTranslate(pCreateSRView->Format, false);
 
    u_sampler_view_default_template(&desc,
