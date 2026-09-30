@@ -3261,7 +3261,12 @@ struct radeon_winsys_heap_info {
 static void
 radv_query_heap_info(struct radv_physical_device *pdev, struct radeon_winsys_heap_info *heap_info)
 {
-   memset(heap_info, 0, sizeof(*heap_info));
+   struct radeon_winsys *ws = pdev->ws;
+   radv_wddm2_query_allocated(ws, &heap_info->allocated_vram,
+                             &heap_info->allocated_vram_vis, &heap_info->allocated_gtt);
+   heap_info->vram_usage = ws->query_value(ws, RADEON_VRAM_USAGE);
+   heap_info->vram_vis_usage = ws->query_value(ws, RADEON_VRAM_VIS_USAGE);
+   heap_info->gtt_usage = ws->query_value(ws, RADEON_GTT_USAGE);
 }
 #else
 static void

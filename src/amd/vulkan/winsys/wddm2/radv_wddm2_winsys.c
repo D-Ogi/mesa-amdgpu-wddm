@@ -625,6 +625,26 @@ radv_wddm2_winsys_query_value(struct radeon_winsys *_ws, enum radeon_value_id va
    }
 }
 
+void
+radv_wddm2_query_allocated(struct radeon_winsys *base, uint64_t *vram,
+                           uint64_t *vram_vis, uint64_t *gtt)
+{
+   struct radv_wddm2_winsys *source = radv_wddm2_winsys(base);
+   *vram = *vram_vis = *gtt = 0;
+   simple_mtx_lock(&winsys_creation_mutex);
+   if (winsyses) {
+      hash_table_foreach(winsyses, entry) {
+         struct radv_wddm2_winsys *ws = entry->data;
+         if (memcmp(&ws->adapter_luid, &source->adapter_luid, sizeof(LUID)))
+            continue;
+         *vram += p_atomic_read(&ws->allocated_vram);
+         *vram_vis += p_atomic_read(&ws->allocated_vram_vis);
+         *gtt += p_atomic_read(&ws->allocated_gtt);
+      }
+   }
+   simple_mtx_unlock(&winsys_creation_mutex);
+}
+
 static void
 radv_wddm2_winsys_destroy(struct radeon_winsys *_ws)
 {
