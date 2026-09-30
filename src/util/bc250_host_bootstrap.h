@@ -9,6 +9,17 @@
 #define BC250_HOST_STYPE 0x42434831u
 #define BC250_HOST_VERSION 5u
 #define BC250_HOST_IMPORT_STYPE 0x42434832u
+/* Adapter GetCaps precedes the runtime device callbacks. This instance can
+ * enumerate the real adapter and its queue policy, but cannot create a device.
+ * Use a distinct identity from every device instance; no paging queue is made.
+ */
+#define BC250_HOST_ADAPTER_QUERY_STYPE 0x42434834u
+#define BC250_HOST_ADAPTER_QUERY_VERSION 1u
+struct bc250_host_adapter_query {
+   uint32_t sType;
+   const void *pNext;
+   uint32_t version, size;
+};
 struct bc250_host_import {
    uint32_t sType;
    const void *pNext;

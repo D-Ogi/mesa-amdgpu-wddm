@@ -169,6 +169,7 @@ struct radv_instance {
    struct bc250_host bc250_host;
    /* The embedder binds every queue to a runtime queue context (draft). */
    bool bc250_bound_queues;
+   bool bc250_adapter_query;
 
    VkAllocationCallbacks alloc;
 
