@@ -23,6 +23,31 @@ struct bc250_host_adapter_query {
    const void *pNext;
    uint32_t version, size;
 };
+/* Policy of the host for this instance. Chained next to struct bc250_host; a host that does not chain
+ * it leaves every decision where it was. With the structure present the host alone decides on sparse
+ * binding: BC250_HOST_POLICY_SPARSE turns it on, its absence turns it off, and the process environment
+ * is not asked. reserved is zero. */
+#define BC250_HOST_POLICY_STYPE 0x42434836u
+#define BC250_HOST_POLICY_VERSION 1u
+#define BC250_HOST_POLICY_SPARSE 1u
+#define BC250_HOST_POLICY_KNOWN_FLAGS BC250_HOST_POLICY_SPARSE
+struct bc250_host_policy {
+   uint32_t sType;
+   const void *pNext;
+   uint32_t version, size;
+   uint32_t flags, reserved;
+};
+/* The sparse bit of an instance's experimental flags: the host's when it chained a policy, the
+ * environment's otherwise. */
+static inline int bc250_host_policy_sparse_bit(int present, uint32_t flags, int environment)
+{
+   return present ? (flags & BC250_HOST_POLICY_SPARSE) != 0 : environment != 0;
+}
+/* A host that said off holds against sparse support the winsys reports of its own. */
+static inline int bc250_host_policy_sparse_refused(int present, uint32_t flags)
+{
+   return present && !(flags & BC250_HOST_POLICY_SPARSE);
+}
 struct bc250_host_import {
    uint32_t sType;
    const void *pNext;

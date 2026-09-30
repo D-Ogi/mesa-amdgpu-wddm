@@ -170,6 +170,9 @@ struct radv_instance {
    /* The embedder binds every queue to a runtime queue context (draft). */
    bool bc250_bound_queues;
    bool bc250_adapter_query;
+   /* The host chained its policy: it decides on sparse binding, the environment does not. */
+   bool bc250_policy;
+   uint32_t bc250_policy_flags;
 
    VkAllocationCallbacks alloc;
 

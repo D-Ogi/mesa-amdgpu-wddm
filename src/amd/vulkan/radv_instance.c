@@ -271,6 +271,14 @@ radv_instance_parse_bc250(struct radv_instance *instance, const VkInstanceCreate
          if (query->version != BC250_HOST_ADAPTER_QUERY_VERSION || query->size != sizeof(*query))
             return VK_ERROR_INITIALIZATION_FAILED;
          instance->bc250_adapter_query = true;
+      } else if ((uint32_t)ext->sType == BC250_HOST_POLICY_STYPE) {
+         const struct bc250_host_policy *policy = (const void *)ext;
+         if (instance->bc250_policy || policy->version != BC250_HOST_POLICY_VERSION ||
+             policy->size != sizeof(*policy) || (policy->flags & ~BC250_HOST_POLICY_KNOWN_FLAGS) ||
+             policy->reserved)
+            return VK_ERROR_INITIALIZATION_FAILED;
+         instance->bc250_policy = true;
+         instance->bc250_policy_flags = policy->flags;
       } else if ((uint32_t)ext->sType == BC250_HOST_QUEUE_BINDING_STYPE) {
          const struct bc250_host_queue_binding *binding = (const void *)ext;
          if (binding->version != BC250_HOST_QUEUE_BINDING_VERSION || binding->size != sizeof(*binding) ||
@@ -280,7 +288,7 @@ radv_instance_parse_bc250(struct radv_instance *instance, const VkInstanceCreate
       }
    }
 
-   if (instance->bc250_adapter_query && !instance->bc250_host.dispatch)
+   if ((instance->bc250_adapter_query || instance->bc250_policy) && !instance->bc250_host.dispatch)
       return VK_ERROR_INITIALIZATION_FAILED;
    if (!queue_funcs)
       return VK_SUCCESS;
@@ -334,6 +342,14 @@ radv_CreateInstance(const VkInstanceCreateInfo *pCreateInfo, const VkAllocationC
    parse_debug_bitset(os_get_option("RADV_DEBUG"), radv_debug_options, instance->debug_flags);
    instance->perftest_flags = parse_debug_string(os_get_option("RADV_PERFTEST"), radv_perftest_options);
    instance->experimental_flags = parse_debug_string(os_get_option("RADV_EXPERIMENTAL"), radv_experimental_options);
+   /* A host with a policy decides on sparse binding for its instance; the other bits stay the environment's. */
+   {
+      const int sparse = bc250_host_policy_sparse_bit(instance->bc250_policy, instance->bc250_policy_flags,
+                                                      !!(instance->experimental_flags & RADV_EXPERIMENTAL_SPARSE));
+      instance->experimental_flags &= ~RADV_EXPERIMENTAL_SPARSE;
+      if (sparse)
+         instance->experimental_flags |= RADV_EXPERIMENTAL_SPARSE;
+   }
    instance->trap_excp_flags = parse_debug_string(os_get_option("RADV_TRAP_HANDLER_EXCP"), radv_trap_excp_options);
    instance->profile_pstate = radv_parse_pstate(debug_get_option("RADV_PROFILE_PSTATE", "peak"));
    instance->queue_disable_flags = parse_debug_string(os_get_option("RADV_QUEUE_DISABLE"), radv_queue_disable_options);

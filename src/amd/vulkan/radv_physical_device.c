@@ -107,6 +107,10 @@ radv_sparse_enabled(const struct radv_physical_device *pdev)
    if (instance->queue_disable_flags & RADV_QUEUE_DISABLE_SPARSE)
       return false;
 
+   /* The host's off holds even where the winsys reports sparse support of its own. */
+   if (bc250_host_policy_sparse_refused(instance->bc250_policy, instance->bc250_policy_flags))
+      return false;
+
    return pdev->info.has_sparse || (instance->experimental_flags & RADV_EXPERIMENTAL_SPARSE);
 }
 
