@@ -692,6 +692,12 @@ radv_wddm2_ctx_wait_idle(struct radeon_winsys_ctx *rwctx, enum amd_ip_type ip_ty
    if (ctx->per_ip[ip_type].last_submission.handle)
       ret = vk_wddm2_fence_wait(ctx->ws, &ctx->per_ip[ip_type].last_submission);
 
+   /* A submission without application signals leaves last_submission behind; the queue's progress
+    * fence follows every accepted IB. */
+   struct radv_wddm2_queue *queue = &ctx->per_ip[ip_type].queue;
+   if (ret && queue->bc250_progress.handle && queue->bc250_progress.wait_value)
+      ret = vk_wddm2_fence_wait(ctx->ws, &queue->bc250_progress);
+
    return ret;
 }
 

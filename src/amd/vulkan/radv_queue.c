@@ -869,7 +869,8 @@ radv_init_graphics_state(struct radv_cmd_stream *cs, struct radv_device *device)
 
 static VkResult
 radv_update_preamble_cs(struct radv_queue_state *queue, struct radv_device *device,
-                        const struct radv_queue_ring_info *needs, bool secure)
+                        const struct radv_queue_ring_info *needs, bool secure,
+                        struct radeon_winsys_ctx *hw_ctx, enum amd_ip_type ip)
 {
    const struct radv_physical_device *pdev = radv_device_physical(device);
    struct radeon_winsys *ws = device->ws;
@@ -1126,13 +1127,21 @@ radv_update_preamble_cs(struct radv_queue_state *queue, struct radv_device *devi
          goto fail;
    }
 
-   if (queue->initial_full_flush_preamble_cs)
+   /* WDDM: the winsys unmaps and destroys a BO at once, not when the GPU is done with it as the amdgpu
+    * kernel driver does. Submissions in flight on this queue still use the old scratch, rings and
+    * descriptors, so wait for them before anything below is destroyed. If the wait fails, keep the old
+    * objects (a leak) rather than unmap pages under running waves. */
+   const bool old_idle = !queue->initial_full_flush_preamble_cs || ws->ctx_wait_idle(hw_ctx, ip, 0);
+   if (!old_idle)
+      fprintf(stderr, "radv: queue not idle, keeping the replaced preamble objects\n");
+
+   if (queue->initial_full_flush_preamble_cs && old_idle)
       radv_destroy_cmd_stream(device, queue->initial_full_flush_preamble_cs);
 
-   if (queue->initial_preamble_cs)
+   if (queue->initial_preamble_cs && old_idle)
       radv_destroy_cmd_stream(device, queue->initial_preamble_cs);
 
-   if (queue->continue_preamble_cs)
+   if (queue->continue_preamble_cs && old_idle)
       radv_destroy_cmd_stream(device, queue->continue_preamble_cs);
 
    queue->initial_full_flush_preamble_cs = dest_cs[0];
@@ -1140,7 +1149,7 @@ radv_update_preamble_cs(struct radv_queue_state *queue, struct radv_device *devi
    queue->continue_preamble_cs = dest_cs[2];
 
    if (scratch_bo != queue->scratch_bo) {
-      if (queue->scratch_bo) {
+      if (queue->scratch_bo && old_idle) {
          radv_rmv_log_command_buffer_bo_destroy(device, queue->scratch_bo);
          radv_bo_destroy(device, NULL, queue->scratch_bo);
       }
@@ -1148,7 +1157,7 @@ radv_update_preamble_cs(struct radv_queue_state *queue, struct radv_device *devi
    }
 
    if (compute_scratch_bo != queue->compute_scratch_bo) {
-      if (queue->compute_scratch_bo) {
+      if (queue->compute_scratch_bo && old_idle) {
          radv_rmv_log_command_buffer_bo_destroy(device, queue->compute_scratch_bo);
          radv_bo_destroy(device, NULL, queue->compute_scratch_bo);
       }
@@ -1156,7 +1165,7 @@ radv_update_preamble_cs(struct radv_queue_state *queue, struct radv_device *devi
    }
 
    if (esgs_ring_bo != queue->esgs_ring_bo) {
-      if (queue->esgs_ring_bo) {
+      if (queue->esgs_ring_bo && old_idle) {
          radv_rmv_log_command_buffer_bo_destroy(device, queue->esgs_ring_bo);
          radv_bo_destroy(device, NULL, queue->esgs_ring_bo);
       }
@@ -1164,7 +1173,7 @@ radv_update_preamble_cs(struct radv_queue_state *queue, struct radv_device *devi
    }
 
    if (gsvs_ring_bo != queue->gsvs_ring_bo) {
-      if (queue->gsvs_ring_bo) {
+      if (queue->gsvs_ring_bo && old_idle) {
          radv_rmv_log_command_buffer_bo_destroy(device, queue->gsvs_ring_bo);
          radv_bo_destroy(device, NULL, queue->gsvs_ring_bo);
       }
@@ -1172,7 +1181,7 @@ radv_update_preamble_cs(struct radv_queue_state *queue, struct radv_device *devi
    }
 
    if (descriptor_bo != queue->descriptor_bo) {
-      if (queue->descriptor_bo)
+      if (queue->descriptor_bo && old_idle)
          radv_bo_destroy(device, NULL, queue->descriptor_bo);
       queue->descriptor_bo = descriptor_bo;
    }
@@ -1296,7 +1305,9 @@ radv_update_preambles(struct radv_queue_state *queue, struct radv_device *device
        queue->ring_info.sample_positions == needs.sample_positions)
       return VK_SUCCESS;
 
-   return radv_update_preamble_cs(queue, device, &needs, secure);
+   /* Only reached through &radv_queue::state (radv_queue_submit_normal). */
+   struct radv_queue *owner = container_of(queue, struct radv_queue, state);
+   return radv_update_preamble_cs(queue, device, &needs, secure, owner->hw_ctx, radv_queue_ring(owner));
 }
 
 /**
@@ -1556,7 +1567,8 @@ radv_update_gang_preambles(struct radv_queue *queue, bool secure)
    needs.compute_scratch_waves = queue->state.ring_info.scratch_waves;
    needs.task_rings = queue->state.ring_info.task_rings;
 
-   r = radv_update_preamble_cs(queue->follower_state, device, &needs, secure);
+   r = radv_update_preamble_cs(queue->follower_state, device, &needs, secure, queue->hw_ctx,
+                               radv_queue_ring(queue));
    if (r != VK_SUCCESS)
       return r;
 
