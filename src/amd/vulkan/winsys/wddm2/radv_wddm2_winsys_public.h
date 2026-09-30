@@ -36,7 +36,7 @@ struct radeon_winsys;
 struct vk_dx_adapter_info;
 
 VkResult radv_wddm2_winsys_create(const struct vk_dx_adapter_info *adapter_info,
-                                  const BITSET_WORD *debug_flags, const struct bc250_host *host, struct radeon_winsys **winsys);
+                                  const BITSET_WORD *debug_flags, const struct bc250_host *host, bool adapter_query, struct radeon_winsys **winsys);
 
 void radv_wddm2_query_allocated(struct radeon_winsys *ws, uint64_t *vram,
                                 uint64_t *vram_vis, uint64_t *gtt);

@@ -676,7 +676,9 @@ radv_wddm2_winsys_destroy(struct radeon_winsys *_ws)
    D3DDDI_DESTROYPAGINGQUEUE destroy_paging_queue = {
       .hPagingQueue = ws->paging_queue_h,
    };
-   if (ws->host.dispatch) {
+   if (ws->adapter_query) {
+      status = STATUS_SUCCESS;
+   } else if (ws->host.dispatch) {
       struct bc250_host_paging paging = { .queue = ws->paging_queue_h };
       status = ws->host.dispatch(ws->host.userdata, BC250_HOST_DESTROY_PAGING, &paging);
       fprintf(stderr, "BC250 hosted paging destroy identity=%p queue=%x status=%08x\n", ws->host.identity, paging.queue, status);
@@ -755,13 +757,15 @@ radv_wddm2_winsys_query_gpuvm_fault(struct radeon_winsys *rws, struct radv_winsy
 
 VkResult
 radv_wddm2_winsys_create(const struct vk_dx_adapter_info *adapter_info,
-                         const BITSET_WORD *debug_flags, const struct bc250_host *host, struct radeon_winsys **winsys)
+                         const BITSET_WORD *debug_flags, const struct bc250_host *host, bool adapter_query, struct radeon_winsys **winsys)
 {
    VkResult result = VK_SUCCESS;
    struct radv_wddm2_winsys *ws = NULL;
    NTSTATUS status;
    fprintf(stderr, "radv_wddm2_winsys_create\n");
 
+   if (adapter_query && !host)
+      return VK_ERROR_INITIALIZATION_FAILED;
    const void *key = host ? host->identity : (void *)1;
    if (host && memcmp(&host->adapter_luid, &adapter_info->adapter_luid, sizeof(uint64_t)))
       return VK_ERROR_INCOMPATIBLE_DRIVER;
@@ -778,6 +782,10 @@ radv_wddm2_winsys_create(const struct vk_dx_adapter_info *adapter_info,
    struct hash_entry *entry = _mesa_hash_table_search(winsyses, key);
    if (entry) {
       ws = (struct radv_wddm2_winsys *)entry->data;
+      if (ws->adapter_query != adapter_query) {
+         result = VK_ERROR_INITIALIZATION_FAILED;
+         goto fail;
+      }
       ++ws->refcount;
    }
    
@@ -796,6 +804,7 @@ radv_wddm2_winsys_create(const struct vk_dx_adapter_info *adapter_info,
    ws->refcount = 1;
    ws->cache_key = key;
    if (host) ws->host = *host;
+   ws->adapter_query = adapter_query;
    ws->adapter_luid = adapter_info->adapter_luid;
    ws->chain_ib = !(BITSET_TEST(debug_flags, RADV_DEBUG_NO_IB_CHAINING));
    ws->debug_all_bos = !!(BITSET_TEST(debug_flags, RADV_DEBUG_ALL_BOS));
@@ -868,7 +877,9 @@ radv_wddm2_winsys_create(const struct vk_dx_adapter_info *adapter_info,
    D3DKMT_CREATEPAGINGQUEUE create_paging_queue = {
       .hDevice = ws->device_h,
    };
-   if (host) {
+   if (adapter_query) {
+      status = STATUS_SUCCESS;
+   } else if (host) {
       struct bc250_host_paging paging = {0};
       status = host->dispatch(host->userdata, BC250_HOST_CREATE_PAGING, &paging);
       create_paging_queue.hPagingQueue = paging.queue;

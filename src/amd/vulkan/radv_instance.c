@@ -266,6 +266,11 @@ radv_instance_parse_bc250(struct radv_instance *instance, const VkInstanceCreate
             return VK_ERROR_INITIALIZATION_FAILED;
          instance->bc250_host = *host;
          instance->bc250_host.pNext = NULL;
+      } else if ((uint32_t)ext->sType == BC250_HOST_ADAPTER_QUERY_STYPE) {
+         const struct bc250_host_adapter_query *query = (const void *)ext;
+         if (query->version != BC250_HOST_ADAPTER_QUERY_VERSION || query->size != sizeof(*query))
+            return VK_ERROR_INITIALIZATION_FAILED;
+         instance->bc250_adapter_query = true;
       } else if ((uint32_t)ext->sType == BC250_HOST_QUEUE_BINDING_STYPE) {
          const struct bc250_host_queue_binding *binding = (const void *)ext;
          if (binding->version != BC250_HOST_QUEUE_BINDING_VERSION || binding->size != sizeof(*binding) ||
@@ -275,6 +280,8 @@ radv_instance_parse_bc250(struct radv_instance *instance, const VkInstanceCreate
       }
    }
 
+   if (instance->bc250_adapter_query && !instance->bc250_host.dispatch)
+      return VK_ERROR_INITIALIZATION_FAILED;
    if (!queue_funcs)
       return VK_SUCCESS;
 

@@ -1353,7 +1353,7 @@ radv_create_winsys(struct radv_device *device)
    const struct radv_physical_device *pdev = radv_device_physical(device);
    const struct radv_instance *instance = radv_physical_device_instance(pdev);
    return radv_wddm2_winsys_create(&pdev->wddm2_adapter, instance->debug_flags,
-                                   instance->bc250_host.dispatch ? &instance->bc250_host : NULL, &device->ws);
+                                   instance->bc250_host.dispatch ? &instance->bc250_host : NULL, false, &device->ws);
 #else
    const struct radv_physical_device *pdev = radv_device_physical(device);
    const struct radv_instance *instance = radv_physical_device_instance(pdev);
@@ -1466,6 +1466,10 @@ radv_CreateDevice(VkPhysicalDevice physicalDevice, const VkDeviceCreateInfo *pCr
 {
    VK_FROM_HANDLE(radv_physical_device, pdev, physicalDevice);
    struct radv_instance *instance = radv_physical_device_instance(pdev);
+   if (instance->bc250_adapter_query) {
+      *pDevice = VK_NULL_HANDLE;
+      return VK_ERROR_INITIALIZATION_FAILED;
+   }
    VkResult result;
    struct radv_device *device;
 
