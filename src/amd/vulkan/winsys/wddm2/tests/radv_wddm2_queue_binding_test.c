@@ -12,7 +12,8 @@
  * context or fence, no device-level context.
  *
  * Scope: the tests call the winsys hooks (ctx_create_bindable, ctx_bind,
- * ctx_unbind, cs_submit, the sparse hooks, ctx_destroy) directly. They do
+ * ctx_unbind, cs_submit, the sparse hooks, ctx_destroy, and for host
+ * imports buffer_from_hosted, buffer_map, buffer_destroy) directly. They do
  * not cover the instance chain parser (radv_instance.c), the public bind
  * and unbind entries with their queue lock (radv_queue.c) or the queue
  * count admission of vkCreateDevice (radv_device.c).
@@ -80,7 +81,8 @@ const struct vk_sync_type vk_wddm2_monitored_fence_type = {0};
 struct obj {
    uint32_t handle;
    bool live;
-   bool app;          /* syncs: an application fence of the test */
+   bool app;          /* syncs: an application fence of the test;
+                       * allocations: the host's own, imported by the test */
    void *cookie;      /* contexts: the cookie they were created with */
    uint64_t value;    /* syncs: what the fence's CPU mapping shows */
    void *mem;         /* allocations: Lock2 memory */
@@ -393,9 +395,16 @@ fake_dispatch(void *userdata, uint32_t op, void *arg)
       record(op, 0, 0, o->handle, NULL);
       return 0;
    }
+   case BC250_HOST_Unlock2: {
+      const D3DKMT_UNLOCK2 *u = arg;
+      struct obj *o = find(h.allocs, h.n_allocs, u->hAllocation);
+      if (!o || !o->live)
+         h.unexpected++;
+      record(op, 0, 0, u->hAllocation, NULL);
+      return 0;
+   }
    case BC250_HOST_FreeGpuVirtualAddress:
    case BC250_HOST_Evict:
-   case BC250_HOST_Unlock2:
    case BC250_HOST_GetDeviceState:
       record(op, 0, 0, 0, NULL);
       return 0;
@@ -481,6 +490,15 @@ app_fence(struct vk_wddm2_monitored_fence *fence)
    o->app = true;
    fence->handle = o->handle;
    fence->value_map = &o->value;
+}
+
+/* An allocation the host owns and hands over through bc250_host_import. */
+static struct obj *
+host_alloc(void)
+{
+   struct obj *o = new_obj(h.allocs, &h.n_allocs, 0x3000);
+   o->app = true;
+   return o;
 }
 
 struct fake_cs {
@@ -1140,6 +1158,64 @@ test_review_destroy_failure(void)
    contract();
 }
 
+/* Allocations imported from the host: mapped only with
+ * BC250_HOST_IMPORT_CPU_MAP, through the host's Lock2 and Unlock2, and
+ * never released by the ICD. */
+static void
+test_hosted_map(void)
+{
+   struct radv_wddm2_winsys *ws = make_ws();
+   void *const identity = ws->host.identity;
+   const uint64_t va = 0x800000000ull, size = 65536;
+   const uint64_t vram_vis = ws->allocated_vram_vis;
+
+   /* Without the flag the ICD never maps it. */
+   struct obj *plain = host_alloc();
+   struct radeon_winsys_bo *bo = NULL;
+   unsigned mark = h.n_ev;
+   check(ws->base.buffer_from_hosted(&ws->base, identity, plain->handle, 0, va, size, &bo) == VK_SUCCESS && bo &&
+            h.n_ev == mark,
+         "an import without flags succeeds, no host call");
+   check(ws->base.buffer_map(&ws->base, bo, false, NULL) == NULL && h.n_ev == mark,
+         "and is not mapped, with no host call");
+   ws->base.buffer_destroy(&ws->base, bo);
+   check(h.n_ev == mark && plain->live, "destroying it makes no host call; the allocation stays the host's");
+
+   /* With it, the first map locks the host's allocation, once. */
+   struct obj *mappable = host_alloc();
+   bo = NULL;
+   mark = h.n_ev;
+   check(ws->base.buffer_from_hosted(&ws->base, identity, mappable->handle, BC250_HOST_IMPORT_CPU_MAP, va, size,
+                                     &bo) == VK_SUCCESS && bo && h.n_ev == mark,
+         "an import with BC250_HOST_IMPORT_CPU_MAP succeeds, no host call");
+   void *ptr = ws->base.buffer_map(&ws->base, bo, false, NULL);
+   check(ptr && ptr == mappable->mem, "the map returns the host's pData");
+   check(h.n_ev == mark + 1 && event_is((int)mark, BC250_HOST_Lock2, 0, 0, mappable->handle),
+         "through exactly one Lock2 of the imported allocation (calls: %u)", h.n_ev - mark);
+   mark = h.n_ev;
+   check(ws->base.buffer_map(&ws->base, bo, false, NULL) == ptr && h.n_ev == mark,
+         "a second map returns the same pointer, no host call");
+
+   /* Destroy unlocks it and gives nothing else back: the host owns it. */
+   mark = h.n_ev;
+   ws->base.buffer_destroy(&ws->base, bo);
+   check(h.n_ev == mark + 1 && event_is((int)mark, BC250_HOST_Unlock2, 0, 0, mappable->handle),
+         "destroying it makes exactly one Unlock2 of the allocation (calls: %u)", h.n_ev - mark);
+   check(!count_op(mark, BC250_HOST_Evict) && !count_op(mark, BC250_HOST_FreeGpuVirtualAddress) &&
+            !count_op(mark, BC250_HOST_DestroyAllocation2) && mappable->live,
+         "no evict, VA free or allocation destroy; the allocation stays the host's");
+
+   /* An unknown flag bit is refused before anything is made. */
+   bo = NULL;
+   mark = h.n_ev;
+   check(ws->base.buffer_from_hosted(&ws->base, identity, plain->handle, 0x80000000u, va, size, &bo) ==
+               VK_ERROR_INVALID_EXTERNAL_HANDLE &&
+            !bo && h.n_ev == mark,
+         "an unknown flag bit is refused, no BO, no host call");
+   check(ws->allocated_vram_vis == vram_vis, "the imports leave no byte charge behind");
+   contract();
+}
+
 static const struct {
    const char *name;
    void (*run)(void);
@@ -1156,6 +1232,7 @@ static const struct {
    {"rebind", test_rebind},
    {"review_wait_failure", test_review_wait_failure},
    {"review_destroy_failure", test_review_destroy_failure},
+   {"hosted_map", test_hosted_map},
 };
 
 int

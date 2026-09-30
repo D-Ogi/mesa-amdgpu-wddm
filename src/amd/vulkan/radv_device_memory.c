@@ -161,13 +161,19 @@ radv_alloc_memory(struct radv_device *device, const VkMemoryAllocateInfo *pAlloc
 #endif
 
    const struct bc250_host_import *host_import=NULL;
-   for (const VkBaseInStructure *ext=pAllocateInfo->pNext;ext;ext=ext->pNext)
-      if ((uint32_t)ext->sType==BC250_HOST_IMPORT_STYPE) host_import=(const void *)ext;
+   uint32_t host_import_flags=0;
+   for (const VkBaseInStructure *ext=pAllocateInfo->pNext;ext;ext=ext->pNext) {
+      if ((uint32_t)ext->sType==BC250_HOST_IMPORT_STYPE) {
+         host_import=(const void *)ext; host_import_flags=0; /* no flags field under this type */
+      } else if ((uint32_t)ext->sType==BC250_HOST_IMPORT_FLAGS_STYPE) {
+         host_import=(const void *)ext; host_import_flags=host_import->flags;
+      }
+   }
    if (host_import) {
       if (!device->vk.bc250_host.dispatch || !device->ws->buffer_from_hosted ||
           host_import->size<pAllocateInfo->allocationSize) { result=VK_ERROR_INVALID_EXTERNAL_HANDLE; goto fail; }
       result=device->ws->buffer_from_hosted(device->ws,host_import->identity,host_import->allocation,
-                                           host_import->va,host_import->size,&mem->bo);
+                                           host_import_flags,host_import->va,host_import->size,&mem->bo);
       if (result!=VK_SUCCESS) goto fail;
    } else if (ahb_import_info) {
       result = radv_import_ahb_memory(device, mem, priority, ahb_import_info);

@@ -1088,7 +1088,8 @@ radv_wddm2_bo_map(struct radeon_winsys *_ws, struct radeon_winsys_bo *_bo,
    struct radv_wddm2_bo *bo = radv_wddm2_bo(_bo);
    ASSERTED NTSTATUS status;
 
-   if (bo->borrowed) return NULL;
+   /* A borrowed allocation is mapped only when its import asked for it. */
+   if (bo->borrowed && !bo->host_mappable) return NULL;
 
    if (bo->map && !fixed_addr)
       return bo->map;
@@ -1534,16 +1535,17 @@ radv_wddm2_dump_bo_ranges(struct radeon_winsys *_ws, FILE *file)
 }
 
 static VkResult
-radv_wddm2_bo_from_hosted(struct radeon_winsys *rws, void *identity, uint32_t allocation,
+radv_wddm2_bo_from_hosted(struct radeon_winsys *rws, void *identity, uint32_t allocation, uint32_t flags,
                          uint64_t va, uint64_t size, struct radeon_winsys_bo **out)
 {
    struct radv_wddm2_winsys *ws=radv_wddm2_winsys(rws);
    if (!ws->host.dispatch || identity!=ws->host.identity || !allocation || !va || !size ||
+       (flags & ~BC250_HOST_IMPORT_KNOWN_FLAGS) ||
        (va & 4095) || (size & 4095) || va>=RADV_WDDM2_PRT_CONTROL_MASK || size>RADV_WDDM2_PRT_CONTROL_MASK-va)
       return VK_ERROR_INVALID_EXTERNAL_HANDLE;
    struct radv_wddm2_bo *bo=CALLOC_STRUCT(radv_wddm2_bo);
    if (!bo) return VK_ERROR_OUT_OF_HOST_MEMORY;
-   bo->ws=ws; bo->borrowed=true;
+   bo->ws=ws; bo->borrowed=true; bo->host_mappable=!!(flags & BC250_HOST_IMPORT_CPU_MAP);
    bo->base.va=va; bo->base.size=size; bo->base.handle=allocation; bo->base.obj_id=allocation;
    bo->base.initial_domain=RADEON_DOMAIN_VRAM;
    radv_wddm2_bo_account(ws, bo, true);
