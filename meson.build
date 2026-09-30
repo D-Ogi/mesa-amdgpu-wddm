@@ -1411,6 +1411,10 @@ if cc.get_argument_syntax() == 'msvc'
     '/Zc:enumTypes', # Enables C++ conforming enum underlying type and enumerator type deduction
     '/Zc:preprocessor', # Use the standards-conforming preprocessor
   ]
+  # Variables that are only used for assertions are unused without them, as for the other compilers below.
+  if with_mesa_ndebug
+    _trial += ['/wd4189']
+  endif
   c_args += cc.get_supported_arguments(_trial)
   cpp_args += cpp.get_supported_arguments(_trial)
 else
