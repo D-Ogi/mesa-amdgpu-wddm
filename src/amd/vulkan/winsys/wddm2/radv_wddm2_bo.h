@@ -52,6 +52,8 @@ struct radv_wddm2_bo {
    uint64_t sparse_high_va;
    bool emulate_sparse_residency;
    bool borrowed;
+   /* A borrowed allocation whose host answers Lock2 and Unlock2 (BC250_HOST_IMPORT_CPU_MAP). */
+   bool host_mappable;
 
    void *map;
    uint32_t handle;
