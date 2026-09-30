@@ -583,8 +583,11 @@ radv_wddm2_winsys_query_value(struct radeon_winsys *_ws, enum radeon_value_id va
 
    switch (value) {
    case RADEON_ALLOCATED_VRAM:
+      return p_atomic_read(&ws->allocated_vram);
    case RADEON_ALLOCATED_VRAM_VIS:
+      return p_atomic_read(&ws->allocated_vram_vis);
    case RADEON_ALLOCATED_GTT:
+      return p_atomic_read(&ws->allocated_gtt);
    case RADEON_VRAM_USAGE:
    case RADEON_VRAM_VIS_USAGE:
    case RADEON_GTT_USAGE: {
@@ -592,13 +595,10 @@ radv_wddm2_winsys_query_value(struct radeon_winsys *_ws, enum radeon_value_id va
          .hAdapter = ws->adapter_h,
       };
       switch (value) {
-      case RADEON_ALLOCATED_VRAM:
-      case RADEON_ALLOCATED_VRAM_VIS:
       case RADEON_VRAM_USAGE:
       case RADEON_VRAM_VIS_USAGE:
          mem_info.MemorySegmentGroup = D3DKMT_MEMORY_SEGMENT_GROUP_LOCAL;
          break;
-      case RADEON_ALLOCATED_GTT:
       case RADEON_GTT_USAGE:
          mem_info.MemorySegmentGroup = D3DKMT_MEMORY_SEGMENT_GROUP_NON_LOCAL;
          break;
@@ -611,11 +611,6 @@ radv_wddm2_winsys_query_value(struct radeon_winsys *_ws, enum radeon_value_id va
          return 0;
 
       switch (value) {
-      case RADEON_ALLOCATED_VRAM:
-      case RADEON_ALLOCATED_VRAM_VIS:
-      case RADEON_ALLOCATED_GTT:
-         return mem_info.CurrentReservation;
-
       case RADEON_VRAM_USAGE:
       case RADEON_VRAM_VIS_USAGE:
       case RADEON_GTT_USAGE:

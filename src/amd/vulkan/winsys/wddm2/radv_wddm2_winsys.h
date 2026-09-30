@@ -29,6 +29,7 @@
 #define RADV_WDDM2_WINSYS_H
 
 #include "util/list.h"
+#include "util/u_atomic.h"
 #include "util/bc250_host_bootstrap.h"
 #include "util/simple_mtx.h"
 #include "util/vma.h"
@@ -43,6 +44,11 @@ struct vk_sync_type;
 
 struct radv_wddm2_winsys {
    struct radeon_winsys base;
+
+   /* Live physical BO bytes, partitioned like the amdgpu winsys. */
+   uint64_t allocated_vram;
+   uint64_t allocated_vram_vis;
+   uint64_t allocated_gtt;
 
    uint32_t refcount;
    const void *cache_key;
