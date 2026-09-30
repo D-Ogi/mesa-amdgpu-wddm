@@ -1,11 +1,11 @@
 #include <stdlib.h>
 /*
- * Copyright © 2020 Valve Corporation
+ * Copyright Â© 2020 Valve Corporation
  *
  * based on amdgpu winsys.
- * Copyright © 2016 Red Hat.
- * Copyright © 2016 Bas Nieuwenhuizen
- * Copyright © 2022 Collabora, Ltd
+ * Copyright Â© 2016 Red Hat.
+ * Copyright Â© 2016 Bas Nieuwenhuizen
+ * Copyright Â© 2022 Collabora, Ltd
  *
  * Permission is hereby granted, free of charge, to any person obtaining a
  * copy of this software and associated documentation files (the "Software"),

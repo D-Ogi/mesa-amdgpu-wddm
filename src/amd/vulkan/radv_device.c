@@ -1,9 +1,9 @@
 /*
- * Copyright © 2016 Red Hat.
- * Copyright © 2016 Bas Nieuwenhuizen
+ * Copyright Â© 2016 Red Hat.
+ * Copyright Â© 2016 Bas Nieuwenhuizen
  *
  * based in part on anv driver which is:
- * Copyright © 2015 Intel Corporation
+ * Copyright Â© 2015 Intel Corporation
  *
  * SPDX-License-Identifier: MIT
  */

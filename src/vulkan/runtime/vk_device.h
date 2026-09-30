@@ -1,6 +1,6 @@
 #include "util/bc250_host_bootstrap.h"
 /*
- * Copyright © 2020 Intel Corporation
+ * Copyright Â© 2020 Intel Corporation
  *
  * Permission is hereby granted, free of charge, to any person obtaining a
  * copy of this software and associated documentation files (the "Software"),
