@@ -673,6 +673,12 @@ radv_wddm2_winsys_destroy(struct radeon_winsys *_ws)
       ws->base.buffer_destroy(&ws->base, ws->null_prt.bo);
    simple_mtx_destroy(&ws->null_prt.lock);
 
+   /* Held BOs go before the paging queue and the device: a CPU wait for their work, then the release. */
+   radv_wddm2_deferred_finish(ws);
+   radv_wddm2_bo_pool_finish(ws);
+   simple_mtx_destroy(&ws->deferred.lock);
+   simple_mtx_destroy(&ws->summary.lock);
+
    D3DDDI_DESTROYPAGINGQUEUE destroy_paging_queue = {
       .hPagingQueue = ws->paging_queue_h,
    };
@@ -831,8 +837,11 @@ radv_wddm2_winsys_create(const struct vk_dx_adapter_info *adapter_info,
 
    status = radv_wddm2_fill_gpu_info(ws, adapter_info, !BITSET_TEST(debug_flags, RADV_DEBUG_NO_CACHE_COMPAT));
    if (ws->bc250)
-      /* One IB on the ring. Do not also link CS chunks with INDIRECT_BUFFER:
-       * that packet's VMID field is left 0. Skipping the gfx-init IB itself is
+      /* One IB1 on the ring per submission, packed by radv_wddm2_bc250_submit: each CS
+       * piece gets its own IB2 call (or copy) there, so CS chunks are not chained. A chain
+       * from an IB2 would end the IB2 level, and IB1 chaining would leave the gather slot.
+       * An IB2 packet with VMID 0 runs under the IB1's VMID (E14); the M122 nested-IB hang
+       * was the address32_hi fault of M137/M138. Skipping the gfx-init IB itself is
        * inline_gfx_preamble, below; this flag does not do that. */
       ws->chain_ib = false;
    if (!NT_SUCCESS(status)) {

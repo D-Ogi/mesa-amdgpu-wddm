@@ -40,12 +40,18 @@ struct vk_wddm2_fence {
    uint64_t *value_map;
 };
 
-#define BC250_GATHER_SLOTS 7u
+/* The gather ring of a queue: ws->bc250_gather_slots slots in use (BC250_GATHER_SLOTS, 16 by default,
+ * 4 to BC250_GATHER_SLOTS_MAX), the array sized for the largest. */
+#define BC250_GATHER_SLOTS_MIN     4u
+#define BC250_GATHER_SLOTS_DEFAULT 16u
+#define BC250_GATHER_SLOTS_MAX     32u
 struct bc250_gather_slot {
    struct radeon_winsys_bo *bo;
    uint8_t *map;
    uint64_t retire_value;
 };
+
+struct bc250_submit_ib; /* radv_wddm2_cs.c */
 
 struct radv_wddm2_queue {
    enum amd_ip_type hw_ip;
@@ -55,14 +61,25 @@ struct radv_wddm2_queue {
    struct vk_wddm2_fence vm_fence;
    struct util_dynarray sparse_ops;
    bool sparse_batch_active;
-   /* Each queue owns its packed IB and an unconditional retirement fence. */
+   /* Each queue owns its packed IB and an unconditional retirement fence. The packed IB
+    * is the IB1 the KMD launches: IB2 calls of the submitted IBs, or their copies. */
    struct radv_wddm2_winsys *bc250_ws;
-   struct bc250_gather_slot bc250_gather[BC250_GATHER_SLOTS];
+   struct bc250_gather_slot bc250_gather[BC250_GATHER_SLOTS_MAX];
    unsigned bc250_gather_index;
    bool bc250_submit_failed;
-   struct radv_winsys_ib *bc250_ibs;
+   struct bc250_submit_ib *bc250_ibs;
    unsigned bc250_ib_capacity;
    struct vk_wddm2_fence bc250_progress;
+   /* Nonzero: the GPU writes bc250_progress (BC250_PROGRESS_FENCE=gpu), this is its
+    * FenceValueGPUVirtualAddress, and every IB1 of the queue ends with that write; the kernel never
+    * signals this fence. Zero: the kernel signals it after each IB1. Fixed from the bind to the release,
+    * so that one fence never takes both writers. */
+   uint64_t bc250_progress_va;
+   /* The largest bc250_progress value read at a submit: the invariant check of
+    * radv_wddm2_cs_submit (a progress read never goes back). Zeroed with the queue. */
+   uint64_t bc250_last_observed;
+   /* The progress tracker of deferred destruction, while bc250_progress exists (radv_wddm2_bo.h). */
+   struct radv_wddm2_tracker *bc250_tracker;
    /* context_h came from the embedder's queue (BC250_HOST_CREATE_QUEUE_CONTEXT)
     * and goes back through it, with the cookie it was bound with: NULL for
     * the engine's internal queue. */
@@ -107,5 +124,10 @@ radv_wddm2_ctx_unbound(const struct radv_wddm2_ctx *ctx)
 }
 
 void radv_wddm2_cs_init_functions(struct radv_wddm2_winsys *ws);
+
+struct radv_wddm2_bo;
+/* The deferred-destruction witness's stamp of every BO one command stream names (radv_wddm2_bo.c). */
+void radv_wddm2_witness_cs(struct ac_cmdbuf *cs, uint32_t serial, uint64_t value, uint32_t *stale,
+                           struct radv_wddm2_bo **first);
 
 #endif /* RADV_WDDM2_CS_H */

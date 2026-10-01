@@ -30,6 +30,11 @@ struct radv_winsys_cs {
    unsigned chain_ib_size;
    uint64_t chain_ib_va;
    bool is_secondary;
+   /* The stream holds an INDIRECT_BUFFER packet that the CP runs as an IB2 (a secondary
+    * command buffer, a DGC buffer, an execute_ib) or chains into GPU-written commands.
+    * Such a stream must itself run at IB1 level: the CP has no third IB level. Cleared
+    * by a reset. */
+   bool calls_ib2;
 
    unsigned hw_ip;
 
@@ -306,6 +311,7 @@ radv_winsys_cs_reset(struct radv_winsys_cs *cs)
    cs->base.cdw = 0;
    cs->base.reserved_dw = 0;
    cs->status = VK_SUCCESS;
+   cs->calls_ib2 = false;
 
    /* When the CS is finalized and IBs are not allowed, use last IB. */
    assert(cs->ib_buffer || cs->num_ib_buffers);
@@ -482,6 +488,8 @@ radv_winsys_cs_emit_secondary_ib2(struct radv_winsys_cs *parent, struct radv_win
    // FIXME assert(info->can_chain_ib2 || !child->chain_ib);
    const uint32_t num_ib2 = child->chain_ib ? 1 : child->num_ib_buffers;
 
+   parent->calls_ib2 = true;
+
    for (uint32_t i = 0; i < num_ib2; ++i) {
       if (parent->base.cdw + 4 > parent->base.max_dw)
          radv_winsys_cs_grow(&parent->base, 4);
@@ -507,6 +515,9 @@ radv_winsys_cs_execute_secondary(struct radv_winsys_cs *parent, struct radv_wins
    if (use_ib2) {
       radv_winsys_cs_emit_secondary_ib2(parent, child);
    } else {
+      /* The copied packets keep any IB2 call of the child. */
+      parent->calls_ib2 |= child->calls_ib2;
+
       /* Grow the current CS and copy the contents of the secondary CS. */
       for (unsigned i = 0; i < child->num_ib_buffers; i++) {
          struct radv_winsys_ib *ib = &child->ib_buffers[i];
@@ -547,6 +558,8 @@ radv_winsys_cs_execute_ib(struct ac_cmdbuf *_cs, struct radeon_winsys_bo *bo, ui
    if (cs->status != VK_SUCCESS)
       return;
 
+   cs->calls_ib2 = true;
+
    assert(ib_va && ib_va % info->ip[cs->hw_ip].ib_alignment == 0);
    assert(cs->hw_ip == AMD_IP_GFX && cdw <= ~C_3F3_IB_SIZE);
 
@@ -563,6 +576,9 @@ radv_winsys_cs_chain_dgc_ib(struct ac_cmdbuf *_cs, uint64_t va, uint32_t cdw, ui
       return;
 
    assert(info->gfx_level >= GFX8);
+
+   /* GFX calls the DGC buffer as an IB2; other queues chain into it and back. */
+   cs->calls_ib2 = true;
 
    if (cs->hw_ip == AMD_IP_GFX) {
       /* Use IB2 for executing DGC CS on GFX. */

@@ -60,6 +60,93 @@
 
 #include <assert.h>
 #include <d3dkmthk.h>
+#include <stdarg.h>
+
+/* One IB of a bc250 submission, in submission order. calls_ib2 is the flag of the
+ * command stream it came from: such an IB runs at IB1 level, copied into the gather slot. */
+struct bc250_submit_ib {
+   struct radv_winsys_ib ib;
+   bool calls_ib2;
+};
+
+/* amdgpu-wddm fence-lifetime checks. The CPU reuses a gather slot, and the embedder
+ * retires memory, on the strength of bc250_progress: a read of it never goes back and
+ * never passes the last value this queue signalled on it (wait_value, stored after the
+ * signal call of the same thread; submits on one queue are externally serialized). A
+ * violation is printed, and with AMDGPU_WDDM_DDI_TRACE=2 (the embedder's failures-only
+ * debugger mode) also sent to the debugger, at most 256 lines; nothing else changes.
+ */
+static bool
+radv_wddm2_debugger_lines(void)
+{
+   static int mode = -1; /* benign race: every thread computes the same value */
+   if (mode < 0) {
+      const char *value = getenv("AMDGPU_WDDM_DDI_TRACE");
+      mode = value && !strcmp(value, "2");
+   }
+   return mode == 1;
+}
+
+static int32_t radv_wddm2_invariant_budget = 256;
+
+static void
+radv_wddm2_invariant(const char *format, ...)
+{
+   char text[512];
+   va_list args;
+   va_start(args, format);
+   vsnprintf(text, sizeof(text), format, args);
+   va_end(args);
+   fprintf(stderr, "bc250: invariant: %s\n", text);
+#ifdef _WIN32
+   if (radv_wddm2_debugger_lines() && p_atomic_dec_return(&radv_wddm2_invariant_budget) >= 0) {
+      char line[600];
+      LARGE_INTEGER now;
+      QueryPerformanceCounter(&now);
+      snprintf(line, sizeof(line), "amdgpu_wddm_radv invariant: %s qpc=%lld thread=%lu\n", text,
+               (long long)now.QuadPart, (unsigned long)GetCurrentThreadId());
+      OutputDebugStringA(line);
+   }
+#endif
+}
+
+/* A line that has to be seen, such as a fallback of the IB submission: stderr always, and
+ * with AMDGPU_WDDM_DDI_TRACE=2 also the debugger (a game's stderr is not captured), at most
+ * 256 debugger lines per process. */
+static int32_t radv_wddm2_notice_budget = 256;
+
+static void
+radv_wddm2_notice(const char *format, ...)
+{
+   char text[512];
+   va_list args;
+   va_start(args, format);
+   vsnprintf(text, sizeof(text), format, args);
+   va_end(args);
+   fprintf(stderr, "bc250: %s\n", text);
+#ifdef _WIN32
+   if (radv_wddm2_debugger_lines() && p_atomic_dec_return(&radv_wddm2_notice_budget) >= 0) {
+      char line[600];
+      snprintf(line, sizeof(line), "amdgpu_wddm_radv: %s thread=%lu\n", text, (unsigned long)GetCurrentThreadId());
+      OutputDebugStringA(line);
+   }
+#endif
+}
+
+static void
+radv_wddm2_check_progress(struct radv_wddm2_queue *queue, uint64_t observed, const char *where)
+{
+   if (observed == UINT64_MAX) /* the lost-device value, reported by bc250_host_fence_valid */
+      return;
+   if (observed < queue->bc250_last_observed)
+      radv_wddm2_invariant("progress fence of context 0x%x went back from %" PRIu64 " to %" PRIu64 " (%s)",
+                           queue->context_h, queue->bc250_last_observed, observed, where);
+   else
+      queue->bc250_last_observed = observed;
+   if (observed > queue->bc250_progress.wait_value)
+      radv_wddm2_invariant("progress fence of context 0x%x reads %" PRIu64 " beyond its last signal %" PRIu64
+                           " (%s)", queue->context_h, observed, queue->bc250_progress.wait_value, where);
+}
 
 struct PACKED create_context_private_data {
    uint32_t header_size;
@@ -209,7 +296,7 @@ static bool
 radv_wddm2_queue_holds(const struct radv_wddm2_queue *queue)
 {
    bool holds = queue->bc250_progress.handle || queue->vm_fence.handle || queue->context_h || queue->handle;
-   for (unsigned i = 0; i < BC250_GATHER_SLOTS; i++)
+   for (unsigned i = 0; i < BC250_GATHER_SLOTS_MAX; i++)
       holds |= queue->bc250_gather[i].bo != NULL;
    return holds;
 }
@@ -255,8 +342,11 @@ radv_wddm2_queue_release(struct radv_wddm2_queue *queue, bool in_scope, bool *re
    if (!work_retired)
       return false;
 
+   /* Every value of the progress fence retired: held BOs stop waiting on it before it goes. */
+   radv_wddm2_tracker_detach(ws, queue->bc250_tracker, true);
+   queue->bc250_tracker = NULL;
    radv_wddm2_release_sync(ws, &queue->bc250_progress.handle);
-   for (unsigned i = 0; i < BC250_GATHER_SLOTS; i++) {
+   for (unsigned i = 0; i < BC250_GATHER_SLOTS_MAX; i++) {
       /* buffer_destroy reports no status. */
       if (queue->bc250_gather[i].bo)
          ws->base.buffer_destroy(&ws->base, queue->bc250_gather[i].bo);
@@ -292,6 +382,39 @@ radv_wddm2_queue_release(struct radv_wddm2_queue *queue, bool in_scope, bool *re
          queue->handle = 0;
    }
    return !radv_wddm2_queue_holds(queue);
+}
+
+/* BC250_PROGRESS_FENCE=gpu: the address the queue's IB1s write their progress value to, or 0 when
+ * the kernel signals the fence instead. The write is a 64-bit RELEASE_MEM (8-byte aligned, a 48-bit
+ * GFX10 address; bc250_gfx_emit_fence refuses the same). BC250_IB_DWORDS may cut the IB1 short of
+ * its end, and with it the write, so it keeps the kernel signal. The choice holds for the queue's
+ * life: a fence written by both the GPU and the kernel could see a kernel signal of an older value
+ * land after a newer GPU write. The fence is the queue's own, created without Shared or
+ * NtSecuritySharing, so every waiter is in this process, where dxgkrnl's scan at each DMA buffer
+ * completion wakes it (context-monitoring.md); the application's fences, imported and shared ones
+ * among them, stay with the kernel signal. */
+static uint64_t
+radv_wddm2_progress_gpu_va(struct radv_wddm2_winsys *ws, uint32_t context, uint64_t va)
+{
+   const char *why;
+   if (!ws->bc250_progress_gpu)
+      return 0;
+   if (ws->bc250_ib_dwords_cap)
+      why = "BC250_IB_DWORDS may cut the write off";
+   else if (!va)
+      why = "no FenceValueGPUVirtualAddress";
+   else if (va & 7)
+      why = "the address is not 8-byte aligned";
+   else if (va >> 48)
+      why = "the address is beyond 48 bits";
+   else
+      return va;
+   /* The first 16 such queues, then every power of two: the periodic summary counts them all. */
+   const uint64_t count = p_atomic_inc_return(&ws->submit_stats.kernel_queues);
+   if (count <= 16 || util_is_power_of_two_or_zero64(count))
+      radv_wddm2_notice("progress fence of context 0x%x is signalled by the kernel: %s (0x%" PRIx64 "); %" PRIu64
+                        " such queues so far", context, why, va, count);
+   return 0;
 }
 
 /* With queue_context set, the context comes from the embedder's queue
@@ -393,6 +516,11 @@ radv_wddm2_queue_init(struct radv_wddm2_winsys *ws, enum amd_ip_type hw_ip,
          goto failed;
       queue->bc250_progress.handle = create_progress.hSyncObject;
       queue->bc250_progress.value_map = create_progress.Info.MonitoredFence.FenceValueCPUVirtualAddress;
+      queue->bc250_progress_va = radv_wddm2_progress_gpu_va(
+         ws, queue->context_h, create_progress.Info.MonitoredFence.FenceValueGPUVirtualAddress);
+      /* Deferred destruction waits on this fence from now on (radv_wddm2_bo.c). */
+      queue->bc250_tracker = radv_wddm2_tracker_attach(ws, queue->bc250_progress.handle,
+                                                       queue->bc250_progress.value_map, queue->context_h);
       /* Packet submission also needs a distinct companion-paging fence.
        * The render progress fence protects CPU-repacked IBs and cannot share
        * ownership with UpdateGpuVirtualAddress increments. */
@@ -495,6 +623,8 @@ static void
 radv_wddm2_queue_reset_unbound(struct radv_wddm2_winsys *ws, enum amd_ip_type hw_ip,
                                struct radv_wddm2_queue *queue)
 {
+   /* Only a released queue gets here, and its release detached the tracker; never lose one. */
+   radv_wddm2_tracker_detach(ws, queue->bc250_tracker, false);
    memset(queue, 0, sizeof(*queue));
    queue->hw_ip = hw_ip;
    queue->bc250_ws = ws;
@@ -614,6 +744,12 @@ radv_wddm2_ctx_destroy(struct radeon_winsys_ctx *rwctx)
       abandoned |= ctx->kept || !radv_wddm2_queue_release(&ctx->per_ip[ip].queue, false, NULL);
    abandoned |= ctx->kept || !radv_wddm2_queue_release(&ctx->ace_queue, false, NULL);
 
+   /* A queue whose work did not retire keeps its progress fence with the device: held BOs keep
+    * waiting on it, through the tracker, after the queue's memory is gone. */
+   for (uint32_t ip = 0; ip < AMD_NUM_IP_TYPES; ip++)
+      radv_wddm2_tracker_detach(ctx->ws, ctx->per_ip[ip].queue.bc250_tracker, false);
+   radv_wddm2_tracker_detach(ctx->ws, ctx->ace_queue.bc250_tracker, false);
+
    if (abandoned)
       fprintf(stderr, "radv/wddm2: queue destroyed %s, its kernel objects are left to the device\n",
               ctx->bound ? "while bound" : "after a failed release");
@@ -678,6 +814,17 @@ vk_wddm2_fence_wait(struct radv_wddm2_winsys *ws, struct vk_wddm2_fence *fence)
    return result == VK_SUCCESS && bc250_host_fence_valid(&ws->host,p_atomic_read(fence->value_map));
 }
 
+bool
+radv_wddm2_fence_wait_value(struct radv_wddm2_winsys *ws, uint32_t fence, const uint64_t *value_map, uint64_t value)
+{
+   struct vk_wddm2_fence wait = {
+      .handle = fence,
+      .wait_value = value,
+      .value_map = (uint64_t *)value_map,
+   };
+   return vk_wddm2_fence_wait(ws, &wait);
+}
+
 static bool
 radv_wddm2_ctx_wait_idle(struct radeon_winsys_ctx *rwctx, enum amd_ip_type ip_type, int ring_index)
 {
@@ -698,6 +845,9 @@ radv_wddm2_ctx_wait_idle(struct radeon_winsys_ctx *rwctx, enum amd_ip_type ip_ty
    if (ret && queue->bc250_progress.handle && queue->bc250_progress.wait_value)
       ret = vk_wddm2_fence_wait(ctx->ws, &queue->bc250_progress);
 
+   /* An idle point: BOs held for this queue's work can go now. */
+   if (ret)
+      radv_wddm2_deferred_drain(ctx->ws);
    return ret;
 }
 
@@ -785,7 +935,64 @@ static void
 radv_wddm2_cs_execute_secondary(struct ac_cmdbuf *_parent, struct ac_cmdbuf *_child,
                                 bool allow_ib2)
 {
-   radv_winsys_cs_execute_secondary(radv_winsys_cs(_parent), radv_winsys_cs(_child), allow_ib2);
+   struct radv_wddm2_cs *parent = radv_wddm2_cs(_parent), *child = radv_wddm2_cs(_child);
+   radv_winsys_cs_execute_secondary(&parent->base, &child->base, allow_ib2);
+
+   /* For the deferred-destruction witness the primary's submission names the secondary's BOs, its
+    * command BOs too (an IB2 call reads them), as the amdgpu winsys's BO list does. */
+   if (radv_wddm2_winsys(parent->base.ws)->deferred.witness && parent->buffers && child->buffers) {
+      set_foreach (child->buffers, entry)
+         _mesa_set_add(parent->buffers, entry->key);
+      for (unsigned i = 0; i < child->base.num_ib_buffers; i++) {
+         if (child->base.ib_buffers[i].bo)
+            _mesa_set_add(parent->buffers, radv_wddm2_bo(child->base.ib_buffers[i].bo));
+      }
+   }
+}
+
+/* The deferred-destruction witness (radv_wddm2_bo.c): every BO a submission names takes the serial
+ * of the queue's tracker and the progress value the submission signals. A command stream names its
+ * BO set and its command BOs. */
+void
+radv_wddm2_witness_cs(struct ac_cmdbuf *base, uint32_t serial, uint64_t value, uint32_t *stale,
+                      struct radv_wddm2_bo **first)
+{
+   struct radv_wddm2_cs *cs = radv_wddm2_cs(base);
+   if (cs->buffers) {
+      set_foreach (cs->buffers, entry)
+         radv_wddm2_witness_stamp((struct radv_wddm2_bo *)entry->key, serial, value, stale, first);
+   }
+   for (unsigned i = 0; i < cs->base.num_ib_buffers; i++) {
+      if (cs->base.ib_buffers[i].bo)
+         radv_wddm2_witness_stamp(radv_wddm2_bo(cs->base.ib_buffers[i].bo), serial, value, stale, first);
+   }
+   if (cs->base.ib_buffer)
+      radv_wddm2_witness_stamp(radv_wddm2_bo(cs->base.ib_buffer), serial, value, stale, first);
+}
+
+static void
+radv_wddm2_witness_array(struct ac_cmdbuf **array, unsigned count, uint32_t serial, uint64_t value,
+                         uint32_t *stale, struct radv_wddm2_bo **first)
+{
+   for (unsigned i = 0; i < count; i++)
+      radv_wddm2_witness_cs(array[i], serial, value, stale, first);
+}
+
+static void
+radv_wddm2_witness_submit(struct radv_wddm2_winsys *ws, struct radv_wddm2_queue *queue,
+                          const struct radv_winsys_submit_info *submit, uint64_t value)
+{
+   const uint32_t serial = queue->bc250_tracker->serial;
+   uint32_t stale = 0;
+   struct radv_wddm2_bo *first = NULL;
+   radv_wddm2_witness_array(submit->cs_array, submit->cs_count, serial, value, &stale, &first);
+   radv_wddm2_witness_array(submit->initial_preamble_cs, submit->initial_preamble_count, serial, value, &stale,
+                            &first);
+   radv_wddm2_witness_array(submit->continue_preamble_cs, submit->continue_preamble_count, serial, value, &stale,
+                            &first);
+   radv_wddm2_witness_array(submit->postamble_cs, submit->postamble_count, serial, value, &stale, &first);
+   if (unlikely(stale))
+      radv_wddm2_witness_stale(ws, first, stale, queue->context_h);
 }
 
 static void
@@ -957,7 +1164,7 @@ radv_wddm2_submit_add_queue(struct radv_wddm2_ctx *ctx, struct submit_pdd_writer
  * A NULL output counts the complete submission before allocating its collection.
  */
 static bool
-bc250_collect_cs(struct radv_winsys_cs *cs, struct radv_winsys_ib *out, unsigned *n, unsigned cap)
+bc250_collect_cs(struct radv_winsys_cs *cs, struct bc250_submit_ib *out, unsigned *n, unsigned cap)
 {
    unsigned count = cs->chain_ib ? 1 : cs->num_ib_buffers;
    unsigned i;
@@ -966,15 +1173,17 @@ bc250_collect_cs(struct radv_winsys_cs *cs, struct radv_winsys_ib *out, unsigned
       return false;
    }
    if (out) {
-      for (i = 0; i < count; i++)
-         out[*n + i] = cs->ib_buffers[i];
+      for (i = 0; i < count; i++) {
+         out[*n + i].ib = cs->ib_buffers[i];
+         out[*n + i].calls_ib2 = cs->calls_ib2;
+      }
    }
    *n += count;
    return true;
 }
 
 static bool
-bc250_collect_array(struct ac_cmdbuf **arr, unsigned count, struct radv_winsys_ib *out, unsigned *n, unsigned cap)
+bc250_collect_array(struct ac_cmdbuf **arr, unsigned count, struct bc250_submit_ib *out, unsigned *n, unsigned cap)
 {
    unsigned i;
    for (i = 0; i < count; i++) {
@@ -986,7 +1195,7 @@ bc250_collect_array(struct ac_cmdbuf **arr, unsigned count, struct radv_winsys_i
 
 static bool
 bc250_collect_submit(const struct radv_winsys_submit_info *submit,
-                      struct radv_winsys_ib *ibs, unsigned *n, unsigned cap)
+                      struct bc250_submit_ib *ibs, unsigned *n, unsigned cap)
 {
    /* Same order as the amdgpu winsys: initial preamble on the first CS, the continue
     * preamble on every later CS in this submit, postamble once at the end.
@@ -1003,18 +1212,98 @@ bc250_collect_submit(const struct radv_winsys_submit_info *submit,
    return true;
 }
 
-/* One IB on the gfx ring. Several command streams are copied into one gather BO: the KMD
- * runs a single IB and does not half-run a list.
+/* Whether the CP may run this IB as an IB2 called from the gather slot: it calls no IB2
+ * itself (there is no third level), and its address and size fit IB_BASE (dword aligned)
+ * and IB_SIZE. The caller checked that the IB lies inside its BO.
+ */
+static bool
+bc250_ib2_callable(const struct bc250_submit_ib *s)
+{
+   return !s->calls_ib2 && s->ib.va >= s->ib.bo->va && (s->ib.va & 3) == 0 &&
+          s->ib.cdw <= G_3F3_IB_SIZE(UINT32_MAX);
+}
+
+/* The CS BO bytes of one IB, NULL if the IB is not inside a mapped BO. */
+static const uint8_t *
+bc250_ib_bytes(struct radv_wddm2_winsys *ws, const struct radv_winsys_ib *ib)
+{
+   uint64_t off = 0;
+   if (!ib->bo)
+      return NULL;
+   if (ib->va >= ib->bo->va)
+      off = ib->va - ib->bo->va;
+   if (off + (uint64_t)ib->cdw * 4 > ib->bo->size)
+      return NULL;
+   const uint8_t *src = ws->base.buffer_map(&ws->base, ib->bo, false, NULL);
+   return src ? src + off : NULL;
+}
+
+/* The progress write that ends an IB1 with BC250_PROGRESS_FENCE=gpu: a RELEASE_MEM of the 64-bit value to
+ * the progress fence's FenceValueGPUVirtualAddress, bit for bit the KMD's own ring fence
+ * (driver/shim/bc250_gfx.c:1544-1561, gfx_v10_0_ring_emit_fence upstream): event
+ * CACHE_FLUSH_AND_INV_TS at index 5 (end of pipe, after every earlier draw and dispatch of the queue),
+ * GLM write-back and invalidate, GL2 write-back, SEQ 1, cache policy 3 (bypass), then DATA_SEL 2 (the
+ * 64-bit value), INT_SEL 0 (no interrupt) and DST_SEL 0 (memory). The lab's positive control
+ * (tools/win/monfence, run A0 on KMD 184) wrote this packet to that address: the CPU mapping read the
+ * value 64 us after the write, WaitForSynchronizationObjectFromCpu woke, and a second context's GPU wait
+ * on it released. dxgkrnl wakes the waiters of a GPU-written fence when a DMA buffer of the process
+ * completes (context-monitoring.md: "Dxgkrnl goes through the list of fence objects with pending waits");
+ * the KMD's ring fence follows this IB1, so that scan runs after the write. Eight dwords, a multiple of
+ * the GFX IB padding. */
+#define BC250_PROGRESS_WRITE_DW 8u
+#define BC250_PROGRESS_RM_DW1                                                                               \
+   (EVENT_TYPE(V_028A90_CACHE_FLUSH_AND_INV_TS_EVENT) | EVENT_INDEX(5) | S_491_GLM_WB(1) | S_491_GLM_INV(1) | \
+    S_491_GL2_WB(1) | S_491_SEQ(1) | (3u << 25) /* CACHE_POLICY, no gfx10 macro */)
+#define BC250_PROGRESS_RM_DW2                                                                               \
+   (EOP_DST_SEL(EOP_DST_SEL_MEM) | EOP_INT_SEL(EOP_INT_SEL_NONE) | EOP_DATA_SEL(EOP_DATA_SEL_VALUE_64BIT))
+_Static_assert(BC250_PROGRESS_RM_DW1 == 0x06603514u, "the KMD fence's RELEASE_MEM dword 1 (monfence_packets.h)");
+_Static_assert(BC250_PROGRESS_RM_DW2 == 0x40000000u, "DATA_SEL 2, INT_SEL 0, DST_SEL 0");
+
+static void
+bc250_emit_progress_write(uint8_t *dst, uint64_t va, uint64_t value)
+{
+   const uint32_t packet[BC250_PROGRESS_WRITE_DW] = {
+      PKT3(PKT3_RELEASE_MEM, 6, 0),
+      BC250_PROGRESS_RM_DW1,
+      BC250_PROGRESS_RM_DW2,
+      (uint32_t)va,
+      (uint32_t)(va >> 32),
+      (uint32_t)value,
+      (uint32_t)(value >> 32),
+      0, /* INT_CTXID */
+   };
+   memcpy(dst, packet, sizeof(packet));
+}
+
+/* One IB1 on the gfx ring: the KMD runs the single IB of a BC2S blob (driver/kmd/umd_blob.c,
+ * single_ib) and puts its own frame and fence around it on the ring. A submission of several
+ * IBs is packed into a gather BO of the queue. By default the gather BO holds one IB2 call
+ * (INDIRECT_BUFFER without CHAIN, the form RADV uses for secondaries) per IB, and the CP reads
+ * the command streams where RADV recorded them; an IB whose stream calls an IB2 itself is
+ * copied into the gather BO instead and runs at IB1 level. BC250_IB_NOCOPY=0 copies every IB,
+ * the previous behaviour.
+ *
+ * The IB2 calls leave the command streams in use until this submission retires. That holds
+ * as for any Vulkan submission: a command buffer stays pending until the application's
+ * signal, which is queued after this IB1 on the same context, and RADV destroys a replaced
+ * queue preamble only after ctx_wait_idle (radv_update_preamble_cs).
+ *
+ * progress_value (BC250_PROGRESS_FENCE=gpu, nonzero) ends the IB1 with the write of that value to
+ * the queue's progress fence (bc250_emit_progress_write). Every submission then goes through the
+ * gather slot, a single IB and an empty submission too: the stream is called as an IB2 (or copied
+ * when it calls one itself), then the padding, then the write as the IB1's last packet. 0 keeps the
+ * IB1 as before.
  */
 static NTSTATUS
 radv_wddm2_bc250_submit(struct radv_wddm2_ctx *ctx, struct radv_wddm2_queue *queue,
-                        const struct radv_winsys_submit_info *submit)
+                        const struct radv_winsys_submit_info *submit, uint64_t progress_value)
 {
    struct radv_wddm2_winsys *ws = ctx->ws;
-   struct radv_winsys_ib local_ibs[16];
-   struct radv_winsys_ib *ibs = local_ibs;
+   struct bc250_submit_ib local_ibs[16];
+   struct bc250_submit_ib *ibs = local_ibs;
    struct bc250_submit_blob blob;
    unsigned n = 0, i;
+   unsigned calls = 0, copies = 0, nested = 0;
    uint64_t total = 0;
    uint64_t va;
    uint32_t bytes;
@@ -1041,16 +1330,41 @@ radv_wddm2_bc250_submit(struct radv_wddm2_ctx *ctx, struct radv_wddm2_queue *que
    }
    if (!bc250_collect_submit(submit, ibs, &n, required))
       return STATUS_INVALID_PARAMETER;
-   if (n == 0)
+   const bool gpu_progress = progress_value != 0;
+   if (n == 0 && !gpu_progress)
       return STATUS_SUCCESS;
 
-   if (n == 1) {
-      va = ibs[0].va;
-      bytes = ibs[0].cdw * 4;
+   const bool direct = n == 1 && !gpu_progress;
+   if (direct) {
+      va = ibs[0].ib.va;
+      bytes = ibs[0].ib.cdw * 4;
    } else {
+      const bool copy_all = ws->bc250_gather_copy;
+      uint64_t copied_dw = 0;
+      unsigned pad = 0;
       uint8_t *dst;
-      for (i = 0; i < n; i++)
-         total += ibs[i].cdw;
+      for (i = 0; i < n; i++) {
+         const struct radv_winsys_ib *ib = &ibs[i].ib;
+         if (!bc250_ib_bytes(ws, ib))
+            return STATUS_INVALID_PARAMETER;
+         if (!copy_all && !ib->cdw)
+            continue; /* nothing to call */
+         if (copy_all || !bc250_ib2_callable(&ibs[i])) {
+            copied_dw += ib->cdw;
+            copies++;
+            nested += ibs[i].calls_ib2;
+         } else {
+            calls++;
+         }
+      }
+      total = copied_dw + 4ull * calls + (gpu_progress ? BC250_PROGRESS_WRITE_DW : 0);
+      /* The IB1 ends on the IB padding of the GFX queue, as every RADV IB does. Copied IBs are
+       * already padded; four-dword calls may leave half a unit (the progress write is 8 dwords). */
+      if (!copy_all || gpu_progress) {
+         const uint32_t pad_mask = ws->gpu_info.ip[AMD_IP_GFX].ib_pad_dw_mask;
+         pad = (unsigned)((pad_mask + 1u - (total & pad_mask)) & pad_mask);
+         total += pad;
+      }
       /* Match the GFX INDIRECT_BUFFER IB_SIZE field, not an arbitrary 1 MiB
        * staging limit. The caller retired the selected gather slot before any write or resize. */
       if (total == 0 || total > G_3F3_IB_SIZE(UINT32_MAX)) {
@@ -1075,38 +1389,68 @@ radv_wddm2_bc250_submit(struct radv_wddm2_ctx *ctx, struct radv_wddm2_queue *que
             ws->base.buffer_destroy(&ws->base, queue->bc250_gather[queue->bc250_gather_index].bo);
          queue->bc250_gather[queue->bc250_gather_index].bo = replacement;
          queue->bc250_gather[queue->bc250_gather_index].map = mapping;
-         fprintf(stderr, "bc250: gather capacity=%" PRIu64 " bytes required=%u ibs=%u\n", capacity, bytes, n);
+         fprintf(stderr, "bc250: gather capacity=%" PRIu64 " bytes required=%u ibs=%u calls=%u copies=%u\n",
+                 capacity, bytes, n, calls, copies);
       }
       dst = queue->bc250_gather[queue->bc250_gather_index].map;
       for (i = 0; i < n; i++) {
-         uint8_t *src = NULL;
-         uint64_t off = 0;
-         if (!ibs[i].bo)
-            return STATUS_INVALID_PARAMETER;
-         if (ibs[i].va >= ibs[i].bo->va)
-            off = ibs[i].va - ibs[i].bo->va;
-         if (off + (uint64_t)ibs[i].cdw * 4 > ibs[i].bo->size)
-            return STATUS_INVALID_PARAMETER;
-         src = ws->base.buffer_map(&ws->base, ibs[i].bo, false, NULL);
-         if (!src)
-            return STATUS_INVALID_PARAMETER;
-         memcpy(dst, src + off, ibs[i].cdw * 4);
-         dst += ibs[i].cdw * 4;
+         const struct radv_winsys_ib *ib = &ibs[i].ib;
+         if (!copy_all && !ib->cdw)
+            continue;
+         if (copy_all || !bc250_ib2_callable(&ibs[i])) {
+            /* Checked above; the mapping is the BO's persistent one. */
+            memcpy(dst, bc250_ib_bytes(ws, ib), ib->cdw * 4);
+            dst += ib->cdw * 4;
+         } else {
+            /* IB2: header, IB_BASE_LO, IB_BASE_HI, IB_SIZE. No CHAIN and no VMID, as RADV's
+             * IB2 for secondaries (radv_winsys_cs_emit_secondary_ib2); the CP runs it at the
+             * IB1's VMID, which the KMD put on the ring. */
+            const uint32_t packet[4] = {
+               PKT3(PKT3_INDIRECT_BUFFER, 2, 0),
+               (uint32_t)ib->va,
+               (uint32_t)(ib->va >> 32),
+               S_3F3_IB_SIZE(ib->cdw),
+            };
+            memcpy(dst, packet, sizeof(packet));
+            dst += sizeof(packet);
+         }
       }
+      if (pad == 1) {
+         const uint32_t nop = PKT3_NOP_PAD;
+         memcpy(dst, &nop, 4);
+      } else if (pad > 1) {
+         const uint32_t nop = PKT3(PKT3_NOP, pad - 2, 0);
+         memcpy(dst, &nop, 4);
+         memset(dst + 4, 0, (pad - 1) * 4);
+      }
+      dst += pad * 4u;
+      /* The last packet of the IB1, after every call, copy and the padding: the work of the whole
+       * submission precedes the write, and once the CP has parsed it there is nothing left to fetch from
+       * this slot or from the streams it called. A progress value seen on the CPU therefore also means
+       * the CP is done with the slot's bytes, which the slot's reuse relies on, as it did on the kernel
+       * signal queued after the IB1. */
+      if (gpu_progress)
+         bc250_emit_progress_write(dst, queue->bc250_progress_va, progress_value);
       va = queue->bc250_gather[queue->bc250_gather_index].bo->va;
+
+      if (!copy_all && copies) {
+         const uint64_t count = p_atomic_inc_return(&ws->bc250_inline_submits);
+         if (count <= 16 || util_is_power_of_two_or_zero64(count))
+            radv_wddm2_notice("IB2 fallback: %u of %u IBs copied into the IB1 (%u call an IB2 themselves, %u"
+                              " outside IB_BASE/IB_SIZE), %" PRIu64 " dwords; %" PRIu64 " such submissions so far",
+                              copies, n, nested, copies - nested, copied_dw, count);
+      }
    }
 
    /* BC250_IB_DWORDS cuts the IB the CP executes. 5 is CONTEXT_CONTROL plus
     * CLEAR_STATE, a packet boundary. The ring fence still follows the IB, so a
-    * timeout here means the CP did not finish that prefix. Unset, the whole IB runs. */
+    * timeout here means the CP did not finish that prefix. Unset, the whole IB runs.
+    * Read once (radv_wddm2_cs_init_functions); it also selects the gather copy. */
    {
-      const char *cap_env = getenv("BC250_IB_DWORDS");
-      if (cap_env && cap_env[0]) {
-         unsigned long cap = strtoul(cap_env, NULL, 0);
-         if (cap > 0 && cap < 0x100000ul && cap * 4ul < bytes) {
-            fprintf(stderr, "bc250: IB clamped to %lu dwords (%u were ready)\n", cap, bytes / 4u);
-            bytes = (uint32_t)(cap * 4ul);
-         }
+      const unsigned long cap = ws->bc250_ib_dwords_cap;
+      if (!gpu_progress && cap > 0 && cap < 0x100000ul && cap * 4ul < bytes) {
+         fprintf(stderr, "bc250: IB clamped to %lu dwords (%u were ready)\n", cap, bytes / 4u);
+         bytes = (uint32_t)(cap * 4ul);
       }
    }
 
@@ -1138,17 +1482,22 @@ radv_wddm2_bc250_submit(struct radv_wddm2_ctx *ctx, struct radv_wddm2_queue *que
       fprintf(stderr, "bc250: SubmitCommand 0x%X (%u ibs packed, %u bytes)\n", status, n, bytes);
    else if (ws->bc250_trace_submits) {
       const uint32_t *dw = NULL;
-      if (n == 1 && ibs[0].bo)
-         dw = (const uint32_t *)((uint8_t *)ws->base.buffer_map(&ws->base, ibs[0].bo, false, NULL) +
-                                 (ibs[0].va - ibs[0].bo->va));
+      if (direct && ibs[0].ib.bo)
+         dw = (const uint32_t *)((uint8_t *)ws->base.buffer_map(&ws->base, ibs[0].ib.bo, false, NULL) +
+                                 (ibs[0].ib.va - ibs[0].ib.bo->va));
       else
          dw = (const uint32_t *)queue->bc250_gather[queue->bc250_gather_index].map;
       fprintf(stderr, "bc250: SubmitCommand ib 0x%" PRIx64 " %u bytes (from %u) %08x %08x %08x %08x\n",
               va, bytes, n,
               dw ? dw[0] : 0, dw && bytes >= 8 ? dw[1] : 0,
               dw && bytes >= 12 ? dw[2] : 0, dw && bytes >= 16 ? dw[3] : 0);
-      /* Slices of the unclamped preamble and the main CS. 163 is the first
-       * ACQUIRE_MEM, 176 the main IB, 216 the dispatch. */
+      if (!direct)
+         fprintf(stderr, "bc250: IB1 holds %u IB2 calls and %u copied IBs%s\n", calls, copies,
+                 gpu_progress ? " and the progress write" : "");
+      /* Slices of the unclamped preamble and the main CS, when the IB1 is their copy. 163 is
+       * the first ACQUIRE_MEM, 176 the main IB, 216 the dispatch. */
+      if (calls)
+         dw = NULL;
       if (dw && bytes >= 176u * 4u) {
          fprintf(stderr, "bc250: IB +158 %08x %08x %08x %08x %08x %08x %08x %08x\n",
                  dw[158], dw[159], dw[160], dw[161], dw[162], dw[163], dw[164], dw[165]);
@@ -1180,6 +1529,47 @@ radv_wddm2_bc250_submit(struct radv_wddm2_ctx *ctx, struct radv_wddm2_queue *que
    return status;
 }
 
+#ifndef D3DDDI_MAX_OBJECT_SIGNALED
+#define D3DDDI_MAX_OBJECT_SIGNALED 32
+#endif
+
+/* The progress value next_value was signalled after the IB that used slot, in a call of its own or with
+ * the application's signals, or that IB1 ends with its GPU write: the slot retires with it, it is the
+ * queue's last signal, the embedder learns it, and the next submission takes the next slot. A failed
+ * publication leaves the queue unable to track its work: it never reuses a slot again. */
+static VkResult
+radv_wddm2_progress_signalled(struct radv_wddm2_winsys *ws, struct radv_wddm2_queue *queue,
+                              struct bc250_gather_slot *slot, uint64_t next_value)
+{
+   slot->retire_value = next_value;
+   queue->bc250_progress.wait_value = next_value;
+   if (ws->host.dispatch) {
+      struct bc250_host_progress progress = {queue->context_h, queue->bc250_progress.handle, next_value,
+                                             queue->bc250_progress.value_map};
+      if (ws->host.dispatch(ws->host.userdata, BC250_HOST_PUBLISH_PROGRESS, &progress) < 0) {
+         queue->bc250_submit_failed = true;
+         return VK_ERROR_DEVICE_LOST;
+      }
+   }
+   queue->bc250_gather_index = (queue->bc250_gather_index + 1u) % ws->bc250_gather_slots;
+   return VK_SUCCESS;
+}
+
+/* A CPU wait for a gather slot to retire, for the periodic summary. */
+static void
+radv_wddm2_count_gather_wait(struct radv_wddm2_winsys *ws, uint64_t ns)
+{
+   p_atomic_inc(&ws->submit_stats.gather_waits);
+   p_atomic_add(&ws->submit_stats.gather_wait_ns, ns);
+   uint64_t max = p_atomic_read(&ws->submit_stats.gather_wait_max_ns);
+   while (ns > max) {
+      const uint64_t seen = p_atomic_cmpxchg(&ws->submit_stats.gather_wait_max_ns, max, ns);
+      if (seen == max)
+         break;
+      max = seen;
+   }
+}
+
 static VkResult
 radv_wddm2_cs_submit(struct radeon_winsys_ctx *_ctx,
                      const struct radv_winsys_submit_info *submit,
@@ -1195,6 +1585,11 @@ radv_wddm2_cs_submit(struct radeon_winsys_ctx *_ctx,
    if (radv_wddm2_ctx_unbound(ctx))
       return VK_ERROR_VALIDATION_FAILED;
 
+   /* Destroy the held BOs whose waits retired (no host call when none did). */
+   radv_wddm2_deferred_drain(ws);
+   /* The periodic summary: one clock read, the lines only once the period has passed. */
+   radv_wddm2_summary_tick(ws);
+
    assert(queue->context_h != 0 && "Unsupported IP type");
 
    if (submit->is_gang && ace_queue->handle == 0) {
@@ -1208,23 +1603,44 @@ radv_wddm2_cs_submit(struct radeon_winsys_ctx *_ctx,
       STACK_ARRAY(D3DKMT_HANDLE, handles, wait_count);
       STACK_ARRAY(uint64_t, values, wait_count);
 
+      /* BC250_SUBMIT_COALESCE: a wait whose value the fence's CPU mapping already shows needs no GPU
+       * wait. The value of a monitored fence of this winsys only grows (a timeline: no reset, and a CPU
+       * signal asserts a larger value), so the GPU would pass that wait at once. A wait the CPU does
+       * not see complete is queued as before, whichever queue signals it, and so is a fence that
+       * reads the lost-device value: the kernel reports that. */
+      const bool drop = ws->bc250 && ws->bc250_drop_waits && !queue->handle;
+      uint32_t count = 0;
       for (uint32_t i = 0; i < wait_count; i++) {
-         handles[i] = vk_sync_as_wddm2_monitored_fence(waits[i].sync)->handle;
-         values[i] = waits[i].wait_value;
+         struct vk_wddm2_monitored_fence *fence = vk_sync_as_wddm2_monitored_fence(waits[i].sync);
+         if (drop && fence->value_map) {
+            const uint64_t seen = p_atomic_read(fence->value_map);
+            if (seen != UINT64_MAX && seen >= waits[i].wait_value)
+               continue;
+         }
+         handles[count] = fence->handle;
+         values[count] = waits[i].wait_value;
+         count++;
+      }
+      if (ws->bc250) {
+         p_atomic_add(&ws->submit_stats.wait_objects, (uint64_t)wait_count);
+         if (count < wait_count)
+            p_atomic_add(&ws->submit_stats.wait_dropped, (uint64_t)(wait_count - count));
+         p_atomic_inc(count ? &ws->submit_stats.wait_calls : &ws->submit_stats.wait_skipped);
       }
 
-      if (queue->handle) {
+      status = STATUS_SUCCESS;
+      if (count && queue->handle) {
          D3DKMT_SUBMITWAITFORSYNCOBJECTSTOHWQUEUE wait = {
             .hHwQueue = queue->handle,
-            .ObjectCount = wait_count,
+            .ObjectCount = count,
             .ObjectHandleArray = handles,
             .FenceValueArray = values,
          };
          status = BC250_WDDM_CALL(&ws->host, SubmitWaitForSyncObjectsToHwQueue, &wait);
-      } else {
+      } else if (count) {
          D3DKMT_WAITFORSYNCHRONIZATIONOBJECTFROMGPU wait = {
             .hContext = queue->context_h,
-            .ObjectCount = wait_count,
+            .ObjectCount = count,
             .ObjectHandleArray = handles,
             .MonitoredFenceValueArray = values,
          };
@@ -1239,14 +1655,19 @@ radv_wddm2_cs_submit(struct radeon_winsys_ctx *_ctx,
          return VK_ERROR_DEVICE_LOST;
    }
 
+   bool merge_progress = false;
+   uint64_t next_value = 0;
+   struct bc250_gather_slot *slot = NULL;
    if (submit->cs_count > 0 && ctx->ws->bc250) {
-      /* Independent of application signals: retire only the slot being reused,
-       * not the immediately preceding job. Seven BOs match the bounded KMD
-       * completion capacity; CP consumption alone never permits CPU reuse. */
-      struct bc250_gather_slot *slot = &queue->bc250_gather[queue->bc250_gather_index];
+      /* Independent of application signals: retire only the slot being reused, not the immediately
+       * preceding job; CP consumption alone never permits CPU reuse. The ring bounds how far this
+       * thread runs ahead of the GPU (BC250_GATHER_SLOTS). The KMD bounds its own ring apart from it
+       * (seven completion records, a polling wait in its SubmitCommand DDI, which dxgkrnl calls). */
+      slot = &queue->bc250_gather[queue->bc250_gather_index];
       uint64_t pending_value = queue->bc250_progress.wait_value;
       uint64_t observed = p_atomic_read(queue->bc250_progress.value_map);
       if (!bc250_host_fence_valid(&ws->host,observed)) return VK_ERROR_DEVICE_LOST;
+      radv_wddm2_check_progress(queue, observed, "before submit");
       if (queue->bc250_submit_failed)
          return VK_ERROR_DEVICE_LOST;
       if (ctx->ws->bc250_trace_submits || pending_value == 0)
@@ -1256,37 +1677,88 @@ radv_wddm2_cs_submit(struct radeon_winsys_ctx *_ctx,
                          slot->retire_value, wait_count, signal_count);
       struct vk_wddm2_fence reuse = queue->bc250_progress;
       reuse.wait_value = slot->retire_value;
-      if (reuse.wait_value && !vk_wddm2_fence_wait(ctx->ws, &reuse))
+      if (reuse.wait_value) {
+         /* observed, read above, tells a real wait apart: counted and timed for the summary. */
+         const bool waiting = observed < reuse.wait_value;
+         const uint64_t start = waiting ? os_time_get_nano() : 0;
+         const bool retired_ok = vk_wddm2_fence_wait(ctx->ws, &reuse);
+         if (waiting)
+            radv_wddm2_count_gather_wait(ws, os_time_get_nano() - start);
+         if (!retired_ok)
+            return VK_ERROR_DEVICE_LOST;
+         /* The CPU overwrites this slot's IB next: its job must have retired. */
+         const uint64_t retired = p_atomic_read(queue->bc250_progress.value_map);
+         if (retired != UINT64_MAX && retired < slot->retire_value)
+            radv_wddm2_invariant("gather slot %u of context 0x%x reused at progress %" PRIu64
+                                 " before its retirement value %" PRIu64,
+                                 queue->bc250_gather_index, queue->context_h, retired, slot->retire_value);
+         radv_wddm2_check_progress(queue, retired, "after slot wait");
+      }
+      /* The progress value of this submission: one more than the last, never the lost-device value
+       * UINT64_MAX (checked before anything names it). At one submission per microsecond the 64-bit
+       * count lasts 584,000 years: it never wraps, and a value the queue read never goes back
+       * (radv_wddm2_check_progress). */
+      if (queue->bc250_progress.wait_value >= UINT64_MAX - 1)
          return VK_ERROR_DEVICE_LOST;
-      status = radv_wddm2_bc250_submit(ctx, queue, submit);
+      next_value = queue->bc250_progress.wait_value + 1;
+      /* Published before the IB reaches the kernel: a BO destroyed from now on, on any thread,
+       * also waits for this submission. */
+      radv_wddm2_tracker_publish(queue->bc250_tracker, next_value);
+      if (ws->deferred.witness && queue->bc250_tracker)
+         radv_wddm2_witness_submit(ws, queue, submit, next_value);
+      /* BC250_PROGRESS_FENCE=gpu: the IB1 ends with the GPU's write of next_value (radv_wddm2_bc250_submit);
+       * the fence takes no kernel signal on this queue, ever (bc250_progress_va is fixed per binding). */
+      const bool gpu_progress = queue->bc250_progress_va != 0;
+      status = radv_wddm2_bc250_submit(ctx, queue, submit, gpu_progress ? next_value : 0);
       if (!NT_SUCCESS(status)) {
          fprintf(stderr, "bc250: native submit failed NTSTATUS=0x%X cs_count=%u\n", status, submit->cs_count);
          return VK_ERROR_DEVICE_LOST;
       }
-      if (queue->bc250_progress.wait_value >= UINT64_MAX-1) return VK_ERROR_DEVICE_LOST;
-      uint64_t next_value = queue->bc250_progress.wait_value + 1;
-      D3DKMT_SIGNALSYNCHRONIZATIONOBJECTFROMGPU2 progress_signal = {
-         .ObjectCount = 1,
-         .ObjectHandleArray = &queue->bc250_progress.handle,
-         .BroadcastContextCount = 1,
-         .BroadcastContextArray = &queue->context_h,
-         .MonitoredFenceValueArray = &next_value,
-      };
-      status = BC250_WDDM_CALL(&ws->host, SignalSynchronizationObjectFromGpu2, &progress_signal);
-      if (!NT_SUCCESS(status)) {
-         queue->bc250_submit_failed = true; // accepted IB has no retirement value: never reuse its slot
-         return VK_ERROR_DEVICE_LOST;
+      p_atomic_inc(&ws->submit_stats.submits);
+      /* Ordering, BC250_PROGRESS_FENCE=gpu. The write is the IB1's last packet, an end-of-pipe
+       * RELEASE_MEM; the KMD's ring fence, the same packet to its own fence page, follows the IB1 on the
+       * ring, and end-of-pipe writes land in the order the CP issues them (Linux amdgpu_ib_schedule relies
+       * on the same order: a job's user fence, then its ring fence). dxgkrnl signals the application's fences
+       * of the call below only on that DMA buffer's completion, which the KMD reports from its ring
+       * fence. Hence the invariant: an application fence of submission k reads its value only once
+       * the progress fence reads at least k, so nothing that waited for the application's fence finds
+       * a slot, a held BO or the embedder's record of k unretired. The reverse order is not promised
+       * and not needed: progress may read k shortly before the application's fences of k, when all the
+       * work of k is done and written back (CACHE_FLUSH_AND_INV_TS, GL2 write-back) and the CP has
+       * fetched the last dword of the IB1. The application's fences keep their kernel call, imported
+       * and shared ones included; only the progress fence, which the queue created unshared, moves. */
+      if (gpu_progress) {
+         p_atomic_inc(&ws->submit_stats.progress_gpu);
+         const VkResult result = radv_wddm2_progress_signalled(ws, queue, slot, next_value);
+         if (result != VK_SUCCESS)
+            return result;
       }
-      slot->retire_value = next_value;
-      queue->bc250_progress.wait_value = next_value;
-      if (ws->host.dispatch) {
-         struct bc250_host_progress progress = {queue->context_h, queue->bc250_progress.handle, next_value, queue->bc250_progress.value_map};
-         if (ws->host.dispatch(ws->host.userdata, BC250_HOST_PUBLISH_PROGRESS, &progress) < 0) {
-            queue->bc250_submit_failed = true;
+      /* BC250_SUBMIT_COALESCE (kernel mode): the application's signals of this submission follow the IB
+       * on the same context, and their call carries the progress value too. Every object of one signal
+       * call is signalled at the same point of the context's queue, after the IB, so the slot, the
+       * queue's last value, the embedder's record and every BO held behind next_value (published above)
+       * see it retire when the IB has, as with a call of its own. Without application signals, or with
+       * coalescing off, the progress value gets its own call, as before. */
+      merge_progress = !gpu_progress && ws->bc250_merge_signals && signal_count > 0 &&
+                       signal_count < D3DDDI_MAX_OBJECT_SIGNALED && !queue->handle;
+      if (!gpu_progress && !merge_progress) {
+         D3DKMT_SIGNALSYNCHRONIZATIONOBJECTFROMGPU2 progress_signal = {
+            .ObjectCount = 1,
+            .ObjectHandleArray = &queue->bc250_progress.handle,
+            .BroadcastContextCount = 1,
+            .BroadcastContextArray = &queue->context_h,
+            .MonitoredFenceValueArray = &next_value,
+         };
+         status = BC250_WDDM_CALL(&ws->host, SignalSynchronizationObjectFromGpu2, &progress_signal);
+         if (!NT_SUCCESS(status)) {
+            queue->bc250_submit_failed = true; // accepted IB has no retirement value: never reuse its slot
             return VK_ERROR_DEVICE_LOST;
          }
+         p_atomic_inc(&ws->submit_stats.progress_separate);
+         const VkResult result = radv_wddm2_progress_signalled(ws, queue, slot, next_value);
+         if (result != VK_SUCCESS)
+            return result;
       }
-      queue->bc250_gather_index = (queue->bc250_gather_index + 1u) % BC250_GATHER_SLOTS;
    } else if (submit->cs_count > 0) {
       struct radv_winsys_ib first_ib = {};
       struct submit_pdd_writer pdd;
@@ -1332,12 +1804,18 @@ radv_wddm2_cs_submit(struct radeon_winsys_ctx *_ctx,
    }
 
    if (signal_count > 0) {
-      STACK_ARRAY(D3DKMT_HANDLE, handles, signal_count);
-      STACK_ARRAY(uint64_t, values, signal_count);
+      const uint32_t count = signal_count + (merge_progress ? 1u : 0u);
+      STACK_ARRAY(D3DKMT_HANDLE, handles, count);
+      STACK_ARRAY(uint64_t, values, count);
 
       for (uint32_t i = 0; i < signal_count; i++) {
          handles[i] = vk_sync_as_wddm2_monitored_fence(signals[i].sync)->handle;
          values[i] = signals[i].signal_value;
+      }
+      if (merge_progress) {
+         /* Last, so the application's fences keep their places. */
+         handles[signal_count] = queue->bc250_progress.handle;
+         values[signal_count] = next_value;
       }
 
       if (queue->handle) {
@@ -1354,7 +1832,7 @@ radv_wddm2_cs_submit(struct radeon_winsys_ctx *_ctx,
          status = BC250_WDDM_CALL(&ws->host, SubmitSignalSyncObjectsToHwQueue, &signal);
       } else {
          D3DKMT_SIGNALSYNCHRONIZATIONOBJECTFROMGPU2 signal = {
-            .ObjectCount = signal_count,
+            .ObjectCount = count,
             .ObjectHandleArray = handles,
             .BroadcastContextCount = 1,
             .BroadcastContextArray = &queue->context_h,
@@ -1366,9 +1844,22 @@ radv_wddm2_cs_submit(struct radeon_winsys_ctx *_ctx,
       STACK_ARRAY_FINISH(handles);
       STACK_ARRAY_FINISH(values);
 
+      if (ws->bc250) {
+         p_atomic_inc(&ws->submit_stats.signal_calls);
+         p_atomic_add(&ws->submit_stats.signal_objects, (uint64_t)signal_count);
+      }
       assert(NT_SUCCESS(status));
-      if (!NT_SUCCESS(status))
+      if (!NT_SUCCESS(status)) {
+         if (merge_progress)
+            queue->bc250_submit_failed = true; // accepted IB has no retirement value: never reuse its slot
          return VK_ERROR_DEVICE_LOST;
+      }
+      if (merge_progress) {
+         p_atomic_inc(&ws->submit_stats.progress_merged);
+         const VkResult result = radv_wddm2_progress_signalled(ws, queue, slot, next_value);
+         if (result != VK_SUCCESS)
+            return result;
+      }
 
       struct vk_wddm2_monitored_fence *fence = vk_sync_as_wddm2_monitored_fence(signals[0].sync);
       ctx->per_ip[submit->ip_type].last_submission.handle = fence->handle;
@@ -1379,9 +1870,37 @@ radv_wddm2_cs_submit(struct radeon_winsys_ctx *_ctx,
    return VK_SUCCESS;
 }
 
+/* The CS was written through a write-combined mapping on this thread. With IB2 calls the
+ * CP reads it where it is, and another thread may submit it: drain this core's write-
+ * combining buffers before the stream leaves the recording thread. The submit's own sfence
+ * drains the submitting core only. */
+static VkResult
+radv_wddm2_cs_finalize(struct ac_cmdbuf *_cs)
+{
+   VkResult result = radv_winsys_cs_finalize(_cs);
+   _mm_sfence();
+   return result;
+}
+
 void
 radv_wddm2_cs_init_functions(struct radv_wddm2_winsys *ws)
 {
+   if (ws->bc250) {
+      const char *nocopy = getenv("BC250_IB_NOCOPY");
+      const char *cap = getenv("BC250_IB_DWORDS");
+      ws->bc250_ib_dwords_cap = cap && cap[0] ? strtoul(cap, NULL, 0) : 0;
+      ws->bc250_gather_copy = (nocopy && !strcmp(nocopy, "0")) || ws->bc250_ib_dwords_cap;
+      if (!ws->adapter_query) {
+         if (!ws->bc250_gather_copy)
+            radv_wddm2_notice("IB submission: IB2 calls from the gather slot (BC250_IB_NOCOPY=0 copies every IB)");
+         else if (nocopy && !strcmp(nocopy, "0"))
+            radv_wddm2_notice("IB submission fallback: every IB copied into the gather slot (BC250_IB_NOCOPY=0)");
+         else
+            radv_wddm2_notice("IB submission fallback: every IB copied into the gather slot (BC250_IB_DWORDS=%lu"
+                              " clamps the copied stream)", ws->bc250_ib_dwords_cap);
+      }
+   }
+
    ws->base.ctx_create = radv_wddm2_ctx_create;
    ws->base.ctx_destroy = radv_wddm2_ctx_destroy;
    if (ws->bc250 && ws->host.dispatch) {
@@ -1392,7 +1911,7 @@ radv_wddm2_cs_init_functions(struct radv_wddm2_winsys *ws)
    ws->base.ctx_wait_idle = radv_wddm2_ctx_wait_idle;
    ws->base.cs_domain = radv_wddm2_cs_domain;
    ws->base.cs_create = radv_wddm2_cs_create;
-   ws->base.cs_finalize = radv_winsys_cs_finalize;
+   ws->base.cs_finalize = radv_wddm2_cs_finalize;
    ws->base.cs_reset = radv_wddm2_cs_reset;
    ws->base.cs_chain = radv_winsys_cs_chain;
    ws->base.cs_unchain = radv_winsys_cs_unchain;
