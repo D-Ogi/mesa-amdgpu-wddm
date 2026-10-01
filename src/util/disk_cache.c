@@ -23,19 +23,23 @@
 
 #ifdef ENABLE_SHADER_CACHE
 
+#include "util/detect_os.h"
+
 #include <ctype.h>
-#include <ftw.h>
 #include <string.h>
 #include <stdlib.h>
 #include <stdio.h>
-#include <sys/file.h>
 #include <sys/types.h>
 #include <sys/stat.h>
-#include <sys/mman.h>
 #include <fcntl.h>
 #include <errno.h>
-#include <dirent.h>
 #include <inttypes.h>
+#if !DETECT_OS_WINDOWS
+#include <dirent.h>
+#include <ftw.h>
+#include <sys/file.h>
+#include <sys/mman.h>
+#endif
 
 #include "util/compress.h"
 #include "util/crc32.h"

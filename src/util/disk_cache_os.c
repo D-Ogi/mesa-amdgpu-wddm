@@ -119,7 +119,11 @@ disk_cache_get_function_identifier(void *ptr, blake3_hasher *ctx)
 #ifdef ENABLE_SHADER_CACHE
 
 #if DETECT_OS_WINDOWS
-/* TODO: implement disk cache support on windows */
+
+#include <stdio.h>
+#include <string.h>
+
+#include "util/u_string.h"
 
 #else
 
@@ -135,11 +139,200 @@ disk_cache_get_function_identifier(void *ptr, blake3_hasher *ctx)
 #include <unistd.h>
 #include "utime.h"
 
+#endif
+
 #include "util/blob.h"
 #include "util/crc32.h"
 #include "util/u_debug.h"
 #include "util/ralloc.h"
 #include "util/rand_xor.h"
+
+#if DETECT_OS_WINDOWS
+
+/* The Windows implementation of the multi-file cache. It keeps the layout and the protocol of the POSIX one:
+ * one file per entry in a two-character subdirectory, written to "<name>.tmp" and renamed into place, and an index
+ * file mapped shared by every process that uses the directory, holding the total size of the entries.
+ *
+ * Paths stay in UTF-8, as elsewhere in Mesa, with the forward slashes the shared code puts between components, and
+ * are widened for each call into the file system: a profile path need not fit the ANSI code page.
+ *
+ * The single-file (Fossilize) and database caches are not implemented here: fossilize_db.c needs flock() and
+ * mesa_cache_db.c is POSIX-only. disk_cache_type_create() makes a database cache, such as RADV's built-in shader
+ * cache, a multi-file one; the single-file cache gets no directory from disk_cache_generate_cache_dir() and stays off.
+ */
+
+/* The size an entry takes on the disk, as st_blocks * 512 is on POSIX: its length rounded up to the 4 KiB cluster
+ * NTFS uses by default. Writes add it and evictions subtract it, both from the file length, so the total in the
+ * index stays exact whatever the real cluster size. */
+static uint64_t
+cache_file_size(uint64_t length)
+{
+   return (length + 4095) & ~(uint64_t)4095;
+}
+
+static wchar_t *
+utf8_to_wide(const char *path)
+{
+   int len = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, path, -1, NULL, 0);
+   if (len <= 0)
+      return NULL;
+
+   wchar_t *wpath = malloc(len * sizeof(wchar_t));
+   if (!wpath)
+      return NULL;
+
+   if (!MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, path, -1, wpath, len)) {
+      free(wpath);
+      return NULL;
+   }
+
+   /* Backslashes only, and no runs of them past a UNC prefix: the directory walk below splits at them. */
+   wchar_t *out = wpath;
+   for (const wchar_t *in = wpath; *in; in++) {
+      wchar_t c = *in == L'/' ? L'\\' : *in;
+      if (c == L'\\' && out - wpath >= 2 && out[-1] == L'\\')
+         continue;
+      *out++ = c;
+   }
+   *out = L'\0';
+
+   return wpath;
+}
+
+static char *
+wide_to_utf8(const wchar_t *wstr)
+{
+   int len = WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS, wstr, -1, NULL, 0, NULL, NULL);
+   if (len <= 0)
+      return NULL;
+
+   char *str = malloc(len);
+   if (str && !WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS, wstr, -1, str, len, NULL, NULL)) {
+      free(str);
+      return NULL;
+   }
+
+   return str;
+}
+
+/* An environment variable in UTF-8, or NULL when it is unset or empty. */
+static char *
+get_env_utf8(void *mem_ctx, const wchar_t *name)
+{
+   DWORD len = GetEnvironmentVariableW(name, NULL, 0);
+   if (len <= 1)
+      return NULL;
+
+   wchar_t *wvalue = malloc(len * sizeof(wchar_t));
+   if (!wvalue)
+      return NULL;
+
+   char *value = NULL;
+   DWORD ret = GetEnvironmentVariableW(name, wvalue, len);
+   if (ret > 0 && ret < len) {
+      char *utf8 = wide_to_utf8(wvalue);
+      if (utf8) {
+         value = ralloc_strdup(mem_ctx, utf8);
+         free(utf8);
+      }
+   }
+   free(wvalue);
+
+   return value;
+}
+
+static bool
+get_file_length(const char *path, uint64_t *length)
+{
+   wchar_t *wpath = utf8_to_wide(path);
+   if (!wpath)
+      return false;
+
+   WIN32_FILE_ATTRIBUTE_DATA data;
+   bool ret = GetFileAttributesExW(wpath, GetFileExInfoStandard, &data) &&
+              !(data.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY);
+   free(wpath);
+
+   if (ret)
+      *length = ((uint64_t)data.nFileSizeHigh << 32) | data.nFileSizeLow;
+   return ret;
+}
+
+static bool
+delete_file(const char *path)
+{
+   wchar_t *wpath = utf8_to_wide(path);
+   if (!wpath)
+      return false;
+
+   bool ret = DeleteFileW(wpath);
+   free(wpath);
+   return ret;
+}
+
+/* Creates the directory and any missing parents. Returns true when the path exists afterwards, as whatever it is. */
+static bool
+create_dir_with_parents(wchar_t *wpath)
+{
+   if (CreateDirectoryW(wpath, NULL) || GetLastError() == ERROR_ALREADY_EXISTS)
+      return true;
+
+   if (GetLastError() != ERROR_PATH_NOT_FOUND)
+      return false;
+
+   wchar_t *sep = wcsrchr(wpath, L'\\');
+   if (!sep || sep == wpath)
+      return false;
+
+   *sep = L'\0';
+   bool parent = create_dir_with_parents(wpath);
+   *sep = L'\\';
+
+   return parent && (CreateDirectoryW(wpath, NULL) || GetLastError() == ERROR_ALREADY_EXISTS);
+}
+
+/* Check if directory exists or if mkdir param is set create a directory named
+ * 'path' if it does not already exist, including parent directories if
+ * required.
+ *
+ * Returns: 0 if path already exists as a directory or if created.
+ *         -1 in all other cases.
+ */
+static int
+find_or_create_dir(const char *path, bool mkdir_with_parents_if_needed)
+{
+   if (path[0] == '\0')
+      return -1;
+
+   wchar_t *wpath = utf8_to_wide(path);
+   if (!wpath)
+      return -1;
+
+   int ret = -1;
+   DWORD attrs = GetFileAttributesW(wpath);
+   if (attrs == INVALID_FILE_ATTRIBUTES && mkdir_with_parents_if_needed) {
+      if (create_dir_with_parents(wpath)) {
+         attrs = GetFileAttributesW(wpath);
+      } else {
+         fprintf(stderr, "Failed to create %s for shader cache (error %lu)---disabling.\n",
+                 path, GetLastError());
+      }
+   }
+
+   if (attrs != INVALID_FILE_ATTRIBUTES) {
+      if (attrs & FILE_ATTRIBUTE_DIRECTORY) {
+         ret = 0;
+      } else {
+         fprintf(stderr, "Cannot use %s for shader cache (not a directory)"
+                         "---disabling.\n", path);
+      }
+   }
+
+   free(wpath);
+   return ret;
+}
+
+#else
 
 /* Check if directory exists or if mkdir_if_needed param is set create a
  * directory named 'path' if it does not already exist.
@@ -219,6 +412,8 @@ find_or_create_dir(const char *path, bool mkdir_with_parents_if_needed)
    return 0;
 }
 
+#endif
+
 /* Concatenate an existing path and a new name to form a new path.  If the new
  * path does not exist as a directory, create it if the mkdir param is set
  * then return the resulting name of the new path (ralloc'ed off of 'ctx').
@@ -260,6 +455,208 @@ free_lru_file_list(struct list_head *lru_file_list)
    }
    free(lru_file_list);
 }
+
+#if DETECT_OS_WINDOWS
+
+struct lru_candidate {
+   char *name;
+   uint64_t length;
+   time_t atime;
+};
+
+static int
+compare_lru_candidates(const void *a, const void *b)
+{
+   const struct lru_candidate *ca = a, *cb = b;
+   return ca->atime < cb->atime ? -1 : ca->atime > cb->atime;
+}
+
+/* Given a directory path and predicate function, create a linked list of the
+ * entries with the oldest access time in that directory for which the
+ * predicate returns true, oldest first: a tenth of them, and at least one.
+ *
+ * Returns: A malloc'ed linked list for the paths of chosen files, (or
+ * NULL on any error). The caller should free the linked list via
+ * free_lru_file_list() when finished.
+ */
+static struct list_head *
+choose_lru_file_matching(const char *dir_path,
+                         bool (*predicate)(const char *dir_path,
+                                           const WIN32_FIND_DATAW *,
+                                           const char *, const size_t))
+{
+   char *pattern = NULL;
+   if (asprintf(&pattern, "%s/*", dir_path) == -1)
+      return NULL;
+
+   wchar_t *wpattern = utf8_to_wide(pattern);
+   free(pattern);
+   if (!wpattern)
+      return NULL;
+
+   WIN32_FIND_DATAW fd;
+   HANDLE find = FindFirstFileExW(wpattern, FindExInfoBasic, &fd, FindExSearchNameMatch, NULL,
+                                  FIND_FIRST_EX_LARGE_FETCH);
+   free(wpattern);
+   if (find == INVALID_HANDLE_VALUE)
+      return NULL;
+
+   struct lru_candidate *candidates = NULL;
+   unsigned count = 0, capacity = 0;
+   do {
+      char *name = wide_to_utf8(fd.cFileName);
+      if (!name)
+         continue;
+
+      if (!predicate(dir_path, &fd, name, strlen(name))) {
+         free(name);
+         continue;
+      }
+
+      if (count == capacity) {
+         unsigned new_capacity = capacity ? capacity * 2 : 64;
+         struct lru_candidate *grown = realloc(candidates, new_capacity * sizeof(*candidates));
+         if (!grown) {
+            free(name);
+            break;
+         }
+         candidates = grown;
+         capacity = new_capacity;
+      }
+
+      ULARGE_INTEGER atime = {
+         .LowPart = fd.ftLastAccessTime.dwLowDateTime,
+         .HighPart = fd.ftLastAccessTime.dwHighDateTime,
+      };
+      candidates[count].name = name;
+      candidates[count].length = ((uint64_t)fd.nFileSizeHigh << 32) | fd.nFileSizeLow;
+      /* Seconds since 1970 from 100 ns ticks since 1601, as st_atime. */
+      candidates[count].atime = (time_t)(atime.QuadPart / 10000000) - 11644473600ll;
+      count++;
+   } while (FindNextFileW(find, &fd));
+   FindClose(find);
+
+   struct list_head *lru_file_list = NULL;
+   if (count) {
+      qsort(candidates, count, sizeof(*candidates), compare_lru_candidates);
+
+      /* Collect 10% of files in this directory for removal. Note: This should work
+       * out to only be around 0.04% of total cache items.
+       */
+      unsigned lru_file_count = count > 10 ? count / 10 : 1;
+      lru_file_list = malloc(sizeof(struct list_head));
+      if (lru_file_list) {
+         list_inithead(lru_file_list);
+         for (unsigned i = 0; i < lru_file_count; i++) {
+            struct lru_file *entry = calloc(1, sizeof(struct lru_file));
+            if (!entry)
+               break;
+
+            if (asprintf(&entry->lru_name, "%s/%s", dir_path, candidates[i].name) == -1) {
+               free(entry);
+               break;
+            }
+            entry->lru_file_size = cache_file_size(candidates[i].length);
+            entry->lru_atime = candidates[i].atime;
+            list_addtail(&entry->node, lru_file_list);
+         }
+
+         if (list_is_empty(lru_file_list)) {
+            free(lru_file_list);
+            lru_file_list = NULL;
+         }
+      }
+   }
+
+   for (unsigned i = 0; i < count; i++)
+      free(candidates[i].name);
+   free(candidates);
+
+   return lru_file_list;
+}
+
+/* Is entry a regular file, and not having a name with a trailing
+ * ".tmp"
+ */
+static bool
+is_regular_non_tmp_file(const char *path, const WIN32_FIND_DATAW *fd,
+                        const char *d_name, const size_t len)
+{
+   if (fd->dwFileAttributes & (FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_REPARSE_POINT))
+      return false;
+
+   if (len >= 4 && strcmp(&d_name[len-4], ".tmp") == 0)
+      return false;
+
+   return true;
+}
+
+/* Returns the size of the deleted files, (or 0 on any error). */
+static size_t
+unlink_lru_file_from_directory(const char *path)
+{
+   struct list_head *lru_file_list =
+      choose_lru_file_matching(path, is_regular_non_tmp_file);
+   if (lru_file_list == NULL)
+      return 0;
+
+   assert(!list_is_empty(lru_file_list));
+
+   size_t total_unlinked_size = 0;
+   struct lru_file *e;
+   LIST_FOR_EACH_ENTRY(e, lru_file_list, node) {
+      if (delete_file(e->lru_name))
+         total_unlinked_size += e->lru_file_size;
+   }
+   free_lru_file_list(lru_file_list);
+
+   return total_unlinked_size;
+}
+
+/* Is entry a directory with a two-character name, (and not the
+ * special name of ".."). We also return false if the dir is empty.
+ */
+static bool
+is_two_character_sub_directory(const char *path, const WIN32_FIND_DATAW *fd,
+                               const char *d_name, const size_t len)
+{
+   if (!(fd->dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) ||
+       (fd->dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT))
+      return false;
+
+   if (len != 2)
+      return false;
+
+   if (strcmp(d_name, "..") == 0)
+      return false;
+
+   char *pattern;
+   if (asprintf(&pattern, "%s/%s/*", path, d_name) == -1)
+      return false;
+
+   wchar_t *wpattern = utf8_to_wide(pattern);
+   free(pattern);
+   if (!wpattern)
+      return false;
+
+   WIN32_FIND_DATAW sub;
+   HANDLE find = FindFirstFileExW(wpattern, FindExInfoBasic, &sub, FindExSearchNameMatch, NULL, 0);
+   free(wpattern);
+   if (find == INVALID_HANDLE_VALUE)
+      return false;
+
+   /* If dir only contains '.' and '..' it must be empty */
+   bool empty = true;
+   do {
+      if (wcscmp(sub.cFileName, L".") != 0 && wcscmp(sub.cFileName, L"..") != 0)
+         empty = false;
+   } while (empty && FindNextFileW(find, &sub));
+   FindClose(find);
+
+   return !empty;
+}
+
+#else
 
 /* Given a directory path and predicate function, create a linked list of entrys
  * with the oldest access time in that directory for which the predicate
@@ -469,6 +866,8 @@ is_two_character_sub_directory(const char *path, const struct stat *sb,
    return true;
 }
 
+#endif
+
 /* Create the directory that will be needed for the cache file for \key.
  *
  * Obviously, the implementation here must closely match
@@ -487,6 +886,38 @@ make_cache_file_directory(struct disk_cache *cache, const cache_key key)
    find_or_create_dir(dir, true);
    free(dir);
 }
+
+#if DETECT_OS_WINDOWS
+
+static bool
+read_all(HANDLE file, void *buf, size_t count)
+{
+   char *in = buf;
+
+   for (size_t done = 0; done < count;) {
+      DWORD chunk = (DWORD)MIN2(count - done, 1u << 30), read_bytes;
+      if (!ReadFile(file, in + done, chunk, &read_bytes, NULL) || read_bytes == 0)
+         return false;
+      done += read_bytes;
+   }
+   return true;
+}
+
+static bool
+write_all(HANDLE file, const void *buf, size_t count)
+{
+   const char *out = buf;
+
+   for (size_t done = 0; done < count;) {
+      DWORD chunk = (DWORD)MIN2(count - done, 1u << 30), written;
+      if (!WriteFile(file, out + done, chunk, &written, NULL) || written == 0)
+         return false;
+      done += written;
+   }
+   return true;
+}
+
+#else
 
 static ssize_t
 read_all(int fd, void *buf, size_t count)
@@ -517,6 +948,8 @@ write_all(int fd, const void *buf, size_t count)
    }
    return done;
 }
+
+#endif
 
 /* Evict least recently used cache item */
 void
@@ -568,6 +1001,20 @@ disk_cache_evict_lru_item(struct disk_cache *cache)
       p_atomic_add(&cache->size->value, - (uint64_t)size);
 }
 
+#if DETECT_OS_WINDOWS
+
+void
+disk_cache_evict_item(struct disk_cache *cache, char *filename)
+{
+   uint64_t length;
+   if (get_file_length(filename, &length) && delete_file(filename))
+      p_atomic_add(&cache->size->value, - cache_file_size(length));
+
+   free(filename);
+}
+
+#else
+
 void
 disk_cache_evict_item(struct disk_cache *cache, char *filename)
 {
@@ -583,6 +1030,8 @@ disk_cache_evict_item(struct disk_cache *cache, char *filename)
    if (sb.st_blocks)
       p_atomic_add(&cache->size->value, - (uint64_t)sb.st_blocks * 512);
 }
+
+#endif
 
 static void *
 parse_and_validate_cache_item(struct disk_cache *cache, void *cache_item,
@@ -666,6 +1115,91 @@ parse_and_validate_cache_item(struct disk_cache *cache, void *cache_item,
    return NULL;
 }
 
+#if DETECT_OS_WINDOWS
+
+/* One day in 100 ns ticks. NTFS keeps last-access times only when the volume is set to, so a load sets the time
+ * itself when it is older than this, as relatime would: eviction picks the files with the oldest. */
+#define CACHE_ACCESS_TIME_GRANULARITY (24ll * 60 * 60 * 10000000)
+
+void *
+disk_cache_load_item(struct disk_cache *cache, char *filename, size_t *size)
+{
+   uint8_t *data = NULL;
+   uint8_t *uncompressed_data = NULL;
+   uint64_t length = 0;
+   bool corrupt = false;
+
+   wchar_t *wfilename = utf8_to_wide(filename);
+   if (!wfilename)
+      goto done;
+
+   /* Shared for writing and deleting too: an entry never changes after its rename, a writer still holds it for a
+    * moment after, and an eviction in another process may delete it while it is read here.
+    */
+   HANDLE file = CreateFileW(wfilename, GENERIC_READ | FILE_WRITE_ATTRIBUTES,
+                             FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, NULL, OPEN_EXISTING,
+                             FILE_FLAG_SEQUENTIAL_SCAN, NULL);
+   if (file == INVALID_HANDLE_VALUE)
+      goto done;
+
+   LARGE_INTEGER file_size;
+   FILE_BASIC_INFO basic;
+   if (!GetFileSizeEx(file, &file_size) ||
+       !GetFileInformationByHandleEx(file, FileBasicInfo, &basic, sizeof(basic)))
+      goto close;
+
+   length = file_size.QuadPart;
+   if (length == 0 || length > SIZE_MAX) {
+      corrupt = true;
+      goto close;
+   }
+
+   data = malloc(length);
+   if (data == NULL)
+      goto close;
+
+   /* Read entire file into memory */
+   if (!read_all(file, data, length)) {
+      corrupt = true;
+      goto close;
+   }
+
+   uncompressed_data = parse_and_validate_cache_item(cache, data, length, size);
+   if (!uncompressed_data) {
+      corrupt = true;
+      goto close;
+   }
+
+   FILETIME now;
+   GetSystemTimeAsFileTime(&now);
+   int64_t now_ticks = ((int64_t)now.dwHighDateTime << 32) | now.dwLowDateTime;
+   if (now_ticks - basic.LastAccessTime.QuadPart > CACHE_ACCESS_TIME_GRANULARITY) {
+      FILE_BASIC_INFO touch = { 0 }; /* zero leaves a field as it is */
+      touch.LastAccessTime.QuadPart = now_ticks;
+      SetFileInformationByHandle(file, FileBasicInfo, &touch, sizeof(touch));
+   }
+
+ close:
+   CloseHandle(file);
+
+   /* An entry that cannot be read back, such as one whose data a power loss cut off after its rename, would stay
+    * as it is: every load would miss, and every write of its key would find the file there and skip it. Delete it
+    * so that the next write replaces it. A load that fails for want of memory deletes a good entry too, which costs
+    * one compile.
+    */
+   if (corrupt && delete_file(filename))
+      p_atomic_add(&cache->size->value, - cache_file_size(length));
+
+ done:
+   free(data);
+   free(wfilename);
+   free(filename);
+
+   return uncompressed_data;
+}
+
+#else
+
 void *
 disk_cache_load_item(struct disk_cache *cache, char *filename, size_t *size)
 {
@@ -707,6 +1241,8 @@ disk_cache_load_item(struct disk_cache *cache, char *filename, size_t *size)
 
    return NULL;
 }
+
+#endif
 
 /* Return a filename within the cache's directory corresponding to 'key'.
  *
@@ -804,6 +1340,117 @@ create_cache_item_header_and_blob(struct disk_cache_put_job *dc_job,
 
    return false;
 }
+
+#if DETECT_OS_WINDOWS
+
+void
+disk_cache_write_item_to_disk(struct disk_cache_put_job *dc_job,
+                              char *filename)
+{
+   HANDLE file = INVALID_HANDLE_VALUE;
+   bool remove_tmp = false;
+   wchar_t *wfilename = NULL, *wfilename_tmp = NULL;
+   FILE_RENAME_INFO *rename_info = NULL;
+   struct blob cache_blob;
+   blob_init(&cache_blob);
+
+   /* Write to a temporary file to allow for an atomic rename to the
+    * final destination filename, (to prevent any readers from seeing
+    * a partially written file).
+    */
+   char *filename_tmp = NULL;
+   if (asprintf(&filename_tmp, "%s.tmp", filename) == -1)
+      goto done;
+
+   wfilename = utf8_to_wide(filename);
+   wfilename_tmp = utf8_to_wide(filename_tmp);
+   if (!wfilename || !wfilename_tmp)
+      goto done;
+
+   /* The open temporary file is the lock that the flock is elsewhere: it is
+    * shared for reading only, so another writer of the same entry, in this
+    * process or another, fails to open it and leaves the entry to this one. A
+    * temporary file that a writer which died left behind is truncated and
+    * reused. DELETE access is for the rename below.
+    */
+   file = CreateFileW(wfilename_tmp, GENERIC_WRITE | DELETE, FILE_SHARE_READ, NULL,
+                      CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+
+   /* Make the two-character subdirectory within the cache as needed. */
+   if (file == INVALID_HANDLE_VALUE) {
+      if (GetLastError() != ERROR_PATH_NOT_FOUND)
+         goto done;
+
+      make_cache_file_directory(dc_job->cache, dc_job->key);
+
+      file = CreateFileW(wfilename_tmp, GENERIC_WRITE | DELETE, FILE_SHARE_READ, NULL,
+                         CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+      if (file == INVALID_HANDLE_VALUE)
+         goto done;
+   }
+   remove_tmp = true;
+
+   /* Now that we hold the temporary file, we can check to see if the
+    * destination file already exists. If so, another process won the race
+    * between when we saw that the file didn't exist and now. In this case, we
+    * don't do anything more, (to ensure the size accounting of the cache
+    * doesn't get off).
+    */
+   if (GetFileAttributesW(wfilename) != INVALID_FILE_ATTRIBUTES)
+      goto done;
+
+   /* OK, we're now on the hook to write out a file that we know is
+    * not in the cache, and is also not being written out to the cache
+    * by some other process.
+    */
+   if (!create_cache_item_header_and_blob(dc_job, &cache_blob))
+      goto done;
+
+   /* Now, finally, write out the contents to the temporary file, then
+    * rename them atomically to the destination filename, and also
+    * perform an atomic increment of the total cache size.
+    */
+   if (!write_all(file, cache_blob.data, cache_blob.size))
+      goto done;
+
+   /* The rename goes through the open handle, so the file renamed is the one
+    * written. ReplaceIfExists stays FALSE: an entry is never replaced, so its
+    * size is added once.
+    */
+   size_t name_size = (wcslen(wfilename) + 1) * sizeof(wchar_t);
+   rename_info = calloc(1, sizeof(FILE_RENAME_INFO) + name_size);
+   if (!rename_info)
+      goto done;
+
+   rename_info->FileNameLength = name_size - sizeof(wchar_t);
+   memcpy(rename_info->FileName, wfilename, name_size);
+   if (!SetFileInformationByHandle(file, FileRenameInfo, rename_info,
+                                   sizeof(FILE_RENAME_INFO) + name_size))
+      goto done;
+   remove_tmp = false;
+
+   p_atomic_add(&dc_job->cache->size->value, cache_file_size(cache_blob.size));
+
+ done:
+   if (file != INVALID_HANDLE_VALUE) {
+      if (remove_tmp) {
+         FILE_DISPOSITION_INFO disposition = { .DeleteFile = TRUE };
+         SetFileInformationByHandle(file, FileDispositionInfo, &disposition,
+                                    sizeof(disposition));
+      }
+      /* This close finally releases the lock, (now that the final file
+       * has been renamed into place and the size has been added).
+       */
+      CloseHandle(file);
+   }
+   free(rename_info);
+   free(wfilename_tmp);
+   free(wfilename);
+   free(filename_tmp);
+   blob_finish(&cache_blob);
+}
+
+#else
 
 void
 disk_cache_write_item_to_disk(struct disk_cache_put_job *dc_job,
@@ -911,6 +1558,108 @@ disk_cache_write_item_to_disk(struct disk_cache_put_job *dc_job,
    free(filename_tmp);
    blob_finish(&cache_blob);
 }
+
+#endif
+
+#if DETECT_OS_WINDOWS
+
+bool
+disk_cache_account_has_default_dir(const void *sid)
+{
+   static const SID_IDENTIFIER_AUTHORITY nt_authority = SECURITY_NT_AUTHORITY;
+   static const SID_IDENTIFIER_AUTHORITY entra_authority = { { 0, 0, 0, 0, 0, 12 } };
+   const SID *s = sid;
+
+   if (!s || s->Revision != SID_REVISION || s->SubAuthorityCount < 1)
+      return false;
+
+   /* A local or domain account: S-1-5-21-... */
+   if (memcmp(&s->IdentifierAuthority, &nt_authority, sizeof(nt_authority)) == 0)
+      return s->SubAuthority[0] == SECURITY_NT_NON_UNIQUE;
+
+   /* A Microsoft Entra ID account: S-1-12-1-... */
+   if (memcmp(&s->IdentifierAuthority, &entra_authority, sizeof(entra_authority)) == 0)
+      return s->SubAuthority[0] == 1;
+
+   return false;
+}
+
+/* Whether this process gets a cache directory without being given one: only
+ * when it runs as a user account, which owns a profile and with it the
+ * %LOCALAPPDATA% in its environment, in any session (session 0 included, as
+ * for a program started over SSH) and elevated or not.
+ *
+ * Other accounts load the driver too: the desktop window manager
+ * (Window Manager\DWM-n, S-1-5-90-0-n), the user-mode font driver host
+ * (Font Driver Host\UMFD-n, S-1-5-96-0-n), LocalSystem, LocalService and
+ * NetworkService (S-1-5-18, -19 and -20), and service and application pool
+ * identities (S-1-5-80-..., S-1-5-82-...). They are not a person's
+ * accounts: a default directory for one of them would hold a cache shared by
+ * unrelated system processes, in a profile that is the system's or none at
+ * all, and the desktop compositor would write to it. They run without a disk
+ * cache unless MESA_SHADER_CACHE_DIR or XDG_CACHE_HOME names one.
+ */
+static bool
+process_has_default_cache_dir(void)
+{
+   union {
+      TOKEN_USER user;
+      uint8_t data[sizeof(TOKEN_USER) + SECURITY_MAX_SID_SIZE];
+   } info;
+   DWORD size;
+
+   return GetTokenInformation(GetCurrentProcessToken(), TokenUser, &info, sizeof(info), &size) &&
+          disk_cache_account_has_default_dir(info.user.User.Sid);
+}
+
+/* Determine path for cache based on the first defined name as follows:
+ *
+ *   $MESA_SHADER_CACHE_DIR/mesa_shader_cache
+ *   $XDG_CACHE_HOME/mesa_shader_cache
+ *   %LOCALAPPDATA%/mesa_shader_cache, for a user account only
+ *
+ * If none applies, the cache stays off. Only the multi-file cache has a
+ * Windows implementation; the single-file type gets no directory, and
+ * disk_cache_type_create() never asks for the database type.
+ *
+ * If the mkdir param is set we create the directory if it doesn't already
+ * exist, if it does not exist and the param is false NULL will be returned.
+ */
+const char *
+disk_cache_generate_cache_dir(void *mem_ctx, const char *gpu_name,
+                              const char *driver_id,
+                              const char *cache_dir_name_custom,
+                              enum disk_cache_type cache_type,
+                              bool mkdir)
+{
+   if (cache_type != DISK_CACHE_MULTI_FILE)
+      return NULL;
+
+   const char *cache_dir_name = cache_dir_name_custom ? cache_dir_name_custom : CACHE_DIR_NAME;
+
+   const char *path = get_env_utf8(mem_ctx, L"MESA_SHADER_CACHE_DIR");
+
+   if (!path) {
+      path = get_env_utf8(mem_ctx, L"MESA_GLSL_CACHE_DIR");
+      if (path)
+         fprintf(stderr,
+                 "*** MESA_GLSL_CACHE_DIR is deprecated; "
+                 "use MESA_SHADER_CACHE_DIR instead ***\n");
+   }
+
+   if (!path)
+      path = get_env_utf8(mem_ctx, L"XDG_CACHE_HOME");
+
+   if (!path && process_has_default_cache_dir())
+      path = get_env_utf8(mem_ctx, L"LOCALAPPDATA");
+
+   if (!path)
+      return NULL;
+
+   return concatenate_and_mkdir(mem_ctx, path, cache_dir_name, mkdir);
+}
+
+#else
 
 /* Determine path for cache based on the first defined name as follows:
  *
@@ -1036,6 +1785,8 @@ disk_cache_generate_cache_dir(void *mem_ctx, const char *gpu_name,
    return path;
 }
 
+#endif
+
 bool
 disk_cache_enabled()
 {
@@ -1115,6 +1866,115 @@ disk_cache_load_cache_index_foz(void *mem_ctx, struct disk_cache *cache)
    return foz_prepare(&cache->foz_db, cache->path);
 }
 
+#if DETECT_OS_WINDOWS
+
+void
+disk_cache_touch_cache_user_marker(char *path)
+{
+   char *marker_path = NULL;
+   UNUSED int _unused = asprintf(&marker_path, "%s/marker", path);
+   if (!marker_path)
+      return;
+
+   wchar_t *wmarker_path = utf8_to_wide(marker_path);
+   free(marker_path);
+   if (!wmarker_path)
+      return;
+
+   HANDLE file = CreateFileW(wmarker_path, FILE_READ_ATTRIBUTES | FILE_WRITE_ATTRIBUTES,
+                             FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, NULL,
+                             OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+   bool existed = GetLastError() == ERROR_ALREADY_EXISTS;
+   free(wmarker_path);
+   if (file == INVALID_HANDLE_VALUE)
+      return;
+
+   /* An existing marker gets the current time once a day, as utime() does. */
+   FILE_BASIC_INFO info;
+   if (existed && GetFileInformationByHandleEx(file, FileBasicInfo, &info, sizeof(info))) {
+      FILETIME now;
+      GetSystemTimeAsFileTime(&now);
+      int64_t now_ticks = ((int64_t)now.dwHighDateTime << 32) | now.dwLowDateTime;
+      if (now_ticks - info.LastWriteTime.QuadPart > 24ll * 60 * 60 * 10000000 /* One day */) {
+         FILE_BASIC_INFO touch = { 0 }; /* zero leaves a field as it is */
+         touch.LastAccessTime.QuadPart = now_ticks;
+         touch.LastWriteTime.QuadPart = now_ticks;
+         SetFileInformationByHandle(file, FileBasicInfo, &touch, sizeof(touch));
+      }
+   }
+   CloseHandle(file);
+}
+
+bool
+disk_cache_mmap_cache_index(void *mem_ctx, struct disk_cache *cache)
+{
+   HANDLE file = INVALID_HANDLE_VALUE, mapping = NULL;
+   wchar_t *wpath = NULL;
+   bool mapped = false;
+
+   char *path = ralloc_asprintf(mem_ctx, "%s/index", cache->path);
+   if (path == NULL)
+      goto path_fail;
+
+   wpath = utf8_to_wide(path);
+   if (wpath == NULL)
+      goto path_fail;
+
+   file = CreateFileW(wpath, GENERIC_READ | GENERIC_WRITE,
+                      FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, NULL,
+                      OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+   if (file == INVALID_HANDLE_VALUE)
+      goto path_fail;
+
+   /* Force the index file to be the expected size. Extending the file
+    * allocates its clusters, so a full disk fails here rather than on a
+    * write through the mapping.
+    */
+   size_t size = sizeof(*cache->size) + CACHE_INDEX_MAX_KEYS * CACHE_KEY_SIZE;
+   LARGE_INTEGER current;
+   if (!GetFileSizeEx(file, &current))
+      goto path_fail;
+
+   if ((uint64_t)current.QuadPart != size) {
+      FILE_END_OF_FILE_INFO end_of_file = { .EndOfFile.QuadPart = size };
+      if (!SetFileInformationByHandle(file, FileEndOfFileInfo, &end_of_file,
+                                      sizeof(end_of_file)))
+         goto path_fail;
+   }
+
+   /* We map this shared so that other processes see updates that we
+    * make. The cache size is updated with atomic additions, as elsewhere.
+    */
+   mapping = CreateFileMappingW(file, NULL, PAGE_READWRITE, 0, 0, NULL);
+   if (mapping == NULL)
+      goto path_fail;
+
+   cache->index_mmap = MapViewOfFile(mapping, FILE_MAP_READ | FILE_MAP_WRITE, 0, 0, size);
+   if (cache->index_mmap == NULL)
+      goto path_fail;
+   cache->index_mmap_size = size;
+
+   cache->size = (p_atomic_uint64_t *) cache->index_mmap;
+   cache->stored_keys = cache->index_mmap + sizeof(uint64_t);
+   mapped = true;
+
+path_fail:
+   if (mapping != NULL)
+      CloseHandle(mapping);
+   if (file != INVALID_HANDLE_VALUE)
+      CloseHandle(file);
+   free(wpath);
+
+   return mapped;
+}
+
+void
+disk_cache_destroy_mmap(struct disk_cache *cache)
+{
+   UnmapViewOfFile(cache->index_mmap);
+}
+
+#else
 
 void
 disk_cache_touch_cache_user_marker(char *path)
@@ -1220,6 +2080,8 @@ disk_cache_destroy_mmap(struct disk_cache *cache)
    munmap(cache->index_mmap, cache->index_mmap_size);
 }
 
+#endif
+
 void *
 disk_cache_db_load_item(struct disk_cache *cache, const cache_key key,
                         size_t *size)
@@ -1259,6 +2121,19 @@ disk_cache_db_load_cache_index(void *mem_ctx, struct disk_cache *cache)
 {
    return mesa_cache_db_multipart_open(&cache->cache_db, cache->path);
 }
+
+#if DETECT_OS_WINDOWS
+
+/* Deletes old multi-file caches, to avoid having two default caches taking up
+ * disk space. The database cache that would replace it has no Windows
+ * implementation, so the multi-file cache is the only one and stays.
+ */
+void
+disk_cache_delete_old_cache(void)
+{
+}
+
+#else
 
 static void
 delete_dir(const char* path)
