@@ -27,12 +27,6 @@
 #include "util/u_queue.h"
 #include "util/disk_cache.h"
 
-#if DETECT_OS_WINDOWS
-
-/* TODO: implement disk cache support on windows */
-
-#else
-
 #include "util/fossilize_db.h"
 #include "util/mesa_cache_db.h"
 #include "util/mesa_cache_db_multipart.h"
@@ -186,10 +180,16 @@ disk_cache_db_load_cache_index(void *mem_ctx, struct disk_cache *cache);
 void
 disk_cache_delete_old_cache(void);
 
-#ifdef __cplusplus
-}
+#if DETECT_OS_WINDOWS
+/* Whether a process running as the account with this SID gets a cache
+ * directory under %LOCALAPPDATA% when none is configured.
+ */
+bool
+disk_cache_account_has_default_dir(const void *sid);
 #endif
 
+#ifdef __cplusplus
+}
 #endif
 
 #endif /* DISK_CACHE_OS_H */
