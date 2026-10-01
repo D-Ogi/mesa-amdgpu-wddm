@@ -42,7 +42,11 @@
 
 struct Adapter
 {
+   /* Legacy loader-based screen (BC250_HOSTED_RENDER=0 only); NULL for the registered hosted UMD, whose
+    * rendering screens belong to each runtime device. */
    struct pipe_screen *screen;
+   /* The runtime adapter's LUID (bc250_adapter_identity trailer), handed to every hosted device. */
+   UINT64 luid;
 };
 
 
@@ -159,7 +163,8 @@ static inline void
 SetError(D3D10DDI_HDEVICE hDevice, HRESULT hr)
 {
    if (FAILED(hr)) {
-      DebugPrintf("BC250 SetError %08lx\n", hr);
+      // WASSTILLDRAWING is the ordinary answer to a polled query, not an error event.
+      BC250_REPORT(hr != DXGI_DDI_ERR_WASSTILLDRAWING, "BC250 SetError %08lx\n", hr);
       Device *pDevice = CastDevice(hDevice);
       pDevice->UMCallbacks.pfnSetErrorCb(pDevice->hRTCoreLayer, hr);
    }

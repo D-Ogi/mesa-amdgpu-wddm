@@ -39,7 +39,7 @@ zink_win32_create_screen(uint64_t adapter_luid);
 #endif
 
 struct bc250_host;
-struct pipe_screen *zink_win32_create_hosted_screen(uint64_t adapter_luid, const struct bc250_host *host);
+struct pipe_screen *zink_win32_create_hosted_screen(uint64_t adapter_luid, const struct bc250_host *host, const char *icd_path);
 
 struct pipe_context;
 struct pipe_resource;

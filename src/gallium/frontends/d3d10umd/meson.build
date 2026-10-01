@@ -9,6 +9,7 @@ libd3d10umd = static_library(
   'd3d10umd',
   files(
     'Adapter.cpp',
+    'Bc250Config.cpp',
     'Debug.cpp',
     'Device.cpp',
     'Draw.cpp',

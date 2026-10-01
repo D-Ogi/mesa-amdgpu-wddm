@@ -15,6 +15,8 @@ subdir('blake3')
 files_mesa_util = files(
   'anon_file.h',
   'anon_file.c',
+  'bc250_diag.c',
+  'bc250_diag.h',
   'bigmath.h',
   'bitscan.c',
   'bitscan.h',

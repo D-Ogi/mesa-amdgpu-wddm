@@ -120,8 +120,8 @@ HRESULT Bc250EnsureSurface(Device *device, Resource *resource)
       DebugPrintf("BC250 Allocate input runtime %p size %llu primary %u\n", resource->hRTResource, data.size, resource->primary);
       allocate.NumAllocations = 1; allocate.pAllocationInfo2 = &info;
       hr = device->KTCallbacks.pfnAllocateCb(device->hDevice, &allocate);
-      fprintf(stderr, "BC250 Allocate hr=%08lx inputRT=%p callbackRT=%p miscShared=%u format=%u primary=%u allocation=%x resource=%x\n", hr, resource->hRTResource, allocate.hResource, resource->shared, format, resource->primary, info.hAllocation, allocate.hKMResource);
-      fprintf(stderr, "BC250 ALLOCATE ABI size=%zu private=%zu privateSize=%zu hResource=%zu hKMResource=%zu NumAllocations=%zu info2=%zu\n", sizeof(D3DDDICB_ALLOCATE), offsetof(D3DDDICB_ALLOCATE,pPrivateDriverData), offsetof(D3DDDICB_ALLOCATE,PrivateDriverDataSize), offsetof(D3DDDICB_ALLOCATE,hResource), offsetof(D3DDDICB_ALLOCATE,hKMResource), offsetof(D3DDDICB_ALLOCATE,NumAllocations), offsetof(D3DDDICB_ALLOCATE,pAllocationInfo2));
+      BC250_REPORT(FAILED(hr), "BC250 Allocate hr=%08lx inputRT=%p callbackRT=%p miscShared=%u format=%u primary=%u allocation=%x resource=%x\n", hr, resource->hRTResource, allocate.hResource, resource->shared, format, resource->primary, info.hAllocation, allocate.hKMResource);
+      BC250_DIAG("BC250 ALLOCATE ABI size=%zu private=%zu privateSize=%zu hResource=%zu hKMResource=%zu NumAllocations=%zu info2=%zu\n", sizeof(D3DDDICB_ALLOCATE), offsetof(D3DDDICB_ALLOCATE,pPrivateDriverData), offsetof(D3DDDICB_ALLOCATE,PrivateDriverDataSize), offsetof(D3DDDICB_ALLOCATE,hResource), offsetof(D3DDDICB_ALLOCATE,hKMResource), offsetof(D3DDDICB_ALLOCATE,NumAllocations), offsetof(D3DDDICB_ALLOCATE,pAllocationInfo2));
       if (FAILED(hr)) return hr;
       resource->allocation = info.hAllocation;
       resource->surfacePitch = pitch;
@@ -133,7 +133,7 @@ HRESULT Bc250EnsureSurface(Device *device, Resource *resource)
          OBJECT_ATTRIBUTES attrs = {}; attrs.Length = sizeof(attrs);
          HANDLE nt = NULL;
          NTSTATUS status = share(1, &allocate.hKMResource, &attrs, SHARED_ALLOCATION_ALL_ACCESS, &nt);
-         fprintf(stderr, "BC250 runtime ShareObjects status=%08lx nt=%u\n", status, nt != NULL);
+         BC250_DIAG("BC250 runtime ShareObjects status=%08lx nt=%u\n", status, nt != NULL);
          if (nt) CloseHandle(nt);
          return S_OK;
       }
@@ -160,7 +160,7 @@ HRESULT Bc250EnsureSurface(Device *device, Resource *resource)
    ULONGLONG deadline = GetTickCount64() + 5000;
    while (device->pagingFence && *device->pagingFence < fence && GetTickCount64() < deadline) Sleep(1);
    if (!device->pagingFence || *device->pagingFence < fence) return HRESULT_FROM_WIN32(WAIT_TIMEOUT);
-   fprintf(stderr,"BC250 surface hosted=%u allocation=%x pitch=%u bytes=%llu\n",device->hosted_state!=NULL,resource->allocation,data.pitch,resource->gpuBytes);
+   BC250_DIAG("BC250 surface hosted=%u allocation=%x pitch=%u bytes=%llu\n",device->hosted_state!=NULL,resource->allocation,data.pitch,resource->gpuBytes);
    if (device->hosted_state) {
       struct winsys_handle handle={};
       handle.type=WINSYS_HANDLE_TYPE_FD;
@@ -266,9 +266,9 @@ _Present(DXGI_DDI_ARG_PRESENT *pPresentData)
    hr = device->pDXGIBaseCallbacks->pfnPresentCb(device->hDevice, &present);
    if (device->hosted_state && SUCCEEDED(hr)) hr=Bc250SignalPresent(device);
    QueryPerformanceCounter(&presentEnd);QueryPerformanceFrequency(&frequency);
-   static const bool auditPresent = GetEnvironmentVariableA("BC250_HOST_AUDIT", NULL, 0) != 0;
+   static const bool auditPresent = bc250_diag_enabled && GetEnvironmentVariableA("BC250_HOST_AUDIT", NULL, 0) != 0;
    if (auditPresent && device->hosted_state) {
-      fprintf(stderr, "BC250 audit present event=complete pid=%lu device=%p present=%u time_ns=%llu context=%p src=%p src_allocation=%x dst=%p dst_allocation=%x width=%u height=%u format=%u primary=%u flags=%x hr=%08lx\n",
+      BC250_DIAG("BC250 audit present event=complete pid=%lu device=%p present=%u time_ns=%llu context=%p src=%p src_allocation=%x dst=%p dst_allocation=%x width=%u height=%u format=%u primary=%u flags=%x hr=%08lx\n",
               GetCurrentProcessId(), device->hDevice, device->profilePresents+1,
               (unsigned long long)os_time_get_nano(), device->hContext,
               (void *)pSrcResource->resource, present.hSrcAllocation,
@@ -279,7 +279,7 @@ _Present(DXGI_DDI_ARG_PRESENT *pPresentData)
    }
 
    if(++device->profilePresents<=120 || device->profilePresents%60==0)
-      DebugPrintf("BC250 Perf frame %u gap_ms %.3f draws %llu draw_ms %.3f max_draw_ms %.3f present_ms %.3f render_wait_ms %.3f\n",
+      BC250_DIAG("BC250 Perf frame %u gap_ms %.3f draws %llu draw_ms %.3f max_draw_ms %.3f present_ms %.3f render_wait_ms %.3f\n",
        device->profilePresents,
        device->profileLastPresent?1000.0*(presentEnd.QuadPart-device->profileLastPresent)/frequency.QuadPart:0.0,
        device->profileDrawCalls,1000.0*device->profileDrawTicks/frequency.QuadPart,

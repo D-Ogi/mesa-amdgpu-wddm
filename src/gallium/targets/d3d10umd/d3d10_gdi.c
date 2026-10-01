@@ -27,15 +27,18 @@
  **************************************************************************/
 
 
-/* BC250 experimental native D3D -> Zink path. Not a system UMD yet.
+/* BC250 native D3D -> Zink path, registered as the hosted (DWM) UMD.
  * A nonzero adapter LUID is mandatory to prevent accidental GPU selection.
- * The bounded test supplies it from DXGI enumeration of the BC250 adapter.
+ * The hosted screen takes it from the runtime adapter; only the legacy
+ * loader-based screen (BC250_HOSTED_RENDER=0) and the enumeration bootstrap
+ * still read BC250_D3D_ZINK_LUID from the trial environment.
  */
 #include <stdint.h>
 #include <stdio.h>
 #include <vulkan/vulkan_core.h>
 #include "util/u_dl.h"
 #include "util/os_misc.h"
+#include "util/bc250_diag.h"
 #include "util/bc250_host_bootstrap.h"
 #include <stdlib.h>
 #include <errno.h>
@@ -75,7 +78,7 @@ bc250_hosted_content(PFN_vkGetInstanceProcAddr gipa, VkInstance instance, VkPhys
    VkDeviceCreateInfo ci={.sType=VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO,.queueCreateInfoCount=1,.pQueueCreateInfos=&qi};
    VkDevice device=VK_NULL_HANDLE;
    VkResult result=create(physical,&ci,NULL,&device);
-   fprintf(stderr,"BC250 hosted device result=%d\n",result);
+   BC250_DIAG("BC250 hosted device result=%d\n",result);
    if(result!=VK_SUCCESS) return false;
 #define LOAD(name) PFN_vk##name name=(PFN_vk##name)gdpa(device,"vk" #name)
    LOAD(DestroyDevice); LOAD(GetDeviceQueue); LOAD(CreateBuffer); LOAD(DestroyBuffer);
@@ -91,7 +94,7 @@ bc250_hosted_content(PFN_vkGetInstanceProcAddr gipa, VkInstance instance, VkPhys
    VkFence fence=VK_NULL_HANDLE;
    bool ok=false;
    VkBufferCreateInfo bi={.sType=VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,.size=16384,.usage=VK_BUFFER_USAGE_TRANSFER_DST_BIT};
-#define CHECK(call) do { result=(call); if(result!=VK_SUCCESS) { fprintf(stderr,"BC250 hosted %s result=%d\n",#call,result); goto done; } } while(0)
+#define CHECK(call) do { result=(call); if(result!=VK_SUCCESS) { BC250_DIAG("BC250 hosted %s result=%d\n",#call,result); goto done; } } while(0)
    CHECK(CreateBuffer(device,&bi,NULL,&buffer));
    VkMemoryRequirements req;
    GetBufferMemoryRequirements(device,buffer,&req);
@@ -130,7 +133,7 @@ bc250_hosted_content(PFN_vkGetInstanceProcAddr gipa, VkInstance instance, VkPhys
    if(result==VK_SUCCESS) for(unsigned i=0;i<4096;i++) mismatches+=mapped[i]!=0x39c57a16;
    UnmapMemory(device,memory);
    ok=result==VK_SUCCESS && mismatches==0;
-   fprintf(stderr,"BC250 hosted content words=4096 mismatches=%u result=%d pass=%d\n",mismatches,result,ok);
+   BC250_DIAG("BC250 hosted content words=4096 mismatches=%u result=%d pass=%d\n",mismatches,result,ok);
 done:
    if(fence) DestroyFence(device,fence,NULL);
    if(pool) DestroyCommandPool(device,pool,NULL);
@@ -162,14 +165,14 @@ d3d10_hosted_bootstrap(struct bc250_host *host)
       .pNext = host, .pApplicationInfo = &app };
    VkInstance instance = VK_NULL_HANDLE;
    VkResult result = create(&ci, NULL, &instance);
-   fprintf(stderr, "BC250 hosted instance result=%d runtime=%p\n", result, host->identity);
+   BC250_DIAG("BC250 hosted instance result=%d runtime=%p\n", result, host->identity);
    bool ok = false;
    if (result == VK_SUCCESS) {
       PFN_vkEnumeratePhysicalDevices enumerate = (PFN_vkEnumeratePhysicalDevices)gipa(instance, "vkEnumeratePhysicalDevices");
       PFN_vkDestroyInstance destroy = (PFN_vkDestroyInstance)gipa(instance, "vkDestroyInstance");
       uint32_t count = 0;
       result = enumerate(instance, &count, NULL);
-      fprintf(stderr, "BC250 hosted enumerate result=%d devices=%u\n", result, count);
+      BC250_DIAG("BC250 hosted enumerate result=%d devices=%u\n", result, count);
       ok = result == VK_SUCCESS && count == 1;
       if (ok) {
          VkPhysicalDevice physical;
@@ -183,15 +186,21 @@ d3d10_hosted_bootstrap(struct bc250_host *host)
    return ok;
 }
 
+/* The registered UMD's rendering screen. The frontend resolves both inputs without the process environment
+ * (frontends/d3d10umd/Bc250Config.cpp): host->adapter_luid from the runtime adapter's identity trailer and
+ * icd_path from the registry or this DLL's directory. */
 struct pipe_screen *
-d3d10_create_hosted_screen(struct bc250_host *host)
+d3d10_create_hosted_screen(struct bc250_host *host, const char *icd_path)
 {
-   const char *luid=os_get_option("BC250_D3D_ZINK_LUID");
-   if (!luid) return NULL;
-   host->adapter_luid=strtoull(luid,NULL,16);
-   const char *path=os_get_option("BC250_HOSTED_ICD");
-   if (!host->adapter_luid || !path || !*path) return NULL;
-   return zink_win32_create_hosted_screen(host->adapter_luid,host);
+   if (!host || !host->adapter_luid || !icd_path || !*icd_path) {
+      BC250_ERROR("BC250 hosted screen: adapter LUID and ICD path are required\n");
+      return NULL;
+   }
+   struct pipe_screen *screen = zink_win32_create_hosted_screen(host->adapter_luid, host, icd_path);
+   if (!screen)
+      BC250_ERROR("BC250 hosted screen: zink screen creation failed luid=%016llx\n",
+                  (unsigned long long)host->adapter_luid);
+   return screen;
 }
 
 int

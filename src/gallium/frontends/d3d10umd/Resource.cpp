@@ -52,26 +52,26 @@ public:
    Bc250DdiMapAudit(const char *origin, struct pipe_context *pipe,
                    struct pipe_resource *resource, unsigned level,
                    unsigned usage, const struct pipe_box &box) {
-      static const bool active = debug_get_bool_option("BC250_HOST_AUDIT", false);
+      static const bool active = bc250_diag_enabled && debug_get_bool_option("BC250_HOST_AUDIT", false);
       enabled = active;
       id = 0;
       if (!enabled)
          return;
       alignas(8) static LONG64 sequence = 0;
       id = (unsigned long long)InterlockedIncrement64(&sequence);
-      fprintf(stderr, "BC250 audit ddi event=begin id=%llu tid=%lu time_ns=%llu origin=%s ctx=%p resource=%p level=%u usage=%x x=%d y=%d z=%d box_width=%d box_height=%d box_depth=%d\n",
+      BC250_DIAG("BC250 audit ddi event=begin id=%llu tid=%lu time_ns=%llu origin=%s ctx=%p resource=%p level=%u usage=%x x=%d y=%d z=%d box_width=%d box_height=%d box_depth=%d\n",
               id, GetCurrentThreadId(), (unsigned long long)os_time_get_nano(),
               origin, (void *)pipe, (void *)resource, level, usage,
               box.x, box.y, box.z, box.width, box.height, box.depth);
    }
    void Copied() {
       if (enabled)
-         fprintf(stderr, "BC250 audit ddi event=copy_complete id=%llu tid=%lu time_ns=%llu\n",
+         BC250_DIAG("BC250 audit ddi event=copy_complete id=%llu tid=%lu time_ns=%llu\n",
                  id, GetCurrentThreadId(), (unsigned long long)os_time_get_nano());
    }
    ~Bc250DdiMapAudit() {
       if (enabled)
-         fprintf(stderr, "BC250 audit ddi event=end id=%llu tid=%lu time_ns=%llu\n",
+         BC250_DIAG("BC250 audit ddi event=end id=%llu tid=%lu time_ns=%llu\n",
                  id, GetCurrentThreadId(), (unsigned long long)os_time_get_nano());
    }
 };
@@ -382,7 +382,7 @@ CreateResource(D3D10DDI_HDEVICE hDevice,                                // IN
       if (!memory) { SetError(hDevice, E_OUTOFMEMORY); return; }
       pResource->resource = screen->resource_from_memobj(screen, &templat, memory, 0);
       screen->memobj_destroy(screen, memory);
-      fprintf(stderr, "BC250 native shared probe import %s\n", pResource->resource ? "ok" : "failed");
+      BC250_DIAG("BC250 native shared probe import %s\n", pResource->resource ? "ok" : "failed");
    } else {
       pResource->resource = screen->resource_create(screen, &templat);
    }
@@ -397,7 +397,7 @@ CreateResource(D3D10DDI_HDEVICE hDevice,                                // IN
                                                           sizeof *pResource->transfers);
 
    if (GetEnvironmentVariableA("BC250_D3D_RUNTIME_INVENTORY", NULL, 0))
-      fprintf(stderr, "BC250 runtime resource misc=%x bind=%x primary=%u\n",
+      BC250_DIAG("BC250 runtime resource misc=%x bind=%x primary=%u\n",
               pCreateResource->MiscFlags, pCreateResource->BindFlags, pResource->primary);
    if (GetEnvironmentVariableA("BC250_D3D_RUNTIME_INVENTORY", NULL, 0) ||
        pResource->primary || (pCreateResource->BindFlags & D3D10_DDI_BIND_PRESENT) ||
@@ -622,7 +622,7 @@ DestroyResource(D3D10DDI_HDEVICE hDevice,       // IN
          free.NumAllocations = 1; free.HandleList = &pResource->allocation;
       }
       HRESULT hr = device->KTCallbacks.pfnDeallocate2Cb(device->hDevice, &free);
-      fprintf(stderr, "BC250 Deallocate %08lx flags=%u\n", hr, free.Flags.Value);
+      BC250_REPORT(FAILED(hr), "BC250 Deallocate %08lx flags=%u\n", hr, free.Flags.Value);
       if (FAILED(hr)) {
          Bc250StopHostedSubmission(device);
          SetError(hDevice,hr);

@@ -36,6 +36,7 @@
 #include "State.h"
 
 #include "Debug.h"
+#include "Bc250Config.h"
 
 #include "util/u_memory.h"
 
@@ -72,17 +73,31 @@ OpenAdapterCommon(__inout D3D10DDIARG_OPENADAPTER *pOpenData)   // IN
 #endif
    ++numAdapters;
 
+   const struct Bc250Config *config = Bc250GetConfig();
    Adapter *pAdaptor = (Adapter *)calloc(sizeof *pAdaptor, 1);
    if (!pAdaptor) {
       --numAdapters;
       return E_OUTOFMEMORY;
    }
 
-   pAdaptor->screen = d3d10_create_screen();
-   if (!pAdaptor->screen) {
-      free(pAdaptor);
-      --numAdapters;
-      return E_OUTOFMEMORY;
+   if (config->hosted_render) {
+      /* Registered UMD: no Vulkan device at adapter level. Refuse here, where a
+       * router can still fall back to another UMD, rather than at the first
+       * device. */
+      HRESULT hr = FAILED(config->icd_status) ? config->icd_status :
+                   Bc250QueryAdapterLuid(pOpenData, &pAdaptor->luid);
+      if (FAILED(hr)) {
+         free(pAdaptor);
+         --numAdapters;
+         return hr;
+      }
+   } else {
+      pAdaptor->screen = d3d10_create_screen();
+      if (!pAdaptor->screen) {
+         free(pAdaptor);
+         --numAdapters;
+         return E_OUTOFMEMORY;
+      }
    }
 
    pOpenData->hAdapter.pDrvPrivate = pAdaptor;
@@ -260,7 +275,8 @@ CloseAdapter(D3D10DDI_HADAPTER hAdapter)  // IN
 
    Adapter *pAdapter = CastAdapter(hAdapter);
    struct pipe_screen *screen = pAdapter->screen;
-   screen->destroy(screen);
+   if (screen)
+      screen->destroy(screen);
    free(pAdapter);
 
    --numAdapters;

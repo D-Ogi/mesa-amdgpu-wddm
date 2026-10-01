@@ -9,10 +9,14 @@
 
 #include <windows.h>
 #include "util/u_debug.h"
+#include "util/bc250_diag.h"
 
 #ifdef __cplusplus
 extern "C" {
 #endif
+
+/* BC250_UMD_VERBOSE=1 with diagnostics on (Bc250Config.cpp); cheap after the first call. */
+int Bc250UmdVerbose(void);
 
 
 #define ST_DEBUG_OLD_TEX_OPS   (1 <<  0)
@@ -61,7 +65,7 @@ AssertFail(const char *expr, const char *file, unsigned line, const char *functi
 
 
 #if 1
-#define LOG_ENTRYPOINT() DebugPrintf("%s\n", __func__)
+#define LOG_ENTRYPOINT() do { if (Bc250UmdVerbose()) DebugPrintf("%s\n", __func__); } while (0)
 #else
 #define LOG_ENTRYPOINT() (void)0
 #endif

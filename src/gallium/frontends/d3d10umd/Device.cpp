@@ -43,14 +43,16 @@
 #include "Format.h"
 
 #include "Debug.h"
+#include "Bc250Config.h"
 
+#include "util/bc250_diag.h"
 #include "util/bc250_host_bootstrap.h"
 #include "util/u_sampler.h"
 #include "util/u_framebuffer.h"
 
 
 extern "C" struct pipe_screen *d3d10_create_screen(void);
-extern "C" struct pipe_screen *d3d10_create_hosted_screen(struct bc250_host *host);
+extern "C" struct pipe_screen *d3d10_create_hosted_screen(struct bc250_host *host, const char *icd_path);
 
 
 #include <d3dkmthk.h>
@@ -71,16 +73,16 @@ static LONG Bc250TraceCount;
 struct Bc250DdiTrace {
    LONG sequence;
    explicit Bc250DdiTrace(const char *name, bool selected) : sequence(0) {
-      if (selected && GetEnvironmentVariableA("BC250_HOST_TRACE_DDI",NULL,0)) {
+      if (selected && bc250_diag_enabled && GetEnvironmentVariableA("BC250_HOST_TRACE_DDI",NULL,0)) {
          LONG n=InterlockedIncrement(&Bc250TraceCount);
          if (n<=2048) {
             sequence=n;
-            fprintf(stderr,"BC250 DDI begin seq=%ld tid=%lu name=%s\n",sequence,GetCurrentThreadId(),name);
+            BC250_DIAG("BC250 DDI begin seq=%ld tid=%lu name=%s\n",sequence,GetCurrentThreadId(),name);
          }
       }
    }
    ~Bc250DdiTrace() {
-      if (sequence) fprintf(stderr,"BC250 DDI end seq=%ld tid=%lu\n",sequence,GetCurrentThreadId());
+      if (sequence) BC250_DIAG("BC250 DDI end seq=%ld tid=%lu\n",sequence,GetCurrentThreadId());
    }
 };
 template <auto F> struct Bc250Entry;
@@ -113,7 +115,7 @@ static HRESULT Bc250HostLost(Bc250HostProbeState *s)
    if (!s->device_lost) {
       s->device_lost=true;
       s->submission_failed=true;
-      fprintf(stderr,"BC250 hosted device lost: SetErrorCb\n");
+      BC250_ERROR("BC250 hosted device lost: SetErrorCb\n");
       s->device->UMCallbacks.pfnSetErrorCb(s->device->hRTCoreLayer,D3DDDIERR_DEVICEREMOVED);
    }
    return D3DDDIERR_DEVICEREMOVED;
@@ -133,7 +135,7 @@ static HRESULT Bc250HostStatus(Bc250HostProbeState *s)
       if (!p.cpu_address) continue;
       UINT64 observed=*(const volatile UINT64 *)p.cpu_address;
       if (s->test_loss==2 && s->calls[BC250_HOST_SubmitCommand]>=3) {
-         fprintf(stderr,"BC250 injected fence observation UINT64_MAX; mapped memory unchanged\n");
+         BC250_ERROR("BC250 injected fence observation UINT64_MAX; mapped memory unchanged\n");
          observed=UINT64_MAX;
       }
       if (observed==UINT64_MAX) return Bc250HostLost(s);
@@ -308,7 +310,7 @@ static HRESULT Bc250HostOperation(Bc250HostProbeState *s, uint32_t op, void *arg
       HRESULT health=Bc250HostStatus(s);
       if (FAILED(health)) return health;
       if (s->test_loss==1 && s->calls[BC250_HOST_SubmitCommand]>=2) {
-         fprintf(stderr,"BC250 injected SubmitCommand D3DDDIERR_DEVICEREMOVED; no submission\n");
+         BC250_ERROR("BC250 injected SubmitCommand D3DDDIERR_DEVICEREMOVED; no submission\n");
          return D3DDDIERR_DEVICEREMOVED;
       }
       auto *a=(D3DKMT_SUBMITCOMMAND *)argument;
@@ -325,7 +327,7 @@ static HRESULT Bc250HostOperation(Bc250HostProbeState *s, uint32_t op, void *arg
             wait.hContext=b.BroadcastContext[i]; wait.ObjectCount=1;
             wait.ObjectHandleArray=&s->present_sync; wait.MonitoredFenceValueArray=&s->present_value;
             HRESULT hr=HOST_CALL(WaitForSynchronizationObjectFromGpu, &wait);
-            if (s->present_value<=3 || FAILED(hr)) fprintf(stderr,"BC250 render waits Present value=%llu hr=%08lx\n",(unsigned long long)s->present_value,hr);
+            if (s->present_value<=3 || FAILED(hr)) BC250_REPORT(FAILED(hr),"BC250 render waits Present value=%llu hr=%08lx\n",(unsigned long long)s->present_value,hr);
             if (FAILED(hr)) return hr;
             s->present_waited[token-1]=s->present_value;
          }
@@ -343,10 +345,10 @@ static int32_t Bc250HostDispatch(void *userdata, uint32_t operation, void *argum
 {
    auto *s=(Bc250HostProbeState *)userdata;
    if (Bc250RuntimeDevice!=s->device) {
-      fprintf(stderr,"BC250 hosted wrong-thread op=%u\n",operation);
+      BC250_ERROR("BC250 hosted wrong-thread op=%u\n",operation);
       return (int32_t)0xc000000d;
    }
-   if (operation<64 && s->calls[operation]<2 && GetEnvironmentVariableA("BC250_HOST_TRACE_DDI",NULL,0)) fprintf(stderr,"BC250 callback begin op=%u tid=%lu\n",operation,GetCurrentThreadId());
+   if (operation<64 && s->calls[operation]<2 && bc250_diag_enabled && GetEnvironmentVariableA("BC250_HOST_TRACE_DDI",NULL,0)) BC250_DIAG("BC250 callback begin op=%u tid=%lu\n",operation,GetCurrentThreadId());
    HRESULT hr=Bc250HostOperation(s,operation,argument);
    if (Bc250DeviceLostResult(hr)) {
       Bc250HostLost(s);
@@ -355,7 +357,7 @@ static int32_t Bc250HostDispatch(void *userdata, uint32_t operation, void *argum
    if (FAILED(hr) && (operation==BC250_HOST_SubmitCommand || operation==BC250_HOST_SignalSynchronizationObjectFromGpu2 || operation==BC250_HOST_PUBLISH_PROGRESS))
       s->submission_failed=true;
    unsigned count=operation<64 ? ++s->calls[operation] : 0;
-   if (count<=2 || (FAILED(hr) && hr!=E_PENDING)) fprintf(stderr,"BC250 hosted op=%u count=%u hr=%08lx\n",operation,count,hr);
+   if (count<=2 || (FAILED(hr) && hr!=E_PENDING)) BC250_REPORT(FAILED(hr) && hr!=E_PENDING,"BC250 hosted op=%u count=%u hr=%08lx\n",operation,count,hr);
    if (hr==E_PENDING && (operation==BC250_HOST_MapGpuVirtualAddress || operation==BC250_HOST_MakeResident)) return 0x103;
    return SUCCEEDED(hr) ? 0 : hr==E_NOTIMPL ? (int32_t)0xc00000bb :
           hr==E_OUTOFMEMORY ? (int32_t)0xc0000017 :
@@ -364,13 +366,13 @@ static int32_t Bc250HostDispatch(void *userdata, uint32_t operation, void *argum
 
 void Bc250AuditPresent(Device *device)
 {
-   static const bool enabled = GetEnvironmentVariableA("BC250_HOST_AUDIT", NULL, 0) != 0;
+   static const bool enabled = bc250_diag_enabled && GetEnvironmentVariableA("BC250_HOST_AUDIT", NULL, 0) != 0;
    auto *s = (Bc250HostProbeState *)device->hosted_state;
    if (!enabled || !s || (device->profilePresents > 8 && device->profilePresents % 60)) return;
    for (const auto &p : s->progress) {
       if (!p.cpu_address) continue;
       UINT64 completed = *(const volatile UINT64 *)p.cpu_address;
-      fprintf(stderr, "BC250 audit progress pid=%lu device=%p tick=%llu present=%u context=%u sync=%x submitted=%llu completed=%llu submits=%u\n",
+      BC250_DIAG("BC250 audit progress pid=%lu device=%p tick=%llu present=%u context=%u sync=%x submitted=%llu completed=%llu submits=%u\n",
               GetCurrentProcessId(), device->hDevice, (unsigned long long)GetTickCount64(),
               device->profilePresents, p.context, p.sync, (unsigned long long)p.value,
               (unsigned long long)completed, s->calls[BC250_HOST_SubmitCommand]);
@@ -406,17 +408,17 @@ HRESULT Bc250QueuePresentWait(Device *device)
    wait.hContext=device->hContext; wait.ObjectCount=count;
    wait.ObjectHandleArray=objects; wait.MonitoredFenceValueArray=values;
    HRESULT hr=count ? device->KTCallbacks.pfnWaitForSynchronizationObjectFromGpuCb(device->hDevice,&wait) : S_OK;
-   static const bool auditWait = GetEnvironmentVariableA("BC250_HOST_AUDIT", NULL, 0) != 0;
+   static const bool auditWait = bc250_diag_enabled && GetEnvironmentVariableA("BC250_HOST_AUDIT", NULL, 0) != 0;
    if (auditWait) {
-      fprintf(stderr, "BC250 audit present event=wait device=%p present=%u context=%p count=%u hr=%08lx\n",
+      BC250_DIAG("BC250 audit present event=wait device=%p present=%u context=%p count=%u hr=%08lx\n",
               device->hDevice, device->profilePresents+1, device->hContext, count, hr);
       for (UINT i=0;i<count;++i)
-         fprintf(stderr, "BC250 audit present event=wait_fence device=%p present=%u index=%u sync=%x value=%llu\n",
+         BC250_DIAG("BC250 audit present event=wait_fence device=%p present=%u index=%u sync=%x value=%llu\n",
                  device->hDevice, device->profilePresents+1, i, objects[i], (unsigned long long)values[i]);
    }
    if (device->profilePresents<3 || FAILED(hr)) {
-      fprintf(stderr,"BC250 Present GPU wait count=%u hr=%08lx cpu_render_wait=0\n",count,hr);
-      for (UINT i=0;i<count;++i) fprintf(stderr,"BC250 Present fence=%x value=%llu\n",objects[i],(unsigned long long)values[i]);
+      BC250_REPORT(FAILED(hr),"BC250 Present GPU wait count=%u hr=%08lx cpu_render_wait=0\n",count,hr);
+      for (UINT i=0;i<count;++i) BC250_REPORT(FAILED(hr),"BC250 Present fence=%x value=%llu\n",objects[i],(unsigned long long)values[i]);
    }
    return hr;
 }
@@ -434,12 +436,12 @@ HRESULT Bc250SignalPresent(Device *device)
    HRESULT hr=device->KTCallbacks.pfnSignalSynchronizationObjectFromGpu2Cb(device->hDevice,&signal);
    if (SUCCEEDED(hr)) s->present_value=value;
    else s->submission_failed=true;
-   static const bool auditSignal = GetEnvironmentVariableA("BC250_HOST_AUDIT", NULL, 0) != 0;
+   static const bool auditSignal = bc250_diag_enabled && GetEnvironmentVariableA("BC250_HOST_AUDIT", NULL, 0) != 0;
    if (auditSignal)
-      fprintf(stderr, "BC250 audit present event=signal device=%p present=%u context=%p sync=%x value=%llu hr=%08lx\n",
+      BC250_DIAG("BC250 audit present event=signal device=%p present=%u context=%p sync=%x value=%llu hr=%08lx\n",
               device->hDevice, device->profilePresents+1, device->hContext,
               s->present_sync, (unsigned long long)value, hr);
-   if (value<=3 || FAILED(hr)) fprintf(stderr,"BC250 Present signals value=%llu hr=%08lx\n",(unsigned long long)value,hr);
+   if (value<=3 || FAILED(hr)) BC250_REPORT(FAILED(hr),"BC250 Present signals value=%llu hr=%08lx\n",(unsigned long long)value,hr);
    return hr;
 }
 
@@ -559,19 +561,19 @@ struct Bc250CreateGuard {
          D3DDDICB_DESTROYCONTEXT destroy = {};
          destroy.hContext = device->hContext;
          HRESULT hr = device->KTCallbacks.pfnDestroyContextCb(device->hDevice, &destroy);
-         fprintf(stderr, "BC250 create cleanup context hr=%08lx\n", hr);
+         BC250_DIAG("BC250 create cleanup context hr=%08lx\n", hr);
          device->hContext = 0;
       }
       if (device->pagingQueue) {
          D3DDDI_DESTROYPAGINGQUEUE destroy = {};
          destroy.hPagingQueue = device->pagingQueue;
          HRESULT hr = device->KTCallbacks.pfnDestroyPagingQueueCb(device->hDevice, &destroy);
-         fprintf(stderr, "BC250 create cleanup paging hr=%08lx\n", hr);
+         BC250_DIAG("BC250 create cleanup paging hr=%08lx\n", hr);
          device->pagingQueue = 0;
       }
       delete (Bc250HostProbeState *)device->hosted_state;
       device->hosted_state = NULL;
-      fprintf(stderr, "BC250 create cleanup finished\n");
+      BC250_DIAG("BC250 create cleanup finished\n");
    }
 };
 
@@ -579,13 +581,13 @@ static bool
 Bc250FailCreate(const char *stage)
 {
    char requested[32] = {};
-   if (!GetEnvironmentVariableA("BC250_D3D_RUNTIME_PROBE", NULL, 0) ||
-       !GetEnvironmentVariableA("BC250_HOSTED_RENDER", NULL, 0))
+   const struct Bc250Config *config = Bc250GetConfig();
+   if (!config->runtime_probe || !config->hosted_render)
       return false;
    DWORD length = GetEnvironmentVariableA("BC250_HOST_TEST_CREATE", requested, sizeof(requested));
    if (!length || length >= sizeof(requested) || strcmp(requested, stage))
       return false;
-   fprintf(stderr, "BC250 injected create failure stage=%s\n", stage);
+   BC250_ERROR("BC250 injected create failure stage=%s\n", stage);
    return true;
 }
 
@@ -632,20 +634,20 @@ CreateDevice(D3D10DDI_HADAPTER hAdapter,                 // IN
    pDevice->UMCallbacks = *pCreateData->pUMCallbacks;
    pDevice->pDXGIBaseCallbacks = pCreateData->DXGIBaseDDI.pDXGIBaseCallbacks;
    Bc250CreateGuard createGuard(pDevice);
+   const struct Bc250Config *config = Bc250GetConfig();
 
-   // This Zink-only diagnostic DLL is loaded through D3D_DRIVER_TYPE_SOFTWARE.
-   // That runtime cannot service native WDDM presentation callbacks. RADV owns
-   // its rendering context; native primary sharing/presentation is a separate
-   // prerequisite before this DLL may replace the system DWM UMD.
-   if (GetEnvironmentVariableA("BC250_D3D_RUNTIME_PROBE", NULL, 0)) {
+   // Registered UMD: hosted rendering through this runtime device's callbacks
+   // and the runtime virtual context are the defaults (Bc250Config.h); the
+   // trial environment can still turn either off.
+   if (config->runtime_probe) {
    // E26: DWM requests runtime synchronization while creating its primary,
    // before the first Present. Register a virtual context at device creation
    // so the runtime has a context for its broadcast synchronization callbacks.
-   fprintf(stderr,"BC250 D3D device stage 0\n"); fflush(stderr);
+   BC250_DIAG("BC250 D3D device stage 0\n"); BC250_DIAG_FLUSH();
    if (!pCreateData->pKTCallbacks->pfnCreateContextVirtualCb) return E_NOTIMPL;
    D3DDDICB_CREATECONTEXTVIRTUAL context = {};
    context.EngineAffinity = 1;
-   fprintf(stderr,"BC250 D3D device stage 1\n"); fflush(stderr);
+   BC250_DIAG("BC250 D3D device stage 1\n"); BC250_DIAG_FLUSH();
    HRESULT contextResult = pCreateData->pKTCallbacks->pfnCreateContextVirtualCb(
        (HANDLE)pCreateData->hRTDevice.handle, &context);
    DebugPrintf("BC250 initial CreateContextVirtual %08lx\n", contextResult);
@@ -655,11 +657,11 @@ CreateDevice(D3D10DDI_HADAPTER hAdapter,                 // IN
 
    }
 
-   fprintf(stderr,"BC250 D3D device stage 2\n"); fflush(stderr);
-   // Adapter screen remains capability-only for this prototype. Rendering
-   // screens belong to one runtime device so future hosted callbacks cannot
-   // accidentally be inherited from a different D3D device.
-   const bool hostedRender=GetEnvironmentVariableA("BC250_HOSTED_RENDER", NULL, 0)!=0;
+   BC250_DIAG("BC250 D3D device stage 2\n"); BC250_DIAG_FLUSH();
+   // Rendering screens belong to one runtime device so hosted callbacks cannot
+   // be inherited from a different D3D device. The adapter only carries the
+   // LUID the ICD must match (OpenAdapterCommon).
+   const bool hostedRender=config->hosted_render;
    if (!hostedRender && GetEnvironmentVariableA("BC250_HOSTED_ICD", NULL, 0)) {
       Bc250HostProbeState state = {pDevice, GetCurrentThreadId()};
       bc250_host host = {};
@@ -675,23 +677,25 @@ CreateDevice(D3D10DDI_HADAPTER hAdapter,                 // IN
       state->device=pDevice;
       state->thread=GetCurrentThreadId();
       char testLoss[16]={};
-      if (GetEnvironmentVariableA("BC250_D3D_RUNTIME_PROBE",NULL,0) &&
+      if (config->runtime_probe &&
           GetEnvironmentVariableA("BC250_HOST_TEST_LOSS",testLoss,sizeof(testLoss)))
          state->test_loss=!strcmp(testLoss,"submit") ? 1 : !strcmp(testLoss,"fence") ? 2 : 0;
       pDevice->hosted_state=state;
       bc250_host host={};
       host.sType=BC250_HOST_STYPE; host.version=BC250_HOST_VERSION;
       host.size=sizeof(host); host.identity=pDevice->hDevice;
+      host.adapter_luid=CastAdapter(hAdapter)->luid;
       host.userdata=state; host.dispatch=Bc250HostDispatch;
-      pDevice->owned_screen=d3d10_create_hosted_screen(&host);
+      if (FAILED(config->icd_status) || !host.adapter_luid) return E_FAIL;
+      pDevice->owned_screen=d3d10_create_hosted_screen(&host, config->icd_path);
    } else {
       pDevice->owned_screen = d3d10_create_screen();
    }
    if (!pDevice->owned_screen || Bc250FailCreate("screen")) return E_OUTOFMEMORY;
    struct pipe_screen *screen = pDevice->owned_screen;
-   fprintf(stderr, "BC250 device screen=%p runtime=%p\n", screen, pDevice->hDevice);
-   DebugPrintf("BC250 Renderer: %s\n", screen->get_name(screen));
-   fprintf(stderr,"BC250 D3D device stage 3\n"); fflush(stderr);
+   BC250_DIAG("BC250 device screen=%p runtime=%p\n", screen, pDevice->hDevice);
+   BC250_DIAG("BC250 Renderer: %s\n", screen->get_name(screen));
+   BC250_DIAG("BC250 D3D device stage 3\n"); BC250_DIAG_FLUSH();
    struct pipe_context *pipe = screen->context_create(screen, NULL, 0);
    if (!pipe) return E_OUTOFMEMORY;
    pDevice->pipe = pipe;
@@ -722,26 +726,26 @@ CreateDevice(D3D10DDI_HADAPTER hAdapter,                 // IN
        pipe, PIPE_BIND_VERTEX_BUFFER, PIPE_USAGE_IMMUTABLE,
        sizeof(zero_vertex), zero_vertex);
    if (!pDevice->zero_vertex_buffer || Bc250FailCreate("buffer")) return E_OUTOFMEMORY;
-   fprintf(stderr,"BC250 D3D device stage 4\n"); fflush(stderr);
+   BC250_DIAG("BC250 D3D device stage 4\n"); BC250_DIAG_FLUSH();
    pDevice->cso = cso_create_context(pipe, CSO_NO_VBUF);
    if (!pDevice->cso || Bc250FailCreate("cso")) return E_OUTOFMEMORY;
    pDevice->velems_changed = true;
 
-   fprintf(stderr,"BC250 D3D device stage 5\n"); fflush(stderr);
+   BC250_DIAG("BC250 D3D device stage 5\n"); BC250_DIAG_FLUSH();
    pDevice->empty_vs = CreateEmptyShader(pDevice, MESA_SHADER_VERTEX);
    if (!pDevice->empty_vs || Bc250FailCreate("empty_vs")) return E_OUTOFMEMORY;
-   fprintf(stderr,"BC250 D3D device stage 6\n"); fflush(stderr);
+   BC250_DIAG("BC250 D3D device stage 6\n"); BC250_DIAG_FLUSH();
    pDevice->empty_fs = CreateEmptyShader(pDevice, MESA_SHADER_FRAGMENT);
    if (!pDevice->empty_fs || Bc250FailCreate("empty_fs")) return E_OUTOFMEMORY;
 
-   fprintf(stderr,"BC250 D3D device stage 7\n"); fflush(stderr);
+   BC250_DIAG("BC250 D3D device stage 7\n"); BC250_DIAG_FLUSH();
    pipe->bind_vs_state(pipe, pDevice->empty_vs);
    pipe->bind_fs_state(pipe, pDevice->empty_fs);
 
    pDevice->max_dual_source_render_targets =
          screen->caps.max_dual_source_render_targets;
 
-   fprintf(stderr,"BC250 D3D device stage 8\n"); fflush(stderr);
+   BC250_DIAG("BC250 D3D device stage 8\n"); BC250_DIAG_FLUSH();
 
 
    pDevice->draw_so_target = NULL;
@@ -914,7 +918,7 @@ DestroyDevice(D3D10DDI_HDEVICE hDevice)   // IN
    Device *pDevice = CastDevice(hDevice);
    struct pipe_context *pipe = pDevice->pipe;
 
-   fprintf(stderr,"D3D destroy stage 0\n"); fflush(stderr);
+   BC250_DIAG("D3D destroy stage 0\n"); BC250_DIAG_FLUSH();
    pipe->flush(pipe, NULL, 0);
 
    for (i = 0; i < PIPE_MAX_SO_BUFFERS; ++i) {
@@ -926,16 +930,16 @@ DestroyDevice(D3D10DDI_HDEVICE hDevice)   // IN
 
    pipe->bind_fs_state(pipe, NULL);
    pipe->bind_vs_state(pipe, NULL);
-   fprintf(stderr,"D3D destroy stage 1\n"); fflush(stderr);
+   BC250_DIAG("D3D destroy stage 1\n"); BC250_DIAG_FLUSH();
    cso_unbind_context(pDevice->cso);
-   fprintf(stderr,"D3D destroy stage 2\n"); fflush(stderr);
+   BC250_DIAG("D3D destroy stage 2\n"); BC250_DIAG_FLUSH();
    cso_destroy_context(pDevice->cso);
 
-   fprintf(stderr,"D3D destroy stage 3\n"); fflush(stderr);
+   BC250_DIAG("D3D destroy stage 3\n"); BC250_DIAG_FLUSH();
    DeleteEmptyShader(pDevice, MESA_SHADER_FRAGMENT, pDevice->empty_fs);
    DeleteEmptyShader(pDevice, MESA_SHADER_VERTEX, pDevice->empty_vs);
 
-   fprintf(stderr,"D3D destroy stage 4\n"); fflush(stderr);
+   BC250_DIAG("D3D destroy stage 4\n"); BC250_DIAG_FLUSH();
    util_unreference_framebuffer_state(&pDevice->fb);
 
    for (i = 0; i < PIPE_MAX_ATTRIBS; ++i) {
@@ -944,13 +948,13 @@ DestroyDevice(D3D10DDI_HDEVICE hDevice)   // IN
       }
    }
 
-   fprintf(stderr,"D3D destroy stage 5\n"); fflush(stderr);
+   BC250_DIAG("D3D destroy stage 5\n"); BC250_DIAG_FLUSH();
    pipe_resource_reference(&pDevice->zero_vertex_buffer, NULL);
    pipe_resource_reference(&pDevice->index_buffer, NULL);
 
    static struct pipe_sampler_view * sampler_views[PIPE_MAX_SHADER_SAMPLER_VIEWS];
    memset(sampler_views, 0, sizeof sampler_views);
-   fprintf(stderr,"D3D destroy stage 6\n"); fflush(stderr);
+   BC250_DIAG("D3D destroy stage 6\n"); BC250_DIAG_FLUSH();
    pipe->set_sampler_views(pipe, MESA_SHADER_FRAGMENT, 0,
                            MIN2(PIPE_MAX_SHADER_SAMPLER_VIEWS,
                                 pipe->screen->shader_caps[MESA_SHADER_FRAGMENT].max_sampler_views),
@@ -965,11 +969,11 @@ DestroyDevice(D3D10DDI_HDEVICE hDevice)   // IN
                            0, sampler_views);
 
    Bc250DeleteDefaultSampler(pDevice);
-   fprintf(stderr,"D3D destroy stage 7\n"); fflush(stderr);
+   BC250_DIAG("D3D destroy stage 7\n"); BC250_DIAG_FLUSH();
    pipe->destroy(pipe);
    pDevice->pipe = NULL;
    if (pDevice->owned_screen) {
-      fprintf(stderr, "BC250 destroy device screen=%p runtime=%p\n", pDevice->owned_screen, pDevice->hDevice);
+      BC250_DIAG("BC250 destroy device screen=%p runtime=%p\n", pDevice->owned_screen, pDevice->hDevice);
       pDevice->owned_screen->destroy(pDevice->owned_screen);
       pDevice->owned_screen = NULL;
    }
@@ -995,7 +999,7 @@ DestroyDevice(D3D10DDI_HDEVICE hDevice)   // IN
    }
    delete (Bc250HostProbeState *)pDevice->hosted_state;
    pDevice->hosted_state=NULL;
-   fprintf(stderr,"D3D destroy stage 8\n"); fflush(stderr);
+   BC250_DIAG("D3D destroy stage 8\n"); BC250_DIAG_FLUSH();
 }
 
 

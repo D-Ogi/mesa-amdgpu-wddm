@@ -26,18 +26,15 @@ st_debug_parse(void)
 void
 DebugPrintf(const char *format, ...)
 {
-    // Per-entrypoint disk I/O and OutputDebugString exceptions can dominate
-    // CPU composition. Full tracing is explicit; errors and sampled frame
-    // timings remain available without enabling it. Read once per process.
-    static const bool verbose = []() {
-       char value[8] = {};
-       DWORD n = GetEnvironmentVariableA("BC250_UMD_VERBOSE", value, sizeof value);
-       return n == 1 && value[0] == '1';
-    }();
-    const bool retained = strstr(format, "BC250 SetError") ||
-       strstr(format, "BC250 Renderer") || strstr(format, "BC250 Perf") ||
-       strstr(format, "Assertion") || strstr(format, "0x%08lX");
-    if (!verbose && !retained) return;
+    // A registered UMD runs in dwm.exe: no per-line file I/O and no fixed log
+    // path. The entrypoint trace (BC250_UMD_VERBOSE=1, which implies
+    // diagnostics) goes to the diagnostics log; assertion and CheckHResult
+    // lines are error events and reach a debugger even with diagnostics off.
+    // SetError, Renderer and Perf lines use BC250_ERROR/BC250_DIAG directly.
+    const bool verbose = Bc250UmdVerbose() != 0;
+    const bool error = !verbose &&
+       (strstr(format, "Assertion") || strstr(format, "0x%08lX"));
+    if (!verbose && !error) return;
     char buf[4096];
 
     va_list ap;
@@ -45,19 +42,14 @@ DebugPrintf(const char *format, ...)
     vsnprintf(buf, sizeof buf, format, ap);
     va_end(ap);
 
+    if (error) {
+       BC250_ERROR("%s", buf);
+       return;
+    }
     if (IsDebuggerPresent()) OutputDebugStringA(buf);
     static volatile LONG lines = 0;
-    if (InterlockedIncrement(&lines) <= 10000 || retained) {
-       char path[MAX_PATH];
-       snprintf(path, sizeof(path), "C:\\BC250\\e26\\umdlogs\\mesa-%lu.txt", GetCurrentProcessId());
-       HANDLE f = CreateFileA(path, FILE_APPEND_DATA, FILE_SHARE_READ | FILE_SHARE_WRITE,
-                              NULL, OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
-       if (f != INVALID_HANDLE_VALUE) {
-          DWORD written;
-          WriteFile(f, buf, (DWORD)strlen(buf), &written, NULL);
-          CloseHandle(f);
-       }
-    }
+    if (InterlockedIncrement(&lines) <= 10000)
+       fputs(buf, stderr);
 }
 
 

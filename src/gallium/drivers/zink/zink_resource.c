@@ -22,6 +22,7 @@
  */
 
 #include "zink_resource.h"
+#include "util/bc250_diag.h"
 
 #include "zink_batch.h"
 #include "zink_clear.h"
@@ -2391,7 +2392,7 @@ zink_resource_from_handle(struct pipe_screen *pscreen,
 #ifdef ZINK_USE_DMABUF
    struct zink_screen *screen = zink_screen(pscreen);
 
-   fprintf(stderr,"BC250 zink import type=%u modifier=%llu identity=%p va=%llu\n",whandle->type,(unsigned long long)whandle->modifier,whandle->bc250_identity,(unsigned long long)whandle->bc250_va);
+   BC250_DIAG("BC250 zink import type=%u modifier=%llu identity=%p va=%llu\n",whandle->type,(unsigned long long)whandle->modifier,whandle->bc250_identity,(unsigned long long)whandle->bc250_va);
    if (whandle->modifier != DRM_FORMAT_MOD_INVALID &&
        !screen->info.have_EXT_image_drm_format_modifier)
       return NULL;
@@ -3937,7 +3938,7 @@ zink_bc250_release_runtime_resource(struct pipe_context *pctx, struct pipe_resou
    zink_batch_reclaim_completed(screen);
    unsigned resource_refs=p_atomic_read(&res->base.b.reference.count);
    unsigned object_refs=p_atomic_read(&res->obj->reference.count);
-   fprintf(stderr,"BC250 release runtime resource refs=%u object_refs=%u\n",resource_refs,object_refs);
+   BC250_DIAG("BC250 release runtime resource refs=%u object_refs=%u\n",resource_refs,object_refs);
    if (resource_refs!=1 || object_refs!=1) return 0;
    pipe_resource_reference(pres,NULL);
    return 1;
