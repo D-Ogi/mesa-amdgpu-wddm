@@ -352,7 +352,12 @@ disk_cache_destroy(struct disk_cache *cache)
 void
 disk_cache_wait_for_idle(struct disk_cache *cache)
 {
-   util_queue_finish(&cache->cache_queue);
+   /* A cache that got no directory never started its queue, whose mutex is
+    * then zeroed memory: not a valid CRITICAL_SECTION on Windows, where
+    * locking one faults.
+    */
+   if (util_queue_is_initialized(&cache->cache_queue))
+      util_queue_finish(&cache->cache_queue);
 }
 
 void
