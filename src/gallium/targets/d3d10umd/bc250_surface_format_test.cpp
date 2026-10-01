@@ -23,6 +23,7 @@
 #include "amdgpu_wddm_surface_format.h"
 
 #include "util/format/u_format.h"
+#include "util/half_float.h"
 #include "util/box.h"
 #include "tgsi/tgsi_ureg.h"
 
@@ -270,6 +271,86 @@ static void TestOpenAndCompose(Device *device, UINT format, enum pipe_format pip
    free(expected); free(before);
 }
 
+// An FP16 swap-chain buffer (A16B16G16R16F, 8 bytes a pixel) opened and
+// composed into a B8G8R8A8 target through _Blt. The values include scRGB ones
+// outside [0, 1], which the 8-bit target clamps; the oracle converts the
+// stored half back to float, clamps and rounds, and allows one step for the
+// rounding of the float-to-unorm conversion.
+static void TestOpenAndComposeFp16(Device *device)
+{
+   D3D10DDI_HDEVICE hDevice = {device};
+   const UINT format = 113, width = 67, height = 65, pitch = (width * 8 + 255) & ~255u;
+   Lb7a data = {0x4137424c, 1, width, height, pitch, format, UINT64(pitch) * ((height + 3) & ~3u)};
+   FakeAllocation *kmd = AddAllocation(data.size);
+   memset(kmd->memory, 0xcd, (size_t)data.size);
+   UINT *expected = (UINT *)calloc(width * height, sizeof(UINT));
+   auto unorm8 = [](uint16_t h) {
+      float v = _mesa_half_to_float(h);
+      v = v < 0.0f ? 0.0f : v > 1.0f ? 1.0f : v;
+      return (UINT)(v * 255.0f + 0.5f);
+   };
+   UINT outside = 0;
+   for (UINT y = 0; y < height; ++y)
+      for (UINT x = 0; x < width; ++x) {
+         const float rgba[4] = {x / float(width - 1) * 1.5f - 0.25f, y / float(height - 1),
+                                ((x * 31 + y * 17) & 63) / 63.0f, ((x + y) & 3) / 3.0f};
+         uint16_t *texel = (uint16_t *)((char *)kmd->memory + y * pitch) + x * 4;
+         for (UINT c = 0; c < 4; ++c) texel[c] = _mesa_float_to_half(rgba[c]);
+         if (rgba[0] < 0.0f || rgba[0] > 1.0f) outside++;
+         expected[y * width + x] = unorm8(texel[2]) | unorm8(texel[1]) << 8 | unorm8(texel[0]) << 16 |
+                                   unorm8(texel[3]) << 24;
+      }
+   void *before = malloc((size_t)data.size);
+   memcpy(before, kmd->memory, (size_t)data.size);
+
+   Resource src, dst;
+   HRESULT hr = Open(hDevice, &src, data, kmd->handle);
+   CHECK(hr == S_OK, "FP16: OpenResource %08lx", hr);
+   if (FAILED(hr)) { free(expected); free(before); return; }
+   CHECK(src.resource->format == PIPE_FORMAT_R16G16B16A16_FLOAT && src.presentReady &&
+         src.cpuMapping == kmd->memory && src.surfacePitch == pitch && !src.shadow, "FP16: opened resource state");
+   hr = Create(hDevice, &dst, DXGI_FORMAT_B8G8R8A8_UNORM, width, height, 0, NULL);
+   CHECK(hr == S_OK && !dst.allocation, "FP16: destination %08lx", hr);
+
+   DXGI_DDI_ARG_BLT blt = {};
+   blt.hDevice = (DXGI_DDI_HDEVICE)device;
+   blt.hSrcResource = (DXGI_DDI_HRESOURCE)&src; blt.hDstResource = (DXGI_DDI_HRESOURCE)&dst;
+   blt.DstRight = width; blt.DstBottom = height; blt.Rotate = DXGI_DDI_MODE_ROTATION_IDENTITY;
+   hr = _Blt(&blt);
+   CHECK(hr == S_OK, "FP16: _Blt %08lx", hr);
+
+   struct pipe_box box;
+   u_box_2d(0, 0, width, height, &box);
+   struct pipe_transfer *transfer;
+   const char *map = (const char *)device->pipe->texture_map(device->pipe, dst.resource, 0, PIPE_MAP_READ,
+                                                             &box, &transfer);
+   UINT maxDiff = 0, exact = 0, worst = 0, worstGot = 0, worstWant = 0;
+   for (UINT y = 0; map && y < height; ++y)
+      for (UINT x = 0; x < width; ++x) {
+         UINT got = ((const UINT *)(map + y * transfer->stride))[x], want = expected[y * width + x];
+         UINT diff = 0;
+         for (UINT c = 0; c < 32; c += 8) {
+            int d = abs(int((got >> c) & 255) - int((want >> c) & 255));
+            if ((UINT)d > diff) diff = d;
+         }
+         if (!diff) exact++;
+         if (diff > maxDiff) { maxDiff = diff; worst = y * width + x; worstGot = got; worstWant = want; }
+      }
+   if (map) device->pipe->texture_unmap(device->pipe, transfer);
+   CHECK(map != NULL, "FP16: destination map");
+   CHECK(maxDiff <= 1, "FP16: max diff %u (pixel %u got %08x want %08x)", maxDiff, worst, worstGot, worstWant);
+   CHECK(!memcmp(before, kmd->memory, (size_t)data.size), "FP16: source memory changed");
+   printf("format %u -> %s: %u/%u pixels exact, max channel diff %u, %u texels with red outside [0, 1], pitch %u\n",
+          format, util_format_short_name(PIPE_FORMAT_R16G16B16A16_FLOAT), exact, width * height, maxDiff, outside,
+          pitch);
+
+   UINT deallocations = deallocateCalls;
+   Destroy(hDevice, &dst);
+   Destroy(hDevice, &src);
+   CHECK(deallocateCalls == deallocations + 1 && !kmd->locked, "FP16: close");
+   free(expected); free(before);
+}
+
 static void TestOpenRefusals(Device *device)
 {
    D3D10DDI_HDEVICE hDevice = {device};
@@ -278,10 +359,10 @@ static void TestOpenRefusals(Device *device)
    Resource r;
    struct Case { UINT format, pitch, magic; HRESULT want; } cases[] = {
       {35, pitch, 0x4137424c, E_NOTIMPL},        // A2R10G10B10, not R10G10B10A2
-      {113, pitch, 0x4137424c, E_NOTIMPL},       // FP16: a row without COMPOSED
-      {113, width * 6, 0x4137424c, E_NOTIMPL},   // refused rows keep the 4-byte geometry check
+      {113, pitch, 0x4137424c, E_INVALIDARG},    // FP16 is COMPOSED at 8 bytes: 256 is below width * 8
+      {113, width * 6, 0x4137424c, E_INVALIDARG}, // the row's 8 bytes, never 4: 384 is short too
       {31, width * 4 - 16, 0x4137424c, E_INVALIDARG}, // pitch below width * 4
-      {113, width * 4 - 16, 0x4137424c, E_INVALIDARG}, // refused format: geometry first, as before
+      {113, width * 4 - 16, 0x4137424c, E_INVALIDARG}, // below either size
       {31, pitch, 0x12345678, E_INVALIDARG},     // not LB7A
    };
    for (const Case &c : cases) {
@@ -652,6 +733,7 @@ int main(void)
    TestOpenAndCompose(device, 21, PIPE_FORMAT_B8G8R8A8_UNORM);
    TestOpenAndCompose(device, 32, PIPE_FORMAT_R8G8B8A8_UNORM);
    TestOpenAndCompose(device, 31, PIPE_FORMAT_R10G10B10A2_UNORM);
+   TestOpenAndComposeFp16(device);
    TestOpenRefusals(device);
    TestCreateShared(device);
    TestShadow(device);
