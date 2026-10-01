@@ -42,6 +42,65 @@
 
 #include <windows.h>
 
+/* The build identity of a loaded module, read from its PE headers in memory: what an ELF build-id note is elsewhere.
+ * The linker writes a new time stamp and a new CodeView record (PDB GUID and age) for every link, so a rebuilt DLL gets
+ * a new identity while a copy of the same DLL keeps it.
+ *
+ * The file at GetModuleFileName's path is not used: it need not hold the code that runs. A loaded DLL can be renamed
+ * aside and another build put in its place, which is how a driver in use is replaced, and the loader keeps reporting
+ * the old path. An identity read from that file would let the old code write cache entries under the new build's
+ * identity.
+ */
+static bool
+module_build_identity(HMODULE mod, blake3_hasher *ctx)
+{
+   const uint8_t *base = (const uint8_t *)mod;
+   const IMAGE_DOS_HEADER *dos = (const IMAGE_DOS_HEADER *)base;
+   if (dos->e_magic != IMAGE_DOS_SIGNATURE)
+      return false;
+
+   const IMAGE_NT_HEADERS *nt = (const IMAGE_NT_HEADERS *)(base + dos->e_lfanew);
+   if (nt->Signature != IMAGE_NT_SIGNATURE || nt->OptionalHeader.Magic != IMAGE_NT_OPTIONAL_HDR_MAGIC)
+      return false;
+
+   struct {
+      uint32_t machine;
+      uint32_t time_date_stamp;
+      uint32_t size_of_image;
+      uint32_t check_sum;
+      uint8_t pdb_guid[16];
+      uint32_t pdb_age;
+   } id;
+   memset(&id, 0, sizeof(id));
+   id.machine = nt->FileHeader.Machine;
+   id.time_date_stamp = nt->FileHeader.TimeDateStamp;
+   id.size_of_image = nt->OptionalHeader.SizeOfImage;
+   id.check_sum = nt->OptionalHeader.CheckSum;
+
+   /* The CodeView record: "RSDS", the PDB GUID, the age, the PDB path. */
+   const IMAGE_DATA_DIRECTORY *debug_dir = &nt->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_DEBUG];
+   if (nt->OptionalHeader.NumberOfRvaAndSizes > IMAGE_DIRECTORY_ENTRY_DEBUG && debug_dir->VirtualAddress &&
+       (uint64_t)debug_dir->VirtualAddress + debug_dir->Size <= id.size_of_image) {
+      const IMAGE_DEBUG_DIRECTORY *entry = (const IMAGE_DEBUG_DIRECTORY *)(base + debug_dir->VirtualAddress);
+      for (unsigned i = 0; i < debug_dir->Size / sizeof(*entry); i++) {
+         if (entry[i].Type != IMAGE_DEBUG_TYPE_CODEVIEW || !entry[i].AddressOfRawData || entry[i].SizeOfData < 24 ||
+             (uint64_t)entry[i].AddressOfRawData + 24 > id.size_of_image)
+            continue;
+
+         const uint8_t *cv = base + entry[i].AddressOfRawData;
+         if (memcmp(cv, "RSDS", 4) != 0)
+            continue;
+
+         memcpy(id.pdb_guid, cv + 4, sizeof(id.pdb_guid));
+         memcpy(&id.pdb_age, cv + 20, sizeof(id.pdb_age));
+         break;
+      }
+   }
+
+   _mesa_blake3_update(ctx, &id, sizeof(id));
+   return true;
+}
+
 bool
 disk_cache_get_function_identifier(void *ptr, blake3_hasher *ctx)
 {
@@ -52,29 +111,7 @@ disk_cache_get_function_identifier(void *ptr, blake3_hasher *ctx)
    if (!mod)
       return false;
 
-   WCHAR filename[MAX_PATH];
-   DWORD filename_length = GetModuleFileNameW(mod, filename, ARRAY_SIZE(filename));
-
-   if (filename_length == 0 || filename_length == ARRAY_SIZE(filename))
-      return false;
-
-   HANDLE mod_as_file = CreateFileW(
-        filename,
-        GENERIC_READ,
-        FILE_SHARE_READ,
-        NULL,
-        OPEN_EXISTING,
-        FILE_ATTRIBUTE_NORMAL,
-        NULL);
-   if (mod_as_file == INVALID_HANDLE_VALUE)
-      return false;
-
-   FILETIME time;
-   bool ret = GetFileTime(mod_as_file, NULL, NULL, &time);
-   if (ret)
-      _mesa_blake3_update(ctx, &time, sizeof(time));
-   CloseHandle(mod_as_file);
-   return ret;
+   return module_build_identity(mod, ctx);
 }
 
 #endif
