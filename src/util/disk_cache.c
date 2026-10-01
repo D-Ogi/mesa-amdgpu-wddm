@@ -111,6 +111,14 @@ disk_cache_type_create(const char *gpu_name,
    uint8_t cache_version = CACHE_VERSION;
    size_t cv_size = sizeof(cache_version);
 
+#if DETECT_OS_WINDOWS
+   /* The database cache has no Windows implementation: a cache of that type,
+    * such as a driver's custom cache, is a multi-file cache there instead.
+    */
+   if (cache_type == DISK_CACHE_DATABASE)
+      cache_type = DISK_CACHE_MULTI_FILE;
+#endif
+
    /* A ralloc context for transient data during this invocation. */
    local = ralloc_context(NULL);
    if (local == NULL)
