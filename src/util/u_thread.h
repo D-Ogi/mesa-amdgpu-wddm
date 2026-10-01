@@ -125,6 +125,7 @@ typedef pthread_barrier_t util_barrier;
 typedef struct {
    unsigned count;
    unsigned waiters;
+   unsigned inside; /* threads in util_barrier_wait, released or not */
    uint64_t sequence;
    mtx_t mutex;
    cnd_t condvar;
