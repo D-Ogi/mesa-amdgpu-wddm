@@ -39,6 +39,8 @@
 #include <sys/time.h>
 #include <sys/resource.h>
 #include <sys/syscall.h>
+#elif defined(_WIN32)
+#include <windows.h>
 #endif
 
 
@@ -257,6 +259,12 @@ util_queue_thread_func(void *input)
       /* The nice() function can only set a maximum of 19. */
       setpriority(PRIO_PROCESS, syscall(SYS_gettid), 19);
    }
+#elif defined(_WIN32)
+   /* Lowest, not idle: a busy application could starve an idle-priority
+    * thread for seconds at a time.
+    */
+   if (queue->flags & UTIL_QUEUE_INIT_USE_MINIMUM_PRIORITY)
+      SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_LOWEST);
 #endif
 
    if (strlen(queue->name) > 0) {
