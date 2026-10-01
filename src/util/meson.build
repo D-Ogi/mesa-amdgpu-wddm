@@ -519,6 +519,11 @@ if with_tests
     files_util_tests += files(
       'tests/cache_test.cpp',
     )
+    if host_machine.system() == 'windows'
+      files_util_tests += files(
+        'tests/cache_win32_test.cpp',
+      )
+    endif
   endif
 
   test(
