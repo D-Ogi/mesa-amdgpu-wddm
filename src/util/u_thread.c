@@ -219,6 +219,7 @@ void util_barrier_init(util_barrier *barrier, unsigned count)
 {
    barrier->count = count;
    barrier->waiters = 0;
+   barrier->inside = 0;
    barrier->sequence = 0;
    (void) mtx_init(&barrier->mutex, mtx_plain);
    cnd_init(&barrier->condvar);
@@ -227,16 +228,29 @@ void util_barrier_init(util_barrier *barrier, unsigned count)
 void util_barrier_destroy(util_barrier *barrier)
 {
    assert(barrier->waiters == 0);
+
+   /* As with pthread_barrier_destroy(), the thread that util_barrier_wait()
+    * returned true to may destroy the barrier at once, while the threads it
+    * released are still on their way out. Wait for them to leave the mutex.
+    */
+   mtx_lock(&barrier->mutex);
+   while (barrier->inside)
+      cnd_wait(&barrier->condvar, &barrier->mutex);
+   mtx_unlock(&barrier->mutex);
+
    mtx_destroy(&barrier->mutex);
    cnd_destroy(&barrier->condvar);
 }
 
 bool util_barrier_wait(util_barrier *barrier)
 {
+   bool serial = false;
+
    mtx_lock(&barrier->mutex);
 
    assert(barrier->waiters < barrier->count);
    barrier->waiters++;
+   barrier->inside++;
 
    if (barrier->waiters < barrier->count) {
       uint64_t sequence = barrier->sequence;
@@ -248,11 +262,17 @@ bool util_barrier_wait(util_barrier *barrier)
       barrier->waiters = 0;
       barrier->sequence++;
       cnd_broadcast(&barrier->condvar);
+      serial = true;
    }
+
+   /* Wake a util_barrier_destroy() waiting for the last thread out. */
+   if (--barrier->inside == 0)
+      cnd_broadcast(&barrier->condvar);
 
    mtx_unlock(&barrier->mutex);
 
-   return true;
+   /* Like PTHREAD_BARRIER_SERIAL_THREAD: true for one thread of each round. */
+   return serial;
 }
 
 #endif
