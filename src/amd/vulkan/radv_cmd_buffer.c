@@ -13571,6 +13571,19 @@ radv_emit_msaa_state(struct radv_cmd_buffer *cmd_buffer)
    const VkLineRasterizationModeEXT line_rast_mode = cmd_buffer->state.line_rast_mode;
    const bool msaa_enable = rasterization_samples > 1 || enable_1x_user_sample_locs;
    unsigned log_samples = util_logbase2(rasterization_samples);
+   /* Overestimate with inner coverage (gfx < 12) rasterizes over and under at once, as PAL does: the
+    * underestimate result is kept in one extra sample and COVERAGE_TO_SHADER_SELECT passes it to the shader.
+    * Plain underestimate here would drop the partially covered pixels the overestimate draw must still shade.
+    */
+   const bool overestimate_inner_coverage =
+      pdev->info.gfx_level >= GFX9 && pdev->info.gfx_level < GFX12 &&
+      d->vk.rs.conservative_mode == VK_CONSERVATIVE_RASTERIZATION_MODE_OVERESTIMATE_EXT && ps &&
+      ps->info.ps.reads_fully_covered;
+   /* The extra sample only exists for the scan converter with MSAA enabled; with one sample the underestimate
+    * result is dropped and the shader sees the overestimate mask (trial 238: partly covered pixels reported fully
+    * covered).
+    */
+   const bool sc_msaa_enable = msaa_enable || overestimate_inner_coverage;
    unsigned pa_sc_conservative_rast = 0;
    unsigned db_alpha_to_mask = 0;
    unsigned pa_sc_aa_config = 0;
@@ -13589,8 +13602,9 @@ radv_emit_msaa_state(struct radv_cmd_buffer *cmd_buffer)
 
          /* Inner coverage requires underestimate conservative rasterization. */
          if (d->vk.rs.conservative_mode == VK_CONSERVATIVE_RASTERIZATION_MODE_OVERESTIMATE_EXT &&
-             !uses_inner_coverage) {
+             (!uses_inner_coverage || overestimate_inner_coverage)) {
             pa_sc_conservative_rast |= S_028C4C_OVER_RAST_ENABLE(1) |
+                                       S_028C4C_UNDER_RAST_ENABLE(overestimate_inner_coverage) |
                                        S_028C4C_UNDER_RAST_SAMPLE_SELECT(pdev->info.gfx_level < GFX12) |
                                        S_028C4C_PBB_UNCERTAINTY_REGION_ENABLE(1) |
                                        S_028C4C_ZMM_TRI_EXTENT(1);
@@ -13634,7 +13648,8 @@ radv_emit_msaa_state(struct radv_cmd_buffer *cmd_buffer)
       bool uses_underestimate = d->vk.rs.conservative_mode == VK_CONSERVATIVE_RASTERIZATION_MODE_UNDERESTIMATE_EXT;
 
       pa_sc_aa_config |=
-         S_028BE0_MSAA_NUM_SAMPLES(uses_underestimate ? 0 : log_samples) | S_028BE0_MSAA_EXPOSED_SAMPLES(log_samples);
+         S_028BE0_MSAA_NUM_SAMPLES(uses_underestimate ? 0 : log_samples + overestimate_inner_coverage) |
+         S_028BE0_MSAA_EXPOSED_SAMPLES(log_samples);
 
       if (pdev->info.gfx_level >= GFX12) {
          pa_sc_aa_config |= S_028BE0_PS_ITER_SAMPLES(log_ps_iter_samples);
@@ -13650,6 +13665,9 @@ radv_emit_msaa_state(struct radv_cmd_buffer *cmd_buffer)
 
       if (line_rast_mode == VK_LINE_RASTERIZATION_MODE_RECTANGULAR_SMOOTH)
          db_eqaa |= S_028804_OVERRASTERIZATION_AMOUNT(log_samples);
+   } else if (overestimate_inner_coverage) {
+      /* Single sample: the underestimate result still needs its own sample. */
+      pa_sc_aa_config |= S_028BE0_MSAA_NUM_SAMPLES(1);
    }
 
    if (RADV_DEBUG(instance, NO_ATOC_DITHERING)) {
@@ -13688,7 +13706,7 @@ radv_emit_msaa_state(struct radv_cmd_buffer *cmd_buffer)
       gfx12_opt_set_context_reg(
          R_028A48_PA_SC_MODE_CNTL_0, AC_TRACKED_PA_SC_MODE_CNTL_0,
          S_028A48_ALTERNATE_RBS_PER_TILE(pdev->info.gfx_level >= GFX9) | S_028A48_VPORT_SCISSOR_ENABLE(1) |
-            S_028A48_LINE_STIPPLE_ENABLE(d->vk.rs.line.stipple.enable) | S_028A48_MSAA_ENABLE(msaa_enable));
+            S_028A48_LINE_STIPPLE_ENABLE(d->vk.rs.line.stipple.enable) | S_028A48_MSAA_ENABLE(sc_msaa_enable));
       gfx12_opt_set_context_reg(R_02807C_DB_ALPHA_TO_MASK, AC_TRACKED_DB_ALPHA_TO_MASK, db_alpha_to_mask);
       gfx12_opt_set_context_reg(R_028C5C_PA_SC_SAMPLE_PROPERTIES, AC_TRACKED_PA_SC_SAMPLE_PROPERTIES,
                                 S_028C5C_MAX_SAMPLE_DIST(max_sample_dist));
@@ -13704,7 +13722,7 @@ radv_emit_msaa_state(struct radv_cmd_buffer *cmd_buffer)
       gfx11_opt_set_context_reg(
          R_028A48_PA_SC_MODE_CNTL_0, AC_TRACKED_PA_SC_MODE_CNTL_0,
          S_028A48_ALTERNATE_RBS_PER_TILE(pdev->info.gfx_level >= GFX9) | S_028A48_VPORT_SCISSOR_ENABLE(1) |
-            S_028A48_LINE_STIPPLE_ENABLE(d->vk.rs.line.stipple.enable) | S_028A48_MSAA_ENABLE(msaa_enable));
+            S_028A48_LINE_STIPPLE_ENABLE(d->vk.rs.line.stipple.enable) | S_028A48_MSAA_ENABLE(sc_msaa_enable));
       gfx11_opt_set_context_reg(R_028B70_DB_ALPHA_TO_MASK, AC_TRACKED_DB_ALPHA_TO_MASK, db_alpha_to_mask);
       gfx11_opt_set_context_reg(R_028804_DB_EQAA, AC_TRACKED_DB_EQAA, db_eqaa);
       gfx11_opt_set_context_reg(R_028C4C_PA_SC_CONSERVATIVE_RASTERIZATION_CNTL,
@@ -13719,7 +13737,7 @@ radv_emit_msaa_state(struct radv_cmd_buffer *cmd_buffer)
       radeon_opt_set_context_reg(
          R_028A48_PA_SC_MODE_CNTL_0, AC_TRACKED_PA_SC_MODE_CNTL_0,
          S_028A48_ALTERNATE_RBS_PER_TILE(pdev->info.gfx_level >= GFX9) | S_028A48_VPORT_SCISSOR_ENABLE(1) |
-            S_028A48_LINE_STIPPLE_ENABLE(d->vk.rs.line.stipple.enable) | S_028A48_MSAA_ENABLE(msaa_enable));
+            S_028A48_LINE_STIPPLE_ENABLE(d->vk.rs.line.stipple.enable) | S_028A48_MSAA_ENABLE(sc_msaa_enable));
       radeon_opt_set_context_reg(R_028B70_DB_ALPHA_TO_MASK, AC_TRACKED_DB_ALPHA_TO_MASK, db_alpha_to_mask);
       radeon_opt_set_context_reg(R_028804_DB_EQAA, AC_TRACKED_DB_EQAA, db_eqaa);
 
