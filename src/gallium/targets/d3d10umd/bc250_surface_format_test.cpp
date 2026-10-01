@@ -30,9 +30,10 @@
 EXTERN_C struct pipe_screen *d3d10_create_screen(void);
 
 static_assert(D3DDDIFMT_A8R8G8B8 == 21 && D3DDDIFMT_X8R8G8B8 == 22 && D3DDDIFMT_A8B8G8R8 == 32 &&
-              D3DDDIFMT_A2B10G10R10 == 31, "D3DDDIFORMAT values");
+              D3DDDIFMT_A2B10G10R10 == 31 && D3DDDIFMT_A8 == 28, "D3DDDIFORMAT values");
 static_assert(DXGI_FORMAT_B8G8R8A8_UNORM == 87 && DXGI_FORMAT_B8G8R8X8_UNORM == 88 &&
-              DXGI_FORMAT_R8G8B8A8_UNORM == 28 && DXGI_FORMAT_R10G10B10A2_UNORM == 24, "DXGI_FORMAT values");
+              DXGI_FORMAT_R8G8B8A8_UNORM == 28 && DXGI_FORMAT_R10G10B10A2_UNORM == 24 &&
+              DXGI_FORMAT_A8_UNORM == 65, "DXGI_FORMAT values");
 
 static unsigned failures;
 #define CHECK(cond, ...) do { if (!(cond)) { failures++; printf("FAIL %s:%d: ", __func__, __LINE__); \
@@ -351,6 +352,70 @@ static void TestOpenAndComposeFp16(Device *device)
    free(expected); free(before);
 }
 
+// A DirectComposition A8 atlas (D3DDDIFMT_A8, 1 byte a pixel at the producer's
+// pitch, width rounded up to 256 bytes) opened and composed into a B8G8R8A8
+// target through _Blt: the colour channels read 0 and alpha is the stored byte,
+// exactly. The shadow copy takes 4-byte formats only, so it is sampled in place.
+static void TestOpenAndComposeA8(Device *device)
+{
+   D3D10DDI_HDEVICE hDevice = {device};
+   const UINT format = 28, width = 67, height = 65, pitch = (width + 255) & ~255u;
+   Lb7a data = {0x4137424c, 1, width, height, pitch, format, UINT64(pitch) * ((height + 3) & ~3u)};
+   FakeAllocation *kmd = AddAllocation(data.size);
+   memset(kmd->memory, 0xcd, (size_t)data.size);
+   UINT *expected = (UINT *)calloc(width * height, sizeof(UINT));
+   for (UINT y = 0; y < height; ++y)
+      for (UINT x = 0; x < width; ++x) {
+         const UINT a = (x * 7 + y * 3) & 255;
+         ((unsigned char *)kmd->memory + y * pitch)[x] = (unsigned char)a;
+         expected[y * width + x] = a << 24;
+      }
+   void *before = malloc((size_t)data.size);
+   memcpy(before, kmd->memory, (size_t)data.size);
+
+   Resource src, dst;
+   HRESULT hr = Open(hDevice, &src, data, kmd->handle);
+   CHECK(hr == S_OK, "A8: OpenResource %08lx", hr);
+   if (FAILED(hr)) { free(expected); free(before); return; }
+   CHECK(src.resource->format == PIPE_FORMAT_A8_UNORM && src.presentReady && src.cpuMapping == kmd->memory &&
+         src.surfacePitch == pitch && !src.shadow, "A8: opened resource state");
+   hr = Create(hDevice, &dst, DXGI_FORMAT_B8G8R8A8_UNORM, width, height, 0, NULL);
+   CHECK(hr == S_OK && !dst.allocation, "A8: destination %08lx", hr);
+
+   DXGI_DDI_ARG_BLT blt = {};
+   blt.hDevice = (DXGI_DDI_HDEVICE)device;
+   blt.hSrcResource = (DXGI_DDI_HRESOURCE)&src; blt.hDstResource = (DXGI_DDI_HRESOURCE)&dst;
+   blt.DstRight = width; blt.DstBottom = height; blt.Rotate = DXGI_DDI_MODE_ROTATION_IDENTITY;
+   hr = _Blt(&blt);
+   CHECK(hr == S_OK, "A8: _Blt %08lx", hr);
+
+   struct pipe_box box;
+   u_box_2d(0, 0, width, height, &box);
+   struct pipe_transfer *transfer;
+   const char *map = (const char *)device->pipe->texture_map(device->pipe, dst.resource, 0, PIPE_MAP_READ,
+                                                             &box, &transfer);
+   UINT exact = 0, worst = 0, worstGot = 0, worstWant = 0;
+   for (UINT y = 0; map && y < height; ++y)
+      for (UINT x = 0; x < width; ++x) {
+         UINT got = ((const UINT *)(map + y * transfer->stride))[x], want = expected[y * width + x];
+         if (got == want) exact++;
+         else if (!worstGot && !worstWant) { worst = y * width + x; worstGot = got; worstWant = want; }
+      }
+   if (map) device->pipe->texture_unmap(device->pipe, transfer);
+   CHECK(map != NULL, "A8: destination map");
+   CHECK(exact == width * height, "A8: %u/%u exact (first miss pixel %u got %08x want %08x)", exact,
+         width * height, worst, worstGot, worstWant);
+   CHECK(!memcmp(before, kmd->memory, (size_t)data.size), "A8: source memory changed");
+   printf("format %u -> %s: %u/%u pixels exact, pitch %u\n", format, util_format_short_name(PIPE_FORMAT_A8_UNORM),
+          exact, width * height, pitch);
+
+   UINT deallocations = deallocateCalls;
+   Destroy(hDevice, &dst);
+   Destroy(hDevice, &src);
+   CHECK(deallocateCalls == deallocations + 1 && !kmd->locked, "A8: close");
+   free(expected); free(before);
+}
+
 static void TestOpenRefusals(Device *device)
 {
    D3D10DDI_HDEVICE hDevice = {device};
@@ -364,6 +429,8 @@ static void TestOpenRefusals(Device *device)
       {31, width * 4 - 16, 0x4137424c, E_INVALIDARG}, // pitch below width * 4
       {113, width * 4 - 16, 0x4137424c, E_INVALIDARG}, // below either size
       {31, pitch, 0x12345678, E_INVALIDARG},     // not LB7A
+      {28, width - 16, 0x4137424c, E_INVALIDARG}, // A8 is COMPOSED at 1 byte: 48 is below width * 1
+      {28, width + 8, 0x4137424c, E_INVALIDARG},  // A8 at a pitch that is not a multiple of 16
    };
    for (const Case &c : cases) {
       Lb7a data = {c.magic, 1, width, height, c.pitch, c.format, UINT64(c.pitch) * height};
@@ -734,6 +801,7 @@ int main(void)
    TestOpenAndCompose(device, 32, PIPE_FORMAT_R8G8B8A8_UNORM);
    TestOpenAndCompose(device, 31, PIPE_FORMAT_R10G10B10A2_UNORM);
    TestOpenAndComposeFp16(device);
+   TestOpenAndComposeA8(device);
    TestOpenRefusals(device);
    TestCreateShared(device);
    TestShadow(device);
