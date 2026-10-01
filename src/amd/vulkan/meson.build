@@ -295,7 +295,12 @@ endif
 
 radv_link_args = [ld_args_build_id, ld_args_bsymbolic, ld_args_gc_sections, vulkan_icd_link_args]
 if cc.get_id() == 'msvc'
-  radv_link_args += ['/NODEFAULTLIB:libcmt.lib']
+  # Keep the other C runtime out of the link: a static archive may still name it as a default library.
+  if get_option('b_vscrt') in ['mt', 'mtd', 'static_from_buildtype']
+    radv_link_args += ['/NODEFAULTLIB:msvcrt.lib']
+  else
+    radv_link_args += ['/NODEFAULTLIB:libcmt.lib']
+  endif
 endif
 
 libvulkan_radeon = shared_library(
