@@ -29,20 +29,26 @@
 #include <stdlib.h>
 #include <stdbool.h>
 #include <string.h>
-#include <ftw.h>
 #include <errno.h>
 #include <stdarg.h>
 #include <inttypes.h>
 #include <limits.h>
 #include <time.h>
+#ifdef _WIN32
+#include <direct.h>
+#include <filesystem>
+#else
+#include <ftw.h>
 #include <unistd.h>
 #include <utime.h>
+#endif
 
 #include "util/detect_os.h"
 #include "util/disk_cache_os.h"
 #include "util/disk_cache.h"
 #include "util/mesa-blake3.h"
 #include "util/os_misc.h"
+#include "util/os_time.h"
 #include "util/ralloc.h"
 
 #ifdef FOZ_DB_UTIL_DYNAMIC_LIST
@@ -51,6 +57,7 @@
 
 #ifdef ENABLE_SHADER_CACHE
 
+#ifndef _WIN32
 /* Callback for nftw used in rmrf_local below.
  */
 static int
@@ -66,6 +73,7 @@ remove_entry(const char *path,
 
    return err;
 }
+#endif
 
 /* Recursively remove a directory.
  *
@@ -81,7 +89,16 @@ rmrf_local(const char *path)
    if (path == NULL || *path == '\0' || *path != '.')
       return -1;
 
+#ifdef _WIN32
+   std::error_code ec;
+   std::filesystem::remove_all(path, ec);
+   if (ec)
+      fprintf(stderr, "Error removing %s: %s\n", path, ec.message().c_str());
+
+   return ec ? -1 : 0;
+#else
    return nftw(path, remove_entry, 64, FTW_DEPTH | FTW_PHYS);
+#endif
 }
 
 static void
@@ -89,6 +106,10 @@ check_directories_created(void *mem_ctx, const char *cache_dir)
 {
    bool sub_dirs_created = false;
 
+#ifdef _WIN32
+   std::error_code ec;
+   sub_dirs_created = std::filesystem::is_directory(cache_dir, ec);
+#else
    char buf[PATH_MAX];
    if (getcwd(buf, PATH_MAX)) {
       char *full_path = ralloc_asprintf(mem_ctx, "%s%s", buf, ++cache_dir);
@@ -96,6 +117,7 @@ check_directories_created(void *mem_ctx, const char *cache_dir)
       if (stat(full_path, &sb) != -1 && S_ISDIR(sb.st_mode))
          sub_dirs_created = true;
    }
+#endif
 
    EXPECT_TRUE(sub_dirs_created) << "create sub dirs";
 }
@@ -252,7 +274,11 @@ test_disk_cache_create(void *mem_ctx, const char *cache_dir_name,
    rmrf_local(CACHE_TEST_TMP);
    EXPECT_EQ(err, 0) << "Removing " CACHE_TEST_TMP;
 
+#ifdef _WIN32
+   err = _mkdir(CACHE_TEST_TMP);
+#else
    err = mkdir(CACHE_TEST_TMP, 0755);
+#endif
    if (err != 0) {
       fprintf(stderr, "Error creating %s: %s\n", CACHE_TEST_TMP, strerror(errno));
       GTEST_FAIL();
@@ -779,6 +805,8 @@ TEST_F(Cache, SingleFile)
 
 #ifndef ENABLE_SHADER_CACHE
    GTEST_SKIP() << "ENABLE_SHADER_CACHE not defined.";
+#elif DETECT_OS_WINDOWS
+   GTEST_SKIP() << "The single-file cache has no Windows implementation.";
 #else
    bool compress = true;
 
@@ -819,6 +847,8 @@ TEST_F(Cache, Database)
 
 #ifndef ENABLE_SHADER_CACHE
    GTEST_SKIP() << "ENABLE_SHADER_CACHE not defined.";
+#elif DETECT_OS_WINDOWS
+   GTEST_SKIP() << "The database cache has no Windows implementation.";
 #else
    os_set_option("MESA_DISK_CACHE_MULTI_FILE", "false", true);
    os_set_option("MESA_DISK_CACHE_DATABASE_NUM_PARTS", "1", true);
@@ -873,6 +903,8 @@ TEST_F(Cache, Combined)
 
 #ifndef ENABLE_SHADER_CACHE
    GTEST_SKIP() << "ENABLE_SHADER_CACHE not defined.";
+#elif DETECT_OS_WINDOWS
+   GTEST_SKIP() << "The single-file cache has no Windows implementation.";
 #else
    os_set_option("MESA_DISK_CACHE_SINGLE_FILE", "true", true);
    os_set_option("MESA_DISK_CACHE_MULTI_FILE", "true", true);
@@ -1295,7 +1327,7 @@ test_multipart_eviction(const char *driver_id)
        * during testing.
        */
       if (i % 2 == 0)
-         usleep(100000);
+         os_time_sleep(100000);
    }
 
    /* Touch entries of the first part. Second part becomes outdated */
@@ -1333,6 +1365,8 @@ TEST_F(Cache, DatabaseMultipartEviction)
 
 #ifndef ENABLE_SHADER_CACHE
    GTEST_SKIP() << "ENABLE_SHADER_CACHE not defined.";
+#elif DETECT_OS_WINDOWS
+   GTEST_SKIP() << "The database cache has no Windows implementation.";
 #else
    os_set_option("MESA_DISK_CACHE_MULTI_FILE", "false", true);
    os_set_option("MESA_DISK_CACHE_DATABASE_NUM_PARTS", "3", true);
@@ -1388,13 +1422,20 @@ TEST_F(Cache, Disabled)
 #ifndef ENABLE_SHADER_CACHE
    GTEST_SKIP() << "ENABLE_SHADER_CACHE not defined.";
 #else
+#if DETECT_OS_WINDOWS
+   /* The single-file cache has no Windows implementation. */
+   os_set_option("MESA_DISK_CACHE_MULTI_FILE", "true", true);
+   const char *cache_dir_name = CACHE_DIR_NAME;
+#else
    os_set_option("MESA_DISK_CACHE_SINGLE_FILE", "true", true);
+   const char *cache_dir_name = CACHE_DIR_NAME_SF;
+#endif
 
 #ifdef SHADER_CACHE_DISABLE_BY_DEFAULT
    os_set_option("MESA_SHADER_CACHE_DISABLE", "false", true);
 #endif /* SHADER_CACHE_DISABLE_BY_DEFAULT */
 
-   test_disk_cache_create(mem_ctx, CACHE_DIR_NAME_SF, driver_id);
+   test_disk_cache_create(mem_ctx, cache_dir_name, driver_id);
 
    test_put_and_get(false, driver_id);
 
@@ -1403,7 +1444,11 @@ TEST_F(Cache, Disabled)
    test_put_and_get_disabled(driver_id);
 
    os_set_option("MESA_SHADER_CACHE_DISABLE", "false", true);
+#if DETECT_OS_WINDOWS
+   os_set_option("MESA_DISK_CACHE_MULTI_FILE", "false", true);
+#else
    os_set_option("MESA_DISK_CACHE_SINGLE_FILE", "false", true);
+#endif
 
    int err = rmrf_local(CACHE_TEST_TMP);
    EXPECT_EQ(err, 0) << "Removing " CACHE_TEST_TMP " again";
@@ -1414,6 +1459,8 @@ TEST_F(Cache, DoNotDeleteNewCache)
 {
 #ifndef ENABLE_SHADER_CACHE
    GTEST_SKIP() << "ENABLE_SHADER_CACHE not defined.";
+#elif DETECT_OS_WINDOWS
+   GTEST_SKIP() << "disk_cache_delete_old_cache() keeps the only cache Windows has.";
 #else
 
 #ifdef SHADER_CACHE_DISABLE_BY_DEFAULT
@@ -1445,6 +1492,8 @@ TEST_F(Cache, DoNotDeleteCacheWithNewMarker)
 {
 #ifndef ENABLE_SHADER_CACHE
    GTEST_SKIP() << "ENABLE_SHADER_CACHE not defined.";
+#elif DETECT_OS_WINDOWS
+   GTEST_SKIP() << "disk_cache_delete_old_cache() keeps the only cache Windows has.";
 #else
 
 #ifdef SHADER_CACHE_DISABLE_BY_DEFAULT
@@ -1483,6 +1532,8 @@ TEST_F(Cache, DeleteOldCache)
 {
 #ifndef ENABLE_SHADER_CACHE
    GTEST_SKIP() << "ENABLE_SHADER_CACHE not defined.";
+#elif DETECT_OS_WINDOWS
+   GTEST_SKIP() << "disk_cache_delete_old_cache() keeps the only cache Windows has.";
 #else
 
 #ifdef SHADER_CACHE_DISABLE_BY_DEFAULT
