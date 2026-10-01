@@ -1254,9 +1254,7 @@ if with_split_debug.allowed() and get_option('debug')
   add_project_link_arguments('-Wl,--gdb-index', language : ['c', 'cpp'])
 endif
 
-with_shader_cache = get_option('shader-cache') \
-  .require(host_machine.system() != 'windows', error_message : 'Shader Cache does not currently work on Windows') \
-  .allowed()
+with_shader_cache = get_option('shader-cache').allowed()
 
 if with_shader_cache
   pre_args += '-DENABLE_SHADER_CACHE'
