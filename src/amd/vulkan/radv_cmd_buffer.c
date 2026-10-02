@@ -8815,11 +8815,13 @@ radv_draw_stats_wait(struct radv_cmd_buffer *cmd_buffer, enum ac_barrier_flags f
    uint32_t *counts = cmd_buffer->draw_stats.counts;
    uint8_t *work[3] = {&cmd_buffer->draw_stats.work_vs, &cmd_buffer->draw_stats.work_ps,
                        &cmd_buffer->draw_stats.work_cs};
+   uint8_t pending = 0; /* whose work the waits wait for */
 
    if (flags & eop_flags) {
       counts[cmd_buffer->draw_stats.work_ps   ? RADV_DRAW_STAT_wt_eop_gfx
              : cmd_buffer->draw_stats.work_cs ? RADV_DRAW_STAT_wt_eop_cs
                                               : RADV_DRAW_STAT_wt_eop_idle]++;
+      pending = *work[0] | *work[1] | *work[2];
       *work[0] = *work[1] = *work[2] = 0;
    } else if (flags & (AC_BARRIER_SYNC_VS | AC_BARRIER_SYNC_PS | AC_BARRIER_SYNC_CS)) {
       static const enum ac_barrier_flags stage[3] = {AC_BARRIER_SYNC_VS, AC_BARRIER_SYNC_PS, AC_BARRIER_SYNC_CS};
@@ -8843,10 +8845,13 @@ radv_draw_stats_wait(struct radv_cmd_buffer *cmd_buffer, enum ac_barrier_flags f
          counts[RADV_DRAW_STAT_wt_vs_idle + 4 * i + c]++;
          need |= c == 1 || c == 3;
          over |= c == 2;
+         pending |= *work[i];
          *work[i] = 0;
       }
       counts[need ? RADV_DRAW_STAT_wt_fl_need : over ? RADV_DRAW_STAT_wt_fl_over : RADV_DRAW_STAT_wt_fl_idle]++;
    }
+   if (cmd_buffer->state.meta.inside_meta_op && pending == RADV_DRAW_STATS_WORK_META)
+      counts[RADV_DRAW_STAT_wt_xfer_xfer]++;
    cmd_buffer->draw_stats.req = 0;
    cmd_buffer->draw_stats.need = 0;
    cmd_buffer->draw_stats.intl = 0;

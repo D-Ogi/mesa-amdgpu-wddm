@@ -342,7 +342,9 @@ enum radv_cs_dump_type {
  * their source masks name (all commands, all graphics, compute, transfer, fragment, pre-rasterization, ray
  * tracing and acceleration structures, none); bar_req_* and bar_need_* the calls whose source stages ask
  * radv_stage_flush for a VS, PS or CS partial flush, and those for which it is needed at the call;
- * bar_no_work the calls with no draw, dispatch, transfer or query since the previous one. */
+ * bar_no_work the calls with no draw, dispatch, transfer or query since the previous one; wt_xfer_xfer the
+ * flushes of either kind emitted in a meta operation that wait for meta operations' work only, a transfer
+ * waiting for the transfers before it. */
 #define RADV_DRAW_STATS_SYNC(X)                                                                             \
    X(fl_emits) X(fl_meta) X(fl_end) X(fl_eop_cbdb) X(fl_eop_cb) X(fl_eop_db) X(fl_eop_bop) X(fl_vs) X(fl_ps) \
    X(fl_cs) X(fl_vgt) X(fl_l2_inv) X(fl_l2_wb) X(fl_l2_meta) X(fl_vmem) X(fl_smem) X(fl_icache) X(fl_pfp)    \
@@ -355,7 +357,7 @@ enum radv_cs_dump_type {
    X(wt_ps_int) X(wt_cs_idle) X(wt_cs_need) X(wt_cs_over) X(wt_cs_int) X(wt_fl_idle) X(wt_fl_over)           \
    X(wt_fl_need) X(wt_eop_idle) X(wt_eop_cs) X(wt_eop_gfx) X(src_all_cmds) X(src_all_gfx) X(src_cs)          \
    X(src_xfer) X(src_frag) X(src_prerast) X(src_rt) X(src_none) X(bar_req_vs) X(bar_req_ps) X(bar_req_cs)    \
-   X(bar_need_vs) X(bar_need_ps) X(bar_need_cs) X(bar_no_work)
+   X(bar_need_vs) X(bar_need_ps) X(bar_need_cs) X(bar_no_work) X(wt_xfer_xfer)
 
 #define RADV_DRAW_STATS(X) RADV_DRAW_STATS_DRAW(X) RADV_DRAW_STATS_SYNC(X)
 
