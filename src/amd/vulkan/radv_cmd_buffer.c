@@ -9895,9 +9895,40 @@ radv_bind_rt_pipeline(struct radv_cmd_buffer *cmd_buffer, struct radv_ray_tracin
       cmd_buffer->state.rt_stack_size = rt_pipeline->stack_size;
 }
 
+/* bc250: what a graphics pipeline bind keeps of the bound shaders, for the pipe_* counters of BC250_DRAW_STATS. */
+static void
+radv_draw_stats_pipeline_bind(struct radv_cmd_buffer *cmd_buffer, const struct radv_graphics_pipeline *pipeline)
+{
+   uint32_t *counts = cmd_buffer->draw_stats.counts;
+   struct radv_shader *const *bound = cmd_buffer->state.shaders;
+   struct radv_shader *const *shaders = pipeline->base.shaders;
+   bool all = true;
+
+   if (cmd_buffer->state.graphics_pipeline == pipeline) {
+      counts[RADV_DRAW_STAT_pipe_same]++;
+      return;
+   }
+
+   const struct radv_shader *vs = radv_get_shader(shaders, MESA_SHADER_VERTEX);
+   if (vs && vs == radv_get_shader(bound, MESA_SHADER_VERTEX))
+      counts[RADV_DRAW_STAT_pipe_vs_same]++;
+   if (shaders[MESA_SHADER_FRAGMENT] && shaders[MESA_SHADER_FRAGMENT] == bound[MESA_SHADER_FRAGMENT])
+      counts[RADV_DRAW_STAT_pipe_ps_same]++;
+
+   radv_foreach_stage (s, (cmd_buffer->state.active_stages | pipeline->active_stages) & RADV_GRAPHICS_STAGE_BITS) {
+      if (shaders[s] != bound[s])
+         all = false;
+   }
+   if (all && pipeline->base.gs_copy_shader == cmd_buffer->state.gs_copy_shader)
+      counts[RADV_DRAW_STAT_pipe_shaders_same]++;
+}
+
 static ALWAYS_INLINE void
 radv_bind_graphics_pipeline(struct radv_cmd_buffer *cmd_buffer, struct radv_graphics_pipeline *graphics_pipeline)
 {
+   if (radv_draw_stats_on(cmd_buffer))
+      radv_draw_stats_pipeline_bind(cmd_buffer, graphics_pipeline);
+
    /* Bind the non-dynamic graphics state from the pipeline unconditionally because some PSO might
     * have been overwritten between two binds of the same pipeline.
     */
