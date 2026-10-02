@@ -2580,6 +2580,13 @@ else
   vulkan_manifest_suffix = 'json'
 endif
 
+# amdgpu-wddm: a driver DLL built here prints nothing on the application's stdio unless AMDGPU_WDDM_LOG asks
+# (src/util/amdgpu_wddm_stdio.h).
+if host_machine.system() == 'windows' and cc.get_argument_syntax() == 'msvc'
+  add_project_arguments('/FI' + (meson.project_source_root() / 'src' / 'util' / 'amdgpu_wddm_stdio.h'),
+                        language : ['c', 'cpp'])
+endif
+
 subdir('include')
 subdir('bin')
 subdir('src')
