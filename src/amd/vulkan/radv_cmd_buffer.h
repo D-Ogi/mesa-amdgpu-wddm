@@ -296,6 +296,9 @@ struct radv_cmd_state {
    uint64_t dirty_dynamic;
 
    VkShaderStageFlags active_stages;
+   /* bc250: the stages of shader_objs that are not NULL, next to the state every bind reads, so that a pipeline bind
+    * without shader objects skips the walk over them. */
+   VkShaderStageFlags shader_obj_stages;
    struct radv_shader *shaders[MESA_VULKAN_SHADER_STAGES];
    struct radv_shader_object *shader_objs[MESA_VULKAN_SHADER_STAGES];
 
