@@ -2583,6 +2583,8 @@ radv_CmdCopyQueryPoolResultsToMemoryKHR(VkCommandBuffer commandBuffer, VkQueryPo
    const uint64_t dst_va = pDstRange->address;
    const uint64_t stride = pDstRange->stride;
 
+   RADV_DRAW_STATS_COMMAND(cmd_buffer, queries, RADV_DRAW_STATS_QUERY);
+
    if (!queryCount)
       return;
 
@@ -2645,6 +2647,8 @@ radv_CmdResetQueryPool(VkCommandBuffer commandBuffer, VkQueryPool queryPool, uin
    const struct radv_physical_device *pdev = radv_device_physical(device);
    uint32_t value = query_clear_value(pool->vk.query_type);
    uint32_t flush_bits = 0;
+
+   RADV_DRAW_STATS_COMMAND(cmd_buffer, queries, RADV_DRAW_STATS_QUERY);
 
    if (!pool->bo)
       return;
@@ -2769,6 +2773,8 @@ radv_CmdBeginQueryIndexedEXT(VkCommandBuffer commandBuffer, VkQueryPool queryPoo
    struct radv_cmd_stream *cs = cmd_buffer->cs;
    uint64_t va = radv_buffer_get_va(pool->bo);
 
+   RADV_DRAW_STATS_COMMAND(cmd_buffer, queries, RADV_DRAW_STATS_QUERY);
+
    radv_cs_add_buffer(device->ws, cs->b, pool->bo);
 
    emit_query_flush(cmd_buffer, pool);
@@ -2797,6 +2803,8 @@ radv_CmdEndQueryIndexedEXT(VkCommandBuffer commandBuffer, VkQueryPool queryPool,
    uint64_t va = radv_buffer_get_va(pool->bo);
    uint64_t avail_va = va + pool->availability_offset + 4 * query;
    va += pool->stride * query;
+
+   RADV_DRAW_STATS_COMMAND(cmd_buffer, queries, RADV_DRAW_STATS_QUERY);
 
    /* Do not need to add the pool BO to the list because the query must
     * currently be active, which means the BO is already in the list.
@@ -2850,6 +2858,8 @@ radv_CmdWriteTimestamp2(VkCommandBuffer commandBuffer, VkPipelineStageFlags2 sta
    struct radv_cmd_stream *cs = cmd_buffer->cs;
    const uint64_t va = radv_buffer_get_va(pool->bo);
    uint64_t query_va = va + pool->stride * query;
+
+   RADV_DRAW_STATS_COMMAND(cmd_buffer, queries, RADV_DRAW_STATS_QUERY);
 
    radv_cs_add_buffer(device->ws, cs->b, pool->bo);
 

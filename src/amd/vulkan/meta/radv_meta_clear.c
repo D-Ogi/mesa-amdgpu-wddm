@@ -1891,6 +1891,8 @@ radv_CmdClearColorImage(VkCommandBuffer commandBuffer, VkImage image_h, VkImageL
    const struct radv_physical_device *pdev = radv_device_physical(device);
    bool cs;
 
+   RADV_DRAW_STATS_COMMAND(cmd_buffer, transfers, RADV_DRAW_STATS_TRANSFER);
+
    radv_suspend_conditional_rendering(cmd_buffer);
 
    cs = cmd_buffer->qf == RADV_QUEUE_COMPUTE || !radv_image_is_renderable(image) ||
@@ -1913,6 +1915,8 @@ radv_CmdClearDepthStencilImage(VkCommandBuffer commandBuffer, VkImage image_h, V
    VK_FROM_HANDLE(radv_cmd_buffer, cmd_buffer, commandBuffer);
    VK_FROM_HANDLE(radv_image, image, image_h);
 
+   RADV_DRAW_STATS_COMMAND(cmd_buffer, transfers, RADV_DRAW_STATS_TRANSFER);
+
    radv_suspend_conditional_rendering(cmd_buffer);
 
    radv_meta_begin(cmd_buffer);
@@ -1932,6 +1936,8 @@ radv_CmdClearAttachments(VkCommandBuffer commandBuffer, uint32_t attachmentCount
    VK_FROM_HANDLE(radv_cmd_buffer, cmd_buffer, commandBuffer);
    enum ac_barrier_flags pre_flush = 0;
    enum ac_barrier_flags post_flush = 0;
+
+   RADV_DRAW_STATS_COMMAND(cmd_buffer, clear_attachments, 0);
 
    radv_meta_begin_rendering(cmd_buffer);
 

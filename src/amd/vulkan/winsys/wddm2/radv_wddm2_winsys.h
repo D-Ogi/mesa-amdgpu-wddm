@@ -186,6 +186,13 @@ struct radv_wddm2_winsys {
       uint64_t submit_snapshot[16];
    } summary;
 
+   /* BC250_DRAW_STATS=1: the RADV_DRAW_STATS counters of every command buffer ended since the winsys was
+    * created (atomic), written as a third summary line (radv_wddm2_bo.c); snapshot is the last line's. */
+   struct {
+      uint64_t totals[RADV_DRAW_STAT_COUNT];
+      uint64_t snapshot[RADV_DRAW_STAT_COUNT];
+   } draw_stats;
+
    struct vk_sync_binary_type sync_binary_type;
    const struct vk_sync_type *sync_types[3];
    struct {

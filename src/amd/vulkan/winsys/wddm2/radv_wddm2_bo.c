@@ -2078,6 +2078,24 @@ _Static_assert(sizeof(struct radv_wddm2_summary_deferred) <= sizeof(((struct rad
 _Static_assert(sizeof(struct radv_wddm2_summary_submit) <= sizeof(((struct radv_wddm2_winsys *)0)->summary.submit_snapshot),
               "the submit snapshot fits");
 
+/* BC250_DRAW_STATS: radeon_winsys::draw_stats_add, called at the end of every command buffer the
+ * application records. */
+static void
+radv_wddm2_draw_stats_add(struct radeon_winsys *_ws, const uint32_t counts[RADV_DRAW_STAT_COUNT])
+{
+   struct radv_wddm2_winsys *ws = radv_wddm2_winsys(_ws);
+   for (unsigned i = 0; i < RADV_DRAW_STAT_COUNT; i++) {
+      if (counts[i])
+         p_atomic_add(&ws->draw_stats.totals[i], (uint64_t)counts[i]);
+   }
+}
+
+static const char *const radv_wddm2_draw_stat_names[RADV_DRAW_STAT_COUNT] = {
+#define RADV_DRAW_STAT_NAME(name) #name,
+   RADV_DRAW_STATS(RADV_DRAW_STAT_NAME)
+#undef RADV_DRAW_STAT_NAME
+};
+
 static const char *
 radv_wddm2_coalesce_name(const struct radv_wddm2_winsys *ws)
 {
@@ -2130,13 +2148,20 @@ radv_wddm2_summary_write(struct radv_wddm2_winsys *ws, uint64_t now, uint64_t du
       .kernel_queues = p_atomic_read(&ws->submit_stats.kernel_queues),
    };
 
+   uint64_t draw[RADV_DRAW_STAT_COUNT];
+   for (unsigned i = 0; i < RADV_DRAW_STAT_COUNT; i++)
+      draw[i] = p_atomic_read(&ws->draw_stats.totals[i]);
+
    static const struct radv_wddm2_summary_deferred no_deferred;
    static const struct radv_wddm2_summary_submit no_submit;
+   static const uint64_t no_draw[RADV_DRAW_STAT_COUNT];
    simple_mtx_lock(&ws->summary.lock);
    /* Teardown writes what was ever counted; a period, what changed since its last line. */
    const bool write_d = memcmp(&d, final ? (const void *)&no_deferred : ws->summary.deferred_snapshot, sizeof(d)) != 0;
    const bool write_s = memcmp(&s, final ? (const void *)&no_submit : ws->summary.submit_snapshot, sizeof(s)) != 0;
-   if (write_d || write_s) {
+   const bool write_draw = ws->base.draw_stats_add &&
+                           memcmp(draw, final ? no_draw : ws->draw_stats.snapshot, sizeof(draw)) != 0;
+   if (write_d || write_s || write_draw) {
       char tag[32];
       if (final)
          snprintf(tag, sizeof(tag), "final");
@@ -2175,6 +2200,19 @@ radv_wddm2_summary_write(struct radv_wddm2_winsys *ws, uint64_t now, uint64_t du
                                   s.gather_wait_max_ns / 1000u, radv_wddm2_coalesce_name(ws),
                                   ws->bc250_progress_gpu ? "gpu" : "kernel", s.progress_gpu, s.kernel_queues);
          memcpy(ws->summary.submit_snapshot, &s, sizeof(s));
+      }
+      if (write_draw) {
+         char counts[2048];
+         size_t len = 0;
+         for (unsigned i = 0; i < RADV_DRAW_STAT_COUNT && len < sizeof(counts); i++) {
+            const int n = snprintf(counts + len, sizeof(counts) - len, " %s=%" PRIu64, radv_wddm2_draw_stat_names[i],
+                                   draw[i]);
+            if (n < 0)
+               break;
+            len += (size_t)n;
+         }
+         radv_wddm2_deferred_line("periodic %s t=%" PRIu64 "s draw:%s", tag, t, counts);
+         memcpy(ws->draw_stats.snapshot, draw, sizeof(draw));
       }
    }
    simple_mtx_unlock(&ws->summary.lock);
@@ -2744,6 +2782,14 @@ radv_wddm2_bo_init_functions(struct radv_wddm2_winsys *ws)
       else if (strcmp(progress, "gpu"))
          progress_from = "invalid, default";
    }
+   /* BC250_DRAW_STATS=1: RADV counts what the application records in its command buffers
+    * (RADV_DRAW_STATS, radv_cmd_buffer.c) for a third summary line. Off by default; when off, a
+    * command buffer pays one branch per counted command and the log is unchanged. */
+   char draw_buf[64];
+   const char *draw_from;
+   const char *draw = radv_wddm2_knob(&knobs, "BC250_DRAW_STATS", draw_buf, sizeof(draw_buf), &draw_from);
+   if (ws->bc250 && draw && !strcmp(draw, "1"))
+      ws->base.draw_stats_add = radv_wddm2_draw_stats_add;
 
    ws->deferred.report_count = 256;
    ws->deferred.report_bytes = 256ull << 20;
@@ -2765,6 +2811,9 @@ radv_wddm2_bo_init_functions(struct radv_wddm2_winsys *ws)
                                knobs.text ? "read" : "absent", radv_wddm2_deferred_log_path(), log_from, summary_s,
                                summary_from, radv_wddm2_coalesce_name(ws), coalesce_from, ws->bc250_gather_slots,
                                slots_from, ws->bc250_progress_gpu ? "gpu" : "kernel", progress_from);
+      if (ws->base.draw_stats_add)
+         radv_wddm2_deferred_line("draw stats on (%s): counters of every application command buffer, in the "
+                                  "summary's draw line", draw_from);
    }
    free(knobs.text);
 

@@ -336,6 +336,8 @@ radv_CmdFillBuffer(VkCommandBuffer commandBuffer, VkBuffer dstBuffer, VkDeviceSi
    VK_FROM_HANDLE(radv_cmd_buffer, cmd_buffer, commandBuffer);
    VK_FROM_HANDLE(radv_buffer, dst_buffer, dstBuffer);
 
+   RADV_DRAW_STATS_COMMAND(cmd_buffer, transfers, RADV_DRAW_STATS_TRANSFER);
+
    radv_suspend_conditional_rendering(cmd_buffer);
 
    radv_meta_begin(cmd_buffer);
@@ -355,6 +357,8 @@ radv_CmdFillMemoryKHR(VkCommandBuffer commandBuffer, const VkDeviceAddressRangeK
 {
    VK_FROM_HANDLE(radv_cmd_buffer, cmd_buffer, commandBuffer);
    VkAddressCopyFlagsKHR dst_copy_flags = radv_get_copy_flags_from_command_flags(dstFlags);
+
+   RADV_DRAW_STATS_COMMAND(cmd_buffer, transfers, RADV_DRAW_STATS_TRANSFER);
 
    radv_suspend_conditional_rendering(cmd_buffer);
 
@@ -399,6 +403,8 @@ radv_CmdCopyBuffer2(VkCommandBuffer commandBuffer, const VkCopyBufferInfo2 *pCop
    struct radv_device *device = radv_cmd_buffer_device(cmd_buffer);
    struct radv_cmd_stream *cs = cmd_buffer->cs;
 
+   RADV_DRAW_STATS_COMMAND(cmd_buffer, transfers, RADV_DRAW_STATS_TRANSFER);
+
    const VkAddressCopyFlagsKHR src_copy_flags = radv_get_copy_flags_from_bo(src_buffer->bo);
    const VkAddressCopyFlagsKHR dst_copy_flags = radv_get_copy_flags_from_bo(dst_buffer->bo);
 
@@ -426,6 +432,8 @@ VKAPI_ATTR void VKAPI_CALL
 radv_CmdCopyMemoryKHR(VkCommandBuffer commandBuffer, const VkCopyDeviceMemoryInfoKHR *pCopyMemoryInfo)
 {
    VK_FROM_HANDLE(radv_cmd_buffer, cmd_buffer, commandBuffer);
+
+   RADV_DRAW_STATS_COMMAND(cmd_buffer, transfers, RADV_DRAW_STATS_TRANSFER);
 
    radv_suspend_conditional_rendering(cmd_buffer);
 
@@ -499,6 +507,8 @@ radv_CmdUpdateBuffer(VkCommandBuffer commandBuffer, VkBuffer dstBuffer, VkDevice
    const uint64_t dst_va = vk_buffer_address(&dst_buffer->vk, dstOffset);
    struct radv_cmd_stream *cs = cmd_buffer->cs;
 
+   RADV_DRAW_STATS_COMMAND(cmd_buffer, transfers, RADV_DRAW_STATS_TRANSFER);
+
    const VkAddressCopyFlagsKHR dst_copy_flags = radv_get_copy_flags_from_bo(dst_buffer->bo);
 
    radv_suspend_conditional_rendering(cmd_buffer);
@@ -519,6 +529,8 @@ radv_CmdUpdateMemoryKHR(VkCommandBuffer commandBuffer, const VkDeviceAddressRang
                         VkAddressCommandFlagsKHR dstFlags, VkDeviceSize dataSize, const void *pData)
 {
    VK_FROM_HANDLE(radv_cmd_buffer, cmd_buffer, commandBuffer);
+
+   RADV_DRAW_STATS_COMMAND(cmd_buffer, transfers, RADV_DRAW_STATS_TRANSFER);
 
    VkAddressCopyFlagsKHR dst_copy_flags = radv_get_copy_flags_from_command_flags(dstFlags);
 

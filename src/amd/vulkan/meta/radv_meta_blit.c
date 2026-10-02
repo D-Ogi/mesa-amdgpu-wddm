@@ -532,6 +532,8 @@ radv_CmdBlitImage2(VkCommandBuffer commandBuffer, const VkBlitImageInfo2 *pBlitI
    VK_FROM_HANDLE(radv_image, src_image, pBlitImageInfo->srcImage);
    VK_FROM_HANDLE(radv_image, dst_image, pBlitImageInfo->dstImage);
 
+   RADV_DRAW_STATS_COMMAND(cmd_buffer, transfers, RADV_DRAW_STATS_TRANSFER);
+
    radv_suspend_conditional_rendering(cmd_buffer);
 
    radv_meta_begin(cmd_buffer);

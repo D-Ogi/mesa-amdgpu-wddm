@@ -226,6 +226,8 @@ radv_CmdResolveImage2(VkCommandBuffer commandBuffer, const VkResolveImageInfo2 *
    VkImageLayout src_image_layout = pResolveImageInfo->srcImageLayout;
    VkImageLayout dst_image_layout = pResolveImageInfo->dstImageLayout;
 
+   RADV_DRAW_STATS_COMMAND(cmd_buffer, transfers, RADV_DRAW_STATS_TRANSFER);
+
    const VkResolveImageModeInfoKHR *resolve_mode_info =
       vk_find_struct_const(pResolveImageInfo->pNext, RESOLVE_IMAGE_MODE_INFO_KHR);
 

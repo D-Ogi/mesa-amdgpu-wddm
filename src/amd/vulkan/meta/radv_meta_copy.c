@@ -338,6 +338,8 @@ radv_CmdCopyBufferToImage2(VkCommandBuffer commandBuffer, const VkCopyBufferToIm
    const struct radv_physical_device *pdev = radv_device_physical(device);
    struct radv_cmd_stream *cs = cmd_buffer->cs;
 
+   RADV_DRAW_STATS_COMMAND(cmd_buffer, transfers, RADV_DRAW_STATS_TRANSFER);
+
    const VkAddressCopyFlagsKHR src_copy_flags = radv_get_copy_flags_from_bo(src_buffer->bo);
 
    radv_suspend_conditional_rendering(cmd_buffer);
@@ -410,6 +412,8 @@ radv_CmdCopyMemoryToImageKHR(VkCommandBuffer commandBuffer, const VkCopyDeviceMe
    struct radv_device *device = radv_cmd_buffer_device(cmd_buffer);
    const struct radv_physical_device *pdev = radv_device_physical(device);
    struct radv_cmd_stream *cs = cmd_buffer->cs;
+
+   RADV_DRAW_STATS_COMMAND(cmd_buffer, transfers, RADV_DRAW_STATS_TRANSFER);
 
    radv_suspend_conditional_rendering(cmd_buffer);
 
@@ -552,6 +556,8 @@ radv_CmdCopyImageToBuffer2(VkCommandBuffer commandBuffer, const VkCopyImageToBuf
    struct radv_device *device = radv_cmd_buffer_device(cmd_buffer);
    struct radv_cmd_stream *cs = cmd_buffer->cs;
 
+   RADV_DRAW_STATS_COMMAND(cmd_buffer, transfers, RADV_DRAW_STATS_TRANSFER);
+
    const VkAddressCopyFlagsKHR dst_copy_flags = radv_get_copy_flags_from_bo(dst_buffer->bo);
 
    radv_suspend_conditional_rendering(cmd_buffer);
@@ -598,6 +604,8 @@ radv_CmdCopyImageToMemoryKHR(VkCommandBuffer commandBuffer, const VkCopyDeviceMe
    VK_FROM_HANDLE(radv_image, src_image, pCopyMemoryInfo->image);
    struct radv_device *device = radv_cmd_buffer_device(cmd_buffer);
    struct radv_cmd_stream *cs = cmd_buffer->cs;
+
+   RADV_DRAW_STATS_COMMAND(cmd_buffer, transfers, RADV_DRAW_STATS_TRANSFER);
 
    radv_suspend_conditional_rendering(cmd_buffer);
 
@@ -849,6 +857,8 @@ radv_CmdCopyImage2(VkCommandBuffer commandBuffer, const VkCopyImageInfo2 *pCopyI
    struct radv_device *device = radv_cmd_buffer_device(cmd_buffer);
    const struct radv_physical_device *pdev = radv_device_physical(device);
    struct radv_cmd_stream *cs = cmd_buffer->cs;
+
+   RADV_DRAW_STATS_COMMAND(cmd_buffer, transfers, RADV_DRAW_STATS_TRANSFER);
 
    radv_suspend_conditional_rendering(cmd_buffer);
 

@@ -177,6 +177,7 @@ radv_meta_end(struct radv_cmd_buffer *cmd_buffer)
 
    if (state->flags & RADV_META_SAVE_GRAPHICS_PIPELINE) {
       if (state->old_graphics_pipeline) {
+         RADV_DRAW_STATS_COMMAND(cmd_buffer, meta_restores_gfx, 0);
          radv_CmdBindPipeline(radv_cmd_buffer_to_handle(cmd_buffer), VK_PIPELINE_BIND_POINT_GRAPHICS,
                               radv_pipeline_to_handle(&state->old_graphics_pipeline->base));
       }
@@ -191,6 +192,7 @@ radv_meta_end(struct radv_cmd_buffer *cmd_buffer)
 
    if (state->flags & RADV_META_SAVE_COMPUTE_PIPELINE) {
       if (state->old_compute_pipeline) {
+         RADV_DRAW_STATS_COMMAND(cmd_buffer, meta_restores_cs, 0);
          radv_CmdBindPipeline(radv_cmd_buffer_to_handle(cmd_buffer), VK_PIPELINE_BIND_POINT_COMPUTE,
                               radv_pipeline_to_handle(&state->old_compute_pipeline->base));
       }

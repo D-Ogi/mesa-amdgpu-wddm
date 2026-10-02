@@ -4018,6 +4018,66 @@ test_cs_add_buffer(void)
    contract();
 }
 
+/* BC250_DRAW_STATS: off by default (no draw_stats_add, no line); with =1, every command buffer's counters add
+ * up and the summary writes them as its draw line, by name in RADV_DRAW_STATS order, only when they changed,
+ * and again at teardown. */
+static void
+test_draw_stats(void)
+{
+   clear_ib_env();
+   clear_deferred_env();
+   _putenv_s("BC250_DRAW_STATS", "");
+   long lm = log_mark();
+   struct radv_wddm2_winsys *ws = make_ws();
+   check(!ws->base.draw_stats_add && !log_lines(lm, "draw stats on", NULL, 0), "unset: no counting, no line");
+   _putenv_s("BC250_DRAW_STATS", "2");
+   ws = make_ws();
+   check(!ws->base.draw_stats_add, "only 1 turns it on");
+
+   _putenv_s("BC250_DRAW_STATS", "1");
+   lm = log_mark();
+   ws = make_ws();
+   _putenv_s("BC250_DRAW_STATS", "");
+   check(ws->base.draw_stats_add && log_lines(lm, "draw stats on (env)", NULL, 0) == 1, "=1: counting, one line");
+
+   /* Two command buffers: counts i + 1, then 1 each, except the last counter. */
+   uint32_t counts[RADV_DRAW_STAT_COUNT];
+   for (unsigned i = 0; i < RADV_DRAW_STAT_COUNT; i++)
+      counts[i] = i + 1;
+   ws->base.draw_stats_add(&ws->base, counts);
+   for (unsigned i = 0; i < RADV_DRAW_STAT_COUNT; i++)
+      counts[i] = i + 1 < RADV_DRAW_STAT_COUNT;
+   ws->base.draw_stats_add(&ws->base, counts);
+
+   ws->summary.next_ns = 1;
+   lm = log_mark();
+   radv_wddm2_summary_tick(ws);
+   static const char *const names[] = {
+#define TEST_DRAW_STAT_NAME(name) #name,
+      RADV_DRAW_STATS(TEST_DRAW_STAT_NAME)
+#undef TEST_DRAW_STAT_NAME
+   };
+   char line[4096], expected[2048];
+   size_t len = 0;
+   for (unsigned i = 0; i < RADV_DRAW_STAT_COUNT; i++)
+      len += snprintf(expected + len, sizeof(expected) - len, " %s=%u", names[i], i + 1 + (i + 1 < RADV_DRAW_STAT_COUNT));
+   check(log_lines(lm, "periodic #1 t=0s draw:", line, sizeof(line)) == 1 && has(line, expected) &&
+            has(line, "draw: cmdbufs=2 passes=3 "),
+         "the draw line names every counter with its sum: %.300s", line);
+   check(!log_lines(lm, "periodic #1 t=0s deferred:", NULL, 0) && !log_lines(lm, "periodic #1 t=0s submit:", NULL, 0),
+         "nothing else changed: the draw line alone");
+
+   ws->summary.next_ns = 1;
+   lm = log_mark();
+   radv_wddm2_summary_tick(ws);
+   check(!log_lines(lm, "periodic", NULL, 0), "unchanged: no line");
+
+   lm = log_mark();
+   radv_wddm2_deferred_finish(ws);
+   check(log_lines(lm, "periodic final t=0s draw: cmdbufs=2 passes=3 ", NULL, 0) == 1, "teardown writes it again, final");
+   contract();
+}
+
 static const struct {
    const char *name;
    void (*run)(void);
@@ -4055,6 +4115,7 @@ static const struct {
    {"progress_gpu_loss", test_progress_gpu_loss},
    {"progress_gpu_cost", test_progress_gpu_cost},
    {"cs_add_buffer", test_cs_add_buffer},
+   {"draw_stats", test_draw_stats},
 };
 
 int

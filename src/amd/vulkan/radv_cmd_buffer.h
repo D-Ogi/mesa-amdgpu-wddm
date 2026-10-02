@@ -465,6 +465,27 @@ struct radv_cmd_buffer_queue_state {
    bool uses_perf_counters;
 };
 
+/* bc250: BC250_DRAW_STATS (RADV_DRAW_STATS in radv_radeon_winsys.h). The kinds of command recorded
+ * outside a render pass, which tell what separates two passes and what ended one. */
+enum radv_draw_stats_kind {
+   RADV_DRAW_STATS_BARRIER_RO = 1u << 0,
+   RADV_DRAW_STATS_BARRIER = 1u << 1,
+   RADV_DRAW_STATS_QUERY = 1u << 2,
+   RADV_DRAW_STATS_TRANSFER = 1u << 3,
+   RADV_DRAW_STATS_DISPATCH = 1u << 4,
+};
+
+/* What makes two render passes the same: compared with memcmp, so always zeroed before it is filled. */
+struct radv_draw_stats_pass {
+   VkImageView color[MAX_RTS];
+   VkImageView depth;
+   VkImageView stencil;
+   VkRect2D area;
+   uint32_t color_count;
+   uint32_t layer_count;
+   uint32_t view_mask;
+};
+
 struct radv_cmd_buffer {
    struct vk_command_buffer vk;
 
@@ -567,7 +588,35 @@ struct radv_cmd_buffer {
    struct util_dynarray ray_history;
 
    struct list_head msrtss_transients;
+
+   /* bc250: the counters of BC250_DRAW_STATS for this recording, reset at vkBeginCommandBuffer when the
+    * winsys counts and added to its totals at vkEndCommandBuffer. */
+   struct {
+      bool on;
+      bool had_pass;     /* pass holds the last render pass of this recording */
+      bool ended;        /* a pass ended and no command followed it yet */
+      bool last_barrier; /* the last command recorded outside a pass was a barrier */
+      uint32_t between;  /* radv_draw_stats_kind bits recorded since the last pass began */
+      struct radv_draw_stats_pass pass;
+      uint32_t counts[RADV_DRAW_STAT_COUNT];
+   } draw_stats;
 };
+
+/* An application command counts; one that RADV records for its own meta operation does not. */
+static inline bool
+radv_draw_stats_on(const struct radv_cmd_buffer *cmd_buffer)
+{
+   return unlikely(cmd_buffer->draw_stats.on) && !cmd_buffer->state.meta.inside_meta_op;
+}
+
+void radv_draw_stats_command(struct radv_cmd_buffer *cmd_buffer, enum radv_draw_stat stat, uint32_t kind);
+
+/* A command of kind (radv_draw_stats_kind, 0 for one that only sets state) counted as stat. */
+#define RADV_DRAW_STATS_COMMAND(cmd_buffer, stat, kind)                                                          \
+   do {                                                                                                         \
+      if (radv_draw_stats_on(cmd_buffer))                                                                       \
+         radv_draw_stats_command(cmd_buffer, RADV_DRAW_STAT_##stat, kind);                                      \
+   } while (0)
 
 struct radv_msrtss_transient {
    struct list_head link;
