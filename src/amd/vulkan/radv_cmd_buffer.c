@@ -11522,6 +11522,21 @@ radv_cmd_buffer_end_rendering(struct radv_cmd_buffer *cmd_buffer, const VkRender
 
    radv_mark_noncoherent_rb(cmd_buffer);
 
+   /* Most passes resolve nothing: skip describing their attachments for the resolve (bc250: end rendering's own time
+    * was 0.02 ms of the main thread's frame in the CPU profile of Witcher 3, lab session 291).
+    */
+   bool resolves = false;
+   if (!(render->flags & (VK_RENDERING_SUSPENDING_BIT | VK_RENDERING_CUSTOM_RESOLVE_BIT_EXT))) {
+      for (uint32_t i = 0; i < render->color_att_count; i++)
+         resolves |= render->color_att[i].resolve_mode != VK_RESOLVE_MODE_NONE;
+      resolves |= render->ds_att.resolve_mode != VK_RESOLVE_MODE_NONE ||
+                  render->ds_att.stencil_resolve_mode != VK_RESOLVE_MODE_NONE;
+   }
+   if (!resolves) {
+      radv_cmd_buffer_reset_rendering(cmd_buffer);
+      return;
+   }
+
    VkRenderingAttachmentInfo color_atts[MAX_RTS];
    VkRenderingAttachmentFlagsInfoKHR color_atts_flags[MAX_RTS];
    for (uint32_t i = 0; i < render->color_att_count; i++) {
