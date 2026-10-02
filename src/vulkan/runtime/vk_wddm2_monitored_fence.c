@@ -121,6 +121,11 @@ vk_wddm2_monitored_fence_init(struct vk_device *device,
 
    fence->handle = create.hSyncObject;
    fence->value_map = create.Info.MonitoredFence.FenceValueCPUVirtualAddress;
+   /* A fresh kernel object has no signal on record. */
+   fence->signal_gen = 0;
+   fence->signal_epoch = 0;
+   fence->signal_value = 0;
+   fence->signal_progress = 0;
 #ifdef _WIN32
    {
       if (!device->bc250_host.dispatch) {
@@ -327,6 +332,11 @@ vk_wddm2_monitored_fence_import_opaque_win32_handle(struct vk_device *device,
    fence->handle = open.hSyncObject;
    fence->shared_handle = handle;
    fence->value_map = open.MonitoredFence.FenceValueCPUVirtualAddress;
+   /* Another kernel object, signalled by whoever shared it: no record of ours applies to it. */
+   fence->signal_gen = 0;
+   fence->signal_epoch = 0;
+   fence->signal_value = 0;
+   fence->signal_progress = 0;
 
    return VK_SUCCESS;
 }

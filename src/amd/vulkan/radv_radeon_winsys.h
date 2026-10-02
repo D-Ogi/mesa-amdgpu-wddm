@@ -230,6 +230,13 @@ struct radv_winsys_submit_info {
    struct ac_cmdbuf **postamble_cs;
    bool uses_shadow_regs;
    bool secure;
+   /* The first initial preamble of this submission is the full-flush one: it waits for the shader
+    * work of everything earlier on this ring and invalidates the caches before the submission's own
+    * commands run (radv_queue.c, radv_update_preamble_cs case i == 0). radv_queue_submit_normal sets
+    * it exactly when the submission carries a wait, which is the acquire half of every
+    * semaphore dependency; a winsys that resolves a dependency in the ring instead of in the kernel
+    * relies on it (radv_wddm2_cs.c, BC250_WAIT_ELIDE). */
+   bool full_flush_preamble;
 };
 
 /* Kernel effectively allows 0-31. This sets some priorities for fixed

@@ -85,6 +85,24 @@ struct radv_wddm2_winsys {
     * progress fence takes no kernel signal; false ("kernel") signals it through the kernel, as before.
     * A queue without a usable GPU address, or with BC250_IB_DWORDS set, uses the kernel for its life. */
    bool bc250_progress_gpu;
+   /* BC250_WAIT_ELIDE (read with the knobs above): what to do with a GPU wait whose fence was last
+    * signalled by this very queue at or above the waited value - the wait vkd3d-proton's serializing
+    * semaphore puts on nearly every ExecuteCommandLists. RADV_WDDM2_ELIDE_OFF (the default) queues it
+    * with WaitForSynchronizationObjectFromGpu as before; RADV_WDDM2_ELIDE_RING leaves the call out and
+    * waits in the ring instead (a WAIT_REG_MEM on the queue's GPU-written progress value, the shape of
+    * amdgpu's emit_pipeline_sync); RADV_WDDM2_ELIDE_BARE leaves the call out and emits nothing, resting
+    * on the ring order of one context and RADV's full-flush preamble. */
+   enum radv_wddm2_wait_elide {
+      RADV_WDDM2_ELIDE_OFF = 0,
+      RADV_WDDM2_ELIDE_RING,
+      RADV_WDDM2_ELIDE_BARE,
+   } bc250_wait_elide;
+   /* BC250_WAIT_LOG: at most this many waits per summary period get a line of their own (0 off). */
+   int32_t bc250_wait_log;
+   int32_t bc250_wait_log_left; /* the budget of the running period, refilled by the summary; atomic */
+   /* The epoch of the next queue binding (radv_wddm2_cs.c): a D3DKMT context handle is recycled, so a
+    * wait's provenance is recorded against this instead of the handle; atomic. */
+   uint64_t bc250_queue_epoch;
    /* Counters of the submit path for the periodic summary, since creation; atomic. */
    struct {
       uint64_t submits;           /* bc250 submissions with an IB */
@@ -100,6 +118,20 @@ struct radv_wddm2_winsys {
       uint64_t wait_skipped;      /* calls left out, every wait of the submission being complete */
       uint64_t gather_waits;      /* CPU waits for a gather slot to retire before its reuse */
       uint64_t gather_wait_ns, gather_wait_max_ns;
+      /* The provenance of every wait the CPU did not see complete, by its last recorded signal:
+       * same_queue, this queue's own earlier submission at or above the waited value (the class the
+       * elision needs); other_queue, another queue of this process; unknown, no record at all, a
+       * record of a value below the waited one (a wait before its signal), or a record read while it
+       * was being written. The three add up to wait_objects - wait_dropped. */
+      uint64_t wait_same_queue;
+      uint64_t wait_other_queue;
+      uint64_t wait_unknown;
+      uint64_t wait_elided;       /* same_queue waits left out of the kernel call */
+      uint64_t wait_ring;         /* submissions whose IB1 carries the in-ring wait for an elided one */
+      uint64_t wait_ring_passed;  /* elisions that needed no packet: the progress was already past */
+      uint64_t wait_behind_sum;   /* values the waited fences were behind their CPU mapping, summed */
+      uint64_t wait_behind_max;
+      uint64_t wait_foreign_ip;   /* waits of a submission that is not on the GFX ring */
    } submit_stats;
 
    uint32_t adapter_h;
@@ -183,7 +215,7 @@ struct radv_wddm2_winsys {
       uint32_t lines;      /* summaries written */
       /* The counters of the last lines written, in the order radv_wddm2_bo.c collects them. */
       uint64_t deferred_snapshot[48];
-      uint64_t submit_snapshot[16];
+      uint64_t submit_snapshot[32];
    } summary;
 
    struct vk_sync_binary_type sync_binary_type;

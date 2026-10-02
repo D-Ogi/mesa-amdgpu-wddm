@@ -29,6 +29,7 @@
 #define RADV_WDDM2_BO_H
 
 #include "radv_wddm2_winsys.h"
+#include "util/macros.h"
 #include "util/os_time.h"
 
 #define RADV_WDDM2_HEAP_START         0x0000000200000000ull
@@ -128,6 +129,10 @@ void radv_wddm2_witness_stale(struct radv_wddm2_winsys *ws, struct radv_wddm2_bo
 /* A bounded CPU wait for value on a progress fence (radv_wddm2_cs.c); false if it failed or timed out. */
 bool radv_wddm2_fence_wait_value(struct radv_wddm2_winsys *ws, uint32_t fence, const uint64_t *value_map,
                                  uint64_t value);
+
+/* One line of the winsys log (the log file always, stderr with AMDGPU_WDDM_LOG), in the format and
+ * file of the periodic summary. The wait provenance of radv_wddm2_cs.c writes its lines through it. */
+void radv_wddm2_winsys_line(const char *format, ...) PRINTFLIKE(1, 2);
 
 /* Destroys the held BOs whose waits retired. Makes no host call when none did. */
 void radv_wddm2_deferred_drain(struct radv_wddm2_winsys *ws);
