@@ -16443,8 +16443,12 @@ radv_barrier(struct radv_cmd_buffer *cmd_buffer, uint32_t dep_count, const VkDep
 
    radv_gang_barrier(cmd_buffer, src_stage_mask, 0);
 
-   bool inside_meta_op = cmd_buffer->state.meta.inside_meta_op;
-   if (!inside_meta_op)
+   /* Only image layout transitions run meta operations. A barrier without image barriers skips the
+    * state save and the query suspend that would only be undone again (bc250: meta begin and end
+    * under radv_barrier were 0.04 ms of the main thread's frame in the CPU profile of Witcher 3, lab
+    * session 291). */
+   const bool wrap_meta = !cmd_buffer->state.meta.inside_meta_op && has_image_transitions;
+   if (wrap_meta)
       radv_meta_begin(cmd_buffer);
 
    for (uint32_t dep_idx = 0; dep_idx < dep_count; dep_idx++) {
@@ -16495,7 +16499,7 @@ radv_barrier(struct radv_cmd_buffer *cmd_buffer, uint32_t dep_count, const VkDep
       }
    }
 
-   if (!inside_meta_op)
+   if (wrap_meta)
       radv_meta_end(cmd_buffer);
 
    radv_gang_barrier(cmd_buffer, 0, dst_stage_mask);
