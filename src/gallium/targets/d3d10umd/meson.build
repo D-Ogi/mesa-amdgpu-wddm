@@ -49,3 +49,11 @@ executable('bc250_open_resource_test',
  ],
  link_with: [libd3d10umd, libgallium, libwsgdi],
  dependencies: [dep_ws2_32, idep_nir, idep_vtn, idep_xmlconfig, driver_swrast, driver_zink, idep_mesautil])
+
+executable('bc250_ensure_surface_test',
+ ['bc250_ensure_surface_test.cpp', 'd3d10_gdi.c'],
+ include_directories: [
+   inc_include, inc_src, inc_gallium, inc_gallium_aux, inc_d3d10umd, inc_gallium_winsys, inc_gallium_winsys_sw, inc_gallium_drivers, inc_winddk
+ ],
+ link_with: [libd3d10umd, libgallium, libwsgdi],
+ dependencies: [dep_ws2_32, idep_nir, idep_vtn, idep_xmlconfig, driver_swrast, driver_zink, idep_mesautil])
