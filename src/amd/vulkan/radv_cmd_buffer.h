@@ -317,6 +317,12 @@ struct radv_cmd_state {
    struct radv_dynamic_state dynamic;
    struct radv_streamout_state streamout;
    struct radv_vertex_buffer_state vertex_buffer;
+   /* bc250: the vertex shader whose vertex buffer descriptors this recording uploaded last, at vb_desc_va, while
+    * the vertex buffers, their strides and the vertex input are those they were written from: a change to any of
+    * those clears vb_desc_vs (radv_vb_desc_invalidate), as does the memset of this state. A new bind of the same
+    * vertex shader then points it at the same descriptors (radv_flush_vertex_descriptors). */
+   const struct radv_shader *vb_desc_vs;
+   uint64_t vb_desc_va;
    struct radv_index_buffer_state index_buffer;
    struct radv_cond_render_state cond_render;
    struct radv_rendering_state render;
@@ -607,6 +613,10 @@ struct radv_cmd_buffer {
       uint32_t between;  /* radv_draw_stats_kind bits recorded since the last pass began */
       struct radv_draw_stats_pass pass;
       uint32_t counts[RADV_DRAW_STAT_COUNT];
+      /* The vertex buffer descriptors uploaded last (vb_desc_size bytes), against which a write the reuse
+       * would have skipped is checked. */
+      uint32_t vb_desc_size;
+      uint32_t vb_desc[MAX_VERTEX_ATTRIBS * 4];
    } draw_stats;
 };
 

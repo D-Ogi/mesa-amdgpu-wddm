@@ -274,7 +274,10 @@ enum radv_cs_dump_type {
  * transfer, a clear load op of the restart, query, barrier with a write or layout change, read-only
  * barrier, none); end_* is the first command after a pass ends. A read-only barrier has no write access
  * in either scope and no layout change. pipelines_* and push_calls include the binds radv_meta_end
- * makes to restore the application's state, meta_restores_* counts those. */
+ * makes to restore the application's state, meta_restores_* counts those. vb_desc_writes counts the
+ * vertex buffer descriptor uploads, vb_desc_reusable those the reuse of radv_flush_vertex_descriptors
+ * would have skipped (it is off while counting), vb_desc_reuse_wrong those of them whose descriptors
+ * differed from the ones uploaded before. */
 #define RADV_DRAW_STATS(X)                                                                                  \
    X(cmdbufs) X(passes) X(passes_clear) X(restarts) X(restart_none) X(restart_barrier_ro) X(restart_barrier) \
    X(restart_query) X(restart_clear) X(restart_transfer) X(restart_dispatch) X(end_begin) X(end_barrier)     \
@@ -282,7 +285,7 @@ enum radv_cs_dump_type {
    X(pipelines_cs) X(meta_restores_gfx) X(meta_restores_cs) X(vb_calls) X(vb_bindings) X(ib_calls)          \
    X(push_calls) X(barrier_calls) X(barrier_back_to_back) X(barrier_in_pass) X(barrier_ro) X(barrier_mem)   \
    X(barrier_buf) X(barrier_img) X(barrier_layout) X(transfers) X(clear_attachments) X(dispatches)          \
-   X(queries)
+   X(queries) X(vb_desc_writes) X(vb_desc_reusable) X(vb_desc_reuse_wrong)
 
 enum radv_draw_stat {
 #define RADV_DRAW_STAT_ENUM(name) RADV_DRAW_STAT_##name,

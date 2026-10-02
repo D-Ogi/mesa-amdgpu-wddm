@@ -860,12 +860,21 @@ radv_cmd_set_color_blend_equation(struct radv_cmd_buffer *cmd_buffer, uint32_t f
    state->dirty_dynamic |= RADV_DYNAMIC_COLOR_BLEND_EQUATION;
 }
 
+/* bc250: the vertex buffer descriptors uploaded last no longer match the state (radv_cmd_state::vb_desc_vs). */
+ALWAYS_INLINE static void
+radv_vb_desc_invalidate(struct radv_cmd_buffer *cmd_buffer)
+{
+   cmd_buffer->state.vb_desc_vs = NULL;
+}
+
 ALWAYS_INLINE static void
 radv_cmd_set_vertex_binding_strides(struct radv_cmd_buffer *cmd_buffer, uint32_t first, uint32_t count,
                                     const uint16_t *strides)
 {
    struct radv_cmd_state *state = &cmd_buffer->state;
 
+   if (memcmp(state->dynamic.vk.vi_binding_strides + first, strides, count * sizeof(*strides)))
+      radv_vb_desc_invalidate(cmd_buffer);
    typed_memcpy(state->dynamic.vk.vi_binding_strides + first, strides, count);
 
    state->dirty_dynamic |= RADV_DYNAMIC_VERTEX_INPUT_BINDING_STRIDE;
@@ -876,6 +885,7 @@ radv_cmd_set_vertex_input(struct radv_cmd_buffer *cmd_buffer, const struct radv_
 {
    struct radv_cmd_state *state = &cmd_buffer->state;
 
+   radv_vb_desc_invalidate(cmd_buffer);
    memcpy(&state->dynamic.vertex_input, vi_state, sizeof(*vi_state));
 
    state->dirty_dynamic |= RADV_DYNAMIC_VERTEX_INPUT;
@@ -7342,6 +7352,35 @@ radv_write_vertex_descriptors(const struct radv_cmd_buffer *cmd_buffer, const st
    }
 }
 
+/* bc250: the vertex buffer descriptor upload while BC250_DRAW_STATS counts. It writes them on the stack (the
+ * upload buffer is write-combined) and checks each write the reuse would have skipped against the previous
+ * upload, which radv_cmd_state::vb_desc_vs says is that of the same vertex shader. */
+static void
+radv_write_vertex_descriptors_counted(struct radv_cmd_buffer *cmd_buffer, const struct radv_shader *vs,
+                                      bool uses_dynamic_inputs, void *vb_ptr, unsigned size)
+{
+   uint32_t *last = cmd_buffer->draw_stats.vb_desc;
+   uint32_t desc[MAX_VERTEX_ATTRIBS * 4];
+
+   if (uses_dynamic_inputs)
+      radv_write_vertex_descriptors_dynamic(cmd_buffer, vs, desc);
+   else
+      radv_write_vertex_descriptors(cmd_buffer, vs, desc);
+   memcpy(vb_ptr, desc, size);
+
+   if (radv_draw_stats_on(cmd_buffer)) {
+      cmd_buffer->draw_stats.counts[RADV_DRAW_STAT_vb_desc_writes]++;
+      if (vs == cmd_buffer->state.vb_desc_vs) {
+         cmd_buffer->draw_stats.counts[RADV_DRAW_STAT_vb_desc_reusable]++;
+         if (size != cmd_buffer->draw_stats.vb_desc_size || memcmp(desc, last, size))
+            cmd_buffer->draw_stats.counts[RADV_DRAW_STAT_vb_desc_reuse_wrong]++;
+      }
+   }
+
+   cmd_buffer->draw_stats.vb_desc_size = size;
+   memcpy(last, desc, size);
+}
+
 ALWAYS_INLINE static void
 radv_flush_vertex_descriptors(struct radv_cmd_buffer *cmd_buffer)
 {
@@ -7351,6 +7390,17 @@ radv_flush_vertex_descriptors(struct radv_cmd_buffer *cmd_buffer)
 
    if (!vs)
       return;
+
+   /* bc250: binding a pipeline marks the vertex buffers dirty for its vertex shader even where that shader and
+    * the vertex state stay, and each upload then allocated and wrote the same descriptors again. A vertex shader
+    * bound again over the state its descriptors were uploaded for points at those (radv_cmd_state::vb_desc_vs);
+    * the upload buffers of a recording live until its reset. Off while BC250_DRAW_STATS counts, which checks it
+    * instead (radv_write_vertex_descriptors_counted), and with fault detection, which saves every upload. */
+   if (vs == cmd_buffer->state.vb_desc_vs && !cmd_buffer->draw_stats.on &&
+       !radv_device_fault_detection_enabled(device)) {
+      radv_emit_userdata_address(device, cs, vs, AC_UD_VS_VERTEX_BUFFERS, cmd_buffer->state.vb_desc_va);
+      return;
+   }
 
    if (!vs->info.vs.vb_desc_usage_mask)
       return;
@@ -7366,7 +7416,9 @@ radv_flush_vertex_descriptors(struct radv_cmd_buffer *cmd_buffer)
    if (!radv_cmd_buffer_upload_alloc(cmd_buffer, vb_desc_alloc_size, &vb_offset, &vb_ptr))
       return;
 
-   if (uses_dynamic_inputs)
+   if (unlikely(cmd_buffer->draw_stats.on))
+      radv_write_vertex_descriptors_counted(cmd_buffer, vs, uses_dynamic_inputs, vb_ptr, vb_desc_alloc_size);
+   else if (uses_dynamic_inputs)
       radv_write_vertex_descriptors_dynamic(cmd_buffer, vs, vb_ptr);
    else
       radv_write_vertex_descriptors(cmd_buffer, vs, vb_ptr);
@@ -7375,6 +7427,8 @@ radv_flush_vertex_descriptors(struct radv_cmd_buffer *cmd_buffer)
    va += vb_offset;
 
    radv_emit_userdata_address(device, cs, vs, AC_UD_VS_VERTEX_BUFFERS, va);
+   cmd_buffer->state.vb_desc_vs = vs;
+   cmd_buffer->state.vb_desc_va = va;
 
    if (radv_device_fault_detection_enabled(device))
       radv_save_vertex_descriptors(cmd_buffer, (uintptr_t)vb_ptr);
@@ -8750,6 +8804,8 @@ radv_CmdBindVertexBuffers3KHR(VkCommandBuffer commandBuffer, uint32_t firstBindi
          misaligned_mask_invalid |= d->vertex_input.bindings_match_attrib ? BITFIELD_BIT(idx) : 0xffffffff;
       }
 
+      if (vertex_buffer->bindings[idx].addr != addr || vertex_buffer->bindings[idx].size != size)
+         radv_vb_desc_invalidate(cmd_buffer);
       vertex_buffer->bindings[idx].addr = addr;
       vertex_buffer->bindings[idx].size = size;
 
