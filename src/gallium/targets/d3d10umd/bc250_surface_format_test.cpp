@@ -8,7 +8,7 @@
  * runtime: the shared format table as this UMD consumes it, OpenResource and
  * shared CreateResource against fake kernel callbacks, and llvmpipe sampling
  * of an opened surface through the DXGI Blt DDI into a B8G8R8A8 target, the
- * way the compositor reads it.
+ * way the compositor reads it; also the retry of a failed surface setup.
  */
 
 #include <stdio.h>
@@ -39,9 +39,15 @@ static unsigned failures;
 #define CHECK(cond, ...) do { if (!(cond)) { failures++; printf("FAIL %s:%d: ", __func__, __LINE__); \
    printf(__VA_ARGS__); printf("\n"); } } while (0)
 
-struct FakeAllocation { D3DKMT_HANDLE handle; void *memory; UINT64 size; bool locked; };
-static FakeAllocation allocations[16];
+// Lock2 is counted per allocation, so that an unbalanced Lock2 shows.
+struct FakeAllocation { D3DKMT_HANDLE handle; void *memory; UINT64 size; bool locked; UINT locks; };
+static FakeAllocation allocations[32];
 static UINT allocationCount, allocateCalls, deallocateCalls;
+static UINT mapCalls, residentCalls, lockCalls;
+// A failure the next MakeResident or Lock2 returns once, and the paging
+// fence value MakeResident reports.
+static HRESULT residentFailure, lockFailure;
+static UINT64 residentFence = 1;
 static unsigned char lastSurfaceData[32], lastResourceData[16];
 static UINT lastSurfaceDataSize, lastResourceDataSize;
 static volatile UINT64 pagingFence = 1;
@@ -87,31 +93,36 @@ static HRESULT APIENTRY CreatePagingQueueCb(HANDLE, D3DDDICB_CREATEPAGINGQUEUE *
    return S_OK;
 }
 
+// Every map gets a new range, as from VidMm, so that a repeated map shows.
 static HRESULT APIENTRY MapGpuVirtualAddressCb(HANDLE, D3DDDI_MAPGPUVIRTUALADDRESS *map)
 {
-   map->VirtualAddress = 0x100000000ull; map->PagingFenceValue = 1;
+   map->VirtualAddress = 0x100000000ull + 0x10000000ull * mapCalls++; map->PagingFenceValue = 1;
    return S_OK;
 }
 
 static HRESULT APIENTRY MakeResidentCb(HANDLE, D3DDDI_MAKERESIDENT *resident)
 {
-   resident->PagingFenceValue = 1;
+   residentCalls++;
+   if (HRESULT hr = residentFailure) { residentFailure = S_OK; return hr; }
+   resident->PagingFenceValue = residentFence;
    return S_OK;
 }
 
 static HRESULT APIENTRY Lock2Cb(HANDLE, D3DDDICB_LOCK2 *lock)
 {
+   lockCalls++;
+   if (HRESULT hr = lockFailure) { lockFailure = S_OK; return hr; }
    FakeAllocation *a = FindAllocation(lock->hAllocation);
    if (!a) return E_INVALIDARG;
-   a->locked = true; lock->pData = a->memory;
+   a->locks++; a->locked = true; lock->pData = a->memory;
    return S_OK;
 }
 
 static HRESULT APIENTRY Unlock2Cb(HANDLE, const D3DDDICB_UNLOCK2 *unlock)
 {
    FakeAllocation *a = FindAllocation(unlock->hAllocation);
-   if (!a || !a->locked) return E_INVALIDARG;
-   a->locked = false;
+   if (!a || !a->locks) return E_INVALIDARG;
+   a->locked = --a->locks != 0;
    return S_OK;
 }
 
@@ -778,6 +789,75 @@ static void TestShadow(Device *device)
    device->profileShadowRefreshes = device->profileShadowBytes = device->profileShadowTicks = 0;
 }
 
+// A llvmpipe import that fails a given number of times.
+static decltype(pipe_screen::resource_from_handle) realFromHandle;
+static UINT fromHandleFailures;
+static struct pipe_resource *FailingFromHandle(struct pipe_screen *screen, const struct pipe_resource *templat,
+                                               struct winsys_handle *handle, unsigned usage)
+{
+   if (fromHandleFailures) { fromHandleFailures--; return NULL; }
+   return realFromHandle(screen, templat, handle, usage);
+}
+
+// A failed Bc250EnsureSurface leaves presentReady false, and the next Present
+// or SetDisplayMode calls it again. The retry must redo only the failed step
+// and the ones after it: one allocation, one VA range, one MakeResident and
+// one Lock2 that DestroyResource balances (BD-037).
+static void TestEnsureRetry(Device *device)
+{
+   D3D10DDI_HDEVICE hDevice = {device};
+   struct pipe_screen *screen = device->pipe->screen;
+   realFromHandle = screen->resource_from_handle;
+   screen->resource_from_handle = FailingFromHandle;
+   enum Fault { IMPORT, RESIDENT, PAGING, LOCK };
+   const struct Case { Fault fault; const char *step; HRESULT want; } cases[] = {
+      {IMPORT, "resource_from_handle", E_OUTOFMEMORY},
+      {RESIDENT, "MakeResident", E_OUTOFMEMORY},
+      {PAGING, "paging fence wait (5 s)", HRESULT_FROM_WIN32(WAIT_TIMEOUT)},
+      {LOCK, "Lock2", E_FAIL},
+   };
+   for (const Case &c : cases) {
+      // Neither shared nor a primary: CreateResource leaves the surface to
+      // the first Present or SetDisplayMode.
+      Resource r;
+      HRESULT hr = Create(hDevice, &r, DXGI_FORMAT_B8G8R8A8_UNORM, 67, 65, 0, NULL);
+      CHECK(hr == S_OK && !r.allocation && !r.presentReady, "%s: create %08lx", c.step, hr);
+      if (FAILED(hr)) continue;
+      const UINT allocates = allocateCalls, maps = mapCalls, residents = residentCalls, locks = lockCalls,
+                 deallocations = deallocateCalls;
+      switch (c.fault) {
+      case IMPORT: fromHandleFailures = 1; break;
+      case RESIDENT: residentFailure = E_OUTOFMEMORY; break;
+      case PAGING: residentFence = pagingFence + 1; break;
+      case LOCK: lockFailure = E_FAIL; break;
+      }
+      hr = Bc250EnsureSurface(device, &r);
+      const UINT64 va = r.gpuVa;
+      CHECK(hr == c.want && !r.presentReady && r.allocation && va, "%s fails: %08lx, want %08lx", c.step, hr, c.want);
+      if (c.fault == PAGING) {
+         CHECK(r.surfaceFence == residentFence, "%s: fence %llu kept, want %llu", c.step, r.surfaceFence,
+               residentFence);
+         pagingFence = residentFence;
+         residentFence = 1;
+      }
+      hr = Bc250EnsureSurface(device, &r);
+      FakeAllocation *a = FindAllocation(r.allocation);
+      CHECK(hr == S_OK && r.presentReady && a && r.cpuMapping == a->memory, "%s retried: %08lx", c.step, hr);
+      CHECK(allocateCalls == allocates + 1 && mapCalls == maps + 1 && r.gpuVa == va,
+            "%s retried: %u allocations, %u maps, VA %llx then %llx", c.step, allocateCalls - allocates,
+            mapCalls - maps, va, r.gpuVa);
+      CHECK(residentCalls == residents + (c.fault == RESIDENT ? 2 : 1) &&
+            lockCalls == locks + (c.fault == LOCK ? 2 : 1) && a && a->locks == 1,
+            "%s retried: %u MakeResident, %u Lock2, %u held", c.step, residentCalls - residents, lockCalls - locks,
+            a ? a->locks : 0);
+      Destroy(hDevice, &r);
+      CHECK(a && !a->locks && deallocateCalls == deallocations + 1, "%s: destroy leaves %u Lock2 held", c.step,
+            a ? a->locks : 0);
+   }
+   screen->resource_from_handle = realFromHandle;
+   printf("ensure retry: %u failed steps retried\n", (UINT)(sizeof(cases) / sizeof(cases[0])));
+}
+
 int main(void)
 {
    _set_error_mode(_OUT_TO_STDERR);
@@ -805,6 +885,7 @@ int main(void)
    TestOpenRefusals(device);
    TestCreateShared(device);
    TestShadow(device);
+   TestEnsureRetry(device);
 
    device->pipe->destroy(device->pipe);
    screen->destroy(screen);
