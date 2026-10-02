@@ -7254,9 +7254,48 @@ radv_get_vbo_info(const struct radv_cmd_buffer *cmd_buffer, uint32_t idx, struct
    vbo_info->non_trivial_format = d->vertex_input.non_trivial_format[idx];
 }
 
+/* bc250: the vertex count of the per-attribute descriptors, (size - attrib_end) / stride + 1, divided once per
+ * binding of an upload instead of once per attribute: with size = q * stride + r (0 <= r < stride), an attribute
+ * that ends at most r bytes into a vertex has q + 1 vertices and one that ends within the next stride bytes has q.
+ * The attributes of a binding come one after another, so the memo keeps the last binding. A 32-bit division per
+ * attribute was the costliest instruction of the upload in the CPU profile of Witcher 3 on unit A. */
+struct radv_vb_records_memo {
+   uint32_t binding; /* UINT32_MAX until the first division */
+   uint32_t quotient;
+   uint32_t remainder;
+};
+
+/* For size >= attrib_end and stride != 0. records_wrong, when not NULL (BC250_DRAW_STATS), counts the results that
+ * differ from the direct division. */
+ALWAYS_INLINE static uint32_t
+radv_vb_attrib_records(struct radv_vb_records_memo *memo, uint32_t binding, uint32_t size, uint32_t stride,
+                       uint32_t attrib_end, uint32_t *records_wrong)
+{
+   uint32_t records;
+
+   if (memo->binding != binding) {
+      memo->binding = binding;
+      memo->quotient = size / stride;
+      memo->remainder = size % stride;
+   }
+
+   if (attrib_end <= memo->remainder)
+      records = memo->quotient + 1;
+   else if (attrib_end - memo->remainder <= stride)
+      records = memo->quotient;
+   else
+      records = (size - attrib_end) / stride + 1;
+
+   if (records_wrong && records != (size - attrib_end) / stride + 1)
+      (*records_wrong)++;
+
+   return records;
+}
+
 ALWAYS_INLINE static void
 radv_write_vertex_descriptor(const struct radv_cmd_buffer *cmd_buffer, const struct radv_shader *vs, const unsigned i,
-                             const bool uses_dynamic_inputs, uint32_t *desc)
+                             const bool uses_dynamic_inputs, struct radv_vb_records_memo *memo,
+                             uint32_t *records_wrong, uint32_t *desc)
 {
    struct radv_device *device = radv_cmd_buffer_device(cmd_buffer);
    const struct radv_physical_device *pdev = radv_device_physical(device);
@@ -7319,7 +7358,7 @@ radv_write_vertex_descriptor(const struct radv_cmd_buffer *cmd_buffer, const str
       } else if (stride == 0) {
          num_records = 1; /* only one vertex */
       } else {
-         num_records = (num_records - attrib_end) / stride + 1;
+         num_records = radv_vb_attrib_records(memo, vbo_info.binding, num_records, stride, attrib_end, records_wrong);
       }
 
       /* GFX10 uses OOB_SELECT_RAW if stride==0, so convert num_records from elements into
@@ -7370,22 +7409,25 @@ radv_write_vertex_descriptor(const struct radv_cmd_buffer *cmd_buffer, const str
 
 ALWAYS_INLINE static void
 radv_write_vertex_descriptors_dynamic(const struct radv_cmd_buffer *cmd_buffer, const struct radv_shader *vs,
-                                      void *vb_ptr)
+                                      uint32_t *records_wrong, void *vb_ptr)
 {
+   struct radv_vb_records_memo memo = {.binding = UINT32_MAX};
    unsigned desc_index = 0;
    for (unsigned i = 0; i < vs->info.vs.num_attributes; i++) {
       uint32_t *desc = &((uint32_t *)vb_ptr)[desc_index++ * 4];
-      radv_write_vertex_descriptor(cmd_buffer, vs, i, true, desc);
+      radv_write_vertex_descriptor(cmd_buffer, vs, i, true, &memo, records_wrong, desc);
    }
 }
 
 ALWAYS_INLINE static void
-radv_write_vertex_descriptors(const struct radv_cmd_buffer *cmd_buffer, const struct radv_shader *vs, void *vb_ptr)
+radv_write_vertex_descriptors(const struct radv_cmd_buffer *cmd_buffer, const struct radv_shader *vs,
+                              uint32_t *records_wrong, void *vb_ptr)
 {
+   struct radv_vb_records_memo memo = {.binding = UINT32_MAX};
    unsigned desc_index = 0;
    u_foreach_bit (i, vs->info.vs.vb_desc_usage_mask) {
       uint32_t *desc = &((uint32_t *)vb_ptr)[desc_index++ * 4];
-      radv_write_vertex_descriptor(cmd_buffer, vs, i, false, desc);
+      radv_write_vertex_descriptor(cmd_buffer, vs, i, false, &memo, records_wrong, desc);
    }
 }
 
@@ -7397,12 +7439,13 @@ radv_write_vertex_descriptors_counted(struct radv_cmd_buffer *cmd_buffer, const 
                                       bool uses_dynamic_inputs, void *vb_ptr, unsigned size)
 {
    uint32_t *last = cmd_buffer->draw_stats.vb_desc;
+   uint32_t *records_wrong = &cmd_buffer->draw_stats.counts[RADV_DRAW_STAT_vb_desc_records_wrong];
    uint32_t desc[MAX_VERTEX_ATTRIBS * 4];
 
    if (uses_dynamic_inputs)
-      radv_write_vertex_descriptors_dynamic(cmd_buffer, vs, desc);
+      radv_write_vertex_descriptors_dynamic(cmd_buffer, vs, records_wrong, desc);
    else
-      radv_write_vertex_descriptors(cmd_buffer, vs, desc);
+      radv_write_vertex_descriptors(cmd_buffer, vs, records_wrong, desc);
    memcpy(vb_ptr, desc, size);
 
    if (radv_draw_stats_on(cmd_buffer)) {
@@ -7456,9 +7499,9 @@ radv_flush_vertex_descriptors(struct radv_cmd_buffer *cmd_buffer)
    if (unlikely(cmd_buffer->draw_stats.on))
       radv_write_vertex_descriptors_counted(cmd_buffer, vs, uses_dynamic_inputs, vb_ptr, vb_desc_alloc_size);
    else if (uses_dynamic_inputs)
-      radv_write_vertex_descriptors_dynamic(cmd_buffer, vs, vb_ptr);
+      radv_write_vertex_descriptors_dynamic(cmd_buffer, vs, NULL, vb_ptr);
    else
-      radv_write_vertex_descriptors(cmd_buffer, vs, vb_ptr);
+      radv_write_vertex_descriptors(cmd_buffer, vs, NULL, vb_ptr);
 
    va = radv_buffer_get_va(cmd_buffer->upload.upload_bo);
    va += vb_offset;

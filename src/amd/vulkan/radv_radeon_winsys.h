@@ -277,7 +277,9 @@ enum radv_cs_dump_type {
  * makes to restore the application's state, meta_restores_* counts those. vb_desc_writes counts the
  * vertex buffer descriptor uploads, vb_desc_reusable those the reuse of radv_flush_vertex_descriptors
  * would have skipped (it is off while counting), vb_desc_reuse_wrong those of them whose descriptors
- * differed from the ones uploaded before. pc_stage_emits counts the push constant emissions of one
+ * differed from the ones uploaded before, vb_desc_records_wrong the per-attribute vertex counts that
+ * differ from the direct division (radv_vb_attrib_records), which must stay zero, in uploads of
+ * application and meta commands alike. pc_stage_emits counts the push constant emissions of one
  * shader stage, pc_stage_same those that wrote what the stage's previous counted emission wrote (same
  * shader, inline push constants and pointer), pc_regs_wrong those whose precomputed registers
  * (radv_shader_push_const_regs) differ from the shader info, which must stay zero. Of the binds counted
@@ -293,7 +295,8 @@ enum radv_cs_dump_type {
    X(push_calls) X(barrier_calls) X(barrier_back_to_back) X(barrier_in_pass) X(barrier_ro) X(barrier_mem)   \
    X(barrier_buf) X(barrier_img) X(barrier_layout) X(transfers) X(clear_attachments) X(dispatches)          \
    X(queries) X(vb_desc_writes) X(vb_desc_reusable) X(vb_desc_reuse_wrong) X(pc_stage_emits)                \
-   X(pc_stage_same) X(pc_regs_wrong) X(pipe_same) X(pipe_vs_same) X(pipe_ps_same) X(pipe_shaders_same)
+   X(pc_stage_same) X(pc_regs_wrong) X(pipe_same) X(pipe_vs_same) X(pipe_ps_same) X(pipe_shaders_same)  \
+   X(vb_desc_records_wrong)
 
 enum radv_draw_stat {
 #define RADV_DRAW_STAT_ENUM(name) RADV_DRAW_STAT_##name,
