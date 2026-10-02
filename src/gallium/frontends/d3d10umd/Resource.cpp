@@ -690,6 +690,8 @@ DestroyResource(D3D10DDI_HDEVICE hDevice,       // IN
       pResource->allocation=0;
       pResource->gpuVa=0;
       pResource->cpuMapping=NULL;
+      pResource->surfaceResident=FALSE;
+      pResource->surfaceFence=0;
    }
    free(pResource->transfers);
    pResource->transfers=NULL;
