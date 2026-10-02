@@ -8688,11 +8688,6 @@ radv_CmdBindVertexBuffers2(VkCommandBuffer commandBuffer, uint32_t firstBinding,
    struct radv_device *device = radv_cmd_buffer_device(cmd_buffer);
    struct radv_cmd_stream *cs = cmd_buffer->cs;
 
-   if (radv_draw_stats_on(cmd_buffer)) {
-      cmd_buffer->draw_stats.counts[RADV_DRAW_STAT_vb_calls]++;
-      cmd_buffer->draw_stats.counts[RADV_DRAW_STAT_vb_bindings] += bindingCount;
-   }
-
    STACK_ARRAY(VkBindVertexBuffer3InfoKHR, bindings, bindingCount);
 
    for (uint32_t i = 0; i < bindingCount; i++) {
@@ -8726,6 +8721,13 @@ radv_CmdBindVertexBuffers3KHR(VkCommandBuffer commandBuffer, uint32_t firstBindi
    VK_FROM_HANDLE(radv_cmd_buffer, cmd_buffer, commandBuffer);
    struct radv_vertex_buffer_state *vertex_buffer = &cmd_buffer->state.vertex_buffer;
    struct radv_dynamic_state *d = &cmd_buffer->state.dynamic;
+
+   /* bc250: counted here, where the VkBuffer binds of vkCmdBindVertexBuffers2 arrive too, so that an application
+    * binding by address counts the same (BC250_DRAW_STATS). */
+   if (radv_draw_stats_on(cmd_buffer)) {
+      cmd_buffer->draw_stats.counts[RADV_DRAW_STAT_vb_calls]++;
+      cmd_buffer->draw_stats.counts[RADV_DRAW_STAT_vb_bindings] += bindingCount;
+   }
 
    /* We have to defer setting up vertex buffer since we need the buffer
     * stride from the pipeline. */
@@ -8829,8 +8831,6 @@ radv_CmdBindIndexBuffer2(VkCommandBuffer commandBuffer, VkBuffer buffer, VkDevic
    struct radv_cmd_stream *cs = cmd_buffer->cs;
    VkDeviceAddressRangeKHR addr_range = {0};
 
-   RADV_DRAW_STATS_COMMAND(cmd_buffer, ib_calls, 0);
-
    if (index_buffer) {
       radv_cs_add_buffer(device->ws, cs->b, index_buffer->bo);
 
@@ -8852,6 +8852,9 @@ radv_CmdBindIndexBuffer3KHR(VkCommandBuffer commandBuffer, const VkBindIndexBuff
 {
    VK_FROM_HANDLE(radv_cmd_buffer, cmd_buffer, commandBuffer);
    struct radv_index_buffer_state *index_buffer = &cmd_buffer->state.index_buffer;
+
+   /* bc250: counted here for the VkBuffer binds and the binds by address alike, as the vertex buffers. */
+   RADV_DRAW_STATS_COMMAND(cmd_buffer, ib_calls, 0);
 
    index_buffer->index_type = vk_to_index_type(pInfo->indexType);
    cmd_buffer->state.primitive_restart_index = radv_get_primitive_restart_index(pInfo->indexType);
