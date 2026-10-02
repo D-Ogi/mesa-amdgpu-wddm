@@ -109,6 +109,8 @@ struct radv_ps_epilog_key {
    uint8_t color_is_int10;
    uint8_t enable_mrt_output_nan_fixup;
    uint8_t no_signed_zero;
+   /* Unblended 10-bit UNORM targets with FP16_ABGR exports (radv_generate_ps_epilog_key). */
+   uint8_t color_round_unorm10;
 
    uint32_t colors_needed;
 
