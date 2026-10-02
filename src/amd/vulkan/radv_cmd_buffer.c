@@ -11104,6 +11104,20 @@ radv_cmd_buffer_replicate_msrtss_rendering(struct radv_cmd_buffer *cmd_buffer, c
    radv_meta_end(cmd_buffer);
 }
 
+/* Begins the meta operation of a rendering begin at its first layout transition, feedback loop output or VRS copy.
+ * A begin without any of them skips the state save and the query suspend that would only be undone again (bc250:
+ * meta begin and end under radv_cmd_buffer_begin_rendering were 0.03 ms of the main thread's frame in the CPU
+ * profile of Witcher 3, lab session 291).
+ */
+static void
+radv_begin_rendering_meta(struct radv_cmd_buffer *cmd_buffer, bool *begun)
+{
+   if (*begun || cmd_buffer->state.meta.inside_meta_op)
+      return;
+   radv_meta_begin(cmd_buffer);
+   *begun = true;
+}
+
 static void
 radv_cmd_buffer_begin_rendering(struct radv_cmd_buffer *cmd_buffer, const VkRenderingInfo *pRenderingInfo)
 {
@@ -11140,9 +11154,7 @@ radv_cmd_buffer_begin_rendering(struct radv_cmd_buffer *cmd_buffer, const VkRend
    if (cmd_buffer->vk.render_pass)
       radv_describe_barrier_start(cmd_buffer, RGP_BARRIER_EXTERNAL_RENDER_PASS_SYNC);
 
-   bool inside_meta_op = cmd_buffer->state.meta.inside_meta_op;
-   if (!inside_meta_op)
-      radv_meta_begin(cmd_buffer);
+   bool meta_begun = false;
 
    const struct VkMultisampledRenderToSingleSampledInfoEXT *msrtss_info =
       vk_find_struct_const(pRenderingInfo->pNext, MULTISAMPLED_RENDER_TO_SINGLE_SAMPLED_INFO_EXT);
@@ -11196,6 +11208,7 @@ radv_cmd_buffer_begin_rendering(struct radv_cmd_buffer *cmd_buffer, const VkRend
       VkImageLayout initial_layout = attachment_initial_layout(att_info);
       if (initial_layout != color_att[i].layout) {
          assert(!(pRenderingInfo->flags & VK_RENDERING_RESUMING_BIT));
+         radv_begin_rendering_meta(cmd_buffer, &meta_begun);
          radv_handle_rendering_image_transition(cmd_buffer, color_att[i].iview, pRenderingInfo->layerCount,
                                                 pRenderingInfo->viewMask, initial_layout, VK_IMAGE_LAYOUT_UNDEFINED,
                                                 color_att[i].layout, VK_IMAGE_LAYOUT_UNDEFINED, NULL);
@@ -11213,6 +11226,7 @@ radv_cmd_buffer_begin_rendering(struct radv_cmd_buffer *cmd_buffer, const VkRend
 
       if (!(pRenderingInfo->flags & VK_RENDERING_RESUMING_BIT) &&
           color_att[i].flags & VK_RENDERING_ATTACHMENT_INPUT_ATTACHMENT_FEEDBACK_BIT_KHR) {
+         radv_begin_rendering_meta(cmd_buffer, &meta_begun);
          radv_handle_color_fbfetch_output(cmd_buffer, &color_att[i], pRenderingInfo->layerCount,
                                           pRenderingInfo->viewMask);
       }
@@ -11324,6 +11338,7 @@ radv_cmd_buffer_begin_rendering(struct radv_cmd_buffer *cmd_buffer, const VkRend
 
       if (initial_depth_layout != ds_att.layout || initial_stencil_layout != ds_att.stencil_layout) {
          assert(!(pRenderingInfo->flags & VK_RENDERING_RESUMING_BIT));
+         radv_begin_rendering_meta(cmd_buffer, &meta_begun);
          radv_handle_rendering_image_transition(cmd_buffer, ds_att.iview, pRenderingInfo->layerCount,
                                                 pRenderingInfo->viewMask, initial_depth_layout, initial_stencil_layout,
                                                 ds_att.layout, ds_att.stencil_layout, sample_locs_info);
@@ -11334,6 +11349,7 @@ radv_cmd_buffer_begin_rendering(struct radv_cmd_buffer *cmd_buffer, const VkRend
 
       if (!(pRenderingInfo->flags & VK_RENDERING_RESUMING_BIT) &&
           ds_att.flags & VK_RENDERING_ATTACHMENT_INPUT_ATTACHMENT_FEEDBACK_BIT_KHR) {
+         radv_begin_rendering_meta(cmd_buffer, &meta_begun);
          radv_handle_depth_fbfetch_output(cmd_buffer, &ds_att, ds_att_aspects, pRenderingInfo->layerCount,
                                           pRenderingInfo->viewMask, sample_locs_info);
       }
@@ -11373,6 +11389,7 @@ radv_cmd_buffer_begin_rendering(struct radv_cmd_buffer *cmd_buffer, const VkRend
                    render_area.offset.x + render_area.extent.height <= ds_image->vk.extent.height);
 
             /* Copy the VRS rates to the HTILE buffer. */
+            radv_begin_rendering_meta(cmd_buffer, &meta_begun);
             radv_copy_vrs_htile(cmd_buffer, vrs_att.iview, &render_area, ds_image, ds_iview->vk.base_array_layer,
                                 htile_va, true);
          } else {
@@ -11393,13 +11410,14 @@ radv_cmd_buffer_begin_rendering(struct radv_cmd_buffer *cmd_buffer, const VkRend
                   MIN2(render_area.extent.height, ds_image->vk.extent.height - render_area.offset.y);
 
                /* Copy the VRS rates to the HTILE buffer. */
+               radv_begin_rendering_meta(cmd_buffer, &meta_begun);
                radv_copy_vrs_htile(cmd_buffer, vrs_att.iview, &render_area, ds_image, 0, htile_va, false);
             }
          }
       }
    }
 
-   if (!inside_meta_op)
+   if (meta_begun)
       radv_meta_end(cmd_buffer);
 
    if (cmd_buffer->vk.render_pass)
