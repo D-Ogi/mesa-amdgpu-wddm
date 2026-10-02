@@ -238,6 +238,12 @@ radv_wddm2_try_bc250(struct radv_wddm2_winsys *ws, struct drm_amdgpu_info_device
    info->pcie_gen = dev->pcie_gen;
    info->pcie_num_lanes = dev->pcie_num_lanes;
    info->max_gflops = (info->gfx_level >= GFX11 ? 256 : 128) * info->num_cu * info->max_gpu_freq_mhz / 1000;
+   /* ac_query_gpu_info sets this outside the ac_fill_* helpers (ac_gpu_info.c). The SQ fetches up to
+    * SH_MEM_CONFIG.INITIAL_INST_PREFETCH (3) cache lines past the PC, and radv_alloc_shader_memory pads
+    * every shader by this distance. Left at 0, the last shader of a full arena prefetches into the next
+    * VA page, and if that page is unmapped the SQC raises an instruction fetch fault. */
+   info->instr_prefetch_distance = !info->has_graphics && info->family >= CHIP_MI200 ? 16 :
+                                   info->gfx_level >= GFX10 ? 3 : 0;
 
    ws->bc250 = true;
    fprintf(stderr, "bc250: caps blob, device 0x%x family %u gfx %u\n", dev->device_id, info->family,
@@ -537,6 +543,9 @@ radv_wddm2_fill_gpu_info(struct radv_wddm2_winsys *ws,
    //set_custom_cu_en_mask(info);
    ac_fill_raster_config(info);
    ac_fill_scratch_info(info);
+   /* As in radv_wddm2_try_bc250: shader allocations need the instruction prefetch padding. */
+   info->instr_prefetch_distance = !info->has_graphics && info->family >= CHIP_MI200 ? 16 :
+                                   info->gfx_level >= GFX10 ? 3 : 0;
 
    info->compiler_info.has_image_bvh_intersect_ray = false;
 
