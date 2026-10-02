@@ -342,6 +342,11 @@ util_bitcount(unsigned n)
    return __builtin_popcount(n);
 #elif __OPENCL_VERSION__
    return popcount(n);
+#elif defined(_MSC_VER) && defined(_M_X64)
+   /* amdgpu-wddm fork: MSVC has no __builtin_popcount, so its builds took the loop below, one iteration per set
+    * bit and a mispredicted exit, on every vertex buffer descriptor upload among others. The fork's x64 builds run
+    * on Windows 11, whose releases since 24H2 require the POPCNT instruction. */
+   return __popcnt(n);
 #else
    /* K&R classic bitcount.
     *
@@ -384,6 +389,9 @@ util_bitcount64(uint64_t n)
    return __builtin_popcountll(n);
 #elif __OPENCL_VERSION__
    return popcount(n);
+#elif defined(_MSC_VER) && defined(_M_X64)
+   /* amdgpu-wddm fork: as util_bitcount. */
+   return (unsigned)__popcnt64(n);
 #else
    return util_bitcount((unsigned)n) + util_bitcount((unsigned)(n >> 32));
 #endif
