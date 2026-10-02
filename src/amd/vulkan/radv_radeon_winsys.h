@@ -359,7 +359,35 @@ enum radv_cs_dump_type {
    X(src_xfer) X(src_frag) X(src_prerast) X(src_rt) X(src_none) X(bar_req_vs) X(bar_req_ps) X(bar_req_cs)    \
    X(bar_need_vs) X(bar_need_ps) X(bar_need_cs) X(bar_no_work) X(wt_xfer_xfer)
 
-#define RADV_DRAW_STATS(X) RADV_DRAW_STATS_DRAW(X) RADV_DRAW_STATS_SYNC(X)
+/* bc250: the resource tracking of the waits (radv_draw_stats_track), on a third line. A wait that an application
+ * barrier's source stages need (wt_*_need) is needed by its resources too where pending work touched a resource
+ * the barrier names: rw_vs_*, rw_ps_* and rw_cs_* count the needed partial flushes of each stage, rf_* the
+ * flushes counted as wt_fl_need, and rd_* the drains with work pending (wt_eop_cs and wt_eop_gfx), by the
+ * highest level any named resource reached: exact, pending work touched it (an attachment of a render pass since
+ * the last CB or DB flush, a destination or source of RADV's transfers and layout transitions, a storage resource
+ * the engine bound for the application's pipeline); unk, not known (work from before the command buffer, a memory
+ * barrier no resource list covers, transfers whose resources were not recorded, a list that ran full); uav, the
+ * application's work may have written it through storage descriptors the engine did not name; war, the barrier
+ * orders writes after reads (its source access has no write), and the application's work may read it through
+ * any descriptor; none, no pending work touched it, so the wait is not needed for what the barrier names.
+ * rf_int counts the flushes needed only by RADV's own requests, rd_int the drains no application barrier asked
+ * for, rd_cache those whose CB or DB flush an attachment that is still in that cache needs, rd_cunk those that
+ * would be none, war or uav but for not knowing what the CB or DB holds (attachments of earlier command buffers,
+ * an unnamed memory barrier, a full list). rt_entries counts the resources the engine named
+ * (bc250_barrier_resources), rt_wild of them the pending copies it names as a group, rt_uncovered the barrier
+ * calls with a memory barrier no list covers; rt_hints the storage hints the engine sent (bc250_uav_hint) and
+ * rt_hint_ranges their bindings; rt_app_noid and rt_meta_noid the draws and
+ * dispatches whose resources are not known (no hint for the bound pipeline, or a RADV operation without a
+ * record); rt_list_full the ranges dropped from a full list; rt_eval_ns the CPU time of the tracking (sampled
+ * with os_time_get_nano, rt_timed sections; each sample includes one clock read). */
+#define RADV_DRAW_STATS_TRACK(X)                                                                            \
+   X(rw_vs_none) X(rw_vs_war) X(rw_vs_uav) X(rw_vs_unk) X(rw_vs_exact) X(rw_ps_none) X(rw_ps_war)            \
+   X(rw_ps_uav) X(rw_ps_unk) X(rw_ps_exact) X(rw_cs_none) X(rw_cs_war) X(rw_cs_uav) X(rw_cs_unk)             \
+   X(rw_cs_exact) X(rf_none) X(rf_war) X(rf_uav) X(rf_unk) X(rf_exact) X(rf_int) X(rd_none) X(rd_war)        \
+   X(rd_uav) X(rd_unk) X(rd_exact) X(rd_cache) X(rd_cunk) X(rd_int) X(rt_entries) X(rt_wild) X(rt_uncovered) \
+   X(rt_hints) X(rt_hint_ranges) X(rt_app_noid) X(rt_meta_noid) X(rt_list_full) X(rt_eval_ns) X(rt_timed)
+
+#define RADV_DRAW_STATS(X) RADV_DRAW_STATS_DRAW(X) RADV_DRAW_STATS_SYNC(X) RADV_DRAW_STATS_TRACK(X)
 
 enum radv_draw_stat {
 #define RADV_DRAW_STAT_ENUM(name) RADV_DRAW_STAT_##name,
@@ -368,9 +396,12 @@ enum radv_draw_stat {
    RADV_DRAW_STAT_COUNT
 };
 
-/* The first counter of RADV_DRAW_STATS_SYNC. */
+/* The first counters of RADV_DRAW_STATS_SYNC and RADV_DRAW_STATS_TRACK. */
 #define RADV_DRAW_STAT_ONE(name) +1
-enum { RADV_DRAW_STAT_SYNC_FIRST = 0 RADV_DRAW_STATS_DRAW(RADV_DRAW_STAT_ONE) };
+enum {
+   RADV_DRAW_STAT_SYNC_FIRST = 0 RADV_DRAW_STATS_DRAW(RADV_DRAW_STAT_ONE),
+   RADV_DRAW_STAT_TRACK_FIRST = RADV_DRAW_STAT_SYNC_FIRST RADV_DRAW_STATS_SYNC(RADV_DRAW_STAT_ONE),
+};
 #undef RADV_DRAW_STAT_ONE
 
 struct radeon_winsys {

@@ -538,10 +538,16 @@ radv_CmdBlitImage2(VkCommandBuffer commandBuffer, const VkBlitImageInfo2 *pBlitI
 
    radv_meta_begin(cmd_buffer);
 
+   const struct radv_draw_stats_op stats_op =
+      RADV_DRAW_STATS_TRANSFER(cmd_buffer, radv_draw_stats_image_range(dst_image),
+                               radv_draw_stats_image_range(src_image));
+
    for (unsigned r = 0; r < pBlitImageInfo->regionCount; r++) {
       blit_image(cmd_buffer, src_image, pBlitImageInfo->srcImageLayout, dst_image, pBlitImageInfo->dstImageLayout,
                  &pBlitImageInfo->pRegions[r], pBlitImageInfo->filter);
    }
+
+   radv_draw_stats_transfer_end(cmd_buffer, stats_op);
 
    radv_meta_end(cmd_buffer);
 

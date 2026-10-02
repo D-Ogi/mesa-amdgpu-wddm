@@ -235,12 +235,18 @@ radv_CmdResolveImage2(VkCommandBuffer commandBuffer, const VkResolveImageInfo2 *
 
    radv_meta_begin(cmd_buffer);
 
+   const struct radv_draw_stats_op stats_op =
+      RADV_DRAW_STATS_TRANSFER(cmd_buffer, radv_draw_stats_image_range(dst_image),
+                               radv_draw_stats_image_range(src_image));
+
    for (uint32_t r = 0; r < pResolveImageInfo->regionCount; r++) {
       const VkImageResolve2 *region = &pResolveImageInfo->pRegions[r];
 
       radv_resolve_image(cmd_buffer, src_image, src_image_layout, dst_image, dst_image_layout, region,
                          resolve_mode_info);
    }
+
+   radv_draw_stats_transfer_end(cmd_buffer, stats_op);
 
    radv_meta_end(cmd_buffer);
 

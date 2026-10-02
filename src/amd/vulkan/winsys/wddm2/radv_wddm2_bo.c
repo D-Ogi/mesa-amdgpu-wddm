@@ -2202,11 +2202,14 @@ radv_wddm2_summary_write(struct radv_wddm2_winsys *ws, uint64_t now, uint64_t du
          memcpy(ws->summary.submit_snapshot, &s, sizeof(s));
       }
       if (write_draw) {
-         /* Two lines, draw: and sync: (RADV_DRAW_STATS_SYNC), each within what radv_wddm2_deferred_line keeps. */
+         /* Three lines, draw:, sync: (RADV_DRAW_STATS_SYNC) and track: (RADV_DRAW_STATS_TRACK), each within what
+          * radv_wddm2_deferred_line keeps. */
          static const struct {
             const char *name;
             unsigned first, end;
-         } parts[] = {{"draw", 0, RADV_DRAW_STAT_SYNC_FIRST}, {"sync", RADV_DRAW_STAT_SYNC_FIRST, RADV_DRAW_STAT_COUNT}};
+         } parts[] = {{"draw", 0, RADV_DRAW_STAT_SYNC_FIRST},
+                      {"sync", RADV_DRAW_STAT_SYNC_FIRST, RADV_DRAW_STAT_TRACK_FIRST},
+                      {"track", RADV_DRAW_STAT_TRACK_FIRST, RADV_DRAW_STAT_COUNT}};
          for (unsigned p = 0; p < ARRAY_SIZE(parts); p++) {
             char counts[2048];
             size_t len = 0;

@@ -189,7 +189,10 @@ radv_compute_fill_memory(struct radv_cmd_buffer *cmd_buffer, uint64_t va, uint64
 
    radv_meta_push_constants(cmd_buffer, layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(fill_consts), &fill_consts);
 
+   const struct radv_draw_stats_op stats_op =
+      RADV_DRAW_STATS_TRANSFER(cmd_buffer, radv_draw_stats_va_range(va, size), RADV_DRAW_STATS_NOTHING);
    radv_unaligned_dispatch(cmd_buffer, dim_x, 1, 1);
+   radv_draw_stats_transfer_end(cmd_buffer, stats_op);
 }
 
 static void
@@ -233,7 +236,10 @@ radv_compute_copy_memory(struct radv_cmd_buffer *cmd_buffer, uint64_t src_va, ui
 
    radv_meta_push_constants(cmd_buffer, layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(copy_consts), &copy_consts);
 
+   const struct radv_draw_stats_op stats_op = RADV_DRAW_STATS_TRANSFER(
+      cmd_buffer, radv_draw_stats_va_range(dst_va, size), radv_draw_stats_va_range(src_va, size));
    radv_unaligned_dispatch(cmd_buffer, dim_x, 1, 1);
+   radv_draw_stats_transfer_end(cmd_buffer, stats_op);
 
    radv_utrace_end_compute_copy_memory(cmd_buffer);
 }

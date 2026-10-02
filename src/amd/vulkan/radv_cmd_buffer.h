@@ -503,6 +503,22 @@ enum radv_draw_stats_work {
    RADV_DRAW_STATS_WORK_PRIOR = 1u << 2,
 };
 
+/* radv_draw_stats_track: a memory range [va, end) that pending work touched or a barrier names. */
+struct radv_draw_stats_range {
+   uint64_t va, end;
+};
+
+#define RADV_DRAW_STATS_TRACK_RANGES 48
+#define RADV_DRAW_STATS_TRACK_HINT 32
+
+/* The ranges of one kind (RADV's transfer writes, their reads, the application's storage resources) that the work
+ * pending in one stage touched, and whether that work touched more that is not in them. */
+struct radv_draw_stats_ranges {
+   struct radv_draw_stats_range r[RADV_DRAW_STATS_TRACK_RANGES];
+   uint8_t count;
+   bool more;
+};
+
 /* What makes two render passes the same: compared with memcmp, so always zeroed before it is filled. */
 struct radv_draw_stats_pass {
    VkImageView color[MAX_RTS];
@@ -652,6 +668,31 @@ struct radv_cmd_buffer {
          uint64_t va;
          uint32_t values[AC_MAX_INLINE_PUSH_CONSTS];
       } pc[MESA_VULKAN_SHADER_STAGES];
+      /* radv_draw_stats_track: what the work pending in each stage (vs, ps, cs, as work_*) touched: RADV's
+       * transfer writes and reads, the application's storage resources; the attachments rendered since the last
+       * CB and DB flush (more: those of earlier command buffers too); the level the application's barriers since
+       * the last wait reached for each stage (radv_draw_stats_level), whether one needs a CB or DB flush for an
+       * attachment still in it (or may: cache_unk), and whether one asked for anything at all. */
+      struct {
+         struct radv_draw_stats_ranges w[3], r[3], uav[3];
+         struct radv_draw_stats_ranges cb, db;
+         uint8_t level[3];
+         bool cache, cache_unk, asked;
+         /* The resources of the RADV operation being recorded (radv_draw_stats_transfer), whole memory where it
+          * is not known which. */
+         bool op;
+         struct radv_draw_stats_range op_w, op_r;
+         /* The storage resources the engine named last for each bind point (graphics, compute) with the pipeline
+          * they belong to (bc250_uav_hint), and which of them each stage's pending work has taken already. */
+         struct {
+            VkPipeline pipeline;
+            uint32_t gen;
+            uint8_t count;
+            bool more;
+            struct radv_draw_stats_range r[RADV_DRAW_STATS_TRACK_HINT];
+         } hint[2];
+         uint32_t hints, hint_taken[3];
+      } track;
    } draw_stats;
 };
 
@@ -663,6 +704,7 @@ radv_draw_stats_on(const struct radv_cmd_buffer *cmd_buffer)
 }
 
 void radv_draw_stats_command(struct radv_cmd_buffer *cmd_buffer, enum radv_draw_stat stat, uint32_t kind);
+void radv_draw_stats_track_work(struct radv_cmd_buffer *cmd_buffer, enum ac_barrier_flags flags);
 
 /* A draw (AC_BARRIER_SYNC_VS | PS) or dispatch (AC_BARRIER_SYNC_CS) went out, in meta operations too. */
 static inline void
@@ -677,6 +719,43 @@ radv_draw_stats_work(struct radv_cmd_buffer *cmd_buffer, enum ac_barrier_flags f
    if (flags & AC_BARRIER_SYNC_CS)
       cmd_buffer->draw_stats.work_cs |= work;
    cmd_buffer->draw_stats.worked = true;
+   radv_draw_stats_track_work(cmd_buffer, flags);
+}
+
+/* bc250: radv_draw_stats_track: the RADV operation recorded between RADV_DRAW_STATS_TRANSFER and
+ * radv_draw_stats_transfer_end writes w and reads r (RADV_DRAW_STATS_ALL where it is not known what); the value
+ * keeps the operation it interrupts, if any, which the end restores. */
+struct radv_draw_stats_op {
+   bool set, op;
+   struct radv_draw_stats_range w, r;
+};
+
+#define RADV_DRAW_STATS_ALL ((struct radv_draw_stats_range){0, UINT64_MAX})
+#define RADV_DRAW_STATS_NOTHING ((struct radv_draw_stats_range){0, 0})
+
+struct radv_image;
+struct radv_draw_stats_op radv_draw_stats_transfer(struct radv_cmd_buffer *cmd_buffer, struct radv_draw_stats_range w,
+                                                   struct radv_draw_stats_range r);
+struct radv_draw_stats_range radv_draw_stats_image_range(const struct radv_image *image);
+
+static inline struct radv_draw_stats_range
+radv_draw_stats_va_range(uint64_t va, uint64_t size)
+{
+   return (struct radv_draw_stats_range){va, va + size};
+}
+
+#define RADV_DRAW_STATS_TRANSFER(cmd_buffer, w, r)                                                               \
+   (unlikely((cmd_buffer)->draw_stats.on) ? radv_draw_stats_transfer(cmd_buffer, w, r)                         \
+                                          : (struct radv_draw_stats_op){0})
+
+static inline void
+radv_draw_stats_transfer_end(struct radv_cmd_buffer *cmd_buffer, struct radv_draw_stats_op prev)
+{
+   if (prev.set) {
+      cmd_buffer->draw_stats.track.op = prev.op;
+      cmd_buffer->draw_stats.track.op_w = prev.w;
+      cmd_buffer->draw_stats.track.op_r = prev.r;
+   }
 }
 
 /* A command of kind (radv_draw_stats_kind, 0 for one that only sets state) counted as stat. */

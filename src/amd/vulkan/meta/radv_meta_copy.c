@@ -346,6 +346,10 @@ radv_CmdCopyBufferToImage2(VkCommandBuffer commandBuffer, const VkCopyBufferToIm
 
    radv_meta_begin(cmd_buffer);
 
+   const struct radv_draw_stats_op stats_op =
+      RADV_DRAW_STATS_TRANSFER(cmd_buffer, radv_draw_stats_image_range(dst_image),
+                               radv_draw_stats_va_range(vk_buffer_address(&src_buffer->vk, 0), src_buffer->vk.size));
+
    radv_cs_add_buffer(device->ws, cs->b, src_buffer->bo);
 
    for (unsigned r = 0; r < pCopyBufferToImageInfo->regionCount; r++) {
@@ -399,6 +403,8 @@ radv_CmdCopyBufferToImage2(VkCommandBuffer commandBuffer, const VkCopyBufferToIm
       }
    }
 
+   radv_draw_stats_transfer_end(cmd_buffer, stats_op);
+
    radv_meta_end(cmd_buffer);
 
    radv_resume_conditional_rendering(cmd_buffer);
@@ -419,6 +425,10 @@ radv_CmdCopyMemoryToImageKHR(VkCommandBuffer commandBuffer, const VkCopyDeviceMe
    radv_suspend_conditional_rendering(cmd_buffer);
 
    radv_meta_begin(cmd_buffer);
+
+   const struct radv_draw_stats_op stats_op =
+      RADV_DRAW_STATS_TRANSFER(cmd_buffer, radv_draw_stats_image_range(dst_image),
+                               RADV_DRAW_STATS_ALL);
 
    for (unsigned r = 0; r < pCopyMemoryInfo->regionCount; r++) {
       const VkDeviceMemoryImageCopyKHR *region = &pCopyMemoryInfo->pRegions[r];
@@ -458,6 +468,8 @@ radv_CmdCopyMemoryToImageKHR(VkCommandBuffer commandBuffer, const VkCopyDeviceMe
          }
       }
    }
+
+   radv_draw_stats_transfer_end(cmd_buffer, stats_op);
 
    radv_meta_end(cmd_buffer);
 
@@ -566,6 +578,10 @@ radv_CmdCopyImageToBuffer2(VkCommandBuffer commandBuffer, const VkCopyImageToBuf
 
    radv_meta_begin(cmd_buffer);
 
+   const struct radv_draw_stats_op stats_op =
+      RADV_DRAW_STATS_TRANSFER(cmd_buffer, radv_draw_stats_va_range(vk_buffer_address(&dst_buffer->vk, 0), dst_buffer->vk.size),
+                               radv_draw_stats_image_range(src_image));
+
    radv_cs_add_buffer(device->ws, cs->b, dst_buffer->bo);
 
    for (unsigned r = 0; r < pCopyImageToBufferInfo->regionCount; r++) {
@@ -594,6 +610,8 @@ radv_CmdCopyImageToBuffer2(VkCommandBuffer commandBuffer, const VkCopyImageToBuf
       }
    }
 
+   radv_draw_stats_transfer_end(cmd_buffer, stats_op);
+
    radv_meta_end(cmd_buffer);
 
    radv_resume_conditional_rendering(cmd_buffer);
@@ -613,6 +631,10 @@ radv_CmdCopyImageToMemoryKHR(VkCommandBuffer commandBuffer, const VkCopyDeviceMe
 
    radv_meta_begin(cmd_buffer);
 
+   const struct radv_draw_stats_op stats_op =
+      RADV_DRAW_STATS_TRANSFER(cmd_buffer, RADV_DRAW_STATS_ALL,
+                               radv_draw_stats_image_range(src_image));
+
    for (unsigned r = 0; r < pCopyMemoryInfo->regionCount; r++) {
       const VkDeviceMemoryImageCopyKHR *region = &pCopyMemoryInfo->pRegions[r];
       const VkImageAspectFlags aspect_mask = region->imageSubresource.aspectMask;
@@ -628,6 +650,8 @@ radv_CmdCopyImageToMemoryKHR(VkCommandBuffer commandBuffer, const VkCopyDeviceMe
          compute_copy_image_to_memory(cmd_buffer, copy_flags, src_image, region);
       }
    }
+
+   radv_draw_stats_transfer_end(cmd_buffer, stats_op);
 
    radv_meta_end(cmd_buffer);
 
@@ -866,6 +890,10 @@ radv_CmdCopyImage2(VkCommandBuffer commandBuffer, const VkCopyImageInfo2 *pCopyI
 
    radv_meta_begin(cmd_buffer);
 
+   const struct radv_draw_stats_op stats_op =
+      RADV_DRAW_STATS_TRANSFER(cmd_buffer, radv_draw_stats_image_range(dst_image),
+                               radv_draw_stats_image_range(src_image));
+
    for (unsigned r = 0; r < pCopyImageInfo->regionCount; r++) {
       const VkImageCopy2 *region = &pCopyImageInfo->pRegions[r];
       const VkImageAspectFlags src_aspect_mask = region->srcSubresource.aspectMask;
@@ -922,6 +950,8 @@ radv_CmdCopyImage2(VkCommandBuffer commandBuffer, const VkCopyImageInfo2 *pCopyI
          }
       }
    }
+
+   radv_draw_stats_transfer_end(cmd_buffer, stats_op);
 
    radv_meta_end(cmd_buffer);
 
