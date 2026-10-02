@@ -11228,19 +11228,6 @@ radv_cmd_buffer_begin_rendering(struct radv_cmd_buffer *cmd_buffer, const VkRend
    const struct VkSampleLocationsInfoEXT *sample_locs_info =
       vk_find_struct_const(pRenderingInfo->pNext, SAMPLE_LOCATIONS_INFO_EXT);
 
-   struct radv_sample_locations_state sample_locations = {
-      .count = 0,
-   };
-   if (sample_locs_info) {
-      sample_locations = (struct radv_sample_locations_state){
-         .per_pixel = sample_locs_info->sampleLocationsPerPixel,
-         .grid_size = sample_locs_info->sampleLocationGridSize,
-         .count = sample_locs_info->sampleLocationsCount,
-      };
-      typed_memcpy(sample_locations.locations, sample_locs_info->pSampleLocations,
-                   sample_locs_info->sampleLocationsCount);
-   }
-
    /* Dynamic rendering does not have implicit transitions, so limit the marker to
     * when a render pass is used.
     * Additionally, some internal meta operations called inside a barrier may issue
@@ -11537,7 +11524,16 @@ radv_cmd_buffer_begin_rendering(struct radv_cmd_buffer *cmd_buffer, const VkRend
    render->color_samples = color_samples;
    render->ds_samples = ds_samples;
    render->max_samples = MAX2(color_samples, ds_samples);
-   render->sample_locations = sample_locations;
+   /* bc250: radv_cmd_buffer_reset_rendering zeroed the sample locations, and only a pass that gives some fills them
+    * in, up to their count (all that radv_cmd_buffer_end_rendering reads), instead of every pass zeroing a local copy
+    * of the whole block and copying it over. */
+   if (sample_locs_info) {
+      render->sample_locations.per_pixel = sample_locs_info->sampleLocationsPerPixel;
+      render->sample_locations.grid_size = sample_locs_info->sampleLocationGridSize;
+      render->sample_locations.count = sample_locs_info->sampleLocationsCount;
+      typed_memcpy(render->sample_locations.locations, sample_locs_info->pSampleLocations,
+                   sample_locs_info->sampleLocationsCount);
+   }
    render->color_att_count = pRenderingInfo->colorAttachmentCount;
    typed_memcpy(render->color_att, color_att, render->color_att_count);
    render->ds_att = ds_att;
