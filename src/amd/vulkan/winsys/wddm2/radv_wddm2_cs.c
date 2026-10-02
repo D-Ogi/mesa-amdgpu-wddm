@@ -852,15 +852,30 @@ radv_wddm2_ctx_wait_idle(struct radeon_winsys_ctx *rwctx, enum amd_ip_type ip_ty
    return ret;
 }
 
+/* Every bind of a vertex, index or copy buffer names its BO again (radv_cs_add_buffer): a game binds the same few
+ * heap BOs thousands of times per stream, and a set insert per bind was 0.23 ms per frame of Witcher 3's main thread
+ * (trial 291). recent is a direct-mapped cache in front of the set, as the amdgpu winsys keeps buffer_hash_table in
+ * front of its handle list: a BO in recent is in buffers, so a hit skips the insert. Only add_buffer fills it, reset
+ * clears it with the set. */
+#define RADV_WDDM2_CS_RECENT_BOS 256
+
 struct radv_wddm2_cs {
    struct radv_winsys_cs base;
-   struct set *buffers;
+   struct set *buffers; /* the prefix the queue tests' fake_cs mirrors */
+   struct radv_wddm2_bo *recent[RADV_WDDM2_CS_RECENT_BOS];
 };
 
 static inline struct radv_wddm2_cs *
 radv_wddm2_cs(struct ac_cmdbuf *base)
 {
    return (struct radv_wddm2_cs *)base;
+}
+
+static inline unsigned
+radv_wddm2_cs_recent_slot(const struct radv_wddm2_bo *bo)
+{
+   const uintptr_t p = (uintptr_t)bo >> 4;
+   return (unsigned)(p ^ (p >> 8)) & (RADV_WDDM2_CS_RECENT_BOS - 1);
 }
 
 static enum radeon_bo_domain
@@ -923,13 +938,20 @@ radv_wddm2_cs_reset(struct ac_cmdbuf *_cs)
 
    radv_winsys_cs_reset(&cs->base);
    _mesa_set_clear(cs->buffers, NULL);
+   memset(cs->recent, 0, sizeof(cs->recent));
 }
 
 static void
 radv_wddm2_cs_add_buffer(struct ac_cmdbuf *_cs, struct radeon_winsys_bo *_bo)
 {
    struct radv_wddm2_cs *cs = radv_wddm2_cs(_cs);
-   _mesa_set_add(cs->buffers, radv_wddm2_bo(_bo));
+   struct radv_wddm2_bo *bo = radv_wddm2_bo(_bo);
+   struct radv_wddm2_bo **slot = &cs->recent[radv_wddm2_cs_recent_slot(bo)];
+
+   if (*slot == bo)
+      return;
+   _mesa_set_add(cs->buffers, bo);
+   *slot = bo;
 }
 
 static void

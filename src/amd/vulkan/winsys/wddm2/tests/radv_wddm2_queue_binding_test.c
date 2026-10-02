@@ -3948,6 +3948,76 @@ test_progress_gpu_cost(void)
    contract();
 }
 
+/* cs_add_buffer's recent-BO cache in front of the stream's BO set: whatever the order of the adds, repeats and
+ * slot collisions, the witness stamps every BO added since the stream's last reset and no other; the cost of a
+ * repeated add, the case of every vertex, index and copy buffer bind, is printed as an INFO line. */
+static void
+test_cs_add_buffer(void)
+{
+   clear_ib_env();
+   clear_deferred_env();
+   struct radv_wddm2_winsys *ws = make_ib_ws();
+   enum { NB = 4096 };
+   struct radv_wddm2_bo *bos = calloc(NB, sizeof(*bos));
+   struct ac_cmdbuf *cs = ws->base.cs_create(&ws->base, AMD_IP_GFX, false);
+   uint32_t stale = 0;
+   struct radv_wddm2_bo *first = NULL;
+
+   /* Every BO twice, then every eighth BO again after BOs that share its cache slot (4096 BOs, 256 slots). */
+   for (unsigned pass = 0; pass < 2; pass++)
+      for (unsigned i = 0; i < NB; i++)
+         ws->base.cs_add_buffer(cs, &bos[i].base);
+   for (unsigned i = 0; i < NB; i += 8)
+      ws->base.cs_add_buffer(cs, &bos[i].base);
+   radv_wddm2_witness_cs(cs, 1, 5, &stale, &first);
+   unsigned stamped = 0;
+   for (unsigned i = 0; i < NB; i++)
+      stamped += bos[i].last_use_serial == 1 && bos[i].last_use_value == 5;
+   check(stamped == NB && !stale, "%u of %u BOs added, repeated and colliding are stamped", stamped, NB);
+
+   /* A reset empties the set and the cache: only the BOs added after it are named. The first eight were in the
+    * cache before the reset; a cache that survived it would skip their insert. */
+   ws->base.cs_reset(cs);
+   for (unsigned i = 0; i < 8; i++)
+      ws->base.cs_add_buffer(cs, &bos[i].base);
+   ws->base.cs_add_buffer(cs, &bos[NB - 1].base);
+   radv_wddm2_witness_cs(cs, 1, 6, &stale, &first);
+   unsigned renamed = 0, kept = 0;
+   for (unsigned i = 0; i < NB; i++) {
+      if (i < 8 || i == NB - 1)
+         renamed += bos[i].last_use_value == 6;
+      else
+         kept += bos[i].last_use_value == 5;
+   }
+   check(renamed == 9 && kept == NB - 9, "after a reset: the %u BOs added again are stamped, %u others keep "
+                                         "their value (expected 9 and %u)", renamed, kept, NB - 9);
+
+   /* The cost of a repeated add: eight BOs bound in turn, as a draw loop rebinds its vertex and index buffers. */
+   LARGE_INTEGER frequency, t0, t1;
+   QueryPerformanceFrequency(&frequency);
+   enum { N = 4000000 };
+   QueryPerformanceCounter(&t0);
+   for (unsigned i = 0; i < N; i++)
+      ws->base.cs_add_buffer(cs, &bos[i & 7].base);
+   QueryPerformanceCounter(&t1);
+   const double hit_ns = (double)(t1.QuadPart - t0.QuadPart) * 1e9 / (double)frequency.QuadPart / N;
+   /* What each of those adds was before the cache: the set insert of a BO the set holds, in a set of NB BOs. */
+   struct set *reference = _mesa_pointer_set_create(NULL);
+   for (unsigned i = 0; i < NB; i++)
+      _mesa_set_add(reference, &bos[i]);
+   QueryPerformanceCounter(&t0);
+   for (unsigned i = 0; i < N; i++)
+      _mesa_set_add(reference, &bos[i & 7]);
+   QueryPerformanceCounter(&t1);
+   const double set_ns = (double)(t1.QuadPart - t0.QuadPart) * 1e9 / (double)frequency.QuadPart / N;
+   _mesa_set_destroy(reference, NULL);
+   printf("INFO cs_add_buffer of a BO already in the stream: %.2f ns per add; the set insert alone: %.2f ns\n",
+          hit_ns, set_ns);
+   ws->base.cs_destroy(cs);
+   free(bos);
+   contract();
+}
+
 static const struct {
    const char *name;
    void (*run)(void);
@@ -3984,6 +4054,7 @@ static const struct {
    {"progress_gpu_fallback", test_progress_gpu_fallback},
    {"progress_gpu_loss", test_progress_gpu_loss},
    {"progress_gpu_cost", test_progress_gpu_cost},
+   {"cs_add_buffer", test_cs_add_buffer},
 };
 
 int
