@@ -104,6 +104,7 @@ export_fs_mrt_color(isel_context* ctx, const struct aco_ps_epilog_info* info, Te
    assert(is_16bit == (color_type != ACO_TYPE_ANY32));
    bool is_int8 = (info->color_is_int8 >> slot) & 1;
    bool is_int10 = (info->color_is_int10 >> slot) & 1;
+   bool round_unorm10 = (info->color_round_unorm10 >> slot) & 1;
    bool enable_mrt_output_nan_fixup = (ctx->options->enable_mrt_output_nan_fixup >> slot) & 1;
 
    /* Replace NaN by zero (only 32-bit) to fix game bugs if requested. */
@@ -166,6 +167,23 @@ export_fs_mrt_color(isel_context* ctx, const struct aco_ps_epilog_info* info, Te
       break;
 
    case V_028714_SPI_SHADER_FP16_ABGR:
+      if (round_unorm10 && !is_16bit) {
+         /* An unblended 10-bit UNORM target: round RGB as ac_nir_lower_ps_late does (see
+          * round_unorm10_for_rtz_pack there), k = floor(c * 1023 + 0.5) exported as
+          * (k + 0.25) / 1023, so that the truncating pack and the CB's ROUND_BY_HALF store k. The
+          * constants are 1023, 0.5, 0.25 and 1 / 1023.
+          */
+         const Operand scale = Operand::c32(0x447fc000u), half = Operand::c32(0x3f000000u);
+         const Operand quarter = Operand::c32(0x3e800000u), inv_scale = Operand::c32(0x3a802008u);
+         Builder pbld = bld.precise();
+         for (unsigned i = 0; i < 3; i++) {
+            Temp t = pbld.vop2(aco_opcode::v_mul_f32, pbld.def(v1), scale, values[i]);
+            t = pbld.vop2(aco_opcode::v_add_f32, pbld.def(v1), half, t);
+            t = pbld.vop1(aco_opcode::v_floor_f32, pbld.def(v1), t);
+            t = pbld.vop2(aco_opcode::v_add_f32, pbld.def(v1), quarter, t);
+            values[i] = pbld.vop2(aco_opcode::v_mul_f32, pbld.def(v1), inv_scale, t);
+         }
+      }
       for (int i = 0; i < 2; i++) {
          if (is_16bit) {
             values[i] = bld.pseudo(aco_opcode::p_create_vector, bld.def(v1), values[i * 2],
