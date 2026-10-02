@@ -9820,11 +9820,18 @@ radv_bind_shader(struct radv_cmd_buffer *cmd_buffer, struct radv_shader *shader,
 static void
 radv_reset_shader_object_state(struct radv_cmd_buffer *cmd_buffer, VkPipelineBindPoint pipelineBindPoint)
 {
+   /* bc250: binds of pipelines, the only kind vkd3d records, find no shader object. */
+   if (!cmd_buffer->state.shader_obj_stages) {
+      cmd_buffer->state.dirty &= ~RADV_CMD_DIRTY_GRAPHICS_SHADERS;
+      return;
+   }
+
    switch (pipelineBindPoint) {
    case VK_PIPELINE_BIND_POINT_COMPUTE:
       if (cmd_buffer->state.shader_objs[MESA_SHADER_COMPUTE]) {
          radv_bind_shader(cmd_buffer, NULL, MESA_SHADER_COMPUTE);
          cmd_buffer->state.shader_objs[MESA_SHADER_COMPUTE] = NULL;
+         cmd_buffer->state.shader_obj_stages &= ~VK_SHADER_STAGE_COMPUTE_BIT;
       }
       break;
    case VK_PIPELINE_BIND_POINT_GRAPHICS:
@@ -9832,6 +9839,7 @@ radv_reset_shader_object_state(struct radv_cmd_buffer *cmd_buffer, VkPipelineBin
          if (cmd_buffer->state.shader_objs[s]) {
             radv_bind_shader(cmd_buffer, NULL, s);
             cmd_buffer->state.shader_objs[s] = NULL;
+            cmd_buffer->state.shader_obj_stages &= ~mesa_to_vk_shader_stage(s);
          }
       }
       break;
@@ -17805,6 +17813,10 @@ radv_CmdBindShadersEXT(VkCommandBuffer commandBuffer, uint32_t stageCount, const
          shader_obj = radv_shader_object_from_handle(pShaders[i]);
 
       cmd_buffer->state.shader_objs[stage] = shader_obj;
+      if (shader_obj)
+         cmd_buffer->state.shader_obj_stages |= pStages[i];
+      else
+         cmd_buffer->state.shader_obj_stages &= ~pStages[i];
       stages |= pStages[i];
    }
 
