@@ -8086,10 +8086,72 @@ can_skip_buffer_l2_flushes(struct radv_device *device)
  * use our knowledge of past usage to optimize flushes away.
  */
 
-enum ac_barrier_flags
-radv_src_access_flush(struct radv_cmd_buffer *cmd_buffer, VkPipelineStageFlags2 src_stages, VkAccessFlags2 src_flags,
-                      VkAccessFlags3KHR src3_flags, const struct radv_image *image,
-                      const VkImageSubresourceRange *range)
+/* bc250: the barrier tracking (BC250_BARRIER_TRACK, on unless 0). In Witcher 3 (lab session 315) each
+ * frame had 146 application barriers without an image whose source side wrote back and invalidated the
+ * whole L2, and 150 whose transfer writes flushed CB and DB, which is a drain of the pipeline: the D3D12
+ * UAV barrier and the buffer transitions from COPY_DEST are memory barriers with shader storage and
+ * transfer writes in vkd3d-proton. With the tracking, the source side of an application barrier without
+ * an image (radv_barrier: a memory, buffer or memory range barrier) asks for:
+ *
+ * - The L2 write-back and invalidation only while state.rb_misaligned_dirty is set, or when its
+ *   destination stages include the host. On GFX10 and GFX10.3 without tcc_rb_non_coherent, L2 is coherent
+ *   between all of its clients except for the images radv_image_is_l2_coherent calls not coherent, the
+ *   pipe-misaligned ones, which the CB and DB address through other L2 channels than the shaders do
+ *   (the destination side already relies on this, can_skip_buffer_l2_flushes). Buffers rest in L2, as the
+ *   comment above defines it; the host sees them at the end of every submission, whose fence write is a
+ *   CACHE_FLUSH_AND_INV_TS RELEASE_MEM with GL2_WB (the KMD's ring fence and bc250_emit_progress_write,
+ *   as gfx_v10_0_ring_emit_fence upstream), and a barrier to the host stage keeps it. That leaves the two
+ *   directions between the CB/DB and the other clients through a pipe-misaligned image:
+ *   - CB/DB writes, then other clients: radv_mark_noncoherent_rb sets rb_misaligned_dirty (with
+ *     rb_noncoherent_dirty) after a pass on such an attachment and for barriers inside one, and only a
+ *     flush of CB, CB metadata, DB and L2 together clears it (radv_emit_cache_flush; a lone L2
+ *     invalidation that ran before the CB wrote its cache back would not do). vkEndCommandBuffer
+ *     flushes those four if it is still set, so every command buffer starts with no such writes outside
+ *     the coherent state, whatever ran before it in the submission; vkCmdExecuteCommands does the same
+ *     before secondaries outside a pass.
+ *   - Other clients write, then the CB/DB: every pass that binds a pipe-misaligned attachment (or
+ *     attachments it does not know) invalidates L2 before its first draw (radv_cmd_buffer_begin_rendering).
+ *     The application's barrier between the write and the pass has already waited for the write; the
+ *     invalidation joins or follows that barrier's flush.
+ *   Barriers with an image keep their rule (radv_image_is_l2_coherent), as do RADV's own meta operations,
+ *   which call radv_src_access_flush.
+ * - For transfer writes, the CB flush (with its metadata) only while state.xfer_cb_inv is set, the DB
+ *   flush only while state.xfer_db_inv is set. Transfers write through the CB or DB only to an image (a
+ *   graphics copy, blit, resolve or clear); the transfers to buffers use CP DMA, CP writes or compute
+ *   shaders. Stale lines in the CB or DB need a write to memory they cached: an image (a transfer to an
+ *   image), or a buffer that aliases a linear attachment (tiled ones do not alias buffers with defined
+ *   contents). So the flags are set when a command buffer begins (unknown history), after every transfer
+ *   to an image (radv_cmd_buffer_image_transfer_done), after a pass with a linear color attachment and
+ *   after secondary command buffers, and cleared by a flush that flushes and invalidates that block. The
+ *   execution dependency stays: radv_stage_flush makes transfer stages wait with CS and PS partial
+ *   flushes, radv_cp_dma_wait_for_stages waits for CP DMA, and a buffer marker written at the end of the
+ *   pipe (vkCmdWriteMarkerToMemoryAMD, a transfer write), which neither of those waits for, sets
+ *   state.xfer_eop_pending for a bottom-of-pipe wait until a flush that waits there.
+ * GFX11 is left out: its flushes may defer their wait (PWS acquire at PRE_DEPTH), which clearing the
+ * flags when a flush is emitted does not model. */
+static inline bool
+radv_barrier_track(const struct radv_device *device)
+{
+   const struct radv_physical_device *pdev = radv_device_physical(device);
+
+   return device->ws->barrier_track && pdev->info.gfx_level >= GFX10 && pdev->info.gfx_level < GFX11 &&
+          !pdev->info.tcc_rb_non_coherent;
+}
+
+/* Whether radv_barrier_track applies to an application barrier: one without an image and not to the host. */
+static inline bool
+radv_barrier_tracked(const struct radv_cmd_buffer *cmd_buffer, const struct radv_image *image,
+                     VkPipelineStageFlags2 dst_stages)
+{
+   return !image && !(dst_stages & VK_PIPELINE_STAGE_2_HOST_BIT) &&
+          radv_barrier_track(radv_cmd_buffer_device(cmd_buffer));
+}
+
+/* tracked: an application barrier without an image under radv_barrier_track (radv_get_src_access_flush). */
+static enum ac_barrier_flags
+radv_src_access_flush_tracked(struct radv_cmd_buffer *cmd_buffer, VkPipelineStageFlags2 src_stages,
+                              VkAccessFlags2 src_flags, VkAccessFlags3KHR src3_flags, const struct radv_image *image,
+                              const VkImageSubresourceRange *range, bool tracked)
 {
    const struct radv_device *device = radv_cmd_buffer_device(cmd_buffer);
    const struct radv_physical_device *pdev = radv_device_physical(device);
@@ -8097,7 +8159,10 @@ radv_src_access_flush(struct radv_cmd_buffer *cmd_buffer, VkPipelineStageFlags2 
    src_flags = vk_expand_src_access_flags2(src_stages, src_flags);
 
    bool has_CB_meta = true, has_DB_meta = true;
-   bool image_is_coherent = image ? radv_image_is_l2_coherent(device, image, range) : false;
+   bool image_is_coherent =
+      image ? radv_image_is_l2_coherent(device, image, range) : tracked && !cmd_buffer->state.rb_misaligned_dirty;
+   const bool xfer_cb = !tracked || cmd_buffer->state.xfer_cb_inv;
+   const bool xfer_db = !tracked || cmd_buffer->state.xfer_db_inv;
    enum ac_barrier_flags flush_bits = 0;
 
    if (image) {
@@ -8149,17 +8214,31 @@ radv_src_access_flush(struct radv_cmd_buffer *cmd_buffer, VkPipelineStageFlags2 
    }
 
    if (src_flags & VK_ACCESS_2_TRANSFER_WRITE_BIT) {
-      flush_bits |= AC_BARRIER_SYNC_AND_INV_CB | AC_BARRIER_SYNC_AND_INV_DB;
+      if (xfer_cb)
+         flush_bits |= AC_BARRIER_SYNC_AND_INV_CB;
+      if (xfer_db)
+         flush_bits |= AC_BARRIER_SYNC_AND_INV_DB;
+      /* A buffer marker's end-of-pipe write, which the partial flushes do not wait for. */
+      if (tracked && cmd_buffer->state.xfer_eop_pending)
+         flush_bits |= AC_BARRIER_SYNC_BOTTOM_OF_PIPE;
 
       if (!image_is_coherent)
          flush_bits |= AC_BARRIER_INV_L2;
-      if (has_CB_meta)
+      if (xfer_cb && has_CB_meta)
          flush_bits |= AC_BARRIER_SYNC_AND_INV_CB_META;
-      if (pdev->info.gfx_level < GFX10 && has_DB_meta)
+      if (xfer_db && pdev->info.gfx_level < GFX10 && has_DB_meta)
          flush_bits |= AC_BARRIER_SYNC_AND_INV_DB_META;
    }
 
    return flush_bits;
+}
+
+enum ac_barrier_flags
+radv_src_access_flush(struct radv_cmd_buffer *cmd_buffer, VkPipelineStageFlags2 src_stages, VkAccessFlags2 src_flags,
+                      VkAccessFlags3KHR src3_flags, const struct radv_image *image,
+                      const VkImageSubresourceRange *range)
+{
+   return radv_src_access_flush_tracked(cmd_buffer, src_stages, src_flags, src3_flags, image, range, false);
 }
 
 /* Return the latest PWS acquire point at which a barrier's destination stages may wait. */
@@ -8537,7 +8616,7 @@ radv_draw_stats_barrier(struct radv_cmd_buffer *cmd_buffer, const VkDependencyIn
 /* The flushes the access masks of one barrier call ask for, gathered by radv_draw_stats_barrier_flush. */
 struct radv_draw_stats_flush_causes {
    enum ac_barrier_flags src;
-   bool dst_cb, dst_db, rt_write, ds_write, xfer_write, meta_storage, l2_global, l2_image;
+   bool dst_cb, dst_db, rt_write, ds_write, xfer_write, meta_storage, l2_global, l2_image, skip_l2, skip_cbdb;
 };
 
 static void
@@ -8548,11 +8627,18 @@ radv_draw_stats_barrier_one(struct radv_cmd_buffer *cmd_buffer, struct radv_draw
 {
    const VkAccessFlags2 src = vk_expand_src_access_flags2(src_stages, src_access);
    const VkAccessFlags2 dst = vk_expand_dst_access_flags2(dst_stages, dst_access);
-   /* Without side effects, unlike radv_dst_access_flush; the access flags 3 aside, which vkd3d does not use. */
-   const enum ac_barrier_flags bits = radv_src_access_flush(cmd_buffer, src_stages, src_access, 0, image, range);
+   /* Without side effects, unlike radv_dst_access_flush; the access flags 3 aside, which vkd3d does not use. As
+    * radv_get_src_access_flush, with what it would ask for untracked. */
+   const bool tracked = radv_barrier_tracked(cmd_buffer, image, dst_stages);
+   const enum ac_barrier_flags bits =
+      radv_src_access_flush_tracked(cmd_buffer, src_stages, src_access, 0, image, range, tracked);
+   const enum ac_barrier_flags skipped =
+      tracked ? radv_src_access_flush(cmd_buffer, src_stages, src_access, 0, image, range) & ~bits : 0;
    const bool storage_image = image && (image->vk.usage & VK_IMAGE_USAGE_2_STORAGE_BIT_KHR);
 
    causes->src |= bits;
+   causes->skip_l2 |= (skipped & (AC_BARRIER_INV_L2 | AC_BARRIER_WB_L2)) != 0;
+   causes->skip_cbdb |= (skipped & (AC_BARRIER_SYNC_AND_INV_CB | AC_BARRIER_SYNC_AND_INV_DB)) != 0;
    causes->rt_write |= (src & VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT) != 0;
    causes->ds_write |= (src & VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT) != 0;
    causes->xfer_write |= (src & VK_ACCESS_2_TRANSFER_WRITE_BIT) != 0;
@@ -8604,6 +8690,8 @@ radv_draw_stats_barrier_flush(struct radv_cmd_buffer *cmd_buffer, const VkDepend
    counts[RADV_DRAW_STAT_cause_dst_cbdb] += causes.dst_cb || causes.dst_db;
    counts[RADV_DRAW_STAT_cause_l2_global] += causes.l2_global;
    counts[RADV_DRAW_STAT_cause_l2_image] += causes.l2_image;
+   counts[RADV_DRAW_STAT_skip_l2] += causes.skip_l2;
+   counts[RADV_DRAW_STAT_skip_cbdb] += causes.skip_cbdb;
 }
 
 /* The cache flush radv_emit_cache_flush is about to emit, counted as ac_gfx10_emit_barrier emits it (bc250:
@@ -8722,6 +8810,12 @@ radv_BeginCommandBuffer(VkCommandBuffer commandBuffer, const VkCommandBufferBegi
    cmd_buffer->usage_flags = pBeginInfo->flags;
 
    radv_init_default_state(cmd_buffer);
+
+   /* bc250: radv_barrier_track: what ran before in the submission may have left lines in the CB or DB, or a
+    * marker write at the end of the pipe. */
+   cmd_buffer->state.xfer_cb_inv = true;
+   cmd_buffer->state.xfer_db_inv = true;
+   cmd_buffer->state.xfer_eop_pending = true;
 
    if (cmd_buffer->qf == RADV_QUEUE_COMPUTE || device->vk.enabled_features.taskShader) {
       uint32_t pred_value = 0;
@@ -9362,6 +9456,14 @@ radv_EndCommandBuffer(VkCommandBuffer commandBuffer)
       if (cmd_buffer->state.rb_noncoherent_dirty && !can_skip_buffer_l2_flushes(device))
          cmd_buffer->state.flush_bits |= radv_src_access_flush(cmd_buffer, VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT,
                                                                VK_ACCESS_2_TRANSFER_WRITE_BIT, 0, NULL, NULL);
+
+      /* bc250: radv_barrier_track: no CB or DB write to a pipe-misaligned attachment leaves the command
+       * buffer before it is coherent in L2, so the next one may start clean. */
+      if (cmd_buffer->state.rb_misaligned_dirty && radv_barrier_track(device)) {
+         cmd_buffer->state.flush_bits |= AC_BARRIER_SYNC_AND_INV_CB | AC_BARRIER_SYNC_AND_INV_CB_META |
+                                         AC_BARRIER_SYNC_AND_INV_DB | AC_BARRIER_INV_L2;
+         RADV_DRAW_STATS_ADD(cmd_buffer, cmdbuf_misaligned, 1);
+      }
 
       /* Since NGG streamout uses GDS, we need to make GDS idle when
        * we leave the IB, otherwise another process might overwrite
@@ -10932,6 +11034,7 @@ radv_invalidate_state(struct radv_cmd_buffer *cmd_buffer)
    uint32_t active_occlusion_queries_save = cmd_buffer->state.active_occlusion_queries;
    uint32_t perfect_occlusion_queries_enabled_save = cmd_buffer->state.perfect_occlusion_queries_enabled;
    bool uses_draw_indirect = cmd_buffer->state.uses_draw_indirect;
+   bool rb_misaligned_dirty = cmd_buffer->state.rb_misaligned_dirty;
 
    /* From the Vulkan spec 1.4.349:
     *
@@ -10950,6 +11053,12 @@ radv_invalidate_state(struct radv_cmd_buffer *cmd_buffer)
    cmd_buffer->state.active_occlusion_queries = active_occlusion_queries_save;
    cmd_buffer->state.perfect_occlusion_queries_enabled = perfect_occlusion_queries_enabled_save;
    cmd_buffer->state.uses_draw_indirect = uses_draw_indirect;
+   /* bc250: radv_barrier_track: the primary's own misaligned writes stay pending (each secondary flushes its own
+    * at its end), and the secondaries may have left lines in the CB or DB, or marker writes. */
+   cmd_buffer->state.rb_misaligned_dirty = rb_misaligned_dirty;
+   cmd_buffer->state.xfer_cb_inv = true;
+   cmd_buffer->state.xfer_db_inv = true;
+   cmd_buffer->state.xfer_eop_pending = true;
 
    radv_mark_descriptors_dirty(cmd_buffer, VK_PIPELINE_BIND_POINT_GRAPHICS);
    radv_mark_descriptors_dirty(cmd_buffer, VK_PIPELINE_BIND_POINT_COMPUTE);
@@ -10970,6 +11079,15 @@ radv_CmdExecuteCommands(VkCommandBuffer commandBuffer, uint32_t commandBufferCou
 
    if (is_gfx_or_ace) {
       radv_emit_mip_change_flush_default(primary);
+
+      /* bc250: radv_barrier_track: a secondary starts with rb_misaligned_dirty clear while its barriers order after
+       * the primary's commands, so the primary's pending CB and DB writes to pipe-misaligned attachments become
+       * coherent first. A secondary that continues the pass marks them itself (attachments it does not know). */
+      if (primary->state.rb_misaligned_dirty && !primary->state.render.active && radv_barrier_track(device)) {
+         primary->state.flush_bits |= AC_BARRIER_SYNC_AND_INV_CB | AC_BARRIER_SYNC_AND_INV_CB_META |
+                                      AC_BARRIER_SYNC_AND_INV_DB | AC_BARRIER_INV_L2;
+         RADV_DRAW_STATS_ADD(primary, cmdbuf_misaligned, 1);
+      }
 
       /* Emit pending flushes on primary prior to executing secondary */
       radv_emit_cache_flush(primary, false);
@@ -11090,17 +11208,17 @@ radv_CmdExecuteCommands(VkCommandBuffer commandBuffer, uint32_t commandBufferCou
    radv_invalidate_state(primary);
 }
 
-static void
-radv_mark_noncoherent_rb(struct radv_cmd_buffer *cmd_buffer)
+/* Whether the pass binds an attachment that is not L2 coherent (bc250: split out of radv_mark_noncoherent_rb for
+ * radv_cmd_buffer_begin_rendering). */
+static bool
+radv_rendering_has_noncoherent_attachment(const struct radv_cmd_buffer *cmd_buffer)
 {
    const struct radv_device *device = radv_cmd_buffer_device(cmd_buffer);
-   struct radv_rendering_state *render = &cmd_buffer->state.render;
+   const struct radv_rendering_state *render = &cmd_buffer->state.render;
 
    /* Have to be conservative in cmdbuffers with inherited attachments. */
-   if (!render->has_image_views) {
-      cmd_buffer->state.rb_noncoherent_dirty = true;
-      return;
-   }
+   if (!render->has_image_views)
+      return true;
 
    for (uint32_t i = 0; i < render->color_att_count; i++) {
       const struct radv_image_view *iview = render->color_att[i].iview;
@@ -11110,10 +11228,8 @@ radv_mark_noncoherent_rb(struct radv_cmd_buffer *cmd_buffer)
 
       const VkImageSubresourceRange range = vk_image_view_subresource_range(&iview->vk);
 
-      if (!radv_image_is_l2_coherent(device, iview->image, &range)) {
-         cmd_buffer->state.rb_noncoherent_dirty = true;
-         return;
-      }
+      if (!radv_image_is_l2_coherent(device, iview->image, &range))
+         return true;
    }
 
    const struct radv_image_view *iview = render->ds_att.iview;
@@ -11122,8 +11238,39 @@ radv_mark_noncoherent_rb(struct radv_cmd_buffer *cmd_buffer)
       const VkImageSubresourceRange range = vk_image_view_subresource_range(&iview->vk);
 
       if (!radv_image_is_l2_coherent(device, iview->image, &range))
-         cmd_buffer->state.rb_noncoherent_dirty = true;
+         return true;
    }
+
+   return false;
+}
+
+static void
+radv_mark_noncoherent_rb(struct radv_cmd_buffer *cmd_buffer)
+{
+   if (radv_rendering_has_noncoherent_attachment(cmd_buffer)) {
+      cmd_buffer->state.rb_noncoherent_dirty = true;
+      cmd_buffer->state.rb_misaligned_dirty = true;
+   }
+}
+
+/* bc250: whether the pass binds a linear color attachment (or attachments it does not know), whose memory a
+ * buffer may alias with defined contents (radv_barrier_track). */
+static bool
+radv_rendering_has_linear_color(const struct radv_cmd_buffer *cmd_buffer)
+{
+   const struct radv_rendering_state *render = &cmd_buffer->state.render;
+
+   if (!render->has_image_views)
+      return true;
+
+   for (uint32_t i = 0; i < render->color_att_count; i++) {
+      const struct radv_image_view *iview = render->color_att[i].iview;
+
+      if (iview && iview->image->planes[iview->plane_id].surface.is_linear)
+         return true;
+   }
+
+   return false;
 }
 
 static VkImageLayout
@@ -11806,6 +11953,13 @@ radv_cmd_buffer_begin_rendering(struct radv_cmd_buffer *cmd_buffer, const VkRend
 
    radv_emit_framebuffer_state(cmd_buffer);
 
+   /* bc250: writes of other clients to a pipe-misaligned attachment become visible to the CB and DB here, as
+    * radv_barrier_track requires; this joins the pending flush of the barrier before the pass. */
+   if (radv_barrier_track(device) && radv_rendering_has_noncoherent_attachment(cmd_buffer)) {
+      cmd_buffer->state.flush_bits |= AC_BARRIER_INV_L2;
+      RADV_DRAW_STATS_ADD(cmd_buffer, rp_misaligned, 1);
+   }
+
    radv_cmd_buffer_clear_rendering(cmd_buffer, pRenderingInfo);
 }
 
@@ -11816,6 +11970,10 @@ radv_cmd_buffer_end_rendering(struct radv_cmd_buffer *cmd_buffer, const VkRender
    bool need_resolve = false;
 
    radv_mark_noncoherent_rb(cmd_buffer);
+
+   /* bc250: radv_barrier_track: the CB may hold lines of a linear attachment that a buffer transfer rewrites. */
+   if (radv_rendering_has_linear_color(cmd_buffer))
+      cmd_buffer->state.xfer_cb_inv = true;
 
    /* Most passes resolve nothing: skip describing their attachments for the resolve (bc250: end rendering's own time
     * was 0.02 ms of the main thread's frame in the CPU profile of Witcher 3, lab session 291).
@@ -16844,6 +17002,21 @@ radv_emit_cache_flush(struct radv_cmd_buffer *cmd_buffer, bool pws_defer_allowed
    if (cmd_buffer->state.flush_bits & AC_BARRIER_INV_L2)
       cmd_buffer->state.rb_noncoherent_dirty = false;
 
+   /* bc250: what radv_barrier_track tracks is clean after a flush and invalidation of the block (the CB with
+    * its metadata); the CB and DB writes to misaligned attachments after one of CB, CB metadata, DB and L2
+    * together, which writes the CB and DB back before L2 (the event before the RELEASE_MEM's GCR). */
+   const enum ac_barrier_flags cb_inv = AC_BARRIER_SYNC_AND_INV_CB | AC_BARRIER_SYNC_AND_INV_CB_META;
+   const enum ac_barrier_flags rb_l2_inv = cb_inv | AC_BARRIER_SYNC_AND_INV_DB | AC_BARRIER_INV_L2;
+   if ((cmd_buffer->state.flush_bits & cb_inv) == cb_inv)
+      cmd_buffer->state.xfer_cb_inv = false;
+   if (cmd_buffer->state.flush_bits & AC_BARRIER_SYNC_AND_INV_DB)
+      cmd_buffer->state.xfer_db_inv = false;
+   if ((cmd_buffer->state.flush_bits & rb_l2_inv) == rb_l2_inv)
+      cmd_buffer->state.rb_misaligned_dirty = false;
+   if (cmd_buffer->state.flush_bits &
+       (AC_BARRIER_SYNC_AND_INV_CB | AC_BARRIER_SYNC_AND_INV_DB | AC_BARRIER_SYNC_BOTTOM_OF_PIPE))
+      cmd_buffer->state.xfer_eop_pending = false;
+
    /* Clear the caches that have been flushed to avoid syncing too much
     * when there is some pending active queries.
     */
@@ -16860,15 +17033,17 @@ radv_emit_cache_flush(struct radv_cmd_buffer *cmd_buffer, bool pws_defer_allowed
    radv_describe_barrier_end_delayed(cmd_buffer);
 }
 
+/* An application barrier's source side (radv_barrier_tracked). */
 static enum ac_barrier_flags
 radv_get_src_access_flush(struct radv_cmd_buffer *cmd_buffer, VkPipelineStageFlags2 src_stage_mask,
-                          VkAccessFlags2 src_access_mask, const struct radv_image *image,
-                          const VkImageSubresourceRange *range, const void *pNext)
+                          VkAccessFlags2 src_access_mask, VkPipelineStageFlags2 dst_stage_mask,
+                          const struct radv_image *image, const VkImageSubresourceRange *range, const void *pNext)
 {
    const VkMemoryBarrierAccessFlags3KHR *barrier3 = vk_find_struct_const(pNext, MEMORY_BARRIER_ACCESS_FLAGS_3_KHR);
    const VkAccessFlags3KHR src3_flags = barrier3 ? barrier3->srcAccessMask3 : 0;
 
-   return radv_src_access_flush(cmd_buffer, src_stage_mask, src_access_mask, src3_flags, image, range);
+   return radv_src_access_flush_tracked(cmd_buffer, src_stage_mask, src_access_mask, src3_flags, image, range,
+                                        radv_barrier_tracked(cmd_buffer, image, dst_stage_mask));
 }
 
 static enum ac_barrier_flags
@@ -16905,8 +17080,8 @@ radv_barrier(struct radv_cmd_buffer *cmd_buffer, uint32_t dep_count, const VkDep
       for (uint32_t i = 0; i < dep_info->memoryBarrierCount; i++) {
          const VkMemoryBarrier2 *barrier = &dep_info->pMemoryBarriers[i];
          src_stage_mask |= barrier->srcStageMask;
-         src_flush_bits |= radv_get_src_access_flush(cmd_buffer, barrier->srcStageMask, barrier->srcAccessMask, NULL,
-                                                     NULL, barrier->pNext);
+         src_flush_bits |= radv_get_src_access_flush(cmd_buffer, barrier->srcStageMask, barrier->srcAccessMask,
+                                                     barrier->dstStageMask, NULL, NULL, barrier->pNext);
          dst_stage_mask |= barrier->dstStageMask;
          dst_flush_bits |= radv_get_dst_access_flush(cmd_buffer, barrier->dstStageMask, barrier->dstAccessMask, NULL,
                                                      NULL, barrier->pNext);
@@ -16915,8 +17090,8 @@ radv_barrier(struct radv_cmd_buffer *cmd_buffer, uint32_t dep_count, const VkDep
       for (uint32_t i = 0; i < dep_info->bufferMemoryBarrierCount; i++) {
          const VkBufferMemoryBarrier2 *barrier = &dep_info->pBufferMemoryBarriers[i];
          src_stage_mask |= barrier->srcStageMask;
-         src_flush_bits |= radv_get_src_access_flush(cmd_buffer, barrier->srcStageMask, barrier->srcAccessMask, NULL,
-                                                     NULL, barrier->pNext);
+         src_flush_bits |= radv_get_src_access_flush(cmd_buffer, barrier->srcStageMask, barrier->srcAccessMask,
+                                                     barrier->dstStageMask, NULL, NULL, barrier->pNext);
          dst_stage_mask |= barrier->dstStageMask;
          dst_flush_bits |= radv_get_dst_access_flush(cmd_buffer, barrier->dstStageMask, barrier->dstAccessMask, NULL,
                                                      NULL, barrier->pNext);
@@ -16927,8 +17102,9 @@ radv_barrier(struct radv_cmd_buffer *cmd_buffer, uint32_t dep_count, const VkDep
          VK_FROM_HANDLE(radv_image, image, barrier->image);
 
          src_stage_mask |= barrier->srcStageMask;
-         src_flush_bits |= radv_get_src_access_flush(cmd_buffer, barrier->srcStageMask, barrier->srcAccessMask, image,
-                                                     &barrier->subresourceRange, barrier->pNext);
+         src_flush_bits |= radv_get_src_access_flush(cmd_buffer, barrier->srcStageMask, barrier->srcAccessMask,
+                                                     barrier->dstStageMask, image, &barrier->subresourceRange,
+                                                     barrier->pNext);
          dst_stage_mask |= barrier->dstStageMask;
          dst_flush_bits |= radv_get_dst_access_flush(cmd_buffer, barrier->dstStageMask, barrier->dstAccessMask, image,
                                                      &barrier->subresourceRange, barrier->pNext);
@@ -16943,8 +17119,8 @@ radv_barrier(struct radv_cmd_buffer *cmd_buffer, uint32_t dep_count, const VkDep
             const VkMemoryRangeBarrierKHR *barrier = &mem_barriers_info->pMemoryRangeBarriers[i];
 
             src_stage_mask |= barrier->srcStageMask;
-            src_flush_bits |= radv_get_src_access_flush(cmd_buffer, barrier->srcStageMask, barrier->srcAccessMask, NULL,
-                                                        NULL, barrier->pNext);
+            src_flush_bits |= radv_get_src_access_flush(cmd_buffer, barrier->srcStageMask, barrier->srcAccessMask,
+                                                        barrier->dstStageMask, NULL, NULL, barrier->pNext);
             dst_stage_mask |= barrier->dstStageMask;
             dst_flush_bits |= radv_get_dst_access_flush(cmd_buffer, barrier->dstStageMask, barrier->dstAccessMask, NULL,
                                                         NULL, barrier->pNext);
@@ -17873,6 +18049,8 @@ radv_CmdWriteMarkerToMemoryAMD(VkCommandBuffer commandBuffer, const VkMemoryMark
       radv_cs_emit_write_event_eop(cs, pdev->info.gfx_level, V_028A90_BOTTOM_OF_PIPE_TS, 0, EOP_DST_SEL_MEM,
                                    EOP_INT_SEL_SEND_DATA_AFTER_WR_CONFIRM, EOP_DATA_SEL_VALUE_32BIT, va, pInfo->marker,
                                    cmd_buffer->eop_bug_va);
+      /* bc250: radv_barrier_track: a transfer-write barrier waits for this write at the end of the pipe. */
+      cmd_buffer->state.xfer_eop_pending = true;
    }
 
    assert(cs->b->cdw <= cdw_max);

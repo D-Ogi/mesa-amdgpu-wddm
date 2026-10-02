@@ -321,14 +321,23 @@ enum radv_cs_dump_type {
  * initialization, DCC decompression, fast clear eliminate, FMASK decompression and color expansion, DCC
  * retiling. wait_events counts the WAIT_REG_MEM of vkCmdWaitEvents2, wait_cp_dma the CP DMA syncs,
  * query_copies the vkCmdCopyQueryPoolResults calls and query_copy_waits the queries they copy with
- * VK_QUERY_RESULT_WAIT_BIT. */
+ * VK_QUERY_RESULT_WAIT_BIT. The barrier tracking of BC250_BARRIER_TRACK (radv_barrier_track): skip_l2 and
+ * skip_cbdb count the barrier calls whose source-side L2 invalidation, or CB or DB flush for transfer
+ * writes, it leaves out (bar_* and cause_l2_* count what remains; counted before a barrier inside a pass
+ * marks a pipe-misaligned attachment, so such a barrier's L2 invalidation counts as left out);
+ * rp_misaligned the render passes that bind a pipe-misaligned attachment (an L2 invalidation before
+ * them), cmdbuf_misaligned the command buffers that end, or call secondaries, with such an attachment's
+ * writes not yet made coherent (a flush there); xfer_img the
+ * transfers to an image (they keep the next transfer-write barrier's CB and DB flush); img_created and
+ * img_misaligned the images created, and of them those with a pipe-misaligned mip level. */
 #define RADV_DRAW_STATS_SYNC(X)                                                                             \
    X(fl_emits) X(fl_meta) X(fl_end) X(fl_eop_cbdb) X(fl_eop_cb) X(fl_eop_db) X(fl_eop_bop) X(fl_vs) X(fl_ps) \
    X(fl_cs) X(fl_vgt) X(fl_l2_inv) X(fl_l2_wb) X(fl_l2_meta) X(fl_vmem) X(fl_smem) X(fl_icache) X(fl_pfp)    \
    X(bar_cb) X(bar_db) X(bar_l2) X(cause_rt_write) X(cause_ds_write) X(cause_xfer_write)                    \
    X(cause_meta_storage) X(cause_dst_cbdb) X(cause_l2_global) X(cause_l2_image) X(tr_calls) X(tr_htile_init) \
    X(tr_htile_expand) X(tr_color_init) X(tr_dcc_decompress) X(tr_fce) X(tr_fmask_decompress)               \
-   X(tr_fmask_expand) X(tr_dcc_retile) X(wait_events) X(wait_cp_dma) X(query_copies) X(query_copy_waits)
+   X(tr_fmask_expand) X(tr_dcc_retile) X(wait_events) X(wait_cp_dma) X(query_copies) X(query_copy_waits)    \
+   X(skip_l2) X(skip_cbdb) X(rp_misaligned) X(cmdbuf_misaligned) X(xfer_img) X(img_created) X(img_misaligned)
 
 #define RADV_DRAW_STATS(X) RADV_DRAW_STATS_DRAW(X) RADV_DRAW_STATS_SYNC(X)
 
@@ -488,6 +497,10 @@ struct radeon_winsys {
    /* bc250: adds one command buffer's RADV_DRAW_STATS counters to the winsys's totals; NULL when the
     * winsys counts nothing (the wddm2 winsys sets it for BC250_DRAW_STATS=1). */
    void (*draw_stats_add)(struct radeon_winsys *ws, const uint32_t counts[RADV_DRAW_STAT_COUNT]);
+
+   /* bc250: the barrier tracking of radv_barrier_track (radv_cmd_buffer.c) may be used; the wddm2 winsys
+    * sets it unless BC250_BARRIER_TRACK=0. */
+   bool barrier_track;
 };
 
 static inline uint64_t

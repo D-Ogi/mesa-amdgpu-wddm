@@ -352,6 +352,17 @@ struct radv_cmd_state {
    /* Whether any images that are not L2 coherent are dirty from the CB. */
    bool rb_noncoherent_dirty;
 
+   /* bc250: the barrier tracking of radv_barrier_track. rb_misaligned_dirty: the CB or DB may have written
+    * an attachment that is not L2 coherent since the last flush of CB, DB and L2 together (cleared only by
+    * such a flush, unlike rb_noncoherent_dirty). xfer_cb_inv and xfer_db_inv: the CB or DB may hold lines
+    * that a transfer write made stale or that a transfer wrote, so a barrier without an image whose source
+    * has transfer writes still flushes and invalidates it. xfer_eop_pending: a buffer marker may have been
+    * written at the end of the pipe (a transfer write) after the last flush that waited there. */
+   bool rb_misaligned_dirty;
+   bool xfer_cb_inv;
+   bool xfer_db_inv;
+   bool xfer_eop_pending;
+
    /* Inheritance info. */
    VkQueryPipelineStatisticFlags inherited_pipeline_statistics;
    bool inherited_occlusion_queries;
@@ -651,6 +662,18 @@ void radv_draw_stats_command(struct radv_cmd_buffer *cmd_buffer, enum radv_draw_
       if (unlikely((cmd_buffer)->draw_stats.on))                                                                \
          (cmd_buffer)->draw_stats.counts[RADV_DRAW_STAT_##stat] += (n);                                         \
    } while (0)
+
+/* bc250: a transfer to an image ends (radv_barrier_track). Its writes may still be in the CB or DB (a
+ * graphics copy, blit, resolve or clear), or may have made lines there stale (a compute copy), so the next
+ * barrier without an image whose source has transfer writes keeps its CB and DB flush. Called after the
+ * command's own flushes, which must not clear it. */
+static inline void
+radv_cmd_buffer_image_transfer_done(struct radv_cmd_buffer *cmd_buffer)
+{
+   cmd_buffer->state.xfer_cb_inv = true;
+   cmd_buffer->state.xfer_db_inv = true;
+   RADV_DRAW_STATS_ADD(cmd_buffer, xfer_img, 1);
+}
 
 struct radv_msrtss_transient {
    struct list_head link;

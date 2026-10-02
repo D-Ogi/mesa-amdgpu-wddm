@@ -2799,6 +2799,21 @@ radv_wddm2_bo_init_functions(struct radv_wddm2_winsys *ws)
    if (ws->bc250 && draw && !strcmp(draw, "1"))
       ws->base.draw_stats_add = radv_wddm2_draw_stats_add;
 
+   /* BC250_BARRIER_TRACK: 1 (the default) lets RADV track what an application barrier without an image must
+    * flush (radv_barrier_track, radv_cmd_buffer.c): the L2 write-back only while CB or DB writes to a
+    * pipe-misaligned attachment are pending, the CB and DB flush for transfer writes only after transfers that
+    * may have reached them; 0 flushes as RADV upstream does. */
+   char track_buf[64];
+   const char *track_from;
+   const char *track = radv_wddm2_knob(&knobs, "BC250_BARRIER_TRACK", track_buf, sizeof(track_buf), &track_from);
+   ws->base.barrier_track = ws->bc250;
+   if (track) {
+      if (!strcmp(track, "0"))
+         ws->base.barrier_track = false;
+      else if (strcmp(track, "1"))
+         track_from = "invalid, default";
+   }
+
    ws->deferred.report_count = 256;
    ws->deferred.report_bytes = 256ull << 20;
    ws->deferred.report_hold_ns = 1000000000ull;
@@ -2822,6 +2837,7 @@ radv_wddm2_bo_init_functions(struct radv_wddm2_winsys *ws)
       if (ws->base.draw_stats_add)
          radv_wddm2_deferred_line("draw stats on (%s): counters of every application command buffer, in the "
                                   "summary's draw line", draw_from);
+      radv_wddm2_deferred_line("barrier tracking %s (%s)", ws->base.barrier_track ? "on" : "off", track_from);
    }
    free(knobs.text);
 

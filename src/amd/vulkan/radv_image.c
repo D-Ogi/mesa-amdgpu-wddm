@@ -1505,6 +1505,16 @@ radv_image_create(VkDevice _device, const struct radv_image_create_info *create_
       return result;
    }
 
+   /* bc250: BC250_DRAW_STATS counts the application's images and those not L2 coherent, the pipe-misaligned
+    * ones on GFX10 (radv_barrier_track in radv_cmd_buffer.c). */
+   if (unlikely(device->ws->draw_stats_add) && !is_internal) {
+      uint32_t counts[RADV_DRAW_STAT_COUNT] = {0};
+
+      counts[RADV_DRAW_STAT_img_created] = 1;
+      counts[RADV_DRAW_STAT_img_misaligned] = !radv_image_is_l2_coherent(device, image, NULL);
+      device->ws->draw_stats_add(device->ws, counts);
+   }
+
    if (image->vk.create_flags & VK_IMAGE_CREATE_2_SPARSE_BINDING_BIT_KHR) {
       enum radeon_bo_flag flags = RADEON_FLAG_VIRTUAL;
 

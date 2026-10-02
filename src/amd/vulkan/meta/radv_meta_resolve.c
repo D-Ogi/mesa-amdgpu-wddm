@@ -245,6 +245,7 @@ radv_CmdResolveImage2(VkCommandBuffer commandBuffer, const VkResolveImageInfo2 *
    radv_meta_end(cmd_buffer);
 
    radv_resume_conditional_rendering(cmd_buffer);
+   radv_cmd_buffer_image_transfer_done(cmd_buffer);
 }
 
 /**
