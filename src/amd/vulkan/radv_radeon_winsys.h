@@ -359,7 +359,62 @@ enum radv_cs_dump_type {
    X(src_xfer) X(src_frag) X(src_prerast) X(src_rt) X(src_none) X(bar_req_vs) X(bar_req_ps) X(bar_req_cs)    \
    X(bar_need_vs) X(bar_need_ps) X(bar_need_cs) X(bar_no_work) X(wt_xfer_xfer)
 
-#define RADV_DRAW_STATS(X) RADV_DRAW_STATS_DRAW(X) RADV_DRAW_STATS_SYNC(X)
+/* bc250: the surface, placement and shader counters, on a line of their own in the dump. They answer
+ * what layouts, compression metadata, memory domains and wave sizes the application's work actually
+ * gets on this winsys, so that the comparison with Linux RADV on the same chip rests on measurement
+ * rather than on a reading of the sources. Nothing here changes what is emitted.
+ *
+ * Images (radv_surf_stats_image, every vkCreateImage of the application, internal ones excluded):
+ * sf_img the images; sf_img_rt, sf_img_ds, sf_img_uav, sf_img_srv, sf_img_ext, sf_img_mut and
+ * sf_img_msaa those with colour attachment, depth-stencil attachment, storage or sampled usage, an
+ * external handle type, a mutable format and more than one sample (the classes overlap). sf_img_kib,
+ * sf_rt_kib, sf_ds_kib and sf_meta_kib the KiB of all planes, of the colour-attachment images, of the
+ * depth-stencil ones and of their metadata (surface meta_size, that is DCC or HTILE). sf_lin and
+ * sf_lin_kib the linear images and their KiB; sf_sw_256b, sf_sw_4kb, sf_sw_64kb, sf_sw_var and
+ * sf_sw_other the tiled ones by the block size of plane 0's GFX9 swizzle mode.
+ * sf_dcc, sf_htile, sf_cmask, sf_fmask and sf_fastclr the images with DCC, HTILE, CMASK, FMASK and a
+ * fast-clearable layout; sf_dcc_rt the DCC ones among the colour attachments, sf_htile_tc and
+ * sf_cmask_tc the TC-compatible HTILE and CMASK ones; sf_misaligned the images with a pipe-misaligned
+ * mip level (not coherent with L2, so barriers on them need an L2 invalidation).
+ * sf_rt_nodcc and sf_ds_nohtile the colour attachments without DCC and the depth-stencil images
+ * without HTILE: the loss, if there is one. The sf_no_* and sf_ds_no_* buckets name why, by
+ * re-evaluating the conditions of radv_use_dcc_for_image_early and radv_use_htile_for_image that are
+ * visible from the image alone: small (DCC: at most 512x512 single-sampled, which turns off fast
+ * clears and with them DCC; HTILE: smaller than 8x8), uav (storage usage), lin (linear tiling), ext
+ * (an external handle type), compr (VK_IMAGE_COMPRESSION_DISABLED_EXT), miparr (array layers and mip
+ * levels both above one) and other (none of these, so a format or a late reason). The buckets are not
+ * exclusive: an image counts in each one that applies.
+ *
+ * Buffer objects (radv_wddm2_bo_create_internal, every allocation the winsys makes): sf_bo the BOs,
+ * sf_bo_vram and sf_bo_gtt those by initial domain with sf_bo_vram_kib and sf_bo_gtt_kib their KiB,
+ * sf_bo_shared those created as WDDM
+ * shared resources (RADV leaves RADEON_FLAG_NO_INTERPROCESS_SHARING unset on application memory),
+ * sf_bo_32bit those in the 32-bit heap, sf_bo_vram_cpu and sf_bo_vram_cpu_kib the CPU-accessible VRAM
+ * ones, sf_bo_gtt_wc and sf_bo_gtt_cached the write-combined and cached GTT ones (GTT is the 256 MiB
+ * WDDM aperture segment), sf_bo_gl2byp those asking to bypass GL2.
+ *
+ * Shaders (radv_shader_create_uncached, cache hits included, so these are shader objects made live):
+ * sf_sh the shaders, sf_sh_w32 and sf_sh_w64 by wave size, sf_sh_ps32 / sf_sh_ps64 the fragment ones,
+ * sf_sh_cs32 / sf_sh_cs64 the compute, task and mesh ones, sf_sh_ge32 / sf_sh_ge64 the geometry
+ * engine ones (vertex, tessellation and geometry); sf_sh_ngg and sf_sh_ngg_pt the NGG and NGG
+ * passthrough ones, sf_sh_nggc those with NGG culling; sf_sh_scratch the ones with scratch and
+ * sf_sh_scratch_b their scratch bytes per wave; sf_sh_code_kib the rounded-up KiB of code;
+ * sf_sh_waves_sum and sf_sh_vgpr_sum the sums of radv_shader::max_waves (the occupancy limit RADV
+ * computes) and of the VGPR counts, for a mean over sf_sh. */
+#define RADV_DRAW_STATS_SURF(X)                                                                             \
+   X(sf_img) X(sf_img_rt) X(sf_img_ds) X(sf_img_uav) X(sf_img_srv) X(sf_img_ext) X(sf_img_mut)               \
+   X(sf_img_msaa) X(sf_img_kib) X(sf_rt_kib) X(sf_ds_kib) X(sf_meta_kib) X(sf_lin) X(sf_lin_kib)             \
+   X(sf_sw_256b) X(sf_sw_4kb) X(sf_sw_64kb) X(sf_sw_var) X(sf_sw_other) X(sf_dcc) X(sf_dcc_rt)               \
+   X(sf_htile) X(sf_htile_tc) X(sf_cmask) X(sf_cmask_tc) X(sf_fmask) X(sf_fastclr) X(sf_rt_nodcc)            \
+   X(sf_ds_nohtile) X(sf_misaligned) X(sf_no_small) X(sf_no_uav) X(sf_no_lin) X(sf_no_ext) X(sf_no_compr)     \
+   X(sf_no_miparr) X(sf_no_other) X(sf_ds_no_small) X(sf_ds_no_ext) X(sf_ds_no_compr) X(sf_ds_no_other)      \
+   X(sf_bo) X(sf_bo_vram) X(sf_bo_vram_kib) X(sf_bo_gtt) X(sf_bo_gtt_kib) X(sf_bo_shared)                    \
+   X(sf_bo_32bit) X(sf_bo_vram_cpu) X(sf_bo_vram_cpu_kib) X(sf_bo_gtt_wc) X(sf_bo_gtt_cached)                \
+   X(sf_bo_gl2byp) X(sf_sh) X(sf_sh_w32) X(sf_sh_w64) X(sf_sh_ps32) X(sf_sh_ps64) X(sf_sh_cs32)              \
+   X(sf_sh_cs64) X(sf_sh_ge32) X(sf_sh_ge64) X(sf_sh_ngg) X(sf_sh_ngg_pt) X(sf_sh_nggc) X(sf_sh_scratch)     \
+   X(sf_sh_scratch_b) X(sf_sh_code_kib) X(sf_sh_waves_sum) X(sf_sh_vgpr_sum)
+
+#define RADV_DRAW_STATS(X) RADV_DRAW_STATS_DRAW(X) RADV_DRAW_STATS_SYNC(X) RADV_DRAW_STATS_SURF(X)
 
 enum radv_draw_stat {
 #define RADV_DRAW_STAT_ENUM(name) RADV_DRAW_STAT_##name,
@@ -368,9 +423,12 @@ enum radv_draw_stat {
    RADV_DRAW_STAT_COUNT
 };
 
-/* The first counter of RADV_DRAW_STATS_SYNC. */
+/* The first counter of RADV_DRAW_STATS_SYNC and of RADV_DRAW_STATS_SURF. */
 #define RADV_DRAW_STAT_ONE(name) +1
 enum { RADV_DRAW_STAT_SYNC_FIRST = 0 RADV_DRAW_STATS_DRAW(RADV_DRAW_STAT_ONE) };
+enum {
+   RADV_DRAW_STAT_SURF_FIRST = 0 RADV_DRAW_STATS_DRAW(RADV_DRAW_STAT_ONE) RADV_DRAW_STATS_SYNC(RADV_DRAW_STAT_ONE)
+};
 #undef RADV_DRAW_STAT_ONE
 
 struct radeon_winsys {

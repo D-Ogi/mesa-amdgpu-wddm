@@ -3115,6 +3115,50 @@ radv_parse_binary_debug_info(const struct radv_compiler_info *compiler_info, con
    return VK_SUCCESS;
 }
 
+/* bc250: BC250_DRAW_STATS, the shader half of RADV_DRAW_STATS_SURF. Counting only: it reads the finished
+ * shader and hands one array to the winsys, as radv_image_create does for images.
+ */
+static void
+radv_surf_stats_shader(struct radv_device *device, const struct radv_shader *shader)
+{
+   const bool w32 = shader->info.wave_size == 32;
+   uint32_t counts[RADV_DRAW_STAT_COUNT] = {0};
+
+   counts[RADV_DRAW_STAT_sf_sh] = 1;
+   counts[RADV_DRAW_STAT_sf_sh_w32] = w32;
+   counts[RADV_DRAW_STAT_sf_sh_w64] = !w32;
+
+   switch (shader->info.stage) {
+   case MESA_SHADER_FRAGMENT:
+      counts[w32 ? RADV_DRAW_STAT_sf_sh_ps32 : RADV_DRAW_STAT_sf_sh_ps64] = 1;
+      break;
+   case MESA_SHADER_COMPUTE:
+   case MESA_SHADER_TASK:
+   case MESA_SHADER_MESH:
+      counts[w32 ? RADV_DRAW_STAT_sf_sh_cs32 : RADV_DRAW_STAT_sf_sh_cs64] = 1;
+      break;
+   case MESA_SHADER_VERTEX:
+   case MESA_SHADER_TESS_CTRL:
+   case MESA_SHADER_TESS_EVAL:
+   case MESA_SHADER_GEOMETRY:
+      counts[w32 ? RADV_DRAW_STAT_sf_sh_ge32 : RADV_DRAW_STAT_sf_sh_ge64] = 1;
+      break;
+   default:
+      break;
+   }
+
+   counts[RADV_DRAW_STAT_sf_sh_ngg] = shader->info.is_ngg;
+   counts[RADV_DRAW_STAT_sf_sh_ngg_pt] = shader->info.is_ngg_passthrough;
+   counts[RADV_DRAW_STAT_sf_sh_nggc] = shader->info.has_ngg_culling;
+   counts[RADV_DRAW_STAT_sf_sh_scratch] = shader->config.scratch_bytes_per_wave != 0;
+   counts[RADV_DRAW_STAT_sf_sh_scratch_b] = shader->config.scratch_bytes_per_wave;
+   counts[RADV_DRAW_STAT_sf_sh_code_kib] = (shader->code_size + 1023) >> 10;
+   counts[RADV_DRAW_STAT_sf_sh_waves_sum] = shader->max_waves;
+   counts[RADV_DRAW_STAT_sf_sh_vgpr_sum] = shader->config.num_vgprs;
+
+   device->ws->draw_stats_add(device->ws, counts);
+}
+
 VkResult
 radv_shader_create_uncached(struct radv_device *device, const struct radv_shader_binary *binary, bool replayable,
                             struct radv_serialized_shader_arena_block *replay_block, struct radv_shader_debug_info *dbg,
@@ -3185,6 +3229,11 @@ radv_shader_create_uncached(struct radv_device *device, const struct radv_shader
 
    /* Precompute register values for faster emission. */
    radv_precompute_registers(device, shader);
+
+   /* bc250: BC250_DRAW_STATS, the shader half of RADV_DRAW_STATS_SURF. Counting only, once per shader
+    * object that becomes live, cache hits included (radv_pipeline_cache.c calls this function too). */
+   if (unlikely(device->ws->draw_stats_add))
+      radv_surf_stats_shader(device, shader);
 
    *out_shader = shader;
 

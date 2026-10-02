@@ -1428,6 +1428,133 @@ radv_select_modifier(const struct radv_device *dev, VkFormat format,
    return VK_ERROR_UNKNOWN;
 }
 
+/* bc250: the block-size class of a GFX9-GFX11 swizzle mode. The numbers are addrlib's AddrSwizzleMode
+ * (src/amd/addrlib/inc/addrtypes.h), whose include directory radv does not carry; the modes group in
+ * fours, 4 KiB at 4-7 and 20-23, 64 KiB at 8-11, 16-19 and 24-27, VAR at 12-15 and 28-31.
+ */
+enum radv_surf_block_class {
+   RADV_SURF_BLOCK_LINEAR,
+   RADV_SURF_BLOCK_256B,
+   RADV_SURF_BLOCK_4KB,
+   RADV_SURF_BLOCK_64KB,
+   RADV_SURF_BLOCK_VAR,
+   RADV_SURF_BLOCK_OTHER,
+};
+
+static enum radv_surf_block_class
+radv_surf_block_class(unsigned swizzle_mode)
+{
+   if (swizzle_mode == 0)
+      return RADV_SURF_BLOCK_LINEAR;
+   if (swizzle_mode <= 3)
+      return RADV_SURF_BLOCK_256B;
+   if (swizzle_mode <= 7 || (swizzle_mode >= 20 && swizzle_mode <= 23))
+      return RADV_SURF_BLOCK_4KB;
+   if ((swizzle_mode >= 8 && swizzle_mode <= 11) || (swizzle_mode >= 16 && swizzle_mode <= 19) ||
+       (swizzle_mode >= 24 && swizzle_mode <= 27))
+      return RADV_SURF_BLOCK_64KB;
+   if (swizzle_mode <= 15 || (swizzle_mode >= 28 && swizzle_mode <= 31))
+      return RADV_SURF_BLOCK_VAR;
+   return RADV_SURF_BLOCK_OTHER;
+}
+
+/* bc250: BC250_DRAW_STATS, the surface half of RADV_DRAW_STATS_SURF. Counting only: it reads the image
+ * that radv_image_create_layout has just produced and adds to the caller's array. The sf_no_* buckets
+ * re-evaluate the conditions of radv_use_dcc_for_image_early and radv_use_htile_for_image that can be
+ * read off the image, so they are not exclusive and name every reason that applies.
+ */
+void
+radv_surf_stats_image(const struct radv_device *device, const struct radv_image *image,
+                      uint32_t counts[RADV_DRAW_STAT_COUNT])
+{
+   const struct radv_physical_device *pdev = radv_device_physical(device);
+   const struct radeon_surf *surf = &image->planes[0].surface;
+   const bool rt = (image->vk.usage & VK_IMAGE_USAGE_2_COLOR_ATTACHMENT_BIT_KHR) != 0;
+   const bool ds = (image->vk.usage & VK_IMAGE_USAGE_2_DEPTH_STENCIL_ATTACHMENT_BIT_KHR) != 0;
+   const bool uav = (image->vk.usage & VK_IMAGE_USAGE_2_STORAGE_BIT_KHR) != 0;
+   const bool ext = image->vk.external_handle_types != 0;
+   const bool compr_off = image->vk.compr_flags == VK_IMAGE_COMPRESSION_DISABLED_EXT;
+   const bool lin = image->vk.tiling == VK_IMAGE_TILING_LINEAR || surf->is_linear;
+   const uint32_t kib = (uint32_t)((image->size + 1023) >> 10);
+   uint64_t meta_bytes = 0;
+
+   counts[RADV_DRAW_STAT_sf_img] = 1;
+   counts[RADV_DRAW_STAT_sf_img_rt] = rt;
+   counts[RADV_DRAW_STAT_sf_img_ds] = ds;
+   counts[RADV_DRAW_STAT_sf_img_uav] = uav;
+   counts[RADV_DRAW_STAT_sf_img_srv] = (image->vk.usage & VK_IMAGE_USAGE_2_SAMPLED_BIT_KHR) != 0;
+   counts[RADV_DRAW_STAT_sf_img_ext] = ext;
+   counts[RADV_DRAW_STAT_sf_img_mut] = (image->vk.create_flags & VK_IMAGE_CREATE_2_MUTABLE_FORMAT_BIT_KHR) != 0;
+   counts[RADV_DRAW_STAT_sf_img_msaa] = image->vk.samples > 1;
+   counts[RADV_DRAW_STAT_sf_img_kib] = kib;
+   counts[RADV_DRAW_STAT_sf_rt_kib] = rt ? kib : 0;
+   counts[RADV_DRAW_STAT_sf_ds_kib] = ds ? kib : 0;
+
+   for (unsigned plane = 0; plane < image->plane_count; plane++)
+      meta_bytes += image->planes[plane].surface.meta_size;
+   counts[RADV_DRAW_STAT_sf_meta_kib] = (uint32_t)((meta_bytes + 1023) >> 10);
+
+   if (lin) {
+      counts[RADV_DRAW_STAT_sf_lin] = 1;
+      counts[RADV_DRAW_STAT_sf_lin_kib] = kib;
+   } else if (pdev->info.gfx_level >= GFX9) {
+      switch (radv_surf_block_class(surf->u.gfx9.swizzle_mode)) {
+      case RADV_SURF_BLOCK_256B:
+         counts[RADV_DRAW_STAT_sf_sw_256b] = 1;
+         break;
+      case RADV_SURF_BLOCK_4KB:
+         counts[RADV_DRAW_STAT_sf_sw_4kb] = 1;
+         break;
+      case RADV_SURF_BLOCK_64KB:
+         counts[RADV_DRAW_STAT_sf_sw_64kb] = 1;
+         break;
+      case RADV_SURF_BLOCK_VAR:
+         counts[RADV_DRAW_STAT_sf_sw_var] = 1;
+         break;
+      default:
+         counts[RADV_DRAW_STAT_sf_sw_other] = 1;
+         break;
+      }
+   } else {
+      counts[RADV_DRAW_STAT_sf_sw_other] = 1;
+   }
+
+   counts[RADV_DRAW_STAT_sf_dcc] = radv_image_has_dcc(image);
+   counts[RADV_DRAW_STAT_sf_dcc_rt] = rt && radv_image_has_dcc(image);
+   counts[RADV_DRAW_STAT_sf_htile] = radv_image_has_htile(image);
+   counts[RADV_DRAW_STAT_sf_htile_tc] = radv_image_is_tc_compat_htile(image);
+   counts[RADV_DRAW_STAT_sf_cmask] = radv_image_has_cmask(image);
+   counts[RADV_DRAW_STAT_sf_cmask_tc] = radv_image_is_tc_compat_cmask(image);
+   counts[RADV_DRAW_STAT_sf_fmask] = radv_image_has_fmask(image);
+   counts[RADV_DRAW_STAT_sf_fastclr] = radv_image_can_fast_clear(device, image);
+   counts[RADV_DRAW_STAT_sf_misaligned] = !radv_image_is_l2_coherent(device, image, NULL);
+
+   if (rt && !radv_image_has_dcc(image)) {
+      /* "small" is a Windows SDK macro (rpcndr.h: #define small char), hence tiny. */
+      const bool tiny = image->vk.samples <= 1 && image->vk.extent.width * image->vk.extent.height <= 512 * 512;
+      const bool miparr = image->vk.array_layers > 1 && image->vk.mip_levels > 1;
+
+      counts[RADV_DRAW_STAT_sf_rt_nodcc] = 1;
+      counts[RADV_DRAW_STAT_sf_no_small] = tiny;
+      counts[RADV_DRAW_STAT_sf_no_uav] = uav;
+      counts[RADV_DRAW_STAT_sf_no_lin] = lin;
+      counts[RADV_DRAW_STAT_sf_no_ext] = ext;
+      counts[RADV_DRAW_STAT_sf_no_compr] = compr_off;
+      counts[RADV_DRAW_STAT_sf_no_miparr] = miparr;
+      counts[RADV_DRAW_STAT_sf_no_other] = !tiny && !uav && !lin && !ext && !compr_off && !miparr;
+   }
+
+   if (ds && !radv_image_has_htile(image)) {
+      const bool tiny = image->vk.extent.width * image->vk.extent.height < 8 * 8;
+
+      counts[RADV_DRAW_STAT_sf_ds_nohtile] = 1;
+      counts[RADV_DRAW_STAT_sf_ds_no_small] = tiny;
+      counts[RADV_DRAW_STAT_sf_ds_no_ext] = ext;
+      counts[RADV_DRAW_STAT_sf_ds_no_compr] = compr_off;
+      counts[RADV_DRAW_STAT_sf_ds_no_other] = !tiny && !ext && !compr_off;
+   }
+}
+
 VkResult
 radv_image_create(VkDevice _device, const struct radv_image_create_info *create_info,
                   const VkAllocationCallbacks *alloc, VkImage *pImage, bool is_internal)
@@ -1506,12 +1633,14 @@ radv_image_create(VkDevice _device, const struct radv_image_create_info *create_
    }
 
    /* bc250: BC250_DRAW_STATS counts the application's images and those not L2 coherent, the pipe-misaligned
-    * ones on GFX10 (radv_barrier_track in radv_cmd_buffer.c). */
+    * ones on GFX10 (radv_barrier_track in radv_cmd_buffer.c), and the layout and compression the image got
+    * (radv_surf_stats_image). */
    if (unlikely(device->ws->draw_stats_add) && !is_internal) {
       uint32_t counts[RADV_DRAW_STAT_COUNT] = {0};
 
       counts[RADV_DRAW_STAT_img_created] = 1;
       counts[RADV_DRAW_STAT_img_misaligned] = !radv_image_is_l2_coherent(device, image, NULL);
+      radv_surf_stats_image(device, image, counts);
       device->ws->draw_stats_add(device->ws, counts);
    }
 

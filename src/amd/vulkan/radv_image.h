@@ -469,4 +469,8 @@ bool radv_image_is_renderable(const struct radv_image *image);
 bool radv_image_is_l2_coherent(const struct radv_device *device, const struct radv_image *image,
                                const VkImageSubresourceRange *range);
 
+/* bc250: BC250_DRAW_STATS, counting only (RADV_DRAW_STATS_SURF). */
+void radv_surf_stats_image(const struct radv_device *device, const struct radv_image *image,
+                           uint32_t counts[RADV_DRAW_STAT_COUNT]);
+
 #endif /* RADV_IMAGE_H */

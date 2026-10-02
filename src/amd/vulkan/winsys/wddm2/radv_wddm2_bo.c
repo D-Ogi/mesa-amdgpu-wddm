@@ -673,6 +673,42 @@ radv_wddm2_bo_account(struct radv_wddm2_winsys *ws, struct radv_wddm2_bo *bo, bo
       p_atomic_add(&ws->allocated_gtt, delta);
 }
 
+/* bc250: BC250_DRAW_STATS, the placement half of RADV_DRAW_STATS_SURF. Counting only, once per BO this
+ * winsys creates. GTT is the KMD's 256 MiB WDDM aperture segment, VRAM the local one; "shared" is a WDDM
+ * shared resource, which every allocation without RADEON_FLAG_NO_INTERPROCESS_SHARING becomes.
+ */
+static void
+radv_wddm2_surf_stats_bo(struct radv_wddm2_winsys *ws, const struct radv_wddm2_bo *bo)
+{
+   if (!ws->base.draw_stats_add)
+      return;
+
+   const enum radeon_bo_flag flags = bo->flags;
+   const uint32_t kib = (uint32_t)((bo->base.size + 1023) >> 10);
+   uint32_t counts[RADV_DRAW_STAT_COUNT] = {0};
+
+   counts[RADV_DRAW_STAT_sf_bo] = 1;
+   counts[RADV_DRAW_STAT_sf_bo_shared] = !(flags & RADEON_FLAG_NO_INTERPROCESS_SHARING);
+   counts[RADV_DRAW_STAT_sf_bo_32bit] = (flags & RADEON_FLAG_32BIT) != 0;
+   counts[RADV_DRAW_STAT_sf_bo_gl2byp] = (flags & RADEON_FLAG_GL2_BYPASS) != 0;
+
+   if (bo->base.initial_domain & RADEON_DOMAIN_VRAM) {
+      counts[RADV_DRAW_STAT_sf_bo_vram] = 1;
+      counts[RADV_DRAW_STAT_sf_bo_vram_kib] = kib;
+      if (!(flags & RADEON_FLAG_NO_CPU_ACCESS)) {
+         counts[RADV_DRAW_STAT_sf_bo_vram_cpu] = 1;
+         counts[RADV_DRAW_STAT_sf_bo_vram_cpu_kib] = kib;
+      }
+   }
+   if (bo->base.initial_domain & RADEON_DOMAIN_GTT) {
+      counts[RADV_DRAW_STAT_sf_bo_gtt] = 1;
+      counts[RADV_DRAW_STAT_sf_bo_gtt_kib] = kib;
+      counts[flags & RADEON_FLAG_GTT_WC ? RADV_DRAW_STAT_sf_bo_gtt_wc : RADV_DRAW_STAT_sf_bo_gtt_cached] = 1;
+   }
+
+   ws->base.draw_stats_add(&ws->base, counts);
+}
+
 static VkResult
 radv_wddm2_bo_create_internal(struct radeon_winsys *_ws, uint64_t size, unsigned alignment,
                               enum radeon_bo_domain initial_domain, enum radeon_bo_flag flags,
@@ -879,6 +915,7 @@ radv_wddm2_bo_create_internal(struct radeon_winsys *_ws, uint64_t size, unsigned
       radv_winsys_log_bo(&ws->bo_log, &bo->base, false);
 
    radv_wddm2_bo_account(ws, bo, true);
+   radv_wddm2_surf_stats_bo(ws, bo);
    *out_bo = (struct radeon_winsys_bo *)bo;
    return VK_SUCCESS;
 
@@ -2202,11 +2239,15 @@ radv_wddm2_summary_write(struct radv_wddm2_winsys *ws, uint64_t now, uint64_t du
          memcpy(ws->summary.submit_snapshot, &s, sizeof(s));
       }
       if (write_draw) {
-         /* Two lines, draw: and sync: (RADV_DRAW_STATS_SYNC), each within what radv_wddm2_deferred_line keeps. */
+         /* Three lines, draw:, sync: (RADV_DRAW_STATS_SYNC) and surf: (RADV_DRAW_STATS_SURF), each within
+          * what radv_wddm2_deferred_line keeps. The surf line carries the winsys's own byte charges as its
+          * tail, because those are a level, not a sum: what is allocated now, by domain. */
          static const struct {
             const char *name;
             unsigned first, end;
-         } parts[] = {{"draw", 0, RADV_DRAW_STAT_SYNC_FIRST}, {"sync", RADV_DRAW_STAT_SYNC_FIRST, RADV_DRAW_STAT_COUNT}};
+         } parts[] = {{"draw", 0, RADV_DRAW_STAT_SYNC_FIRST},
+                      {"sync", RADV_DRAW_STAT_SYNC_FIRST, RADV_DRAW_STAT_SURF_FIRST},
+                      {"surf", RADV_DRAW_STAT_SURF_FIRST, RADV_DRAW_STAT_COUNT}};
          for (unsigned p = 0; p < ARRAY_SIZE(parts); p++) {
             char counts[2048];
             size_t len = 0;
@@ -2217,6 +2258,20 @@ radv_wddm2_summary_write(struct radv_wddm2_winsys *ws, uint64_t now, uint64_t du
                if (n < 0)
                   break;
                len += (size_t)n;
+            }
+            if (parts[p].first == RADV_DRAW_STAT_SURF_FIRST && len < sizeof(counts)) {
+               /* The levels, and the radeon_info fields the layout decisions are made from: so that a
+                * reading of the log alone says which chip configuration RADV was told about (hw_cu is the
+                * CU count the KMD's caps blob reports, which cumode.c patches to the applied CU mode). */
+               const struct radeon_info *gi = &ws->gpu_info;
+               snprintf(counts + len, sizeof(counts) - len,
+                        " alloc_vram_kib=%" PRIu64 " alloc_vram_vis_kib=%" PRIu64 " alloc_gtt_kib=%" PRIu64
+                        " hw_cu=%u hw_rb=%u hw_tcc=%u hw_tcc_rb_nc=%u hw_l2_kib=%u hw_gb_addr=0x%08x"
+                        " hw_vram_vis_mib=%u hw_gart_mib=%u",
+                        p_atomic_read(&ws->allocated_vram) >> 10, p_atomic_read(&ws->allocated_vram_vis) >> 10,
+                        p_atomic_read(&ws->allocated_gtt) >> 10, gi->num_cu, gi->num_rb, gi->num_tcc_blocks,
+                        gi->tcc_rb_non_coherent, gi->l2_cache_size >> 10, gi->gb_addr_config,
+                        (unsigned)(gi->vram_vis_size_kb >> 10), (unsigned)(gi->gart_size_kb >> 10));
             }
             radv_wddm2_deferred_line("periodic %s t=%" PRIu64 "s %s:%s", tag, t, parts[p].name, counts);
          }
