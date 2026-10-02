@@ -457,6 +457,16 @@ struct radv_shader_debug_info {
    uint32_t debug_info_count;
 };
 
+/* bc250: how a shader takes its push constants, precomputed when it is created (radv_precompute_registers), so that
+ * radv_emit_push_constants_per_stage emits them from this block alone instead of scanning the inline push constant
+ * mask and looking up the user SGPR locations of the shader info at every flush. */
+struct radv_shader_push_const_regs {
+   uint32_t inline_reg;  /* SH register of the first inline push constant SGPR */
+   uint32_t ptr_reg;     /* SH register of the push constants pointer, 0 when the shader takes none */
+   uint8_t inline_count; /* inline push constant SGPRs, 0 when none */
+   uint8_t inline_dwords[AC_MAX_INLINE_PUSH_CONSTS]; /* the push constant dword each of them takes, in order */
+};
+
 struct radv_shader {
    struct vk_pipeline_cache_object base;
 
@@ -474,6 +484,7 @@ struct radv_shader {
    uint32_t exec_size;
    struct radv_shader_info info;
    struct radv_shader_regs regs;
+   struct radv_shader_push_const_regs push_const_regs;
    uint32_t max_waves;
 
    blake3_hash hash;

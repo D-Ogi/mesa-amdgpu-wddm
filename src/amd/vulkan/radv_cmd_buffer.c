@@ -2580,32 +2580,6 @@ radv_emit_sample_locations_state(struct radv_cmd_buffer *cmd_buffer)
    radeon_end();
 }
 
-static void
-radv_emit_inline_push_consts(const struct radv_device *device, struct radv_cmd_stream *cs,
-                             const struct radv_shader *shader, int idx, const uint32_t *values)
-{
-   const struct radv_physical_device *pdev = radv_device_physical(device);
-   const struct radv_userdata_info *loc = &shader->info.user_sgprs_locs.shader_data[idx];
-   const uint32_t base_reg = shader->info.user_data_0;
-   const uint32_t sh_offset = base_reg + loc->sgpr_idx * 4;
-
-   if (loc->sgpr_idx == -1)
-      return;
-
-   radeon_check_space(device->ws, cs->b, 2 + loc->num_sgprs);
-
-   radeon_begin(cs);
-   if (pdev->info.gfx_level >= GFX12) {
-      for (uint32_t i = 0; i < loc->num_sgprs; i++) {
-         gfx12_push_sh_reg(sh_offset + i * 4, values[i]);
-      }
-   } else {
-      radeon_set_sh_reg_seq(sh_offset, loc->num_sgprs);
-      radeon_emit_array(values, loc->num_sgprs);
-   }
-   radeon_end();
-}
-
 struct radv_bin_size_entry {
    unsigned bpp;
    VkExtent2D extent;
@@ -6994,37 +6968,92 @@ radv_emit_push_constants_per_stage(const struct radv_device *device, struct radv
                                    const struct radv_shader *shader, uint32_t *values, uint64_t push_constants_va)
 {
    const struct radv_physical_device *pdev = radv_device_physical(device);
-   const uint32_t push_constants_offset = radv_get_user_sgpr_loc(shader, AC_UD_PUSH_CONSTANTS);
-   const uint64_t inline_push_const_mask = shader->info.inline_push_constant_mask;
+   /* bc250: the registers and dwords come from the shader's precomputed block (radv_shader_push_const_regs). */
+   const struct radv_shader_push_const_regs *pc = &shader->push_const_regs;
+   const uint32_t inline_count = pc->inline_count;
+
+   if (!inline_count && !pc->ptr_reg)
+      return;
+
+   radeon_check_space(device->ws, cs->b, 2 + inline_count + 3);
+   radeon_begin(cs);
 
    /* Emit inlined push constants. */
-   if (inline_push_const_mask) {
-      const uint8_t base = ffsll(inline_push_const_mask) - 1;
-
-      if (inline_push_const_mask == u_bit_consecutive64(base, util_last_bit64(inline_push_const_mask) - base)) {
-         /* consecutive inline push constants */
-         radv_emit_inline_push_consts(device, cs, shader, AC_UD_INLINE_PUSH_CONSTANTS, values + base);
+   if (inline_count) {
+      if (pdev->info.gfx_level >= GFX12) {
+         for (uint32_t i = 0; i < inline_count; i++)
+            gfx12_push_sh_reg(pc->inline_reg + i * 4, values[pc->inline_dwords[i]]);
       } else {
-         /* sparse inline push constants */
-         uint32_t consts[AC_MAX_INLINE_PUSH_CONSTS];
-         unsigned num_consts = 0;
-         u_foreach_bit64 (idx, inline_push_const_mask)
-            consts[num_consts++] = values[idx];
-         radv_emit_inline_push_consts(device, cs, shader, AC_UD_INLINE_PUSH_CONSTANTS, consts);
+         radeon_set_sh_reg_seq(pc->inline_reg, inline_count);
+         for (uint32_t i = 0; i < inline_count; i++)
+            radeon_emit(values[pc->inline_dwords[i]]);
       }
    }
 
    /* Emit the push constants upload pointer. */
-   if (push_constants_offset) {
-      radeon_check_space(device->ws, cs->b, 3);
-      radeon_begin(cs);
+   if (pc->ptr_reg) {
       if (pdev->info.gfx_level >= GFX12) {
-         gfx12_push_32bit_pointer(push_constants_offset, push_constants_va, &pdev->info);
+         gfx12_push_32bit_pointer(pc->ptr_reg, push_constants_va, &pdev->info);
       } else {
-         radeon_emit_32bit_pointer(push_constants_offset, push_constants_va, &pdev->info);
+         radeon_emit_32bit_pointer(pc->ptr_reg, push_constants_va, &pdev->info);
       }
-      radeon_end();
    }
+
+   radeon_end();
+}
+
+/* bc250: BC250_DRAW_STATS for the push constant emission of one stage (slot) of an application command. It derives
+ * the inline push constant dwords from the shader info the way the emission did before the precomputed block
+ * (consecutive from the first bit, else bit by bit) and counts pc_regs_wrong when the block differs. pc_stage_same
+ * compares with the last counted emission of the slot only: emissions of meta operations in between are not
+ * counted, so it bounds from above what skipping unchanged emissions could save. */
+static void
+radv_draw_stats_push_consts(struct radv_cmd_buffer *cmd_buffer, unsigned slot, const struct radv_shader *shader,
+                            const uint32_t *values, uint64_t va)
+{
+   const struct radv_shader_push_const_regs *pc = &shader->push_const_regs;
+   const struct radv_userdata_info *loc = radv_get_user_sgpr_info(shader, AC_UD_INLINE_PUSH_CONSTANTS);
+   const uint64_t mask = shader->info.inline_push_constant_mask;
+   uint32_t *counts = cmd_buffer->draw_stats.counts;
+   uint8_t dwords[AC_MAX_INLINE_PUSH_CONSTS];
+   uint32_t emitted[AC_MAX_INLINE_PUSH_CONSTS];
+   unsigned count = 0;
+
+   if (mask && loc->sgpr_idx != -1) {
+      const unsigned base = ffsll(mask) - 1;
+
+      if (mask == u_bit_consecutive64(base, util_last_bit64(mask) - base)) {
+         for (; count < loc->num_sgprs && count < AC_MAX_INLINE_PUSH_CONSTS; count++)
+            dwords[count] = base + count;
+      } else {
+         u_foreach_bit64 (idx, mask) {
+            if (count < loc->num_sgprs && count < AC_MAX_INLINE_PUSH_CONSTS)
+               dwords[count++] = idx;
+         }
+      }
+   }
+
+   if (pc->ptr_reg != radv_get_user_sgpr_loc(shader, AC_UD_PUSH_CONSTANTS) || pc->inline_count != count ||
+       (count && pc->inline_reg != radv_get_user_sgpr_loc(shader, AC_UD_INLINE_PUSH_CONSTANTS)) ||
+       memcmp(pc->inline_dwords, dwords, count))
+      counts[RADV_DRAW_STAT_pc_regs_wrong]++;
+
+   if (!pc->inline_count && !pc->ptr_reg)
+      return;
+
+   for (unsigned i = 0; i < pc->inline_count; i++)
+      emitted[i] = values[pc->inline_dwords[i]];
+
+   counts[RADV_DRAW_STAT_pc_stage_emits]++;
+   if (!pc->ptr_reg)
+      va = 0;
+   if (cmd_buffer->draw_stats.pc[slot].shader == shader && cmd_buffer->draw_stats.pc[slot].va == va &&
+       !memcmp(cmd_buffer->draw_stats.pc[slot].values, emitted, pc->inline_count * 4))
+      counts[RADV_DRAW_STAT_pc_stage_same]++;
+
+   cmd_buffer->draw_stats.pc[slot].shader = shader;
+   cmd_buffer->draw_stats.pc[slot].va = va;
+   memcpy(cmd_buffer->draw_stats.pc[slot].values, emitted, pc->inline_count * 4);
 }
 
 static void
@@ -7073,6 +7102,9 @@ radv_flush_constants(struct radv_cmd_buffer *cmd_buffer, VkShaderStageFlags stag
                                                     : cmd_buffer->state.rt_prolog;
 
       radv_emit_push_constants_per_stage(device, cs, compute_shader, (uint32_t *)cmd_buffer->push_constants, va);
+      if (radv_draw_stats_on(cmd_buffer))
+         radv_draw_stats_push_consts(cmd_buffer, MESA_SHADER_COMPUTE, compute_shader,
+                                     (uint32_t *)cmd_buffer->push_constants, va);
    } else {
       struct radv_shader *prev_shader = NULL;
 
@@ -7082,6 +7114,8 @@ radv_flush_constants(struct radv_cmd_buffer *cmd_buffer, VkShaderStageFlags stag
          /* Avoid redundantly emitting the same values for merged stages. */
          if (shader && shader != prev_shader) {
             radv_emit_push_constants_per_stage(device, cs, shader, (uint32_t *)cmd_buffer->push_constants, va);
+            if (radv_draw_stats_on(cmd_buffer))
+               radv_draw_stats_push_consts(cmd_buffer, stage, shader, (uint32_t *)cmd_buffer->push_constants, va);
 
             prev_shader = shader;
          }
@@ -7090,6 +7124,9 @@ radv_flush_constants(struct radv_cmd_buffer *cmd_buffer, VkShaderStageFlags stag
       if (internal_stages & VK_SHADER_STAGE_TASK_BIT_EXT) {
          radv_emit_push_constants_per_stage(device, cmd_buffer->gang.cs, cmd_buffer->state.shaders[MESA_SHADER_TASK],
                                             (uint32_t *)cmd_buffer->push_constants, va);
+         if (radv_draw_stats_on(cmd_buffer))
+            radv_draw_stats_push_consts(cmd_buffer, MESA_SHADER_TASK, cmd_buffer->state.shaders[MESA_SHADER_TASK],
+                                        (uint32_t *)cmd_buffer->push_constants, va);
       }
    }
 

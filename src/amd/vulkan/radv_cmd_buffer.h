@@ -617,6 +617,12 @@ struct radv_cmd_buffer {
        * would have skipped is checked. */
       uint32_t vb_desc_size;
       uint32_t vb_desc[MAX_VERTEX_ATTRIBS * 4];
+      /* What the last counted push constant emission of each stage wrote, for pc_stage_same. */
+      struct {
+         const struct radv_shader *shader;
+         uint64_t va;
+         uint32_t values[AC_MAX_INLINE_PUSH_CONSTS];
+      } pc[MESA_VULKAN_SHADER_STAGES];
    } draw_stats;
 };
 

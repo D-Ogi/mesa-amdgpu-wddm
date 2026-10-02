@@ -2208,12 +2208,33 @@ radv_precompute_registers_pgm(const struct radv_device *device, struct radv_shad
 }
 
 static void
+radv_precompute_push_const_regs(struct radv_shader *shader)
+{
+   struct radv_shader_push_const_regs *pc = &shader->push_const_regs;
+   const struct radv_userdata_info *loc = radv_get_user_sgpr_info(shader, AC_UD_INLINE_PUSH_CONSTANTS);
+   uint64_t mask = shader->info.inline_push_constant_mask;
+
+   pc->ptr_reg = radv_get_user_sgpr_loc(shader, AC_UD_PUSH_CONSTANTS);
+   pc->inline_reg = radv_get_user_sgpr_loc(shader, AC_UD_INLINE_PUSH_CONSTANTS);
+   pc->inline_count = 0;
+
+   if (!mask || loc->sgpr_idx == -1)
+      return;
+
+   /* The shader args declare one inline SGPR per bit of the mask, in the order of the bits. */
+   assert(loc->num_sgprs == util_bitcount64(mask) && loc->num_sgprs <= AC_MAX_INLINE_PUSH_CONSTS);
+   while (mask && pc->inline_count < loc->num_sgprs)
+      pc->inline_dwords[pc->inline_count++] = u_bit_scan64(&mask);
+}
+
+static void
 radv_precompute_registers(struct radv_device *device, struct radv_shader *shader)
 {
    const struct radv_physical_device *pdev = radv_device_physical(device);
    const struct radv_shader_info *info = &shader->info;
 
    radv_precompute_registers_pgm(device, shader);
+   radv_precompute_push_const_regs(shader);
 
    switch (info->stage) {
    case MESA_SHADER_VERTEX:

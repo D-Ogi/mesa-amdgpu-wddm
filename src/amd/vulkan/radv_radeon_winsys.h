@@ -277,7 +277,10 @@ enum radv_cs_dump_type {
  * makes to restore the application's state, meta_restores_* counts those. vb_desc_writes counts the
  * vertex buffer descriptor uploads, vb_desc_reusable those the reuse of radv_flush_vertex_descriptors
  * would have skipped (it is off while counting), vb_desc_reuse_wrong those of them whose descriptors
- * differed from the ones uploaded before. */
+ * differed from the ones uploaded before. pc_stage_emits counts the push constant emissions of one
+ * shader stage, pc_stage_same those that wrote what the stage's previous counted emission wrote (same
+ * shader, inline push constants and pointer), pc_regs_wrong those whose precomputed registers
+ * (radv_shader_push_const_regs) differ from the shader info, which must stay zero. */
 #define RADV_DRAW_STATS(X)                                                                                  \
    X(cmdbufs) X(passes) X(passes_clear) X(restarts) X(restart_none) X(restart_barrier_ro) X(restart_barrier) \
    X(restart_query) X(restart_clear) X(restart_transfer) X(restart_dispatch) X(end_begin) X(end_barrier)     \
@@ -285,7 +288,8 @@ enum radv_cs_dump_type {
    X(pipelines_cs) X(meta_restores_gfx) X(meta_restores_cs) X(vb_calls) X(vb_bindings) X(ib_calls)          \
    X(push_calls) X(barrier_calls) X(barrier_back_to_back) X(barrier_in_pass) X(barrier_ro) X(barrier_mem)   \
    X(barrier_buf) X(barrier_img) X(barrier_layout) X(transfers) X(clear_attachments) X(dispatches)          \
-   X(queries) X(vb_desc_writes) X(vb_desc_reusable) X(vb_desc_reuse_wrong)
+   X(queries) X(vb_desc_writes) X(vb_desc_reusable) X(vb_desc_reuse_wrong) X(pc_stage_emits)                \
+   X(pc_stage_same) X(pc_regs_wrong)
 
 enum radv_draw_stat {
 #define RADV_DRAW_STAT_ENUM(name) RADV_DRAW_STAT_##name,
