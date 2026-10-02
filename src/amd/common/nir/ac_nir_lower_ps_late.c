@@ -332,6 +332,31 @@ cse_packed_outputs(lower_ps_state *s)
    }
 }
 
+/* A 10-bit UNORM target takes FP16_ABGR exports, packed with round-toward-zero, and the CB converts
+ * them to UNORM with ROUND_BY_HALF. In [0.5, 1) one fp16 ulp is 0.4995 of a UNORM10 step, so the
+ * truncating pack alone can lose half a step: 0.6 (613.8 steps) packs to 0.59961 (613.4) and is
+ * stored as 613. D3D asks for c * 1023 + 0.5 truncated, within 0.6 ULP (D3D11.3 functional spec,
+ * 3.2.3.6 FLOAT -> UNORM); Vulkan only says implementations should round to nearest.
+ *
+ * Round to the UNORM10 grid first, with D3D's own steps (multiply, add 0.5, drop the fraction, each
+ * in fp32), and export a quarter step above the grid point: after the pack the value lies in
+ * (k - 0.25, k + 0.25] steps, which the CB rounds to k. NaN stays NaN, and a value outside [0, 1]
+ * stays outside, so the CB clamps both as it did before. Not for blending, which needs the
+ * unrounded source. The ACO PS epilog (aco_select_ps_epilog.cpp) emits the same five operations.
+ */
+static nir_def *
+round_unorm10_for_rtz_pack(nir_builder *b, nir_def *c)
+{
+   uint32_t fp_math_ctrl = b->fp_math_ctrl;
+   b->fp_math_ctrl = nir_fp_no_fast_math;
+
+   nir_def *k = nir_ffloor(b, nir_fadd_imm(b, nir_fmul_imm(b, c, 1023.0), 0.5));
+   nir_def *q = nir_fmul_imm(b, nir_fadd_imm(b, k, 0.25), 1.0 / 1023.0);
+
+   b->fp_math_ctrl = fp_math_ctrl;
+   return q;
+}
+
 static bool
 emit_ps_color_export(nir_builder *b, lower_ps_state *s, unsigned output_index, unsigned mrt_index)
 {
@@ -352,6 +377,7 @@ emit_ps_color_export(nir_builder *b, lower_ps_state *s, unsigned output_index, u
 
    bool is_int8 = s->options->color_is_int8 & BITFIELD_BIT(mrt_index);
    bool is_int10 = s->options->color_is_int10 & BITFIELD_BIT(mrt_index);
+   bool round_unorm10 = s->options->color_round_unorm10 & BITFIELD_BIT(mrt_index);
    bool enable_mrt_output_nan_fixup =
       s->options->enable_mrt_output_nan_fixup & BITFIELD_BIT(mrt_index);
 
@@ -424,8 +450,16 @@ emit_ps_color_export(nir_builder *b, lower_ps_state *s, unsigned output_index, u
 
       switch (spi_shader_col_format) {
       case V_028714_SPI_SHADER_FP16_ABGR:
-         if (type_size == 32)
+         if (type_size == 32) {
             pack_op = nir_op_pack_half_2x16_rtz_split;
+            if (round_unorm10) {
+               /* RGB only: the 2-bit alpha step is far coarser than the pack's error. */
+               for (int i = 0; i < 3; i++) {
+                  if (data[i])
+                     data[i] = round_unorm10_for_rtz_pack(b, data[i]);
+               }
+            }
+         }
          break;
       case V_028714_SPI_SHADER_UINT16_ABGR:
          if (type_size == 32) {

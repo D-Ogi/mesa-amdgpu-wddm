@@ -420,6 +420,10 @@ typedef struct {
 
    /* Vulkan only */
    unsigned enable_mrt_output_nan_fixup;
+   /* MRTs whose FP16_ABGR export feeds an unblended 10-bit UNORM target: RGB are rounded to the
+    * UNORM10 grid before the round-toward-zero pack, which alone can lose half a step.
+    */
+   unsigned color_round_unorm10;
    bool no_color_export;
    bool no_depth_export;
 } ac_nir_lower_ps_late_options;

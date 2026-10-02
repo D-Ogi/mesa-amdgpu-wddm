@@ -132,6 +132,16 @@ format_is_int10(VkFormat format)
 }
 
 static bool
+format_is_unorm10(VkFormat format)
+{
+   const struct util_format_description *desc = radv_format_description(format);
+   int channel = vk_format_get_first_non_void_channel(format);
+
+   return channel >= 0 && desc->channel[channel].type == UTIL_FORMAT_TYPE_UNSIGNED &&
+          desc->channel[channel].normalized && desc->channel[channel].size == 10;
+}
+
+static bool
 format_is_float32(VkFormat format)
 {
    const struct util_format_description *desc = radv_format_description(format);
@@ -1445,6 +1455,7 @@ struct radv_ps_epilog_key
 radv_generate_ps_epilog_key(const struct radv_compiler_info *compiler_info, const struct radv_ps_epilog_state *state)
 {
    unsigned col_format = 0, is_int8 = 0, is_int10 = 0, is_float32 = 0, z_format = 0, no_signed_zero = 0;
+   unsigned round_unorm10 = 0;
    struct radv_ps_epilog_key key;
 
    memset(&key, 0, sizeof(key));
@@ -1478,6 +1489,14 @@ radv_generate_ps_epilog_key(const struct radv_compiler_info *compiler_info, cons
             is_int10 |= 1 << i;
          if (format_is_float32(fmt))
             is_float32 |= 1 << i;
+         /* The FP16 export's round-toward-zero pack can store a 10-bit UNORM value one step low
+          * (0.6 -> 613, not 614); the export rounds it to the grid first. Not with blending, which
+          * needs the unrounded source, and not with RB+, where the SX converts the export and this
+          * has not been measured.
+          */
+         if (format_is_unorm10(fmt) && !blend_enable && cf == V_028714_SPI_SHADER_FP16_ABGR &&
+             !compiler_info->hw.rbplus_allowed)
+            round_unorm10 |= 1 << i;
       }
 
       col_format |= cf << (4 * i);
@@ -1511,6 +1530,7 @@ radv_generate_ps_epilog_key(const struct radv_compiler_info *compiler_info, cons
    key.spi_shader_col_format = col_format;
    key.color_is_int8 = compiler_info->ac->has_cb_lt16bit_int_clamp_bug ? is_int8 : 0;
    key.color_is_int10 = compiler_info->ac->has_cb_lt16bit_int_clamp_bug ? is_int10 : 0;
+   key.color_round_unorm10 = round_unorm10;
    key.enable_mrt_output_nan_fixup = compiler_info->key.enable_mrt_output_nan_fixup ? is_float32 : 0;
    key.no_signed_zero = no_signed_zero;
    key.colors_written = state->colors_written;
