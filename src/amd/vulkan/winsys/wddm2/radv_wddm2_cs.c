@@ -501,6 +501,8 @@ radv_wddm2_queue_init(struct radv_wddm2_winsys *ws, enum amd_ip_type hw_ip,
    queue->bc250_queue_context = queue_context;
    queue->bc250_queue_cookie = cookie;
    queue->bc250_ws = ws;
+   /* From 1: a signal record left at zero names no queue. */
+   queue->bc250_epoch = p_atomic_inc_return(&ws->bc250_queue_epoch);
 
    /* bc250kmd has no hardware-queue DDIs. SubmitCommand is the packet path. */
    if (ws->bc250) {
@@ -1298,6 +1300,87 @@ bc250_emit_progress_write(uint8_t *dst, uint64_t va, uint64_t value)
    memcpy(dst, packet, sizeof(packet));
 }
 
+/* The in-ring wait that replaces an elided kernel wait (BC250_WAIT_ELIDE=ring): a WAIT_REG_MEM at the
+ * head of the IB1 for the queue's own GPU-written progress value, the shape of amdgpu's
+ * gfx_v10_0_ring_emit_pipeline_sync (ref/linux-stable-6.18.52-amdgpu/gfx_v10_0.c), which waits in the
+ * ring for the last job submitted to it. Mesa's own emitter is ac_emit_cp_wait_mem
+ * (src/amd/common/ac_cmdbuf_cp.c): PKT3_WAIT_REG_MEM with five body dwords, MEM_SPACE 1 and the poll
+ * interval 4; the function is GREATER_OR_EQUAL, as RADV's gang semaphore waits
+ * (radv_cmd_buffer.c, radv_cp_wait_mem), not amdgpu's EQUAL; the engine is the PFP, as amdgpu's
+ * pipeline sync, so the stall precedes the PFP's prefetch of the submission's own commands.
+ *
+ * Only the low 32 bits are compared, which is exact while both values stay below 2^31; the caller
+ * refuses to elide above that (BC250_WAIT_ELIDE_MAX_PROGRESS), so no comparison ever wraps. Seven
+ * dwords. */
+#define BC250_RING_WAIT_DW 7u
+/* The progress value above which a queue stops eliding: a 32-bit GREATER_OR_EQUAL stays exact below
+ * it. At the 178 submissions a second of session 291's measured pan, 2^31 is 380 years. */
+#define BC250_WAIT_ELIDE_MAX_PROGRESS 0x80000000ull
+
+static void
+bc250_emit_ring_wait(uint8_t *dst, uint64_t va, uint64_t value)
+{
+   const uint32_t packet[BC250_RING_WAIT_DW] = {
+      PKT3(PKT3_WAIT_REG_MEM, 5, 0),
+      WAIT_REG_MEM_MEM_SPACE(1) | WAIT_REG_MEM_GREATER_OR_EQUAL | WAIT_REG_MEM_PFP,
+      (uint32_t)va,
+      (uint32_t)(va >> 32),
+      (uint32_t)value,
+      0xffffffffu, /* mask */
+      4,           /* poll interval, as ac_emit_cp_wait_mem */
+   };
+   memcpy(dst, packet, sizeof(packet));
+}
+
+/* The signal record of one application fence (vk_wddm2_monitored_fence.h): the queue binding that
+ * last signalled it, the value and that queue's progress value at the signal. Written by the
+ * signalling submission between two increments of signal_gen, so a reader that sees an odd generation
+ * or a generation that moved has read a record under construction and must not trust it. One queue's
+ * submissions are externally serialized; two queues signalling one fence race, and the seqlock is
+ * what keeps that race from producing a record that never existed.
+ */
+static void
+radv_wddm2_signal_record(struct vk_wddm2_monitored_fence *fence, uint64_t epoch, uint64_t value,
+                         uint64_t progress)
+{
+   p_atomic_inc(&fence->signal_gen);
+   p_atomic_set(&fence->signal_epoch, epoch);
+   p_atomic_set(&fence->signal_value, value);
+   p_atomic_set(&fence->signal_progress, progress);
+   p_atomic_inc(&fence->signal_gen);
+}
+
+/* How a wait that the CPU does not see complete was last signalled. */
+enum radv_wddm2_wait_class {
+   RADV_WDDM2_WAIT_SAME_QUEUE,  /* this queue, at or above the waited value: elidable */
+   RADV_WDDM2_WAIT_OTHER_QUEUE, /* another queue of this process */
+   RADV_WDDM2_WAIT_UNKNOWN,     /* no record, a record below the waited value, or one being written */
+};
+
+/* The class of one wait, and for the same-queue class the progress value of the signalling
+ * submission in *progress: the point in this queue's ring after which the fence carries the waited
+ * value. */
+static enum radv_wddm2_wait_class
+radv_wddm2_wait_class(const struct radv_wddm2_queue *queue, struct vk_wddm2_monitored_fence *fence,
+                      uint64_t wait_value, uint64_t *progress)
+{
+   const uint32_t gen = p_atomic_read(&fence->signal_gen);
+   const uint64_t epoch = p_atomic_read(&fence->signal_epoch);
+   const uint64_t value = p_atomic_read(&fence->signal_value);
+   const uint64_t at = p_atomic_read(&fence->signal_progress);
+   if ((gen & 1u) || gen != p_atomic_read(&fence->signal_gen) || !epoch)
+      return RADV_WDDM2_WAIT_UNKNOWN;
+   if (epoch != queue->bc250_epoch)
+      return RADV_WDDM2_WAIT_OTHER_QUEUE;
+   /* A value this queue has not signalled yet is a wait before its signal: the kernel must hold it.
+    * A signal recorded at progress 0 came before this queue submitted anything; it is not worth a
+    * case of its own. */
+   if (value < wait_value || !at)
+      return RADV_WDDM2_WAIT_UNKNOWN;
+   *progress = at;
+   return RADV_WDDM2_WAIT_SAME_QUEUE;
+}
+
 /* One IB1 on the gfx ring: the KMD runs the single IB of a BC2S blob (driver/kmd/umd_blob.c,
  * single_ib) and puts its own frame and fence around it on the ring. A submission of several
  * IBs is packed into a gather BO of the queue. By default the gather BO holds one IB2 call
@@ -1316,10 +1399,15 @@ bc250_emit_progress_write(uint8_t *dst, uint64_t va, uint64_t value)
  * gather slot, a single IB and an empty submission too: the stream is called as an IB2 (or copied
  * when it calls one itself), then the padding, then the write as the IB1's last packet. 0 keeps the
  * IB1 as before.
+ *
+ * ring_wait (BC250_WAIT_ELIDE=ring, nonzero) opens the IB1 with the in-ring wait for that progress
+ * value of this queue (bc250_emit_ring_wait), before every call and copy: the dependency a kernel
+ * wait would have carried. It needs progress_value too, since it reads the same GPU-written fence.
  */
 static NTSTATUS
 radv_wddm2_bc250_submit(struct radv_wddm2_ctx *ctx, struct radv_wddm2_queue *queue,
-                        const struct radv_winsys_submit_info *submit, uint64_t progress_value)
+                        const struct radv_winsys_submit_info *submit, uint64_t progress_value,
+                        uint64_t ring_wait)
 {
    struct radv_wddm2_winsys *ws = ctx->ws;
    struct bc250_submit_ib local_ibs[16];
@@ -1356,6 +1444,11 @@ radv_wddm2_bc250_submit(struct radv_wddm2_ctx *ctx, struct radv_wddm2_queue *que
    const bool gpu_progress = progress_value != 0;
    if (n == 0 && !gpu_progress)
       return STATUS_SUCCESS;
+   /* The in-ring wait reads the same GPU-written fence as the progress write, and the caller only
+    * asks for it where that write exists; refuse rather than drop a dependency silently. */
+   if (ring_wait && !gpu_progress)
+      return STATUS_INVALID_PARAMETER;
+   const unsigned ring_wait_dw = ring_wait ? BC250_RING_WAIT_DW : 0u;
 
    const bool direct = n == 1 && !gpu_progress;
    if (direct) {
@@ -1380,10 +1473,11 @@ radv_wddm2_bc250_submit(struct radv_wddm2_ctx *ctx, struct radv_wddm2_queue *que
             calls++;
          }
       }
-      total = copied_dw + 4ull * calls + (gpu_progress ? BC250_PROGRESS_WRITE_DW : 0);
+      total = ring_wait_dw + copied_dw + 4ull * calls + (gpu_progress ? BC250_PROGRESS_WRITE_DW : 0);
       /* The IB1 ends on the IB padding of the GFX queue, as every RADV IB does. Copied IBs are
-       * already padded; four-dword calls may leave half a unit (the progress write is 8 dwords). */
-      if (!copy_all || gpu_progress) {
+       * already padded; four-dword calls may leave half a unit (the progress write is 8 dwords,
+       * the in-ring wait 7). */
+      if (!copy_all || gpu_progress || ring_wait_dw) {
          const uint32_t pad_mask = ws->gpu_info.ip[AMD_IP_GFX].ib_pad_dw_mask;
          pad = (unsigned)((pad_mask + 1u - (total & pad_mask)) & pad_mask);
          total += pad;
@@ -1416,6 +1510,13 @@ radv_wddm2_bc250_submit(struct radv_wddm2_ctx *ctx, struct radv_wddm2_queue *que
                  capacity, bytes, n, calls, copies);
       }
       dst = queue->bc250_gather[queue->bc250_gather_index].map;
+      /* The first packet of the IB1, before every call and copy: an elided kernel wait becomes a
+       * PFP wait for this queue's progress value, so the dependency is still in force before any of
+       * the submission's own commands is prefetched. */
+      if (ring_wait_dw) {
+         bc250_emit_ring_wait(dst, queue->bc250_progress_va, ring_wait);
+         dst += ring_wait_dw * 4u;
+      }
       for (i = 0; i < n; i++) {
          const struct radv_winsys_ib *ib = &ibs[i].ib;
          if (!copy_all && !ib->cdw)
@@ -1515,8 +1616,9 @@ radv_wddm2_bc250_submit(struct radv_wddm2_ctx *ctx, struct radv_wddm2_queue *que
               dw ? dw[0] : 0, dw && bytes >= 8 ? dw[1] : 0,
               dw && bytes >= 12 ? dw[2] : 0, dw && bytes >= 16 ? dw[3] : 0);
       if (!direct)
-         amdgpu_wddm_log("bc250: IB1 holds %u IB2 calls and %u copied IBs%s\n", calls, copies,
-                 gpu_progress ? " and the progress write" : "");
+         amdgpu_wddm_log("bc250: IB1 holds %u IB2 calls and %u copied IBs%s%s\n", calls, copies,
+                 gpu_progress ? " and the progress write" : "",
+                 ring_wait ? " behind the in-ring wait" : "");
       /* Slices of the unclamped preamble and the main CS, when the IB1 is their copy. 163 is
        * the first ACQUIRE_MEM, 176 the main IB, 216 the dispatch. */
       if (calls)
@@ -1622,6 +1724,9 @@ radv_wddm2_cs_submit(struct radeon_winsys_ctx *_ctx,
          return VK_ERROR_DEVICE_LOST;
    }
 
+   /* The progress value an elided wait needs in the ring, 0 when nothing was elided. */
+   uint64_t ring_wait_value = 0;
+
    if (wait_count > 0) {
       STACK_ARRAY(D3DKMT_HANDLE, handles, wait_count);
       STACK_ARRAY(uint64_t, values, wait_count);
@@ -1632,23 +1737,92 @@ radv_wddm2_cs_submit(struct radeon_winsys_ctx *_ctx,
        * not see complete is queued as before, whichever queue signals it, and so is a fence that
        * reads the lost-device value: the kernel reports that. */
       const bool drop = ws->bc250 && ws->bc250_drop_waits && !queue->handle;
-      uint32_t count = 0;
+      /* BC250_WAIT_ELIDE: a wait on a fence this queue itself signalled is a dependency inside one
+       * context's single in-order ring, the case Linux resolves without a CPU round trip
+       * (amdgpu_sync_peek_fence: "For fences from the same ring it is sufficient when they are
+       * scheduled"). It may be left out of the kernel call only when this submission has an IB1 of its
+       * own to carry the dependency instead: the packet path (no hardware queue), a GFX submission
+       * with commands, the GPU-written progress value the in-ring wait reads, and RADV's full-flush
+       * preamble, which is this submission's acquire half (waits for the shader work of everything
+       * earlier on the ring and invalidates the caches). Above 2^31 progress values the 32-bit
+       * comparison of the in-ring wait would stop being exact, so the queue stops eliding. */
+      const bool elide = ws->bc250 && ws->bc250_wait_elide != RADV_WDDM2_ELIDE_OFF && !queue->handle &&
+                         submit->cs_count > 0 && submit->ip_type == AMD_IP_GFX && submit->full_flush_preamble &&
+                         queue->bc250_progress_va != 0 && !queue->bc250_submit_failed &&
+                         queue->bc250_progress.wait_value + 1 < BC250_WAIT_ELIDE_MAX_PROGRESS;
+      uint32_t count = 0, same = 0, other = 0, unknown = 0, elided = 0;
+      uint64_t behind_sum = 0, behind_max = 0;
       for (uint32_t i = 0; i < wait_count; i++) {
          struct vk_wddm2_monitored_fence *fence = vk_sync_as_wddm2_monitored_fence(waits[i].sync);
-         if (drop && fence->value_map) {
-            const uint64_t seen = p_atomic_read(fence->value_map);
-            if (seen != UINT64_MAX && seen >= waits[i].wait_value)
+         const uint64_t wait_value = waits[i].wait_value;
+         uint64_t seen = 0;
+         bool lost = false;
+         if (fence->value_map) {
+            seen = p_atomic_read(fence->value_map);
+            lost = seen == UINT64_MAX;
+            if (drop && !lost && seen >= wait_value)
+               continue; /* dropped: the CPU already sees it complete */
+         }
+         if (ws->bc250) {
+            /* How far the fence is from the waited value on the CPU's read: how much of the
+             * signalling work is still outstanding when the dependency is queued. */
+            const uint64_t behind = (!lost && fence->value_map && wait_value > seen) ? wait_value - seen : 0;
+            behind_sum += behind;
+            behind_max = MAX2(behind_max, behind);
+            uint64_t at = 0;
+            const enum radv_wddm2_wait_class class =
+               lost ? RADV_WDDM2_WAIT_UNKNOWN : radv_wddm2_wait_class(queue, fence, wait_value, &at);
+            switch (class) {
+            case RADV_WDDM2_WAIT_SAME_QUEUE:
+               same++;
+               break;
+            case RADV_WDDM2_WAIT_OTHER_QUEUE:
+               other++;
+               break;
+            default:
+               unknown++;
+               break;
+            }
+            if (ws->bc250_wait_log && p_atomic_dec_return(&ws->bc250_wait_log_left) >= 0)
+               radv_wddm2_winsys_line("wait: fence 0x%x value=%" PRIu64 " seen=%" PRIu64 " behind=%" PRIu64
+                                      " class=%s signalled_at=%" PRIu64 " progress=%" PRIu64 " ip=%u queue=%s"
+                                      " context=0x%x elide=%s",
+                                      fence->handle, wait_value, seen, behind,
+                                      class == RADV_WDDM2_WAIT_SAME_QUEUE
+                                         ? "same_queue"
+                                         : (class == RADV_WDDM2_WAIT_OTHER_QUEUE ? "other_queue" : "unknown"),
+                                      at, queue->bc250_progress.wait_value, (unsigned)submit->ip_type,
+                                      queue->bc250_queue_context ? "engine" : "internal", queue->context_h,
+                                      (class == RADV_WDDM2_WAIT_SAME_QUEUE && elide) ? "yes" : "no");
+            if (class == RADV_WDDM2_WAIT_SAME_QUEUE && elide) {
+               elided++;
+               ring_wait_value = MAX2(ring_wait_value, at);
                continue;
+            }
          }
          handles[count] = fence->handle;
-         values[count] = waits[i].wait_value;
+         values[count] = wait_value;
          count++;
       }
       if (ws->bc250) {
          p_atomic_add(&ws->submit_stats.wait_objects, (uint64_t)wait_count);
-         if (count < wait_count)
-            p_atomic_add(&ws->submit_stats.wait_dropped, (uint64_t)(wait_count - count));
+         if (count + elided < wait_count)
+            p_atomic_add(&ws->submit_stats.wait_dropped, (uint64_t)(wait_count - count - elided));
          p_atomic_inc(count ? &ws->submit_stats.wait_calls : &ws->submit_stats.wait_skipped);
+         p_atomic_add(&ws->submit_stats.wait_same_queue, (uint64_t)same);
+         p_atomic_add(&ws->submit_stats.wait_other_queue, (uint64_t)other);
+         p_atomic_add(&ws->submit_stats.wait_unknown, (uint64_t)unknown);
+         p_atomic_add(&ws->submit_stats.wait_elided, (uint64_t)elided);
+         p_atomic_add(&ws->submit_stats.wait_behind_sum, behind_sum);
+         uint64_t max = p_atomic_read(&ws->submit_stats.wait_behind_max);
+         while (behind_max > max) {
+            const uint64_t prev = p_atomic_cmpxchg(&ws->submit_stats.wait_behind_max, max, behind_max);
+            if (prev == max)
+               break;
+            max = prev;
+         }
+         if (submit->ip_type != AMD_IP_GFX)
+            p_atomic_add(&ws->submit_stats.wait_foreign_ip, (uint64_t)wait_count);
       }
 
       status = STATUS_SUCCESS;
@@ -1732,7 +1906,21 @@ radv_wddm2_cs_submit(struct radeon_winsys_ctx *_ctx,
       /* BC250_PROGRESS_FENCE=gpu: the IB1 ends with the GPU's write of next_value (radv_wddm2_bc250_submit);
        * the fence takes no kernel signal on this queue, ever (bc250_progress_va is fixed per binding). */
       const bool gpu_progress = queue->bc250_progress_va != 0;
-      status = radv_wddm2_bc250_submit(ctx, queue, submit, gpu_progress ? next_value : 0);
+      /* BC250_WAIT_ELIDE=ring: the IB1 opens with the in-ring wait for the progress value of the
+       * submission that signalled the elided fences. "bare" emits nothing and rests on the ring
+       * order and the full-flush preamble alone. A value the CPU already sees retired needs no
+       * packet; observed was read before the gather-slot wait, so this check only ever errs towards
+       * emitting one. */
+      uint64_t ring_wait = 0;
+      if (ring_wait_value && ws->bc250_wait_elide == RADV_WDDM2_ELIDE_RING) {
+         if (observed != UINT64_MAX && observed >= ring_wait_value) {
+            p_atomic_inc(&ws->submit_stats.wait_ring_passed);
+         } else {
+            ring_wait = ring_wait_value;
+            p_atomic_inc(&ws->submit_stats.wait_ring);
+         }
+      }
+      status = radv_wddm2_bc250_submit(ctx, queue, submit, gpu_progress ? next_value : 0, ring_wait);
       if (!NT_SUCCESS(status)) {
          amdgpu_wddm_log("bc250: native submit failed NTSTATUS=0x%X cs_count=%u\n", status, submit->cs_count);
          return VK_ERROR_DEVICE_LOST;
@@ -1883,6 +2071,20 @@ radv_wddm2_cs_submit(struct radeon_winsys_ctx *_ctx,
          const VkResult result = radv_wddm2_progress_signalled(ws, queue, slot, next_value);
          if (result != VK_SUCCESS)
             return result;
+      }
+
+      /* The provenance a later wait on one of these fences reads (radv_wddm2_wait_class). The signals
+       * were accepted on this queue's context, after this submission's IB if it had one, so the point
+       * at which they carry their value is this queue's progress value, which
+       * radv_wddm2_progress_signalled has just advanced to this submission's. A signal-only
+       * submission records the value of the last submission instead, which is the point its signals
+       * follow on the context. The record is only read on the bc250 packet path. */
+      if (ws->bc250) {
+         const uint64_t at = queue->bc250_progress.wait_value;
+         for (uint32_t i = 0; i < signal_count; i++) {
+            struct vk_wddm2_monitored_fence *signalled = vk_sync_as_wddm2_monitored_fence(signals[i].sync);
+            radv_wddm2_signal_record(signalled, queue->bc250_epoch, signals[i].signal_value, at);
+         }
       }
 
       struct vk_wddm2_monitored_fence *fence = vk_sync_as_wddm2_monitored_fence(signals[0].sync);

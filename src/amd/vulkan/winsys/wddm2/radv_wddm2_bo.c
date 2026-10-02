@@ -1496,6 +1496,18 @@ radv_wddm2_deferred_line(const char *format, ...)
 #endif
 }
 
+/* radv_wddm2_bo.h: one winsys line for a caller outside this file. */
+void
+radv_wddm2_winsys_line(const char *format, ...)
+{
+   char text[1024];
+   va_list args;
+   va_start(args, format);
+   vsnprintf(text, sizeof(text), format, args);
+   va_end(args);
+   radv_wddm2_deferred_line("%s", text);
+}
+
 /* The knobs: the environment first, then the configuration file, read once per winsys creation. */
 struct radv_wddm2_knobs {
    char path[512];
@@ -2071,6 +2083,8 @@ struct radv_wddm2_summary_submit {
    uint64_t submits, progress_separate, progress_merged, signal_calls, signal_objects;
    uint64_t wait_objects, wait_dropped, wait_calls, wait_skipped, gather_waits, gather_wait_ns, gather_wait_max_ns;
    uint64_t progress_gpu, kernel_queues;
+   uint64_t wait_same_queue, wait_other_queue, wait_unknown, wait_elided, wait_ring, wait_ring_passed;
+   uint64_t wait_behind_sum, wait_behind_max, wait_foreign_ip;
 };
 
 _Static_assert(sizeof(struct radv_wddm2_summary_deferred) <= sizeof(((struct radv_wddm2_winsys *)0)->summary.deferred_snapshot),
@@ -2102,12 +2116,29 @@ radv_wddm2_coalesce_name(const struct radv_wddm2_winsys *ws)
    return ws->bc250_merge_signals ? (ws->bc250_drop_waits ? "on" : "signals") : (ws->bc250_drop_waits ? "waits" : "off");
 }
 
+static const char *
+radv_wddm2_wait_elide_name(const struct radv_wddm2_winsys *ws)
+{
+   switch (ws->bc250_wait_elide) {
+   case RADV_WDDM2_ELIDE_RING:
+      return "ring";
+   case RADV_WDDM2_ELIDE_BARE:
+      return "bare";
+   default:
+      return "off";
+   }
+}
+
 void
 radv_wddm2_summary_write(struct radv_wddm2_winsys *ws, uint64_t now, uint64_t due, bool final)
 {
    /* One writer per period: every other submission that finds the deadline passed goes on. */
    if (!final && p_atomic_cmpxchg(&ws->summary.next_ns, due, now + ws->summary.interval_ns) != due)
       return;
+
+   /* A new period, a new budget of wait lines (BC250_WAIT_LOG, radv_wddm2_cs.c). */
+   if (!final && ws->bc250_wait_log)
+      p_atomic_set(&ws->bc250_wait_log_left, ws->bc250_wait_log);
 
    struct radv_wddm2_summary_deferred d;
    memset(&d, 0, sizeof(d));
@@ -2146,6 +2177,15 @@ radv_wddm2_summary_write(struct radv_wddm2_winsys *ws, uint64_t now, uint64_t du
       .gather_wait_max_ns = p_atomic_read(&ws->submit_stats.gather_wait_max_ns),
       .progress_gpu = p_atomic_read(&ws->submit_stats.progress_gpu),
       .kernel_queues = p_atomic_read(&ws->submit_stats.kernel_queues),
+      .wait_same_queue = p_atomic_read(&ws->submit_stats.wait_same_queue),
+      .wait_other_queue = p_atomic_read(&ws->submit_stats.wait_other_queue),
+      .wait_unknown = p_atomic_read(&ws->submit_stats.wait_unknown),
+      .wait_elided = p_atomic_read(&ws->submit_stats.wait_elided),
+      .wait_ring = p_atomic_read(&ws->submit_stats.wait_ring),
+      .wait_ring_passed = p_atomic_read(&ws->submit_stats.wait_ring_passed),
+      .wait_behind_sum = p_atomic_read(&ws->submit_stats.wait_behind_sum),
+      .wait_behind_max = p_atomic_read(&ws->submit_stats.wait_behind_max),
+      .wait_foreign_ip = p_atomic_read(&ws->submit_stats.wait_foreign_ip),
    };
 
    uint64_t draw[RADV_DRAW_STAT_COUNT];
@@ -2193,12 +2233,19 @@ radv_wddm2_summary_write(struct radv_wddm2_winsys *ws, uint64_t now, uint64_t du
                                   " wait_objects=%" PRIu64 " wait_dropped=%" PRIu64 " wait_calls=%" PRIu64
                                   " wait_skipped=%" PRIu64 " gather_slots=%u gather_waits=%" PRIu64
                                   " gather_wait_ms=%" PRIu64 " gather_wait_max_us=%" PRIu64 " coalesce=%s"
-                                  " progress_fence=%s progress_gpu=%" PRIu64 " kernel_queues=%" PRIu64,
+                                  " progress_fence=%s progress_gpu=%" PRIu64 " kernel_queues=%" PRIu64
+                                  " wait_elide=%s wait_same_queue=%" PRIu64 " wait_other_queue=%" PRIu64
+                                  " wait_unknown=%" PRIu64 " wait_elided=%" PRIu64 " wait_ring=%" PRIu64
+                                  " wait_ring_passed=%" PRIu64 " wait_behind_sum=%" PRIu64
+                                  " wait_behind_max=%" PRIu64 " wait_foreign_ip=%" PRIu64,
                                   tag, t, s.submits, s.progress_separate, s.progress_merged, s.signal_calls,
                                   s.signal_objects, s.wait_objects, s.wait_dropped, s.wait_calls, s.wait_skipped,
                                   ws->bc250_gather_slots, s.gather_waits, radv_wddm2_ms(s.gather_wait_ns),
                                   s.gather_wait_max_ns / 1000u, radv_wddm2_coalesce_name(ws),
-                                  ws->bc250_progress_gpu ? "gpu" : "kernel", s.progress_gpu, s.kernel_queues);
+                                  ws->bc250_progress_gpu ? "gpu" : "kernel", s.progress_gpu, s.kernel_queues,
+                                  radv_wddm2_wait_elide_name(ws), s.wait_same_queue, s.wait_other_queue,
+                                  s.wait_unknown, s.wait_elided, s.wait_ring, s.wait_ring_passed,
+                                  s.wait_behind_sum, s.wait_behind_max, s.wait_foreign_ip);
          memcpy(ws->summary.submit_snapshot, &s, sizeof(s));
       }
       if (write_draw) {
@@ -2791,6 +2838,40 @@ radv_wddm2_bo_init_functions(struct radv_wddm2_winsys *ws)
    if (ws->bc250 && draw && !strcmp(draw, "1"))
       ws->base.draw_stats_add = radv_wddm2_draw_stats_add;
 
+   /* BC250_WAIT_ELIDE: what becomes of a GPU wait on a fence this very queue signalled, which is the
+    * wait vkd3d-proton's serializing semaphore puts on nearly every ExecuteCommandLists. 0 (the
+    * default) queues it with the kernel as before; "ring" leaves the kernel call out and opens the IB1
+    * with a WAIT_REG_MEM for the queue's GPU-written progress value instead (radv_wddm2_cs.c,
+    * bc250_emit_ring_wait); "bare" leaves the kernel call out and emits nothing, resting on the ring
+    * order of one context and RADV's full-flush preamble alone. BC250_WAIT_LOG: at most this many
+    * waits per summary period get a line of their own (0, the default, writes none). The provenance
+    * counters of the summary's submit line are kept either way; they cost three atomic adds a
+    * submission. */
+   char elide_buf[64], wait_log_buf[64];
+   const char *elide_from, *wait_log_from;
+   const char *elide = radv_wddm2_knob(&knobs, "BC250_WAIT_ELIDE", elide_buf, sizeof(elide_buf), &elide_from);
+   const char *wait_log =
+      radv_wddm2_knob(&knobs, "BC250_WAIT_LOG", wait_log_buf, sizeof(wait_log_buf), &wait_log_from);
+   ws->bc250_wait_elide = RADV_WDDM2_ELIDE_OFF;
+   if (elide) {
+      if (!strcmp(elide, "ring"))
+         ws->bc250_wait_elide = RADV_WDDM2_ELIDE_RING;
+      else if (!strcmp(elide, "bare"))
+         ws->bc250_wait_elide = RADV_WDDM2_ELIDE_BARE;
+      else if (strcmp(elide, "0"))
+         elide_from = "invalid, default";
+   }
+   ws->bc250_wait_log = 0;
+   if (wait_log) {
+      char *end = NULL;
+      const unsigned long value = strtoul(wait_log, &end, 10);
+      if (end != wait_log && !*end && value <= 4096)
+         ws->bc250_wait_log = (int32_t)value;
+      else
+         wait_log_from = "invalid, default";
+   }
+   ws->bc250_wait_log_left = ws->bc250_wait_log;
+
    ws->deferred.report_count = 256;
    ws->deferred.report_bytes = 256ull << 20;
    ws->deferred.report_hold_ns = 1000000000ull;
@@ -2803,14 +2884,16 @@ radv_wddm2_bo_init_functions(struct radv_wddm2_winsys *ws)
       if (log_path && !radv_wddm2_deferred_log_opened)
          snprintf(radv_wddm2_deferred_log_knob, sizeof(radv_wddm2_deferred_log_knob), "%s", log_path);
       simple_mtx_unlock(&radv_wddm2_deferred_log_mtx);
-      radv_wddm2_deferred_line("header version=3 destroy=%s(%s) witness=%s(%s) cap_mb=%" PRIu64
+      radv_wddm2_deferred_line("header version=4 destroy=%s(%s) witness=%s(%s) cap_mb=%" PRIu64
                                "(%s) cfg=%s(%s) log=%s(%s) summary_s=%" PRIu64 "(%s) coalesce=%s(%s)"
-                               " gather_slots=%u(%s) progress_fence=%s(%s)",
+                               " gather_slots=%u(%s) progress_fence=%s(%s) wait_elide=%s(%s)"
+                               " wait_log=%d(%s)",
                                ws->deferred.enabled ? "on" : "off", destroy_from,
                                ws->deferred.witness ? "on" : "off", witness_from, cap_mb, cap_from, knobs.path,
                                knobs.text ? "read" : "absent", radv_wddm2_deferred_log_path(), log_from, summary_s,
                                summary_from, radv_wddm2_coalesce_name(ws), coalesce_from, ws->bc250_gather_slots,
-                               slots_from, ws->bc250_progress_gpu ? "gpu" : "kernel", progress_from);
+                               slots_from, ws->bc250_progress_gpu ? "gpu" : "kernel", progress_from,
+                               radv_wddm2_wait_elide_name(ws), elide_from, ws->bc250_wait_log, wait_log_from);
       if (ws->base.draw_stats_add)
          radv_wddm2_deferred_line("draw stats on (%s): counters of every application command buffer, in the "
                                   "summary's draw line", draw_from);

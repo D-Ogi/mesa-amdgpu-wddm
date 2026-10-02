@@ -85,6 +85,11 @@ struct radv_wddm2_queue {
     * the engine's internal queue. */
    bool bc250_queue_context;
    void *bc250_queue_cookie;
+   /* The identity of this binding for the wait provenance of radv_wddm2_cs.c: a number no other
+    * binding of this winsys has, taken from bc250_queue_epoch when the context is created. A
+    * D3DKMT context handle is recycled and a progress fence starts again at zero with every
+    * binding, so a signal record of the previous owner of a handle must never match this queue. */
+   uint64_t bc250_epoch;
 };
 
 struct radv_wddm2_ctx {

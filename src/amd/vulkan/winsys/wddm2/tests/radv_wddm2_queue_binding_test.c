@@ -1900,6 +1900,8 @@ clear_deferred_env(void)
    _putenv_s("BC250_SUBMIT_COALESCE", "");
    _putenv_s("BC250_GATHER_SLOTS", "");
    _putenv_s("BC250_PROGRESS_FENCE", "");
+   _putenv_s("BC250_WAIT_ELIDE", "");
+   _putenv_s("BC250_WAIT_LOG", "");
 }
 
 static struct radeon_winsys_bo *
@@ -1990,6 +1992,26 @@ static bool
 has(const char *line, const char *needle)
 {
    return strstr(line, needle) != NULL;
+}
+
+/* The base name of this executable, as the witness's stack lines spell the module: the runners name the
+ * test program differently (queue-test.exe from tools\build\radv-queue-tests.py,
+ * radv_wddm2_queue_binding_test.exe from the scratch runners), so no test may hardcode it. */
+static const char *
+exe_name(void)
+{
+   static char name[MAX_PATH];
+   if (!name[0]) {
+      char path[MAX_PATH] = "";
+      const DWORD n = GetModuleFileNameA(NULL, path, sizeof(path));
+      const char *base = path;
+      for (DWORD i = 0; i < n; i++) {
+         if (path[i] == '\\' || path[i] == '/')
+            base = path + i + 1;
+      }
+      snprintf(name, sizeof(name), "%s", n ? base : "radv_wddm2_queue_binding_test.exe");
+   }
+   return name;
 }
 
 static void
@@ -2245,10 +2267,11 @@ test_deferred_witness(void)
    check(ws->deferred.in_flight[C_CPU_UPLOAD] == 1 && ws->deferred.in_flight_32bit == 1 &&
             ws->deferred.held_by_class[C_CPU_UPLOAD] == 1 && alloc_live(up_h),
          "the upload BO is destroyed in flight: counted as cpu-upload and 32-bit, and held");
+   char bt[MAX_PATH + 8];
+   snprintf(bt, sizeof(bt), "bt=%s+0x", exe_name());
    check(log_lines(lm, "witness in flight #1 ", line, sizeof(line)) == 1 && has(line, "class=cpu-upload size=65536 ") &&
             has(line, "flags=0x143(GTT_WC|CPU_ACCESS|NO_INTERPROCESS_SHARING|32BIT)") && has(line, "prio=30 ") &&
-            has(line, "32bit=yes ") && has(line, "last_use=1 completed=0 published=1 held=yes ") &&
-            has(line, "bt=radv_wddm2_queue_binding_test.exe+0x"),
+            has(line, "32bit=yes ") && has(line, "last_use=1 completed=0 published=1 held=yes ") && has(line, bt),
          "its line names the class, size, flags, priority, the values and the destroy stack: %.200s", line);
 
    ws->base.buffer_destroy(&ws->base, unnamed);
@@ -2396,9 +2419,10 @@ test_deferred_cfg(void)
    char line[4096];
    check(ws->deferred.enabled && !ws->deferred.witness && ws->deferred.cap_bytes == 3ull << 20,
          "the file sets the knobs (a game Steam starts gets none of our environment)");
-   check(log_lines(lm, "deferred destroy: header version=3 ", line, sizeof(line)) == 1 &&
+   check(log_lines(lm, "deferred destroy: header version=4 ", line, sizeof(line)) == 1 &&
             has(line, "destroy=on(cfg) witness=off(cfg) cap_mb=3(cfg) ") && has(line, "(read)") &&
-            has(line, " summary_s=5(cfg) coalesce=signals(cfg) gather_slots=24(cfg) progress_fence=kernel(cfg)"),
+            has(line, " summary_s=5(cfg) coalesce=signals(cfg) gather_slots=24(cfg) progress_fence=kernel(cfg)"
+                       " wait_elide=off(default) wait_log=0(default)"),
          "the header says where each value came from: %.300s", line);
    check(ws->summary.interval_ns == 5000000000ull && ws->bc250_merge_signals && !ws->bc250_drop_waits &&
             ws->bc250_gather_slots == 24 && !ws->bc250_progress_gpu,
@@ -2461,7 +2485,8 @@ test_deferred_cfg(void)
    check(ws->deferred.enabled && ws->deferred.witness && ws->deferred.cap_bytes == 512ull << 20 &&
             log_lines(lm, "destroy=on(default) witness=on(default) cap_mb=512(default) ", line, sizeof(line)) == 1 &&
             has(line, "(absent)") &&
-            has(line, " summary_s=30(default) coalesce=on(default) gather_slots=16(default) progress_fence=gpu(default)"),
+            has(line, " summary_s=30(default) coalesce=on(default) gather_slots=16(default) progress_fence=gpu(default)"
+                       " wait_elide=off(default) wait_log=0(default)"),
          "no file: the defaults: %.300s", line);
    check(ws->bc250_gather_slots == 16 && ws->bc250_merge_signals && ws->bc250_drop_waits && ws->bc250_progress_gpu &&
             ws->summary.interval_ns == 30000000000ull && ws->summary.next_ns == ws->summary.start_ns + 30000000000ull,
@@ -4078,6 +4103,246 @@ test_draw_stats(void)
    contract();
 }
 
+/* BC250_WAIT_ELIDE: a GPU wait on a fence this very queue signalled at or above the waited value is a
+ * dependency inside one context's single in-order ring. "ring" leaves its kernel call out and opens the
+ * IB1 with a WAIT_REG_MEM for the queue's GPU-written progress value instead, "bare" with nothing, 0
+ * (the default) keeps the kernel call. Everything else must keep it: another queue's signal, a value
+ * this queue has not signalled yet, a submission without RADV's full-flush preamble, a signal-only
+ * submission, and a queue bound again after its handle may have been recycled. */
+
+#define WRM_HEADER 0xC0053C00u /* PKT3(PKT3_WAIT_REG_MEM, 5, 0) */
+/* WAIT_REG_MEM_MEM_SPACE(1) | WAIT_REG_MEM_GREATER_OR_EQUAL | WAIT_REG_MEM_PFP (sid.h) */
+#define WRM_DW1    0x00000115u
+
+/* The 7 dwords at dw wait for va to reach value, the shape of amdgpu's emit_pipeline_sync. */
+static bool
+is_ring_wait(const uint32_t *dw, uint64_t va, uint64_t value)
+{
+   return dw && dw[0] == WRM_HEADER && dw[1] == WRM_DW1 && dw[2] == (uint32_t)va &&
+          dw[3] == (uint32_t)(va >> 32) && dw[4] == (uint32_t)value && dw[5] == 0xffffffffu && dw[6] == 4;
+}
+
+/* submit() with the full-flush preamble flag radv_queue_submit_normal sets whenever a submission
+ * carries a wait: the acquire half the elision rests on. */
+static VkResult
+submit_pre(struct radv_wddm2_winsys *ws, struct radeon_winsys_ctx *ctx, unsigned cs_count, struct ac_cmdbuf **cs,
+           uint32_t wait_count, const struct vk_sync_wait *waits, uint32_t signal_count,
+           const struct vk_sync_signal *signals)
+{
+   const struct radv_winsys_submit_info info = {
+      .ip_type = AMD_IP_GFX,
+      .cs_count = cs_count,
+      .cs_array = cs,
+      .full_flush_preamble = true,
+   };
+   return ws->base.cs_submit(ctx, &info, wait_count, waits, signal_count, signals);
+}
+
+static void
+test_wait_elide(void)
+{
+   void *const cookie_a = (void *)(uintptr_t)0xA0, *const cookie_b = (void *)(uintptr_t)0xB0;
+   const uint32_t WAIT = BC250_HOST_WaitForSynchronizationObjectFromGpu;
+   clear_ib_env();
+   clear_deferred_env();
+
+   /* Off by default: a same-queue wait still goes to the kernel. */
+   struct radv_wddm2_winsys *ws = make_gpu_ws(1);
+   check(ws->bc250_wait_elide == RADV_WDDM2_ELIDE_OFF && !ws->bc250_wait_log,
+         "without BC250_WAIT_ELIDE the kernel wait stays, and no wait line is written");
+   struct radeon_winsys_ctx *c = new_ctx(ws);
+   check(bind(ws, c, cookie_a) == VK_SUCCESS, "the queue binds");
+   struct radv_wddm2_queue *q = gfx(c);
+   watch(q);
+   struct radeon_winsys_bo *bo[1];
+   uint32_t *map[1];
+   if (!pattern_bos(ws, 1, bo, map)) {
+      check(false, "one mapped command BO");
+      return;
+   }
+   struct fake_cs fa;
+   struct ac_cmdbuf *cs[1] = {fake_cs(&fa, bo[0], bo[0]->va, 16)};
+   struct vk_wddm2_monitored_fence f1;
+   app_fence(&f1);
+   const struct vk_sync_signal signal1 = {.sync = &f1.base, .signal_value = 1};
+   const struct vk_sync_wait wait1 = {.sync = &f1.base, .wait_value = 1};
+   check(submit(ws, c, 1, cs, 0, NULL, 1, &signal1) == VK_SUCCESS, "the queue signals f1 = 1 after its first IB");
+   check(f1.signal_epoch == q->bc250_epoch && f1.signal_value == 1 && f1.signal_progress == 1 &&
+            !(f1.signal_gen & 1u),
+         "f1 records this queue's epoch, value 1 and progress 1, with an even generation");
+   unsigned mark = h.n_ev;
+   cs[0] = fake_cs(&fa, bo[0], bo[0]->va, 16);
+   check(submit_pre(ws, c, 1, cs, 1, &wait1, 0, NULL) == VK_SUCCESS, "it waits for its own f1 = 1");
+   check(event_is(find_op(mark, WAIT, 0), WAIT, q->context_h, f1.handle, 1) &&
+            ws->submit_stats.wait_same_queue == 1 && !ws->submit_stats.wait_elided && !ws->submit_stats.wait_ring,
+         "off: the wait is counted same_queue but still queued with the kernel, nothing elided");
+   const uint32_t *ib1 = last_ib1(q);
+   check(ib1 && ib1[0] != WRM_HEADER, "off: the IB1 opens with no WAIT_REG_MEM");
+   unbind(ws, c, cookie_a);
+   ws->base.ctx_destroy(c);
+   contract();
+
+   /* BC250_WAIT_ELIDE=ring. */
+   _putenv_s("BC250_WAIT_ELIDE", "ring");
+   _putenv_s("BC250_WAIT_LOG", "4");
+   ws = make_gpu_ws(1);
+   clear_deferred_env();
+   check(ws->bc250_wait_elide == RADV_WDDM2_ELIDE_RING && ws->bc250_wait_log == 4 && ws->bc250_wait_log_left == 4,
+         "BC250_WAIT_ELIDE=ring with a budget of 4 wait lines");
+   struct radeon_winsys_ctx *a = new_ctx(ws), *b = new_ctx(ws);
+   check(bind(ws, a, cookie_a) == VK_SUCCESS && bind(ws, b, cookie_b) == VK_SUCCESS, "two queues bind");
+   struct radv_wddm2_queue *qa = gfx(a), *qb = gfx(b);
+   check(qa->bc250_epoch && qb->bc250_epoch && qa->bc250_epoch != qb->bc250_epoch,
+         "each binding has an epoch of its own (%llu, %llu)", (unsigned long long)qa->bc250_epoch,
+         (unsigned long long)qb->bc250_epoch);
+   watch(qa);
+   watch(qb);
+   const uint64_t va_a = fence_va(qa->bc250_progress.handle);
+   check(va_a && qa->bc250_progress_va == va_a, "A's progress fence has a GPU address 0x%" PRIx64, va_a);
+   if (!pattern_bos(ws, 1, bo, map)) {
+      check(false, "one mapped command BO");
+      return;
+   }
+
+   /* A signals fa1 after its first IB, then waits for it: elided, with the in-ring wait for progress 1. */
+   struct vk_wddm2_monitored_fence fa1, fb1;
+   app_fence(&fa1);
+   app_fence(&fb1);
+   const struct vk_sync_signal sig_a1 = {.sync = &fa1.base, .signal_value = 1};
+   const struct vk_sync_wait wait_a1 = {.sync = &fa1.base, .wait_value = 1};
+   cs[0] = fake_cs(&fa, bo[0], bo[0]->va, 16);
+   check(submit(ws, a, 1, cs, 0, NULL, 1, &sig_a1) == VK_SUCCESS, "A submits and signals fa1 = 1");
+   mark = h.n_ev;
+   cs[0] = fake_cs(&fa, bo[0], bo[0]->va, 16);
+   check(submit_pre(ws, a, 1, cs, 1, &wait_a1, 0, NULL) == VK_SUCCESS, "A waits for its own fa1 = 1");
+   ib1 = last_ib1(qa);
+   check(!count_op(mark, WAIT) && ws->submit_stats.wait_elided == 1 && ws->submit_stats.wait_ring == 1 &&
+            !ws->submit_stats.wait_ring_passed && ws->submit_stats.wait_same_queue == 1 &&
+            !ws->submit_stats.wait_dropped,
+         "ring: no kernel wait call, one wait elided, one in-ring wait emitted");
+   check(is_ring_wait(ib1, va_a, 1), "the IB1 opens with the WAIT_REG_MEM for A's progress 1 (%08x %08x)",
+         ib1 ? ib1[0] : 0, ib1 ? ib1[1] : 0);
+   check(is_ib2_call(ib1 + 7, bo[0]->va, 16) && is_progress_write(ib1 + 16, va_a, 2) && one_ib1(qa, 24),
+         "then the IB2 call, the padding and the write of progress 2: 24 dwords");
+
+   /* The same wait once the GPU has run past progress 1: elided, no packet needed. */
+   check(gpu_run(16) >= 1, "the GPU runs A's writes");
+   check(fence_value(qa->bc250_progress.handle) >= 1, "A's progress fence reads at least 1");
+   mark = h.n_ev;
+   cs[0] = fake_cs(&fa, bo[0], bo[0]->va, 16);
+   check(submit_pre(ws, a, 1, cs, 1, &wait_a1, 0, NULL) == VK_SUCCESS, "A waits for fa1 = 1 again");
+   check(!count_op(mark, WAIT) && ws->submit_stats.wait_ring == 1 && ws->submit_stats.wait_ring_passed == 1,
+         "the progress was already past: elided with no packet");
+   ib1 = last_ib1(qa);
+   check(ib1 && ib1[0] != WRM_HEADER, "that IB1 opens with no WAIT_REG_MEM");
+
+   /* B waits for A's fence: another queue, so the kernel keeps it. */
+   mark = h.n_ev;
+   cs[0] = fake_cs(&fa, bo[0], bo[0]->va, 16);
+   check(submit_pre(ws, b, 1, cs, 1, &wait_a1, 0, NULL) == VK_SUCCESS, "B waits for A's fa1 = 1");
+   check(event_is(find_op(mark, WAIT, 0), WAIT, qb->context_h, fa1.handle, 1) &&
+            ws->submit_stats.wait_other_queue == 1,
+         "a wait on another queue's signal is counted other_queue and stays with the kernel");
+   ib1 = last_ib1(qb);
+   check(ib1 && ib1[0] != WRM_HEADER, "B's IB1 opens with no WAIT_REG_MEM");
+
+   /* A value A has not signalled yet (wait before signal): unknown, kept. */
+   const struct vk_sync_wait wait_a5 = {.sync = &fa1.base, .wait_value = 5};
+   mark = h.n_ev;
+   cs[0] = fake_cs(&fa, bo[0], bo[0]->va, 16);
+   check(submit_pre(ws, a, 1, cs, 1, &wait_a5, 0, NULL) == VK_SUCCESS, "A waits for fa1 = 5, which it never signalled");
+   check(event_is(find_op(mark, WAIT, 0), WAIT, qa->context_h, fa1.handle, 5) && ws->submit_stats.wait_unknown == 1,
+         "a wait before its signal is counted unknown and stays with the kernel");
+
+   /* Without the full-flush preamble there is no acquire to rest on: kept. */
+   mark = h.n_ev;
+   cs[0] = fake_cs(&fa, bo[0], bo[0]->va, 16);
+   check(submit(ws, a, 1, cs, 1, &wait_a1, 0, NULL) == VK_SUCCESS, "A waits for fa1 = 1 without the preamble");
+   check(event_is(find_op(mark, WAIT, 0), WAIT, qa->context_h, fa1.handle, 1) && ws->submit_stats.wait_elided == 2,
+         "without the full-flush preamble the wait stays with the kernel");
+
+   /* A signal-only submission has no IB1 to carry the dependency: kept. */
+   mark = h.n_ev;
+   check(submit_pre(ws, a, 0, NULL, 1, &wait_a1, 1, &sig_a1) == VK_SUCCESS, "A waits for fa1 = 1 with no commands");
+   check(event_is(find_op(mark, WAIT, 0), WAIT, qa->context_h, fa1.handle, 1) && ws->submit_stats.wait_elided == 2,
+         "a submission without commands keeps its kernel wait");
+
+   /* One elidable wait and one of B's in the same submission: the kernel call names only B's. */
+   const struct vk_sync_signal sig_b1 = {.sync = &fb1.base, .signal_value = 1};
+   cs[0] = fake_cs(&fa, bo[0], bo[0]->va, 16);
+   check(submit(ws, b, 1, cs, 0, NULL, 1, &sig_b1) == VK_SUCCESS, "B submits and signals fb1 = 1");
+   const struct vk_sync_wait both[2] = {{.sync = &fa1.base, .wait_value = 1}, {.sync = &fb1.base, .wait_value = 1}};
+   /* The signal of the submission without commands moved fa1's record: a submission that runs no IB1
+    * writes no progress value of its own, and the kernel signals its fences after the IB1 before it, so
+    * the record names that one's value. */
+   const uint64_t at_a = fa1.signal_progress;
+   check(at_a == qa->bc250_progress.wait_value && at_a > 1,
+         "the empty submission's signal is recorded at the progress value of the last IB1 (%llu)",
+         (unsigned long long)at_a);
+   mark = h.n_ev;
+   cs[0] = fake_cs(&fa, bo[0], bo[0]->va, 16);
+   check(submit_pre(ws, a, 1, cs, 2, both, 0, NULL) == VK_SUCCESS, "A waits for its own fa1 and for B's fb1");
+   int wait_ev = find_op(mark, WAIT, 0);
+   check(wait_ev >= 0 && h.ev[wait_ev].n_objs == 1 && event_names(wait_ev, fb1.handle, 1) &&
+            !event_names(wait_ev, fa1.handle, 1),
+         "one kernel wait call, naming B's fence only");
+   check(ws->submit_stats.wait_elided == 3 && is_ring_wait(last_ib1(qa), va_a, at_a),
+         "A's own wait is elided behind the in-ring wait for %llu, B's is not", (unsigned long long)at_a);
+   check(!ws->bc250_wait_log_left || ws->bc250_wait_log_left < 4, "the wait lines were written from the budget");
+   unbind(ws, a, cookie_a);
+   unbind(ws, b, cookie_b);
+
+   /* A's context handle may now belong to another queue: a record of the old binding must not match.
+    * The epoch is what separates them, so the same fence and value is other_queue after a rebind. */
+   check(bind(ws, a, cookie_a) == VK_SUCCESS, "A binds again");
+   qa = gfx(a);
+   check(qa->bc250_epoch != fa1.signal_epoch, "the new binding's epoch differs from fa1's record");
+   mark = h.n_ev;
+   cs[0] = fake_cs(&fa, bo[0], bo[0]->va, 16);
+   check(submit_pre(ws, a, 1, cs, 1, &wait_a1, 0, NULL) == VK_SUCCESS, "the rebound queue waits for fa1 = 1");
+   check(event_is(find_op(mark, WAIT, 0), WAIT, qa->context_h, fa1.handle, 1) && ws->submit_stats.wait_elided == 3,
+         "a record of the previous binding elides nothing");
+   unbind(ws, a, cookie_a);
+   ws->base.ctx_destroy(a);
+   ws->base.ctx_destroy(b);
+   check(!h.rm_bad && !h.rm_not_last, "every watched IB1 parsed, the progress write last in each (%u, %u)", h.rm_bad,
+         h.rm_not_last);
+   contract();
+
+   /* BC250_WAIT_ELIDE=bare: the kernel call goes, and no packet replaces it. */
+   _putenv_s("BC250_WAIT_ELIDE", "bare");
+   ws = make_gpu_ws(1);
+   clear_deferred_env();
+   check(ws->bc250_wait_elide == RADV_WDDM2_ELIDE_BARE, "BC250_WAIT_ELIDE=bare");
+   struct radeon_winsys_ctx *d = new_ctx(ws);
+   check(bind(ws, d, cookie_a) == VK_SUCCESS, "the queue binds");
+   struct radv_wddm2_queue *qd = gfx(d);
+   watch(qd);
+   if (!pattern_bos(ws, 1, bo, map)) {
+      check(false, "one mapped command BO");
+      return;
+   }
+   struct vk_wddm2_monitored_fence fd;
+   app_fence(&fd);
+   const struct vk_sync_signal sig_d = {.sync = &fd.base, .signal_value = 1};
+   const struct vk_sync_wait wait_d = {.sync = &fd.base, .wait_value = 1};
+   cs[0] = fake_cs(&fa, bo[0], bo[0]->va, 16);
+   check(submit(ws, d, 1, cs, 0, NULL, 1, &sig_d) == VK_SUCCESS, "it submits and signals fd = 1");
+   mark = h.n_ev;
+   cs[0] = fake_cs(&fa, bo[0], bo[0]->va, 16);
+   check(submit_pre(ws, d, 1, cs, 1, &wait_d, 0, NULL) == VK_SUCCESS, "it waits for its own fd = 1");
+   ib1 = last_ib1(qd);
+   check(!count_op(mark, WAIT) && ws->submit_stats.wait_elided == 1 && !ws->submit_stats.wait_ring &&
+            !ws->submit_stats.wait_ring_passed,
+         "bare: no kernel wait call and no in-ring wait");
+   check(one_ib1(qd, 16) && is_ib2_call(ib1, bo[0]->va, 16) && is_progress_write(ib1 + 8, fence_va(qd->bc250_progress.handle), 2),
+         "the IB1 is the call, the padding and the progress write, as without any wait");
+   unbind(ws, d, cookie_a);
+   ws->base.ctx_destroy(d);
+   clear_deferred_env();
+   contract();
+}
+
 static const struct {
    const char *name;
    void (*run)(void);
@@ -4116,6 +4381,7 @@ static const struct {
    {"progress_gpu_cost", test_progress_gpu_cost},
    {"cs_add_buffer", test_cs_add_buffer},
    {"draw_stats", test_draw_stats},
+   {"wait_elide", test_wait_elide},
 };
 
 int

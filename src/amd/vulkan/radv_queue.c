@@ -1715,9 +1715,13 @@ radv_queue_submit_normal(struct radv_queue *queue, struct vk_queue_submit *submi
    struct ac_cmdbuf *continue_preambles[5] = {0};
    struct ac_cmdbuf *postambles[4] = {0};
 
+   /* Whether initial_preambles[0] is the full-flush preamble, for the winsys (radv_winsys_submit_info). */
+   bool full_flush_preamble = false;
+
    if (queue->state.qf == RADV_QUEUE_GENERAL || queue->state.qf == RADV_QUEUE_COMPUTE) {
       initial_preambles[num_initial_preambles++] =
          need_wait ? queue->state.initial_full_flush_preamble_cs->b : queue->state.initial_preamble_cs->b;
+      full_flush_preamble = need_wait;
 
       continue_preambles[num_continue_preambles++] = queue->state.continue_preamble_cs->b;
 
@@ -1777,6 +1781,7 @@ radv_queue_submit_normal(struct radv_queue *queue, struct vk_queue_submit *submi
       .postamble_cs = postambles,
       .uses_shadow_regs = queue->state.uses_shadow_regs,
       .secure = submission->is_protected,
+      .full_flush_preamble = full_flush_preamble,
    };
 
    for (uint32_t j = 0, advance; j < cmd_buffer_count; j += advance) {
@@ -1847,6 +1852,8 @@ radv_queue_submit_normal(struct radv_queue *queue, struct vk_queue_submit *submi
 
       initial_preambles[0] = queue->state.initial_preamble_cs ? queue->state.initial_preamble_cs->b : NULL;
       initial_preambles[1] = !use_ace ? NULL : queue->follower_state->initial_preamble_cs->b;
+      /* The chunks after the first take no waits (above) and the plain preamble. */
+      submit.full_flush_preamble = false;
    }
 
    queue->last_shader_upload_seq = MAX2(queue->last_shader_upload_seq, shader_upload_seq);

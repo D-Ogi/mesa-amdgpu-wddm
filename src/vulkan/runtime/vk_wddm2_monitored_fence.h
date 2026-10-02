@@ -47,6 +47,19 @@ struct vk_wddm2_monitored_fence {
    HANDLE shared_handle;
 #endif
    uint64_t *value_map;
+
+   /* Where this fence was last signalled from, for the BC250 winsys's wait provenance and its wait
+    * elision (radv_wddm2_cs.c). The signalling submission writes the record, a later submission reads
+    * it; signal_gen is a seqlock, odd while the three fields are being written, so a reader that sees
+    * an odd generation or a generation that changed across its read calls the fence's provenance
+    * unknown and keeps the kernel wait. Set to zero by init and by an import (a different kernel
+    * object): no record, hence unknown. The epoch is the signalling queue's binding
+    * (radv_wddm2_queue::bc250_epoch), never a D3DKMT context handle, which the kernel recycles.
+    */
+   uint32_t signal_gen;
+   uint64_t signal_epoch;
+   uint64_t signal_value;
+   uint64_t signal_progress;
 };
 
 static inline bool
