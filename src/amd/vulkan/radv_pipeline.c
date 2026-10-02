@@ -454,6 +454,7 @@ radv_postprocess_nir(const struct radv_compiler_info *compiler_info, const struc
          late_options.dual_src_blend = gfx_state->ps.epilog.mrt0_is_dual_src;
          late_options.color_is_int8 = gfx_state->ps.epilog.color_is_int8;
          late_options.color_is_int10 = gfx_state->ps.epilog.color_is_int10;
+         late_options.color_round_unorm10 = gfx_state->ps.epilog.color_round_unorm10;
          late_options.enable_mrt_output_nan_fixup =
             gfx_state->ps.epilog.enable_mrt_output_nan_fixup && !stage->nir->info.internal;
          /* Need to filter out unwritten color slots. */

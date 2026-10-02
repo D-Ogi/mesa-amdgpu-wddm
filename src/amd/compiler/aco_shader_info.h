@@ -58,6 +58,8 @@ struct aco_ps_epilog_info {
    /* Bitmasks, each bit represents one of the 8 MRTs. */
    uint8_t color_is_int8;
    uint8_t color_is_int10;
+   /* FP16_ABGR exports to unblended 10-bit UNORM targets, rounded as ac_nir_lower_ps_late does. */
+   uint8_t color_round_unorm10;
 
    bool mrt0_is_dual_src;
 
