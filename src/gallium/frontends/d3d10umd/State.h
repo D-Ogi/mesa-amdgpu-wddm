@@ -199,6 +199,10 @@ struct Resource
    UINT64 surfaceBytes;
    BOOL presentReady;
    void *cpuMapping;
+   // Bc250EnsureSurface steps kept across a failed call: MakeResident done,
+   // and the paging fence value the map and MakeResident complete at.
+   BOOL surfaceResident;
+   UINT64 surfaceFence;
    BOOL primary, shared;
    UINT vidpn;
    DXGI_FORMAT Format;

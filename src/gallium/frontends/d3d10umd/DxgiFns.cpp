@@ -311,35 +311,49 @@ HRESULT Bc250EnsureSurface(Device *device, Resource *resource)
       resource->surfaceBytes = bytes;
    }
    resource->gpuBytes = (data.size + 4095) & ~UINT64(4095);
-   D3DDDI_MAPGPUVIRTUALADDRESS map = {};
-   map.hPagingQueue = device->pagingQueue;
-   map.hAllocation = resource->allocation;
-   map.SizeInPages = resource->gpuBytes / 4096;
-   map.Protection.Write = 1;
-   hr = device->KTCallbacks.pfnMapGpuVirtualAddressCb(device->hDevice, &map);
-   DebugPrintf("BC250 MapGpuVa %08lx va %llx\n", hr, map.VirtualAddress);
-   // WDDM callbacks report successful asynchronous paging as E_PENDING.
-   if (FAILED(hr) && hr != E_PENDING) return hr;
-   resource->gpuVa = map.VirtualAddress;
-   UINT64 fence = map.PagingFenceValue;
-   D3DDDI_MAKERESIDENT resident = {};
-   resident.hPagingQueue = device->pagingQueue;
-   resident.NumAllocations = 1; resident.AllocationList = &resource->allocation;
-   hr = device->KTCallbacks.pfnMakeResidentCb(device->hDevice, &resident);
-   DebugPrintf("BC250 MakeResident %08lx\n", hr);
-   if (FAILED(hr) && hr != E_PENDING) return hr;
-   if (resident.PagingFenceValue > fence) fence = resident.PagingFenceValue;
+   // A failed step below leaves presentReady false, and the next Present or
+   // SetDisplayMode calls this again. Steps that succeeded are kept, not
+   // repeated (BD-037): a second map would keep the first VA range, and a
+   // second MakeResident another residency reference, until the allocation
+   // is destroyed; a second Lock2 is not balanced by DestroyResource.
+   if (!resource->gpuVa) {
+      D3DDDI_MAPGPUVIRTUALADDRESS map = {};
+      map.hPagingQueue = device->pagingQueue;
+      map.hAllocation = resource->allocation;
+      map.SizeInPages = resource->gpuBytes / 4096;
+      map.Protection.Write = 1;
+      hr = device->KTCallbacks.pfnMapGpuVirtualAddressCb(device->hDevice, &map);
+      DebugPrintf("BC250 MapGpuVa %08lx va %llx\n", hr, map.VirtualAddress);
+      // WDDM callbacks report successful asynchronous paging as E_PENDING.
+      if (FAILED(hr) && hr != E_PENDING) return hr;
+      resource->gpuVa = map.VirtualAddress;
+      resource->surfaceFence = map.PagingFenceValue;
+   }
+   if (!resource->surfaceResident) {
+      D3DDDI_MAKERESIDENT resident = {};
+      resident.hPagingQueue = device->pagingQueue;
+      resident.NumAllocations = 1; resident.AllocationList = &resource->allocation;
+      hr = device->KTCallbacks.pfnMakeResidentCb(device->hDevice, &resident);
+      DebugPrintf("BC250 MakeResident %08lx\n", hr);
+      if (FAILED(hr) && hr != E_PENDING) return hr;
+      resource->surfaceResident = TRUE;
+      if (resident.PagingFenceValue > resource->surfaceFence)
+         resource->surfaceFence = resident.PagingFenceValue;
+   }
+   const UINT64 fence = resource->surfaceFence;
    ULONGLONG deadline = GetTickCount64() + 5000;
    while (device->pagingFence && *device->pagingFence < fence && GetTickCount64() < deadline) Sleep(1);
    if (!device->pagingFence || *device->pagingFence < fence) return HRESULT_FROM_WIN32(WAIT_TIMEOUT);
-   D3DDDICB_LOCK2 lock = {};
-   lock.hAllocation = resource->allocation;
-   hr = device->KTCallbacks.pfnLock2Cb(device->hDevice, &lock);
-   if (FAILED(hr)) return hr;
-   resource->cpuMapping = lock.pData;
+   if (!resource->cpuMapping) {
+      D3DDDICB_LOCK2 lock = {};
+      lock.hAllocation = resource->allocation;
+      hr = device->KTCallbacks.pfnLock2Cb(device->hDevice, &lock);
+      if (FAILED(hr)) return hr;
+      resource->cpuMapping = lock.pData;
+   }
    struct winsys_handle handle = {};
    handle.type = WINSYS_HANDLE_TYPE_USER_MEMORY;
-   handle.user_memory = lock.pData; handle.stride = data.pitch;
+   handle.user_memory = resource->cpuMapping; handle.stride = data.pitch;
    handle.size = data.size;
    struct pipe_resource desc = *resource->resource;
    desc.bind |= PIPE_BIND_DISPLAY_TARGET | PIPE_BIND_SHARED;
@@ -590,6 +604,8 @@ _RotateResourceIdentities(DXGI_DDI_ARG_ROTATE_RESOURCE_IDENTITIES *args)
       r->surfacePitch = next.surfacePitch;
       r->surfaceBytes = next.surfaceBytes;
       r->cpuMapping = next.cpuMapping;
+      r->surfaceResident = next.surfaceResident;
+      r->surfaceFence = next.surfaceFence;
       r->presentReady = next.presentReady;
       // hRTResource and the logical resource/view descriptors stay in place.
       DebugPrintf("BC250 Rotate slot %u kernel %x -> %x va %llx\n",
