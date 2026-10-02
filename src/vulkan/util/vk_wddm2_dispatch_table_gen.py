@@ -136,7 +136,9 @@ ${e[1]}
 </%def>
 
 % for e in entrypoints:
-static NTSTATUS
+/* APIENTRY like the PFND3DKMT_* types the table holds: on x86 (the WoW64 build) that is __stdcall, not the
+ * compiler's default __cdecl; on x64 there is one calling convention and the keyword changes nothing. */
+static NTSTATUS APIENTRY
 ${e[0]}_not_supported(${arg(e)})
 {
   fprintf(stderr, "D3DKMT${e[0]} is not supported\\n");
