@@ -23,6 +23,42 @@ blocks). They are a shared contract with the kernel-mode driver and will be
 renamed on both sides together, before the branches are prepared for
 upstream review.
 
+## Registered on unit A (2026-10-03)
+
+What the lab machine actually loads today, with the branch and commit each binary was built from. SHA-256
+prefixes are the first eight hex digits of the file's hash; the full hashes and the trial numbers are in the
+main repository's [docs/facts.md](https://github.com/D-Ogi/amdgpu-wddm/blob/main/docs/facts.md) and its
+evidence directories.
+
+| Binary | SHA-256 | Branch | Commit | Registered since |
+|---|---|---|---|---|
+| `amdgpu_wddm_radv.dll`, the D3D12 route's ICD | F9DCB33B | `amdgpu-wddm/registered-2026-10-02` (also on `amdgpu-wddm/draw-path`) | `ae98c795` on `89ef0dc8` | 2026-10-02 |
+| `amdgpu_wddm_radv.dll`, the desktop compositor's hosted ICD | 66FE8F31 | `amdgpu-wddm/radv-wddm2-hosted-main` | `48546c73` | 2026-10-01 |
+| `bc250d3d.dll`, the CPU desktop UMD | 10D9C983 | `amdgpu-wddm/desktop-umd-fp16-table` | `fbfd023f` | 2026-10-02 |
+
+Two deployed binaries are not yet reproducible from a published commit, and that is a gap, not an omission:
+
+- `bc250d3d_zink.dll` 18BFC610, the hosted Zink UMD the compositor renders through, was built from a working
+  tree holding three changes that are not committed anywhere (the hosted-UMD patches and a refresh of the
+  surface-format table). Its nearest committed ancestor is not on a published branch either.
+- `amdgpu_wddm_radv.dll` D672813F, the ICD of the Direct3D 11 route, matches the tree of
+  `amdgpu-wddm/radv-wddm2-hosted` plus one further CPU-mapping change that was never committed.
+
+Development branches past the registered points, in the order they build on each other:
+
+| Branch | What it carries |
+|---|---|
+| `amdgpu-wddm/quiet-stderr` | the winsys lines print only when `AMDGPU_WDDM_LOG` asks; the base of the registered D3D12 ICD |
+| `amdgpu-wddm/draw-path` | the per-draw path: a BO cache, meta shortcuts, vertex descriptors reused, and `BC250_DRAW_STATS` counters that stay off unless the variable is set |
+| `amdgpu-wddm/wait-elision`, `amdgpu-wddm/wait-elision-dp` | a queue's wait on its own fence resolved without the kernel |
+| `amdgpu-wddm/icd-v3-0004b-prefetch`, `amdgpu-wddm/icd-v3-0004c-quiet-stdio` | shader padding for the instruction prefetch, and a driver DLL kept off the application's stdio |
+| `amdgpu-wddm/disk-cache-win`, `amdgpu-wddm/disk-cache-win-f12b129c` | the multi-file shader cache on Windows, with its tests |
+| `amdgpu-wddm/desktop-umd-*`, `amdgpu-wddm/hosted-umd-a8-table` | the Gallium `d3d10umd` surface-format tables: A8 atlases, FP16 and A2B10G10R10 composed surfaces |
+| `amdgpu-wddm/wow64-x86` | the ICD built for x86, for 32-bit processes under WoW64 |
+| `amdgpu-wddm/gdi-immediate-quiet` | the GDI present path with the winsys lines quiet |
+
+None of the development branches is registered. A branch builds; that is not the same as having run.
+
 ## Branches
 
 Each branch starts at a pinned upstream Mesa commit and carries one commit per
