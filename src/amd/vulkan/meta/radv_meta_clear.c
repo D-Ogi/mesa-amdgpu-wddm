@@ -1589,6 +1589,20 @@ radv_subpass_clear_attachment(struct radv_cmd_buffer *cmd_buffer, const VkClearA
    radv_describe_end_render_pass_clear(cmd_buffer);
 }
 
+/* bc250: the attachment a clear inside the render pass writes, for radv_draw_stats_track. */
+static struct radv_draw_stats_range
+radv_draw_stats_clear_att_range(const struct radv_cmd_buffer *cmd_buffer, const VkClearAttachment *clear_att)
+{
+   const struct radv_rendering_state *render = &cmd_buffer->state.render;
+   const struct radv_image_view *iview = NULL;
+
+   if (!(clear_att->aspectMask & VK_IMAGE_ASPECT_COLOR_BIT))
+      iview = render->ds_att.iview;
+   else if (clear_att->colorAttachment < render->color_att_count)
+      iview = render->color_att[clear_att->colorAttachment].iview;
+   return iview ? radv_draw_stats_image_range(iview->image) : RADV_DRAW_STATS_ALL;
+}
+
 /**
  * Emit any pending attachment clears for the current subpass.
  *
@@ -1622,7 +1636,10 @@ radv_cmd_buffer_clear_rendering(struct radv_cmd_buffer *cmd_buffer, const VkRend
          .clearValue = pRenderingInfo->pColorAttachments[i].clearValue,
       };
 
+      const struct radv_draw_stats_op stats_op = RADV_DRAW_STATS_TRANSFER(
+         cmd_buffer, radv_draw_stats_clear_att_range(cmd_buffer, &clear_att), RADV_DRAW_STATS_NOTHING);
       radv_subpass_clear_attachment(cmd_buffer, &clear_att, &pre_flush, &post_flush);
+      radv_draw_stats_transfer_end(cmd_buffer, stats_op);
    }
 
    if (render->ds_att.iview != NULL) {
@@ -1643,7 +1660,10 @@ radv_cmd_buffer_clear_rendering(struct radv_cmd_buffer *cmd_buffer, const VkRend
       }
 
       if (clear_att.aspectMask != 0) {
+         const struct radv_draw_stats_op stats_op = RADV_DRAW_STATS_TRANSFER(
+            cmd_buffer, radv_draw_stats_clear_att_range(cmd_buffer, &clear_att), RADV_DRAW_STATS_NOTHING);
          radv_subpass_clear_attachment(cmd_buffer, &clear_att, &pre_flush, &post_flush);
+         radv_draw_stats_transfer_end(cmd_buffer, stats_op);
       }
    }
 
@@ -1900,7 +1920,13 @@ radv_CmdClearColorImage(VkCommandBuffer commandBuffer, VkImage image_h, VkImageL
 
    radv_meta_begin(cmd_buffer);
 
+   const struct radv_draw_stats_op stats_op =
+      RADV_DRAW_STATS_TRANSFER(cmd_buffer, radv_draw_stats_image_range(image),
+                               RADV_DRAW_STATS_NOTHING);
+
    radv_cmd_clear_image(cmd_buffer, image, imageLayout, (const VkClearValue *)pColor, rangeCount, pRanges, cs);
+
+   radv_draw_stats_transfer_end(cmd_buffer, stats_op);
 
    radv_meta_end(cmd_buffer);
 
@@ -1922,8 +1948,14 @@ radv_CmdClearDepthStencilImage(VkCommandBuffer commandBuffer, VkImage image_h, V
 
    radv_meta_begin(cmd_buffer);
 
+   const struct radv_draw_stats_op stats_op =
+      RADV_DRAW_STATS_TRANSFER(cmd_buffer, radv_draw_stats_image_range(image),
+                               RADV_DRAW_STATS_NOTHING);
+
    radv_cmd_clear_image(cmd_buffer, image, imageLayout, (const VkClearValue *)pDepthStencil, rangeCount, pRanges,
                         false);
+
+   radv_draw_stats_transfer_end(cmd_buffer, stats_op);
 
    radv_meta_end(cmd_buffer);
 
@@ -1944,10 +1976,13 @@ radv_CmdClearAttachments(VkCommandBuffer commandBuffer, uint32_t attachmentCount
    radv_meta_begin_rendering(cmd_buffer);
 
    for (uint32_t a = 0; a < attachmentCount; ++a) {
+      const struct radv_draw_stats_op stats_op = RADV_DRAW_STATS_TRANSFER(
+         cmd_buffer, radv_draw_stats_clear_att_range(cmd_buffer, &pAttachments[a]), RADV_DRAW_STATS_NOTHING);
       for (uint32_t r = 0; r < rectCount; ++r) {
          emit_clear(cmd_buffer, &pAttachments[a], &pRects[r], &pre_flush, &post_flush,
                     cmd_buffer->state.render.view_mask);
       }
+      radv_draw_stats_transfer_end(cmd_buffer, stats_op);
    }
 
    radv_meta_end_rendering(cmd_buffer);

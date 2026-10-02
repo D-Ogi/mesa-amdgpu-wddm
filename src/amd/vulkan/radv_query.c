@@ -2610,6 +2610,9 @@ radv_CmdCopyQueryPoolResultsToMemoryKHR(VkCommandBuffer commandBuffer, VkQueryPo
     */
    emit_query_flush(cmd_buffer, pool);
 
+   const struct radv_draw_stats_op stats_op = RADV_DRAW_STATS_TRANSFER(
+      cmd_buffer, radv_draw_stats_va_range(dst_va, stride * (queryCount - 1) + 128), RADV_DRAW_STATS_NOTHING);
+
    switch (pool->vk.query_type) {
    case VK_QUERY_TYPE_OCCLUSION:
       radv_copy_occlusion_query_result(cmd_buffer, pool, firstQuery, queryCount, dst_va, stride, queryResultFlags);
@@ -2637,6 +2640,7 @@ radv_CmdCopyQueryPoolResultsToMemoryKHR(VkCommandBuffer commandBuffer, VkQueryPo
       UNREACHABLE("trying to get results of unhandled query type");
    }
 
+   radv_draw_stats_transfer_end(cmd_buffer, stats_op);
    radv_resume_conditional_rendering(cmd_buffer);
 }
 

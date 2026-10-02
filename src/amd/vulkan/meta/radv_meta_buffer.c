@@ -210,7 +210,11 @@ radv_fill_memory_internal(struct radv_cmd_buffer *cmd_buffer, const struct radv_
    uint32_t flush_bits = 0;
 
    if (use_compute) {
+      /* The dispatch itself no longer carries the addresses: they are counted here, around the call. */
+      const struct radv_draw_stats_op stats_op =
+         RADV_DRAW_STATS_TRANSFER(cmd_buffer, radv_draw_stats_va_range(dst_va, size), RADV_DRAW_STATS_NOTHING);
       radv_compute_fill_memory(cmd_buffer, &options, &dispatch);
+      radv_draw_stats_transfer_end(cmd_buffer, stats_op);
 
       flush_bits = AC_BARRIER_SYNC_CS | AC_BARRIER_INV_VMEM |
                    radv_src_access_flush(cmd_buffer, VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
@@ -319,7 +323,11 @@ radv_copy_memory(struct radv_cmd_buffer *cmd_buffer, uint64_t src_va, uint64_t d
    const bool use_compute = ac_prepare_cs_clear_copy_buffer(&options, &info, &dispatch);
 
    if (use_compute) {
+      /* The dispatch itself no longer carries the addresses: they are counted here, around the call. */
+      const struct radv_draw_stats_op stats_op = RADV_DRAW_STATS_TRANSFER(
+         cmd_buffer, radv_draw_stats_va_range(dst_va, size), radv_draw_stats_va_range(src_va, size));
       radv_compute_copy_memory(cmd_buffer, &options, &dispatch, size);
+      radv_draw_stats_transfer_end(cmd_buffer, stats_op);
    } else if (size) {
       radv_cp_dma_copy_memory(cmd_buffer, src_va, dst_va, size);
    }
