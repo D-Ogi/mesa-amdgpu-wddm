@@ -4019,8 +4019,8 @@ test_cs_add_buffer(void)
 }
 
 /* BC250_DRAW_STATS: off by default (no draw_stats_add, no line); with =1, every command buffer's counters add
- * up and the summary writes them as its draw line, by name in RADV_DRAW_STATS order, only when they changed,
- * and again at teardown. */
+ * up and the summary writes them as its draw and sync lines (RADV_DRAW_STATS_DRAW, RADV_DRAW_STATS_SYNC), by
+ * name in RADV_DRAW_STATS order, only when they changed, and again at teardown. */
 static void
 test_draw_stats(void)
 {
@@ -4057,15 +4057,22 @@ test_draw_stats(void)
       RADV_DRAW_STATS(TEST_DRAW_STAT_NAME)
 #undef TEST_DRAW_STAT_NAME
    };
-   char line[4096], expected[2048];
+   char line[4096], expected[2048], expected_sync[2048];
    size_t len = 0;
-   for (unsigned i = 0; i < RADV_DRAW_STAT_COUNT; i++)
+   for (unsigned i = 0; i < RADV_DRAW_STAT_SYNC_FIRST; i++)
       len += snprintf(expected + len, sizeof(expected) - len, " %s=%u", names[i], i + 1 + (i + 1 < RADV_DRAW_STAT_COUNT));
    check(log_lines(lm, "periodic #1 t=0s draw:", line, sizeof(line)) == 1 && has(line, expected) &&
-            has(line, "draw: cmdbufs=2 passes=3 "),
-         "the draw line names every counter with its sum: %.300s", line);
+            has(line, "draw: cmdbufs=2 passes=3 ") && !has(line, " fl_emits="),
+         "the draw line names every draw counter with its sum: %.300s", line);
+   len = 0;
+   for (unsigned i = RADV_DRAW_STAT_SYNC_FIRST; i < RADV_DRAW_STAT_COUNT; i++)
+      len += snprintf(expected_sync + len, sizeof(expected_sync) - len, " %s=%u", names[i],
+                      i + 1 + (i + 1 < RADV_DRAW_STAT_COUNT));
+   check(log_lines(lm, "periodic #1 t=0s sync:", line, sizeof(line)) == 1 && has(line, expected_sync) &&
+            has(line, "sync: fl_emits=") && !has(line, " cmdbufs="),
+         "the sync line names every synchronization counter with its sum: %.300s", line);
    check(!log_lines(lm, "periodic #1 t=0s deferred:", NULL, 0) && !log_lines(lm, "periodic #1 t=0s submit:", NULL, 0),
-         "nothing else changed: the draw line alone");
+         "nothing else changed: the draw and sync lines alone");
 
    ws->summary.next_ns = 1;
    lm = log_mark();
@@ -4074,7 +4081,9 @@ test_draw_stats(void)
 
    lm = log_mark();
    radv_wddm2_deferred_finish(ws);
-   check(log_lines(lm, "periodic final t=0s draw: cmdbufs=2 passes=3 ", NULL, 0) == 1, "teardown writes it again, final");
+   check(log_lines(lm, "periodic final t=0s draw: cmdbufs=2 passes=3 ", NULL, 0) == 1 &&
+            log_lines(lm, "periodic final t=0s sync: fl_emits=", NULL, 0) == 1,
+         "teardown writes them again, final");
    contract();
 }
 

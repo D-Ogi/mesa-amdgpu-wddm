@@ -287,7 +287,7 @@ enum radv_cs_dump_type {
  * vertex shader (radv_get_shader, so the merged shader that holds it), pipe_ps_same the fragment shader
  * and pipe_shaders_same every graphics stage (the same radv_shader objects, which the shader cache shares
  * between pipelines with identical binaries). */
-#define RADV_DRAW_STATS(X)                                                                                  \
+#define RADV_DRAW_STATS_DRAW(X)                                                                             \
    X(cmdbufs) X(passes) X(passes_clear) X(restarts) X(restart_none) X(restart_barrier_ro) X(restart_barrier) \
    X(restart_query) X(restart_clear) X(restart_transfer) X(restart_dispatch) X(end_begin) X(end_barrier)     \
    X(end_query) X(end_transfer) X(end_dispatch) X(end_close) X(draws) X(dgc) X(pipelines_gfx)               \
@@ -298,12 +298,51 @@ enum radv_cs_dump_type {
    X(pc_stage_same) X(pc_regs_wrong) X(pipe_same) X(pipe_vs_same) X(pipe_ps_same) X(pipe_shaders_same)  \
    X(vb_desc_records_wrong)
 
+/* bc250: the synchronization counters, on a line of their own in the dump. fl_* count the cache flushes
+ * radv_emit_cache_flush emits, in RADV's meta operations too (fl_meta of them inside one, fl_end at
+ * vkEndCommandBuffer), by what ac_gfx10_emit_barrier makes of the flags: fl_eop_* a RELEASE_MEM with a
+ * TS event that the CP then waits for with WAIT_REG_MEM, a full drain of the pipeline (cbdb:
+ * CACHE_FLUSH_AND_INV_TS; cb: FLUSH_AND_INV_CB_DATA_TS and the CB_META event; db: FLUSH_AND_INV_DB_DATA_TS
+ * and the DB_META event; bop: BOTTOM_OF_PIPE_TS), which already waits for the shaders, so fl_vs, fl_ps and
+ * fl_cs (the VS/PS/CS_PARTIAL_FLUSH events) count only flushes without one; fl_vgt VGT_FLUSH; fl_l2_inv a
+ * write-back and invalidation of the whole L2 (INV_L2), fl_l2_wb a write-back only, fl_l2_meta the
+ * metadata cache alone; fl_vmem the vector L0 and L1 caches, fl_smem the scalar cache, fl_icache the
+ * instruction cache; fl_pfp PFP_SYNC_ME. bar_* and cause_* count the application's vkCmdPipelineBarrier2
+ * calls by the flushes their own access masks ask for (before they merge with pending ones): bar_cb and
+ * bar_db a CB or DB flush (so a drain), bar_l2 an L2 invalidation on the source side; cause_rt_write,
+ * cause_ds_write and cause_xfer_write a source scope with color attachment, depth-stencil attachment or
+ * transfer writes (each makes radv_src_access_flush flush CB, DB or both), cause_meta_storage storage
+ * writes to an image without the storage usage, cause_dst_cbdb attachment reads in the destination scope
+ * of a memory or buffer barrier or of a storage image (radv_dst_access_flush flushes CB or DB for them),
+ * cause_l2_global and cause_l2_image a source-side L2 invalidation from a memory or buffer barrier (no
+ * image, so not known to be coherent) or from an image barrier (an image not coherent with L2). tr_* count
+ * the image layout transitions radv_handle_image_transition handles (tr_calls, a layout or queue change)
+ * and the metadata work they do: HTILE initialization and expansion (decompression), CMASK/FMASK/DCC
+ * initialization, DCC decompression, fast clear eliminate, FMASK decompression and color expansion, DCC
+ * retiling. wait_events counts the WAIT_REG_MEM of vkCmdWaitEvents2, wait_cp_dma the CP DMA syncs,
+ * query_copies the vkCmdCopyQueryPoolResults calls and query_copy_waits the queries they copy with
+ * VK_QUERY_RESULT_WAIT_BIT. */
+#define RADV_DRAW_STATS_SYNC(X)                                                                             \
+   X(fl_emits) X(fl_meta) X(fl_end) X(fl_eop_cbdb) X(fl_eop_cb) X(fl_eop_db) X(fl_eop_bop) X(fl_vs) X(fl_ps) \
+   X(fl_cs) X(fl_vgt) X(fl_l2_inv) X(fl_l2_wb) X(fl_l2_meta) X(fl_vmem) X(fl_smem) X(fl_icache) X(fl_pfp)    \
+   X(bar_cb) X(bar_db) X(bar_l2) X(cause_rt_write) X(cause_ds_write) X(cause_xfer_write)                    \
+   X(cause_meta_storage) X(cause_dst_cbdb) X(cause_l2_global) X(cause_l2_image) X(tr_calls) X(tr_htile_init) \
+   X(tr_htile_expand) X(tr_color_init) X(tr_dcc_decompress) X(tr_fce) X(tr_fmask_decompress)               \
+   X(tr_fmask_expand) X(tr_dcc_retile) X(wait_events) X(wait_cp_dma) X(query_copies) X(query_copy_waits)
+
+#define RADV_DRAW_STATS(X) RADV_DRAW_STATS_DRAW(X) RADV_DRAW_STATS_SYNC(X)
+
 enum radv_draw_stat {
 #define RADV_DRAW_STAT_ENUM(name) RADV_DRAW_STAT_##name,
    RADV_DRAW_STATS(RADV_DRAW_STAT_ENUM)
 #undef RADV_DRAW_STAT_ENUM
    RADV_DRAW_STAT_COUNT
 };
+
+/* The first counter of RADV_DRAW_STATS_SYNC. */
+#define RADV_DRAW_STAT_ONE(name) +1
+enum { RADV_DRAW_STAT_SYNC_FIRST = 0 RADV_DRAW_STATS_DRAW(RADV_DRAW_STAT_ONE) };
+#undef RADV_DRAW_STAT_ONE
 
 struct radeon_winsys {
    void (*destroy)(struct radeon_winsys *ws);

@@ -379,6 +379,8 @@ radv_cp_dma_wait_for_idle(struct radv_cmd_buffer *cmd_buffer)
    if (!cmd_buffer->state.dma_is_busy)
       return;
 
+   RADV_DRAW_STATS_ADD(cmd_buffer, wait_cp_dma, 1);
+
    /* Issue a dummy DMA that copies zero bytes.
     *
     * The DMA engine will see that there's no work to do and skip this

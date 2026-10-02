@@ -2202,16 +2202,24 @@ radv_wddm2_summary_write(struct radv_wddm2_winsys *ws, uint64_t now, uint64_t du
          memcpy(ws->summary.submit_snapshot, &s, sizeof(s));
       }
       if (write_draw) {
-         char counts[2048];
-         size_t len = 0;
-         for (unsigned i = 0; i < RADV_DRAW_STAT_COUNT && len < sizeof(counts); i++) {
-            const int n = snprintf(counts + len, sizeof(counts) - len, " %s=%" PRIu64, radv_wddm2_draw_stat_names[i],
-                                   draw[i]);
-            if (n < 0)
-               break;
-            len += (size_t)n;
+         /* Two lines, draw: and sync: (RADV_DRAW_STATS_SYNC), each within what radv_wddm2_deferred_line keeps. */
+         static const struct {
+            const char *name;
+            unsigned first, end;
+         } parts[] = {{"draw", 0, RADV_DRAW_STAT_SYNC_FIRST}, {"sync", RADV_DRAW_STAT_SYNC_FIRST, RADV_DRAW_STAT_COUNT}};
+         for (unsigned p = 0; p < ARRAY_SIZE(parts); p++) {
+            char counts[2048];
+            size_t len = 0;
+            counts[0] = '\0';
+            for (unsigned i = parts[p].first; i < parts[p].end && len < sizeof(counts); i++) {
+               const int n = snprintf(counts + len, sizeof(counts) - len, " %s=%" PRIu64,
+                                      radv_wddm2_draw_stat_names[i], draw[i]);
+               if (n < 0)
+                  break;
+               len += (size_t)n;
+            }
+            radv_wddm2_deferred_line("periodic %s t=%" PRIu64 "s %s:%s", tag, t, parts[p].name, counts);
          }
-         radv_wddm2_deferred_line("periodic %s t=%" PRIu64 "s draw:%s", tag, t, counts);
          memcpy(ws->draw_stats.snapshot, draw, sizeof(draw));
       }
    }
@@ -2783,8 +2791,8 @@ radv_wddm2_bo_init_functions(struct radv_wddm2_winsys *ws)
          progress_from = "invalid, default";
    }
    /* BC250_DRAW_STATS=1: RADV counts what the application records in its command buffers
-    * (RADV_DRAW_STATS, radv_cmd_buffer.c) for a third summary line. Off by default; when off, a
-    * command buffer pays one branch per counted command and the log is unchanged. */
+    * (RADV_DRAW_STATS, radv_cmd_buffer.c) for a third and a fourth summary line (draw: and sync:). Off by
+    * default; when off, a command buffer pays one branch per counted command and the log is unchanged. */
    char draw_buf[64];
    const char *draw_from;
    const char *draw = radv_wddm2_knob(&knobs, "BC250_DRAW_STATS", draw_buf, sizeof(draw_buf), &draw_from);

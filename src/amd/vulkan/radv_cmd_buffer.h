@@ -645,6 +645,13 @@ void radv_draw_stats_command(struct radv_cmd_buffer *cmd_buffer, enum radv_draw_
          radv_draw_stats_command(cmd_buffer, RADV_DRAW_STAT_##stat, kind);                                      \
    } while (0)
 
+/* n more of stat, in RADV's meta operations too (the synchronization counters). */
+#define RADV_DRAW_STATS_ADD(cmd_buffer, stat, n)                                                                 \
+   do {                                                                                                         \
+      if (unlikely((cmd_buffer)->draw_stats.on))                                                                \
+         (cmd_buffer)->draw_stats.counts[RADV_DRAW_STAT_##stat] += (n);                                         \
+   } while (0)
+
 struct radv_msrtss_transient {
    struct list_head link;
    VkImage image;

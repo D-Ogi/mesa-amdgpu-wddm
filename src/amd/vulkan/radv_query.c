@@ -2584,6 +2584,8 @@ radv_CmdCopyQueryPoolResultsToMemoryKHR(VkCommandBuffer commandBuffer, VkQueryPo
    const uint64_t stride = pDstRange->stride;
 
    RADV_DRAW_STATS_COMMAND(cmd_buffer, queries, RADV_DRAW_STATS_QUERY);
+   RADV_DRAW_STATS_ADD(cmd_buffer, query_copies, 1);
+   RADV_DRAW_STATS_ADD(cmd_buffer, query_copy_waits, queryResultFlags & VK_QUERY_RESULT_WAIT_BIT ? queryCount : 0);
 
    if (!queryCount)
       return;
