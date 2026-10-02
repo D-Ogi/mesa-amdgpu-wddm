@@ -589,6 +589,14 @@ struct radv_cmd_buffer {
 
    struct list_head msrtss_transients;
 
+   /* bc250: the compute pipelines and layouts of buffer copies and fills (radv_meta_buffer.c), by 16-byte variant, as
+    * the device's vk_meta cache returned them. The cache keeps them until the device is destroyed, so a later copy or
+    * fill recorded here skips its key hashes and locked lookups. */
+   struct {
+      VkPipeline pipeline;
+      VkPipelineLayout layout;
+   } meta_copy_memory[2], meta_fill_memory[2];
+
    /* bc250: the counters of BC250_DRAW_STATS for this recording, reset at vkBeginCommandBuffer when the
     * winsys counts and added to its totals at vkEndCommandBuffer. */
    struct {

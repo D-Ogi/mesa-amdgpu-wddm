@@ -155,14 +155,18 @@ static void
 radv_compute_fill_memory(struct radv_cmd_buffer *cmd_buffer, uint64_t va, uint64_t size, uint32_t data)
 {
    struct radv_device *device = radv_cmd_buffer_device(cmd_buffer);
-   VkPipelineLayout layout;
-   VkPipeline pipeline;
+   VkPipelineLayout layout = cmd_buffer->meta_fill_memory[size >= 16].layout;
+   VkPipeline pipeline = cmd_buffer->meta_fill_memory[size >= 16].pipeline;
    VkResult result;
 
-   result = get_fill_memory_pipeline(device, size, &pipeline, &layout);
-   if (result != VK_SUCCESS) {
-      vk_command_buffer_set_error(&cmd_buffer->vk, result);
-      return;
+   if (pipeline == VK_NULL_HANDLE) {
+      result = get_fill_memory_pipeline(device, size, &pipeline, &layout);
+      if (result != VK_SUCCESS) {
+         vk_command_buffer_set_error(&cmd_buffer->vk, result);
+         return;
+      }
+      cmd_buffer->meta_fill_memory[size >= 16].layout = layout;
+      cmd_buffer->meta_fill_memory[size >= 16].pipeline = pipeline;
    }
 
    radv_meta_bind_compute_pipeline(cmd_buffer, pipeline);
@@ -193,14 +197,18 @@ radv_compute_copy_memory(struct radv_cmd_buffer *cmd_buffer, uint64_t src_va, ui
 {
    struct radv_device *device = radv_cmd_buffer_device(cmd_buffer);
    const bool use_16B_copy = size >= 16 && radv_is_copy_memory_4B_aligned(src_va, dst_va, size);
-   VkPipelineLayout layout;
-   VkPipeline pipeline;
+   VkPipelineLayout layout = cmd_buffer->meta_copy_memory[use_16B_copy].layout;
+   VkPipeline pipeline = cmd_buffer->meta_copy_memory[use_16B_copy].pipeline;
    VkResult result;
 
-   result = get_copy_memory_pipeline(device, src_va, dst_va, size, &pipeline, &layout);
-   if (result != VK_SUCCESS) {
-      vk_command_buffer_set_error(&cmd_buffer->vk, result);
-      return;
+   if (pipeline == VK_NULL_HANDLE) {
+      result = get_copy_memory_pipeline(device, src_va, dst_va, size, &pipeline, &layout);
+      if (result != VK_SUCCESS) {
+         vk_command_buffer_set_error(&cmd_buffer->vk, result);
+         return;
+      }
+      cmd_buffer->meta_copy_memory[use_16B_copy].layout = layout;
+      cmd_buffer->meta_copy_memory[use_16B_copy].pipeline = pipeline;
    }
 
    radv_utrace_begin_compute_copy_memory(cmd_buffer, size);
