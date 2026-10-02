@@ -113,6 +113,7 @@ TEMPLATE_C = Template(COPYRIGHT + """\
 
 #include "vk_wddm2_dispatch_table.h"
 
+#include "util/amdgpu_wddm_stdio.h"
 #include "util/log.h"
 #include "util/u_call_once.h"
 #include "util/u_dl.h"
@@ -139,7 +140,7 @@ ${e[1]}
 static NTSTATUS
 ${e[0]}_not_supported(${arg(e)})
 {
-  fprintf(stderr, "D3DKMT${e[0]} is not supported\\n");
+  amdgpu_wddm_log("D3DKMT${e[0]} is not supported\\n");
   return STATUS_NOT_SUPPORTED;
 }
 
@@ -150,7 +151,7 @@ initialize_dispatch_table(void)
 {
    struct util_dl_library *dxcore = util_dl_open(UTIL_DL_PREFIX DXCORE_LIBNAME UTIL_DL_EXT);
    if (!dxcore)
-      fprintf(stderr, "Failed to load DXCore\\n");
+      amdgpu_wddm_log("Failed to load DXCore\\n");
 
    % for e in entrypoints:
    table.${e[0]} = dxcore ? (PFND3DKMT_${e[0].upper()})util_dl_get_proc_address(dxcore, "D3DKMT${e[0]}") : NULL;

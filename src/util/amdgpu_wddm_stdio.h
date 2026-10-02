@@ -17,11 +17,19 @@
  * An executable built from this tree (a test or a tool) keeps its streams. The C runtime is linked statically into
  * the ICD (b_vscrt=mt), so these streams are the DLL's own; the application's are never touched. Debugger output
  * (OutputDebugString, MESA_LOG's windbg logger) and the winsys log files are not stdio and stay as they are.
+ *
+ * The amdgpu-wddm lines of the WDDM2 winsys (adapter, nodes, submission notices, deferred destroy) do not rely on the
+ * redirect: they print with amdgpu_wddm_log(), which writes only with AMDGPU_WDDM_LOG=stderr (the process's stderr)
+ * or file:<path>, whatever Mesa debug variable is set. In lab session 290 these lines still reached a 3DMark helper's
+ * stderr with the switch unset, 234 bytes from radv_wddm2_winsys_create; the gate does not depend on why.
+ * Outside MSVC builds amdgpu_wddm_log() is plain fprintf(stderr).
  */
 #ifndef AMDGPU_WDDM_STDIO_H
 #define AMDGPU_WDDM_STDIO_H
 
 #include <stdio.h>
+
+#ifdef _MSC_VER
 
 #ifdef __cplusplus
 extern "C" {
@@ -30,6 +38,9 @@ extern "C" {
 FILE *amdgpu_wddm_stdio(int fd);
 int amdgpu_wddm_stdio_puts(const char *text);
 int amdgpu_wddm_stdio_putchar(int c);
+/* The stream of the amdgpu-wddm lines: the process's stderr, the AMDGPU_WDDM_LOG file, or NULL (no output). */
+FILE *amdgpu_wddm_log_stream(void);
+int amdgpu_wddm_log(const char *format, ...);
 
 #ifdef __cplusplus
 }
@@ -43,5 +54,12 @@ int amdgpu_wddm_stdio_putchar(int c);
 #define vprintf(format, args) vfprintf(stdout, format, args)
 #define puts(text) amdgpu_wddm_stdio_puts(text)
 #define putchar(c) amdgpu_wddm_stdio_putchar(c)
+
+#else
+
+#define amdgpu_wddm_log_stream() (stderr)
+#define amdgpu_wddm_log(...) fprintf(stderr, __VA_ARGS__)
+
+#endif /* _MSC_VER */
 
 #endif /* AMDGPU_WDDM_STDIO_H */
