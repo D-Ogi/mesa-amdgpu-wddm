@@ -33,6 +33,7 @@
 
 #include "radv_wddm2_bo.h"
 #include "radv_wddm2_bc250.h"
+#include "util/amdgpu_wddm_stdio.h"
 #include "radv_wddm2_cs.h"
 #include "util/u_memory.h"
 
@@ -707,7 +708,7 @@ radv_wddm2_bo_create_internal(struct radeon_winsys *_ws, uint64_t size, unsigned
 
    status = BC250_WDDM_CALL(&ws->host, CreateAllocation2, &create);
    if (!NT_SUCCESS(status)) {
-      fprintf(stderr, "CreateAllocation2 failed 0x%X\n", status);
+      amdgpu_wddm_log("CreateAllocation2 failed 0x%X\n", status);
       result = VK_ERROR_OUT_OF_DEVICE_MEMORY;
       goto error_ptr_alloc;
    }
@@ -715,7 +716,7 @@ radv_wddm2_bo_create_internal(struct radeon_winsys *_ws, uint64_t size, unsigned
    bo->base.obj_id = alloc_info.hAllocation;
    bo->base.size = phys_size;
    bo->base.handle = alloc_info.hAllocation;
-   fprintf(stderr, "allocation handle=0x%x\n", bo->base.handle);
+   amdgpu_wddm_log("allocation handle=0x%x\n", bo->base.handle);
 
    const D3DKMT_DESTROYALLOCATION2 destroy = {
       .hDevice = ws->device_h,
@@ -742,7 +743,7 @@ radv_wddm2_bo_create_internal(struct radeon_winsys *_ws, uint64_t size, unsigned
    };
    status = BC250_WDDM_CALL(&ws->host, MapGpuVirtualAddress, &map);
    if (!NT_SUCCESS(status)) {
-      fprintf(stderr, "mapping 0x%" PRIx64 " failed: 0x%X\n", bo->base.va, status);
+      amdgpu_wddm_log("mapping 0x%" PRIx64 " failed: 0x%X\n", bo->base.va, status);
       result = VK_ERROR_OUT_OF_DEVICE_MEMORY;
       goto error_va_alloc;
    }
@@ -761,7 +762,7 @@ radv_wddm2_bo_create_internal(struct radeon_winsys *_ws, uint64_t size, unsigned
       };
       status = BC250_WDDM_CALL(&ws->host, MakeResident, &make_resident);
       if (!NT_SUCCESS(status)) {
-         fprintf(stderr, "MakeResident failed\n");
+         amdgpu_wddm_log("MakeResident failed\n");
          result = VK_ERROR_OUT_OF_DEVICE_MEMORY;
          goto error_va_alloc;
       }
@@ -777,7 +778,7 @@ radv_wddm2_bo_create_internal(struct radeon_winsys *_ws, uint64_t size, unsigned
    };
    status = BC250_WDDM_CALL(&ws->host, WaitForSynchronizationObjectFromCpu, &wait);
    if (!NT_SUCCESS(status)) {
-      fprintf(stderr, "WaitForSynchronizationObjectFromCpu failed\n");
+      amdgpu_wddm_log("WaitForSynchronizationObjectFromCpu failed\n");
       result = VK_ERROR_OUT_OF_DEVICE_MEMORY;
       goto error_va_alloc;
    }
@@ -793,12 +794,12 @@ radv_wddm2_bo_create_internal(struct radeon_winsys *_ws, uint64_t size, unsigned
 error_va_alloc:
    //radv_wddm2_bo_va_free(ws, flags, bo->base.va, bo->base.size);
 
-   fprintf(stderr, "destroy allocation\n");
+   amdgpu_wddm_log("destroy allocation\n");
    status = BC250_WDDM_CALL(&ws->host, DestroyAllocation2, &destroy);
    assert(NT_SUCCESS(status));
 
 error_ptr_alloc:
-   fprintf(stderr, "free va\n");
+   amdgpu_wddm_log("free va\n");
    FREE(bo);
    return result;
 }
@@ -859,7 +860,7 @@ radv_wddm2_bo_from_handle(struct radeon_winsys *_ws, void *handle, unsigned prio
    };
    status = BC250_WDDM_CALL(&ws->host, QueryResourceInfoFromNtHandle, &query_info);
    if (!NT_SUCCESS(status)) {
-      fprintf(stderr, "QueryResourceInfoFromNtHandle failed 0x%X\n", status);
+      amdgpu_wddm_log("QueryResourceInfoFromNtHandle failed 0x%X\n", status);
       result = VK_ERROR_INVALID_EXTERNAL_HANDLE;
       goto error_alloc;
    }
@@ -1050,7 +1051,7 @@ radv_wddm2_bo_map(struct radeon_winsys *_ws, struct radeon_winsys_bo *_bo,
       return bo->map;
 
    if (bo->flags & RADEON_FLAG_NO_CPU_ACCESS) {
-      fprintf(stderr, "attempt to map non-CPU-accessible BO\n");
+      amdgpu_wddm_log("attempt to map non-CPU-accessible BO\n");
       return NULL;
    }
 
@@ -1151,7 +1152,7 @@ radv_wddm2_bo_destroy(struct radeon_winsys *_ws, struct radeon_winsys_bo *_bo)
       };
       status = BC250_WDDM_CALL(&ws->host, Evict, &evict);
       if (!NT_SUCCESS(status)) {
-         fprintf(stderr, "*****  Evict failed\n");
+         amdgpu_wddm_log("*****  Evict failed\n");
          return;
       }
    }
@@ -1472,7 +1473,7 @@ radv_wddm2_dump_bo_ranges(struct radeon_winsys *_ws, FILE *file)
 {
    struct radv_wddm2_winsys *ws = radv_wddm2_winsys(_ws);
 
-   fprintf(stderr, "dump bo ranges\n");
+   amdgpu_wddm_log("dump bo ranges\n");
    if (ws->debug_all_bos)
       radv_winsys_dump_bo_ranges(&ws->global_bo_list, file);
    else

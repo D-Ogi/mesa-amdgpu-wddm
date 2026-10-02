@@ -5,6 +5,7 @@
 #include <windows.h>
 #include <fcntl.h>
 #include <io.h>
+#include <stdarg.h>
 #include <stdbool.h>
 #include <stdio.h>
 #include <string.h>
@@ -14,6 +15,8 @@
 static INIT_ONCE amdgpu_wddm_stdio_once = INIT_ONCE_STATIC_INIT;
 /* Null: the C runtime's own streams. Otherwise NUL or the AMDGPU_WDDM_LOG file, for both streams. */
 static FILE *amdgpu_wddm_stdio_sink;
+/* The amdgpu-wddm lines (amdgpu_wddm_log): null, the C runtime's stderr or the AMDGPU_WDDM_LOG file. */
+static FILE *amdgpu_wddm_log_sink;
 
 static FILE *
 amdgpu_wddm_stdio_open_append(const char *path)
@@ -45,20 +48,25 @@ amdgpu_wddm_stdio_resolve(PINIT_ONCE once, PVOID parameter, PVOID *context)
    (void)parameter;
    (void)context;
 
-   /* An executable built from this tree keeps its streams: the policy is for a DLL in someone else's process. */
+   /* An executable built from this tree keeps its streams: the policy is for a DLL in someone else's process. A
+    * module that cannot be told apart is treated as the DLL. */
    HMODULE self = NULL;
-   if (!GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
-                           (LPCSTR)&amdgpu_wddm_stdio_resolve, &self) ||
-       self == GetModuleHandleA(NULL))
+   if (GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                          (LPCSTR)&amdgpu_wddm_stdio_resolve, &self) &&
+       self == GetModuleHandleA(NULL)) {
+      amdgpu_wddm_log_sink = __acrt_iob_func(2);
       return TRUE;
+   }
 
    char value[MAX_PATH + 8];
    DWORD length = GetEnvironmentVariableA("AMDGPU_WDDM_LOG", value, sizeof(value));
    bool valid = length && length < sizeof(value);
-   if (valid && !strcmp(value, "stderr"))
+   if (valid && !strcmp(value, "stderr")) {
+      amdgpu_wddm_log_sink = __acrt_iob_func(2);
       return TRUE;
+   }
    if (valid && !strncmp(value, "file:", 5) && value[5])
-      amdgpu_wddm_stdio_sink = amdgpu_wddm_stdio_open_append(value + 5);
+      amdgpu_wddm_stdio_sink = amdgpu_wddm_log_sink = amdgpu_wddm_stdio_open_append(value + 5);
    /* An explicit Mesa debug variable asks for its output on stderr, as an explicit VKD3D_DEBUG does in the engine:
     * RADV_DEBUG (psocachestats and the rest), MESA_SHADER_CACHE_SHOW_STATS, MESA_LOG and the compiler dumps. Only
     * the file sink takes precedence. */
@@ -82,6 +90,26 @@ amdgpu_wddm_stdio(int fd)
    if (amdgpu_wddm_stdio_sink)
       return amdgpu_wddm_stdio_sink;
    return __acrt_iob_func(fd == 1 ? 1 : 2);
+}
+
+FILE *
+amdgpu_wddm_log_stream(void)
+{
+   InitOnceExecuteOnce(&amdgpu_wddm_stdio_once, amdgpu_wddm_stdio_resolve, NULL, NULL);
+   return amdgpu_wddm_log_sink;
+}
+
+int
+amdgpu_wddm_log(const char *format, ...)
+{
+   FILE *out = amdgpu_wddm_log_stream();
+   if (!out)
+      return 0;
+   va_list args;
+   va_start(args, format);
+   int written = vfprintf(out, format, args);
+   va_end(args);
+   return written;
 }
 
 int
