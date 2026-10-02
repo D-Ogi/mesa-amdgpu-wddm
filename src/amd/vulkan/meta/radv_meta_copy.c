@@ -402,6 +402,7 @@ radv_CmdCopyBufferToImage2(VkCommandBuffer commandBuffer, const VkCopyBufferToIm
    radv_meta_end(cmd_buffer);
 
    radv_resume_conditional_rendering(cmd_buffer);
+   radv_cmd_buffer_image_transfer_done(cmd_buffer);
 }
 
 VKAPI_ATTR void VKAPI_CALL
@@ -461,6 +462,7 @@ radv_CmdCopyMemoryToImageKHR(VkCommandBuffer commandBuffer, const VkCopyDeviceMe
    radv_meta_end(cmd_buffer);
 
    radv_resume_conditional_rendering(cmd_buffer);
+   radv_cmd_buffer_image_transfer_done(cmd_buffer);
 }
 
 static void
@@ -924,6 +926,7 @@ radv_CmdCopyImage2(VkCommandBuffer commandBuffer, const VkCopyImageInfo2 *pCopyI
    radv_meta_end(cmd_buffer);
 
    radv_resume_conditional_rendering(cmd_buffer);
+   radv_cmd_buffer_image_transfer_done(cmd_buffer);
 }
 
 VKAPI_ATTR void VKAPI_CALL
@@ -992,4 +995,5 @@ radv_CmdCopyMemoryToImageIndirectKHR(VkCommandBuffer commandBuffer,
    radv_meta_end(cmd_buffer);
 
    radv_resume_conditional_rendering(cmd_buffer);
+   radv_cmd_buffer_image_transfer_done(cmd_buffer);
 }

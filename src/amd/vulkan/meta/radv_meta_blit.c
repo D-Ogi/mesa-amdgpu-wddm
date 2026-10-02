@@ -546,4 +546,5 @@ radv_CmdBlitImage2(VkCommandBuffer commandBuffer, const VkBlitImageInfo2 *pBlitI
    radv_meta_end(cmd_buffer);
 
    radv_resume_conditional_rendering(cmd_buffer);
+   radv_cmd_buffer_image_transfer_done(cmd_buffer);
 }

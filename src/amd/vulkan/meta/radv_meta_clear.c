@@ -1905,6 +1905,7 @@ radv_CmdClearColorImage(VkCommandBuffer commandBuffer, VkImage image_h, VkImageL
    radv_meta_end(cmd_buffer);
 
    radv_resume_conditional_rendering(cmd_buffer);
+   radv_cmd_buffer_image_transfer_done(cmd_buffer);
 }
 
 VKAPI_ATTR void VKAPI_CALL
@@ -1927,6 +1928,7 @@ radv_CmdClearDepthStencilImage(VkCommandBuffer commandBuffer, VkImage image_h, V
    radv_meta_end(cmd_buffer);
 
    radv_resume_conditional_rendering(cmd_buffer);
+   radv_cmd_buffer_image_transfer_done(cmd_buffer);
 }
 
 VKAPI_ATTR void VKAPI_CALL

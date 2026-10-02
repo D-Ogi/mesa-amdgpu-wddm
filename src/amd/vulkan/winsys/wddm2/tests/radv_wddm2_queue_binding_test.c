@@ -4147,6 +4147,32 @@ test_draw_stats(void)
    contract();
 }
 
+/* BC250_BARRIER_TRACK: on unless 0 (anything else keeps the default), and one log line says which. */
+static void
+test_barrier_track(void)
+{
+   clear_ib_env();
+   clear_deferred_env();
+   _putenv_s("BC250_BARRIER_TRACK", "");
+   long lm = log_mark();
+   struct radv_wddm2_winsys *ws = make_ws();
+   check(ws->base.barrier_track && log_lines(lm, "barrier tracking on (default)", NULL, 0) == 1,
+         "unset: on, one line");
+
+   _putenv_s("BC250_BARRIER_TRACK", "0");
+   lm = log_mark();
+   ws = make_ws();
+   check(!ws->base.barrier_track && log_lines(lm, "barrier tracking off (env)", NULL, 0) == 1, "=0: off");
+
+   _putenv_s("BC250_BARRIER_TRACK", "2");
+   lm = log_mark();
+   ws = make_ws();
+   check(ws->base.barrier_track && log_lines(lm, "barrier tracking on (invalid, default)", NULL, 0) == 1,
+         "=2: invalid, the default");
+   _putenv_s("BC250_BARRIER_TRACK", "");
+   contract();
+}
+
 /* BD-045: a CPU lock belongs to whoever releases the allocation. The fake host keeps one lock per allocation
  * (a second Lock2 or an Unlock2 without one is unexpected) and refuses to destroy a locked allocation, as the
  * D3D12 shell's HostedDispatch does. */
@@ -4744,6 +4770,7 @@ static const struct {
    {"progress_gpu_cost", test_progress_gpu_cost},
    {"cs_add_buffer", test_cs_add_buffer},
    {"draw_stats", test_draw_stats},
+   {"barrier_track", test_barrier_track},
    {"cs_create_failure", test_cs_create_failure},
 };
 
