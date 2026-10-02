@@ -2113,6 +2113,9 @@ radv_cmd_buffer_after_draw(struct radv_cmd_buffer *cmd_buffer, enum ac_barrier_f
    const struct radv_instance *instance = radv_physical_device_instance(pdev);
    struct radv_cmd_stream *cs = radv_get_pm4_cs(cmd_buffer);
 
+   if (unlikely(cmd_buffer->draw_stats.on))
+      radv_draw_stats_work(cmd_buffer, flags);
+
    if (RADV_DEBUG(instance, SYNC_SHADERS) || RADV_DEBUG(instance, FULL_SYNC)) {
       enum ac_rgp_flush_bits rgp_flush_bits = 0;
 
@@ -8547,6 +8550,8 @@ void
 radv_draw_stats_command(struct radv_cmd_buffer *cmd_buffer, enum radv_draw_stat stat, uint32_t kind)
 {
    cmd_buffer->draw_stats.counts[stat]++;
+   if (kind)
+      cmd_buffer->draw_stats.worked = true;
    if (!kind || cmd_buffer->state.render.active)
       return;
 
@@ -8601,6 +8606,9 @@ radv_draw_stats_barrier(struct radv_cmd_buffer *cmd_buffer, const VkDependencyIn
    const bool read_only = !writes && !layouts;
    if (read_only)
       counts[RADV_DRAW_STAT_barrier_ro]++;
+   if (!cmd_buffer->draw_stats.worked)
+      counts[RADV_DRAW_STAT_bar_no_work]++;
+   cmd_buffer->draw_stats.worked = false;
 
    if (cmd_buffer->state.render.active) {
       counts[RADV_DRAW_STAT_barrier_in_pass]++;
@@ -8656,6 +8664,109 @@ radv_draw_stats_barrier_one(struct radv_cmd_buffer *cmd_buffer, struct radv_draw
    }
 }
 
+/* The source stages of one application barrier call, and the partial flushes radv_stage_flush will ask for at it
+ * with whether the work pending needs them (the wt_* classes of radv_draw_stats_wait). A barrier's shader stages
+ * wait for the application's draws and dispatches, its transfer stages for RADV's meta operations. */
+static void
+radv_draw_stats_barrier_waits(struct radv_cmd_buffer *cmd_buffer, const VkDependencyInfo *dep_info)
+{
+   uint32_t *counts = cmd_buffer->draw_stats.counts;
+   const enum ac_barrier_flags sync = AC_BARRIER_SYNC_VS | AC_BARRIER_SYNC_PS | AC_BARRIER_SYNC_CS;
+   VkPipelineStageFlags2 src = 0, dst = 0;
+
+   for (uint32_t i = 0; i < dep_info->memoryBarrierCount; i++) {
+      src |= dep_info->pMemoryBarriers[i].srcStageMask;
+      dst |= dep_info->pMemoryBarriers[i].dstStageMask;
+   }
+   for (uint32_t i = 0; i < dep_info->bufferMemoryBarrierCount; i++) {
+      src |= dep_info->pBufferMemoryBarriers[i].srcStageMask;
+      dst |= dep_info->pBufferMemoryBarriers[i].dstStageMask;
+   }
+   for (uint32_t i = 0; i < dep_info->imageMemoryBarrierCount; i++) {
+      src |= dep_info->pImageMemoryBarriers[i].srcStageMask;
+      dst |= dep_info->pImageMemoryBarriers[i].dstStageMask;
+   }
+
+   // clang-format off
+   const VkPipelineStageFlags2 xfer =
+      VK_PIPELINE_STAGE_2_ALL_TRANSFER_BIT | VK_PIPELINE_STAGE_2_COPY_BIT | VK_PIPELINE_STAGE_2_RESOLVE_BIT |
+      VK_PIPELINE_STAGE_2_BLIT_BIT | VK_PIPELINE_STAGE_2_CLEAR_BIT;
+   const VkPipelineStageFlags2 frag =
+      VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_2_EARLY_FRAGMENT_TESTS_BIT |
+      VK_PIPELINE_STAGE_2_LATE_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT;
+   const VkPipelineStageFlags2 prerast =
+      VK_PIPELINE_STAGE_2_DRAW_INDIRECT_BIT | VK_PIPELINE_STAGE_2_VERTEX_INPUT_BIT |
+      VK_PIPELINE_STAGE_2_INDEX_INPUT_BIT | VK_PIPELINE_STAGE_2_VERTEX_ATTRIBUTE_INPUT_BIT |
+      VK_PIPELINE_STAGE_2_PRE_RASTERIZATION_SHADERS_BIT | VK_PIPELINE_STAGE_2_VERTEX_SHADER_BIT |
+      VK_PIPELINE_STAGE_2_TESSELLATION_CONTROL_SHADER_BIT | VK_PIPELINE_STAGE_2_TESSELLATION_EVALUATION_SHADER_BIT |
+      VK_PIPELINE_STAGE_2_GEOMETRY_SHADER_BIT;
+   const VkPipelineStageFlags2 rt =
+      VK_PIPELINE_STAGE_2_RAY_TRACING_SHADER_BIT_KHR | VK_PIPELINE_STAGE_2_ACCELERATION_STRUCTURE_BUILD_BIT_KHR |
+      VK_PIPELINE_STAGE_2_ACCELERATION_STRUCTURE_COPY_BIT_KHR;
+   // clang-format on
+
+   if (src & VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT) {
+      counts[RADV_DRAW_STAT_src_all_cmds]++;
+   } else {
+      counts[RADV_DRAW_STAT_src_all_gfx] += (src & VK_PIPELINE_STAGE_2_ALL_GRAPHICS_BIT) != 0;
+      counts[RADV_DRAW_STAT_src_cs] += (src & VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT) != 0;
+      counts[RADV_DRAW_STAT_src_xfer] += (src & xfer) != 0;
+      counts[RADV_DRAW_STAT_src_frag] += (src & frag) != 0;
+      counts[RADV_DRAW_STAT_src_prerast] += (src & prerast) != 0;
+      counts[RADV_DRAW_STAT_src_rt] += (src & rt) != 0;
+      counts[RADV_DRAW_STAT_src_none] += !(src & ~(VK_PIPELINE_STAGE_2_TOP_OF_PIPE_BIT | VK_PIPELINE_STAGE_2_HOST_BIT));
+   }
+
+   /* What RADV asked for before this barrier is its own, also where the barrier asks for it too. */
+   cmd_buffer->draw_stats.intl |= cmd_buffer->state.flush_bits & sync & ~cmd_buffer->draw_stats.req;
+
+   /* As radv_barrier: no stage flush for BOTTOM_OF_PIPE or NONE as destination without an image barrier. */
+   if (!dep_info->imageMemoryBarrierCount &&
+       (dst == VK_PIPELINE_STAGE_2_BOTTOM_OF_PIPE_BIT || dst == VK_PIPELINE_STAGE_2_NONE))
+      return;
+
+   const VkPipelineStageFlags2 s = radv_get_src_stage_flags2(src);
+   const uint8_t app = RADV_DRAW_STATS_WORK_APP | RADV_DRAW_STATS_WORK_PRIOR;
+   const uint8_t meta = RADV_DRAW_STATS_WORK_META | RADV_DRAW_STATS_WORK_PRIOR;
+   const uint8_t any = app | meta;
+   /* Acceleration structure builds and copies are RADV's own dispatches. */
+   const VkPipelineStageFlags2 as =
+      VK_PIPELINE_STAGE_2_ACCELERATION_STRUCTURE_BUILD_BIT_KHR | VK_PIPELINE_STAGE_2_ACCELERATION_STRUCTURE_COPY_BIT_KHR;
+   const uint8_t cs_scope = (s & as) ? any : app;
+   const uint8_t work_vs = cmd_buffer->draw_stats.work_vs;
+   const uint8_t work_ps = cmd_buffer->draw_stats.work_ps;
+   const uint8_t work_cs = cmd_buffer->draw_stats.work_cs;
+   enum ac_barrier_flags req = 0, need = 0;
+
+   if (s & radv_pre_rast_stage_mask) {
+      req |= AC_BARRIER_SYNC_VS;
+      if (work_vs & app)
+         need |= AC_BARRIER_SYNC_VS;
+   }
+   if (s & (radv_post_ps_stage_mask | radv_post_cb_stage_mask | radv_post_transfer_stage_mask |
+            radv_post_transfer_ps_only_stage_mask)) {
+      req |= AC_BARRIER_SYNC_PS;
+      if (((s & (radv_post_ps_stage_mask | radv_post_cb_stage_mask)) && (work_ps & app)) ||
+          ((s & (radv_post_transfer_stage_mask | radv_post_transfer_ps_only_stage_mask)) && (work_ps & meta)))
+         need |= AC_BARRIER_SYNC_PS;
+   }
+   if (s & (radv_post_cs_stage_mask | radv_post_transfer_stage_mask)) {
+      req |= AC_BARRIER_SYNC_CS;
+      if (((s & radv_post_cs_stage_mask) && (work_cs & cs_scope)) ||
+          ((s & radv_post_transfer_stage_mask) && (work_cs & meta)))
+         need |= AC_BARRIER_SYNC_CS;
+   }
+
+   counts[RADV_DRAW_STAT_bar_req_vs] += (req & AC_BARRIER_SYNC_VS) != 0;
+   counts[RADV_DRAW_STAT_bar_req_ps] += (req & AC_BARRIER_SYNC_PS) != 0;
+   counts[RADV_DRAW_STAT_bar_req_cs] += (req & AC_BARRIER_SYNC_CS) != 0;
+   counts[RADV_DRAW_STAT_bar_need_vs] += (need & AC_BARRIER_SYNC_VS) != 0;
+   counts[RADV_DRAW_STAT_bar_need_ps] += (need & AC_BARRIER_SYNC_PS) != 0;
+   counts[RADV_DRAW_STAT_bar_need_cs] += (need & AC_BARRIER_SYNC_CS) != 0;
+   cmd_buffer->draw_stats.req |= req;
+   cmd_buffer->draw_stats.need |= need;
+}
+
 static void
 radv_draw_stats_barrier_flush(struct radv_cmd_buffer *cmd_buffer, const VkDependencyInfo *dep_info)
 {
@@ -8692,6 +8803,53 @@ radv_draw_stats_barrier_flush(struct radv_cmd_buffer *cmd_buffer, const VkDepend
    counts[RADV_DRAW_STAT_cause_l2_image] += causes.l2_image;
    counts[RADV_DRAW_STAT_skip_l2] += causes.skip_l2;
    counts[RADV_DRAW_STAT_skip_cbdb] += causes.skip_cbdb;
+
+   radv_draw_stats_barrier_waits(cmd_buffer, dep_info);
+}
+
+/* What the waits of the flush radv_draw_stats_cache_flush counts wait for, with flags as it reduced them: a TS
+ * event waits for everything, a partial flush for its stage. */
+static void
+radv_draw_stats_wait(struct radv_cmd_buffer *cmd_buffer, enum ac_barrier_flags flags, enum ac_barrier_flags eop_flags)
+{
+   uint32_t *counts = cmd_buffer->draw_stats.counts;
+   uint8_t *work[3] = {&cmd_buffer->draw_stats.work_vs, &cmd_buffer->draw_stats.work_ps,
+                       &cmd_buffer->draw_stats.work_cs};
+
+   if (flags & eop_flags) {
+      counts[cmd_buffer->draw_stats.work_ps   ? RADV_DRAW_STAT_wt_eop_gfx
+             : cmd_buffer->draw_stats.work_cs ? RADV_DRAW_STAT_wt_eop_cs
+                                              : RADV_DRAW_STAT_wt_eop_idle]++;
+      *work[0] = *work[1] = *work[2] = 0;
+   } else if (flags & (AC_BARRIER_SYNC_VS | AC_BARRIER_SYNC_PS | AC_BARRIER_SYNC_CS)) {
+      static const enum ac_barrier_flags stage[3] = {AC_BARRIER_SYNC_VS, AC_BARRIER_SYNC_PS, AC_BARRIER_SYNC_CS};
+      const enum ac_barrier_flags intl = cmd_buffer->draw_stats.intl | (flags & ~cmd_buffer->draw_stats.req);
+      bool need = false, over = false;
+
+      /* Per stage: idle, need, over, int. */
+      STATIC_ASSERT(RADV_DRAW_STAT_wt_vs_need == RADV_DRAW_STAT_wt_vs_idle + 1 &&
+                    RADV_DRAW_STAT_wt_vs_over == RADV_DRAW_STAT_wt_vs_idle + 2 &&
+                    RADV_DRAW_STAT_wt_vs_int == RADV_DRAW_STAT_wt_vs_idle + 3 &&
+                    RADV_DRAW_STAT_wt_ps_idle == RADV_DRAW_STAT_wt_vs_idle + 4 &&
+                    RADV_DRAW_STAT_wt_cs_idle == RADV_DRAW_STAT_wt_vs_idle + 8 &&
+                    RADV_DRAW_STAT_wt_cs_int == RADV_DRAW_STAT_wt_vs_idle + 11);
+      for (unsigned i = 0; i < 3; i++) {
+         if (!(flags & stage[i]))
+            continue;
+         unsigned c = !*work[i]                                ? 0
+                      : cmd_buffer->draw_stats.need & stage[i] ? 1
+                      : intl & stage[i]                        ? 3
+                                                               : 2;
+         counts[RADV_DRAW_STAT_wt_vs_idle + 4 * i + c]++;
+         need |= c == 1 || c == 3;
+         over |= c == 2;
+         *work[i] = 0;
+      }
+      counts[need ? RADV_DRAW_STAT_wt_fl_need : over ? RADV_DRAW_STAT_wt_fl_over : RADV_DRAW_STAT_wt_fl_idle]++;
+   }
+   cmd_buffer->draw_stats.req = 0;
+   cmd_buffer->draw_stats.need = 0;
+   cmd_buffer->draw_stats.intl = 0;
 }
 
 /* The cache flush radv_emit_cache_flush is about to emit, counted as ac_gfx10_emit_barrier emits it (bc250:
@@ -8706,6 +8864,7 @@ radv_draw_stats_cache_flush(struct radv_cmd_buffer *cmd_buffer, enum ac_barrier_
    flags &= ~AC_BARRIER_SYNC_AND_INV_DB_META;
    if (flags & eop_flags)
       flags &= ~(AC_BARRIER_SYNC_VS | AC_BARRIER_SYNC_PS | AC_BARRIER_SYNC_CS);
+   radv_draw_stats_wait(cmd_buffer, flags, eop_flags);
    if (!flags)
       return;
 
@@ -8803,6 +8962,11 @@ radv_BeginCommandBuffer(VkCommandBuffer commandBuffer, const VkCommandBufferBegi
    if (unlikely(device->ws->draw_stats_add)) {
       memset(&cmd_buffer->draw_stats, 0, sizeof(cmd_buffer->draw_stats));
       cmd_buffer->draw_stats.on = true;
+      /* What ran before this command buffer in the submission is not known. */
+      cmd_buffer->draw_stats.work_vs = RADV_DRAW_STATS_WORK_PRIOR;
+      cmd_buffer->draw_stats.work_ps = RADV_DRAW_STATS_WORK_PRIOR;
+      cmd_buffer->draw_stats.work_cs = RADV_DRAW_STATS_WORK_PRIOR;
+      cmd_buffer->draw_stats.worked = true;
    } else {
       cmd_buffer->draw_stats.on = false;
    }
@@ -11059,6 +11223,13 @@ radv_invalidate_state(struct radv_cmd_buffer *cmd_buffer)
    cmd_buffer->state.xfer_cb_inv = true;
    cmd_buffer->state.xfer_db_inv = true;
    cmd_buffer->state.xfer_eop_pending = true;
+   /* bc250: BC250_DRAW_STATS: what the secondaries left running is not known either, and their flushes are done. */
+   cmd_buffer->draw_stats.work_vs |= RADV_DRAW_STATS_WORK_PRIOR;
+   cmd_buffer->draw_stats.work_ps |= RADV_DRAW_STATS_WORK_PRIOR;
+   cmd_buffer->draw_stats.work_cs |= RADV_DRAW_STATS_WORK_PRIOR;
+   cmd_buffer->draw_stats.req = 0;
+   cmd_buffer->draw_stats.need = 0;
+   cmd_buffer->draw_stats.intl = 0;
 
    radv_mark_descriptors_dirty(cmd_buffer, VK_PIPELINE_BIND_POINT_GRAPHICS);
    radv_mark_descriptors_dirty(cmd_buffer, VK_PIPELINE_BIND_POINT_COMPUTE);

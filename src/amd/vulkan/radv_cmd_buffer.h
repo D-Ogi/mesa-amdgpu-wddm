@@ -495,6 +495,14 @@ enum radv_draw_stats_kind {
    RADV_DRAW_STATS_DISPATCH = 1u << 4,
 };
 
+/* Whose work a wait would wait for (the wt_* counters): the application's draws and dispatches, RADV's meta
+ * operations (transfers, clears, layout transitions), or work recorded before this command buffer began. */
+enum radv_draw_stats_work {
+   RADV_DRAW_STATS_WORK_APP = 1u << 0,
+   RADV_DRAW_STATS_WORK_META = 1u << 1,
+   RADV_DRAW_STATS_WORK_PRIOR = 1u << 2,
+};
+
 /* What makes two render passes the same: compared with memcmp, so always zeroed before it is filled. */
 struct radv_draw_stats_pass {
    VkImageView color[MAX_RTS];
@@ -624,7 +632,14 @@ struct radv_cmd_buffer {
       bool had_pass;     /* pass holds the last render pass of this recording */
       bool ended;        /* a pass ended and no command followed it yet */
       bool last_barrier; /* the last command recorded outside a pass was a barrier */
+      bool worked;       /* a draw, dispatch, transfer or query since the last application barrier */
       uint32_t between;  /* radv_draw_stats_kind bits recorded since the last pass began */
+      /* radv_draw_stats_work bits of the draws (vs, ps) and dispatches (cs) since the last wait that covers
+       * them; the partial flushes (AC_BARRIER_SYNC_*) the application's barriers asked for since the last
+       * flush, those of them needed for that work, and those RADV had asked for before such a barrier
+       * (radv_draw_stats_wait). */
+      uint8_t work_vs, work_ps, work_cs;
+      enum ac_barrier_flags req, need, intl;
       struct radv_draw_stats_pass pass;
       uint32_t counts[RADV_DRAW_STAT_COUNT];
       /* The vertex buffer descriptors uploaded last (vb_desc_size bytes), against which a write the reuse
@@ -648,6 +663,21 @@ radv_draw_stats_on(const struct radv_cmd_buffer *cmd_buffer)
 }
 
 void radv_draw_stats_command(struct radv_cmd_buffer *cmd_buffer, enum radv_draw_stat stat, uint32_t kind);
+
+/* A draw (AC_BARRIER_SYNC_VS | PS) or dispatch (AC_BARRIER_SYNC_CS) went out, in meta operations too. */
+static inline void
+radv_draw_stats_work(struct radv_cmd_buffer *cmd_buffer, enum ac_barrier_flags flags)
+{
+   const uint8_t work = cmd_buffer->state.meta.inside_meta_op ? RADV_DRAW_STATS_WORK_META : RADV_DRAW_STATS_WORK_APP;
+
+   if (flags & AC_BARRIER_SYNC_PS) {
+      cmd_buffer->draw_stats.work_vs |= work;
+      cmd_buffer->draw_stats.work_ps |= work;
+   }
+   if (flags & AC_BARRIER_SYNC_CS)
+      cmd_buffer->draw_stats.work_cs |= work;
+   cmd_buffer->draw_stats.worked = true;
+}
 
 /* A command of kind (radv_draw_stats_kind, 0 for one that only sets state) counted as stat. */
 #define RADV_DRAW_STATS_COMMAND(cmd_buffer, stat, kind)                                                          \

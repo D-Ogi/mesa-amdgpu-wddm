@@ -329,7 +329,20 @@ enum radv_cs_dump_type {
  * them), cmdbuf_misaligned the command buffers that end, or call secondaries, with such an attachment's
  * writes not yet made coherent (a flush there); xfer_img the
  * transfers to an image (they keep the next transfer-write barrier's CB and DB flush); img_created and
- * img_misaligned the images created, and of them those with a pipe-misaligned mip level. */
+ * img_misaligned the images created, and of them those with a pipe-misaligned mip level.
+ * The waits (radv_draw_stats_wait): wt_vs_*, wt_ps_* and wt_cs_* count the VS, PS and CS partial flushes
+ * of the flushes without a TS event by what they wait for: idle, no draw (dispatch for CS) since the last
+ * wait that covers that stage (the partial flush of the stage or a TS event); need, work that an
+ * application barrier's source stages name (shader stages for the application's draws and dispatches,
+ * transfer stages for RADV's meta operations; work from before the command buffer counts for both); over,
+ * asked for by an application barrier whose source stages name none of the work pending; int, asked for by
+ * RADV itself (meta operations, queries, layout transitions). wt_fl_* count those flushes by their waits:
+ * all idle, none needed but one over, one needed or internal; wt_eop_* the flushes with a TS event by the
+ * work pending: none, dispatches only, draws. src_* count the application's barrier calls by the stages
+ * their source masks name (all commands, all graphics, compute, transfer, fragment, pre-rasterization, ray
+ * tracing and acceleration structures, none); bar_req_* and bar_need_* the calls whose source stages ask
+ * radv_stage_flush for a VS, PS or CS partial flush, and those for which it is needed at the call;
+ * bar_no_work the calls with no draw, dispatch, transfer or query since the previous one. */
 #define RADV_DRAW_STATS_SYNC(X)                                                                             \
    X(fl_emits) X(fl_meta) X(fl_end) X(fl_eop_cbdb) X(fl_eop_cb) X(fl_eop_db) X(fl_eop_bop) X(fl_vs) X(fl_ps) \
    X(fl_cs) X(fl_vgt) X(fl_l2_inv) X(fl_l2_wb) X(fl_l2_meta) X(fl_vmem) X(fl_smem) X(fl_icache) X(fl_pfp)    \
@@ -337,7 +350,12 @@ enum radv_cs_dump_type {
    X(cause_meta_storage) X(cause_dst_cbdb) X(cause_l2_global) X(cause_l2_image) X(tr_calls) X(tr_htile_init) \
    X(tr_htile_expand) X(tr_color_init) X(tr_dcc_decompress) X(tr_fce) X(tr_fmask_decompress)               \
    X(tr_fmask_expand) X(tr_dcc_retile) X(wait_events) X(wait_cp_dma) X(query_copies) X(query_copy_waits)    \
-   X(skip_l2) X(skip_cbdb) X(rp_misaligned) X(cmdbuf_misaligned) X(xfer_img) X(img_created) X(img_misaligned)
+   X(skip_l2) X(skip_cbdb) X(rp_misaligned) X(cmdbuf_misaligned) X(xfer_img) X(img_created) X(img_misaligned) \
+   X(wt_vs_idle) X(wt_vs_need) X(wt_vs_over) X(wt_vs_int) X(wt_ps_idle) X(wt_ps_need) X(wt_ps_over)          \
+   X(wt_ps_int) X(wt_cs_idle) X(wt_cs_need) X(wt_cs_over) X(wt_cs_int) X(wt_fl_idle) X(wt_fl_over)           \
+   X(wt_fl_need) X(wt_eop_idle) X(wt_eop_cs) X(wt_eop_gfx) X(src_all_cmds) X(src_all_gfx) X(src_cs)          \
+   X(src_xfer) X(src_frag) X(src_prerast) X(src_rt) X(src_none) X(bar_req_vs) X(bar_req_ps) X(bar_req_cs)    \
+   X(bar_need_vs) X(bar_need_ps) X(bar_need_cs) X(bar_no_work)
 
 #define RADV_DRAW_STATS(X) RADV_DRAW_STATS_DRAW(X) RADV_DRAW_STATS_SYNC(X)
 
