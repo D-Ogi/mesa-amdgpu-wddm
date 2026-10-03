@@ -773,7 +773,9 @@ radv_wddm2_winsys_query_gpuvm_fault(struct radeon_winsys *rws, struct radv_winsy
 
 VkResult
 radv_wddm2_winsys_create(const struct vk_dx_adapter_info *adapter_info,
-                         const BITSET_WORD *debug_flags, const struct bc250_host *host, bool adapter_query, struct radeon_winsys **winsys)
+                         const BITSET_WORD *debug_flags, const struct bc250_host *host,
+                         const struct bc250_host_policy_values *policy, bool adapter_query,
+                         struct radeon_winsys **winsys)
 {
    VkResult result = VK_SUCCESS;
    struct radv_wddm2_winsys *ws = NULL;
@@ -820,6 +822,10 @@ radv_wddm2_winsys_create(const struct vk_dx_adapter_info *adapter_info,
    ws->refcount = 1;
    ws->cache_key = key;
    if (host) ws->host = *host;
+   /* The host's knobs for this winsys; a host that named none leaves every compiled default, and the
+    * environment is then still read for it (radv_wddm2_bo_init_functions). */
+   if (policy)
+      ws->bc250_policy = *policy;
    ws->adapter_query = adapter_query;
    ws->adapter_luid = adapter_info->adapter_luid;
    ws->chain_ib = !(BITSET_TEST(debug_flags, RADV_DEBUG_NO_IB_CHAINING));

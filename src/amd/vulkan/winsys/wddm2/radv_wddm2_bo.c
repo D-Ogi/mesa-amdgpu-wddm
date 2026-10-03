@@ -1408,11 +1408,11 @@ radv_wddm2_bo_destroy_now(struct radv_wddm2_winsys *ws, struct radv_wddm2_bo *bo
  * it off. Application memory that a submission reaches only through addresses (descriptor buffers,
  * buffer device addresses) is in no BO set: the witness cannot see its use, the hold covers it anyway.
  *
- * The log: C:\BC250\tmp\amdgpu_wddm_radv-deferred-<pid>.log, else the same name in %TEMP%, or the file
- * BC250_DEFERRED_LOG names; each line written through and flushed, and on stderr with
- * AMDGPU_WDDM_LOG=stderr (amdgpu_wddm_log). The knobs come from
- * the environment, else from C:\BC250\tmp\amdgpu_wddm_radv.cfg (KEY=VALUE lines, # for comments;
- * BC250_DEFERRED_CFG names another file), which also reaches a game that Steam starts.
+ * The log: nothing is written unless BC250_DEFERRED_LOG names a file. There is no default path any
+ * more: the driver that an application gets writes into no directory of its own, and a line asked for
+ * is written through and flushed, and goes to stderr as well with AMDGPU_WDDM_LOG=stderr
+ * (amdgpu_wddm_log). The submission-path knobs are the host's (struct bc250_host_policy version 2);
+ * every other knob, and every knob the host did not name, is read from the environment alone.
  */
 struct radv_wddm2_deferred_bo {
    struct list_head link;
@@ -1460,24 +1460,24 @@ radv_wddm2_deferred_log_open_locked(void)
       return;
    radv_wddm2_deferred_log_opened = true;
 #ifdef _WIN32
-   const unsigned long pid = GetCurrentProcessId();
+   /* A file is written only where BC250_DEFERRED_LOG names one. An installed driver creates no file of its
+    * own: until 2026-10-03 this opened C:\BC250\tmp\amdgpu_wddm_radv-deferred-<pid>.log on every bc250 winsys
+    * and fell back to %TEMP%, so every process that loaded the ICD, dwm.exe included, left a write-through
+    * flushed log behind in a hardcoded lab directory. The witness still runs and its lines still reach
+    * amdgpu_wddm_log and, under AMDGPU_WDDM_DDI_TRACE=2, the debugger; they just have nowhere to land by
+    * default. %s of the name is "(none)" then, which the header line prints. */
    char path[512];
    HANDLE file = INVALID_HANDLE_VALUE;
    if (radv_wddm2_deferred_log_knob[0]) {
-      snprintf(path, sizeof(path), "%s", radv_wddm2_deferred_log_knob);
+      /* %p in the name is this process's id, so one setting gives a game and its helper a file each, the
+       * way the old hardcoded name did. Without it they would share one file and interleave. */
+      const char *mark = strstr(radv_wddm2_deferred_log_knob, "%p");
+      if (mark)
+         snprintf(path, sizeof(path), "%.*s%lu%s", (int)(mark - radv_wddm2_deferred_log_knob),
+                  radv_wddm2_deferred_log_knob, (unsigned long)GetCurrentProcessId(), mark + 2);
+      else
+         snprintf(path, sizeof(path), "%s", radv_wddm2_deferred_log_knob);
       file = radv_wddm2_deferred_log_try(path);
-   }
-   if (file == INVALID_HANDLE_VALUE) {
-      snprintf(path, sizeof(path), "C:\\BC250\\tmp\\amdgpu_wddm_radv-deferred-%lu.log", pid);
-      file = radv_wddm2_deferred_log_try(path);
-   }
-   if (file == INVALID_HANDLE_VALUE) {
-      char temp[MAX_PATH + 1];
-      const DWORD n = GetTempPathA(sizeof(temp), temp);
-      if (n && n < sizeof(temp)) {
-         snprintf(path, sizeof(path), "%samdgpu_wddm_radv-deferred-%lu.log", temp, pid);
-         file = radv_wddm2_deferred_log_try(path);
-      }
    }
    if (file != INVALID_HANDLE_VALUE) {
       LARGE_INTEGER zero = {0};
@@ -1498,8 +1498,8 @@ radv_wddm2_deferred_log_path(void)
    return radv_wddm2_deferred_log_name;
 }
 
-/* The log file always, stderr with AMDGPU_WDDM_LOG=stderr; with AMDGPU_WDDM_DDI_TRACE=2 also the debugger, at
- * most 256 lines. */
+/* The log file when BC250_DEFERRED_LOG named one (by default there is none), stderr with
+ * AMDGPU_WDDM_LOG=stderr; with AMDGPU_WDDM_DDI_TRACE=2 also the debugger, at most 256 lines. */
 static void
 radv_wddm2_deferred_line(const char *format, ...)
 {
@@ -1541,69 +1541,18 @@ radv_wddm2_deferred_line(const char *format, ...)
 #endif
 }
 
-/* The knobs: the environment first, then the configuration file, read once per winsys creation. */
-struct radv_wddm2_knobs {
-   char path[512];
-   char *text; /* the file, NUL-terminated; NULL if it could not be read */
-};
-
-static void
-radv_wddm2_knobs_load(struct radv_wddm2_knobs *knobs)
-{
-   const char *env = getenv("BC250_DEFERRED_CFG");
-   snprintf(knobs->path, sizeof(knobs->path), "%s",
-            env && *env ? env : "C:\\BC250\\tmp\\amdgpu_wddm_radv.cfg");
-   knobs->text = NULL;
-   FILE *file = fopen(knobs->path, "rb");
-   if (!file)
-      return;
-   char *text = calloc(1, 65537);
-   if (text)
-      text[fread(text, 1, 65536, file)] = 0;
-   fclose(file);
-   knobs->text = text;
-}
-
-/* The value of key, or NULL; source says where it came from. */
+/* The knobs. The host decides the submission-path ones in its own binary (struct bc250_host_policy,
+ * version 2); for every knob the host did not name, the environment is read, so a bisect needs no new
+ * binary. The machine-wide file C:\BC250\tmp\amdgpu_wddm_radv.cfg is gone: every process that loaded
+ * this ICD read it, dwm.exe on the GPU desktop route included, and no trial ever recorded its contents,
+ * so it could change a measured run invisibly. */
 static const char *
-radv_wddm2_knob(const struct radv_wddm2_knobs *knobs, const char *key, char *buf, size_t size, const char **source)
+radv_wddm2_knob(const char *key, const char **source)
 {
    const char *env = getenv(key);
    if (env && *env) {
       *source = "env";
       return env;
-   }
-   const size_t key_len = strlen(key);
-   for (const char *line = knobs->text; line && *line;) {
-      const char *end = strpbrk(line, "\r\n");
-      size_t len = end ? (size_t)(end - line) : strlen(line);
-      const char *p = line;
-      while (len && (*p == ' ' || *p == '\t')) {
-         p++;
-         len--;
-      }
-      if (len > key_len && !strncmp(p, key, key_len)) {
-         const char *q = p + key_len;
-         size_t rest = len - key_len;
-         while (rest && (*q == ' ' || *q == '\t')) {
-            q++;
-            rest--;
-         }
-         if (rest && *q == '=') {
-            q++;
-            rest--;
-            while (rest && (*q == ' ' || *q == '\t')) {
-               q++;
-               rest--;
-            }
-            while (rest && (q[rest - 1] == ' ' || q[rest - 1] == '\t'))
-               rest--;
-            snprintf(buf, size, "%.*s", (int)rest, q);
-            *source = "cfg";
-            return buf;
-         }
-      }
-      line = end ? end + 1 : NULL;
    }
    *source = "default";
    return NULL;
@@ -2789,17 +2738,18 @@ radv_wddm2_bo_init_functions(struct radv_wddm2_winsys *ws)
    ws->deferred.locked_interval_ns = 1000000000ull;
 
    /* Only the bc250 path has per-queue progress fences to wait on. */
-   struct radv_wddm2_knobs knobs;
-   radv_wddm2_knobs_load(&knobs);
-   char destroy_buf[64], witness_buf[64], cap_buf[64], log_buf[512];
+   const struct bc250_host_policy_values *policy = &ws->bc250_policy;
    const char *destroy_from, *witness_from, *cap_from, *log_from;
-   const char *destroy = radv_wddm2_knob(&knobs, "BC250_DEFERRED_DESTROY", destroy_buf, sizeof(destroy_buf),
-                                         &destroy_from);
-   const char *witness = radv_wddm2_knob(&knobs, "BC250_DEFERRED_WITNESS", witness_buf, sizeof(witness_buf),
-                                         &witness_from);
-   const char *cap = radv_wddm2_knob(&knobs, "BC250_DEFERRED_CAP_MB", cap_buf, sizeof(cap_buf), &cap_from);
-   const char *log_path = radv_wddm2_knob(&knobs, "BC250_DEFERRED_LOG", log_buf, sizeof(log_buf), &log_from);
-   ws->deferred.enabled = ws->bc250 && !(destroy && !strcmp(destroy, "0"));
+   const char *destroy = radv_wddm2_knob("BC250_DEFERRED_DESTROY", &destroy_from);
+   const char *witness = radv_wddm2_knob("BC250_DEFERRED_WITNESS", &witness_from);
+   const char *cap = radv_wddm2_knob("BC250_DEFERRED_CAP_MB", &cap_from);
+   const char *log_path = radv_wddm2_knob("BC250_DEFERRED_LOG", &log_from);
+   if (bc250_host_policy_has(policy, BC250_HOST_POLICY_HAS_DEFERRED_DESTROY)) {
+      ws->deferred.enabled = ws->bc250 && policy->deferred_destroy != 0;
+      destroy_from = "host";
+   } else {
+      ws->deferred.enabled = ws->bc250 && !(destroy && !strcmp(destroy, "0"));
+   }
    ws->deferred.witness = ws->bc250 && !(witness && !strcmp(witness, "0"));
    /* 512 MiB by default: a BO is held for the GPU's in-flight depth (a few frames), and 512 MiB covers
     * the frees of a heavy streaming burst over that window while it stays about 3 % of the 16 GiB the
@@ -2817,15 +2767,11 @@ radv_wddm2_bo_init_functions(struct radv_wddm2_winsys *ws)
 
    /* The periodic summary: 30 s is about 900 frames at the lab's 30 fps, 14 periods (up to two lines
     * each) in a 7-minute session. */
-   char summary_buf[64], coalesce_buf[64], slots_buf[64], progress_buf[64];
    const char *summary_from, *coalesce_from, *slots_from, *progress_from;
-   const char *summary = radv_wddm2_knob(&knobs, "BC250_DEFERRED_SUMMARY_S", summary_buf, sizeof(summary_buf),
-                                         &summary_from);
-   const char *coalesce = radv_wddm2_knob(&knobs, "BC250_SUBMIT_COALESCE", coalesce_buf, sizeof(coalesce_buf),
-                                          &coalesce_from);
-   const char *slots = radv_wddm2_knob(&knobs, "BC250_GATHER_SLOTS", slots_buf, sizeof(slots_buf), &slots_from);
-   const char *progress = radv_wddm2_knob(&knobs, "BC250_PROGRESS_FENCE", progress_buf, sizeof(progress_buf),
-                                          &progress_from);
+   const char *summary = radv_wddm2_knob("BC250_DEFERRED_SUMMARY_S", &summary_from);
+   const char *coalesce = radv_wddm2_knob("BC250_SUBMIT_COALESCE", &coalesce_from);
+   const char *slots = radv_wddm2_knob("BC250_GATHER_SLOTS", &slots_from);
+   const char *progress = radv_wddm2_knob("BC250_PROGRESS_FENCE", &progress_from);
    uint64_t summary_s = 30;
    if (summary) {
       char *end = NULL;
@@ -2844,7 +2790,12 @@ radv_wddm2_bo_init_functions(struct radv_wddm2_winsys *ws)
     * "signals" or "waits" does only that one; 0 neither, as before. */
    ws->bc250_merge_signals = true;
    ws->bc250_drop_waits = true;
-   if (coalesce) {
+   /* A knob the host named is the host's: the environment is not asked for it at all. */
+   if (bc250_host_policy_has(policy, BC250_HOST_POLICY_HAS_COALESCE)) {
+      ws->bc250_merge_signals = (policy->coalesce & BC250_HOST_POLICY_COALESCE_SIGNALS) != 0;
+      ws->bc250_drop_waits = (policy->coalesce & BC250_HOST_POLICY_COALESCE_WAITS) != 0;
+      coalesce_from = "host";
+   } else if (coalesce) {
       if (!strcmp(coalesce, "0"))
          ws->bc250_merge_signals = ws->bc250_drop_waits = false;
       else if (!strcmp(coalesce, "signals"))
@@ -2858,7 +2809,10 @@ radv_wddm2_bo_init_functions(struct radv_wddm2_winsys *ws)
     * the CPU for the oldest to retire. 16 lets the submitting thread run about three frames ahead at
     * the five submissions a frame of session 217, where 7 held it to 1.3. */
    ws->bc250_gather_slots = BC250_GATHER_SLOTS_DEFAULT;
-   if (slots) {
+   if (bc250_host_policy_has(policy, BC250_HOST_POLICY_HAS_GATHER_SLOTS)) {
+      ws->bc250_gather_slots = policy->gather_slots; /* the instance validated the range */
+      slots_from = "host";
+   } else if (slots) {
       char *end = NULL;
       const unsigned long value = strtoul(slots, &end, 10);
       if (end != slots && !*end && value >= BC250_GATHER_SLOTS_MIN && value <= BC250_GATHER_SLOTS_MAX)
@@ -2870,7 +2824,10 @@ radv_wddm2_bo_init_functions(struct radv_wddm2_winsys *ws)
     * progress value (radv_wddm2_cs.c, bc250_emit_progress_write), so that fence takes no kernel signal;
     * "kernel" signals it through SignalSynchronizationObjectFromGpu2, as version 2 did. */
    ws->bc250_progress_gpu = true;
-   if (progress) {
+   if (bc250_host_policy_has(policy, BC250_HOST_POLICY_HAS_PROGRESS_GPU)) {
+      ws->bc250_progress_gpu = policy->progress_gpu != 0;
+      progress_from = "host";
+   } else if (progress) {
       if (!strcmp(progress, "kernel"))
          ws->bc250_progress_gpu = false;
       else if (strcmp(progress, "gpu"))
@@ -2879,9 +2836,8 @@ radv_wddm2_bo_init_functions(struct radv_wddm2_winsys *ws)
    /* BC250_DRAW_STATS=1: RADV counts what the application records in its command buffers
     * (RADV_DRAW_STATS, radv_cmd_buffer.c) for a third summary line. Off by default; when off, a
     * command buffer pays one branch per counted command and the log is unchanged. */
-   char draw_buf[64];
    const char *draw_from;
-   const char *draw = radv_wddm2_knob(&knobs, "BC250_DRAW_STATS", draw_buf, sizeof(draw_buf), &draw_from);
+   const char *draw = radv_wddm2_knob("BC250_DRAW_STATS", &draw_from);
    if (ws->bc250 && draw && !strcmp(draw, "1"))
       ws->base.draw_stats_add = radv_wddm2_draw_stats_add;
 
@@ -2897,20 +2853,19 @@ radv_wddm2_bo_init_functions(struct radv_wddm2_winsys *ws)
       if (log_path && !radv_wddm2_deferred_log_opened)
          snprintf(radv_wddm2_deferred_log_knob, sizeof(radv_wddm2_deferred_log_knob), "%s", log_path);
       simple_mtx_unlock(&radv_wddm2_deferred_log_mtx);
-      radv_wddm2_deferred_line("header version=3 destroy=%s(%s) witness=%s(%s) cap_mb=%" PRIu64
-                               "(%s) cfg=%s(%s) log=%s(%s) summary_s=%" PRIu64 "(%s) coalesce=%s(%s)"
+      radv_wddm2_deferred_line("header version=4 destroy=%s(%s) witness=%s(%s) cap_mb=%" PRIu64
+                               "(%s) policy=%s/%02x log=%s(%s) summary_s=%" PRIu64 "(%s) coalesce=%s(%s)"
                                " gather_slots=%u(%s) progress_fence=%s(%s)",
                                ws->deferred.enabled ? "on" : "off", destroy_from,
-                               ws->deferred.witness ? "on" : "off", witness_from, cap_mb, cap_from, knobs.path,
-                               knobs.text ? "read" : "absent", radv_wddm2_deferred_log_path(), log_from, summary_s,
+                               ws->deferred.witness ? "on" : "off", witness_from, cap_mb, cap_from,
+                               policy->present ? "host" : "absent", policy->specified,
+                               radv_wddm2_deferred_log_path(), log_from, summary_s,
                                summary_from, radv_wddm2_coalesce_name(ws), coalesce_from, ws->bc250_gather_slots,
                                slots_from, ws->bc250_progress_gpu ? "gpu" : "kernel", progress_from);
       if (ws->base.draw_stats_add)
          radv_wddm2_deferred_line("draw stats on (%s): counters of every application command buffer, in the "
                                   "summary's draw line", draw_from);
    }
-   free(knobs.text);
-
    ws->base.buffer_from_hosted=radv_wddm2_bo_from_hosted;
    ws->base.buffer_create = radv_wddm2_bo_create;
    ws->base.buffer_destroy = radv_wddm2_bo_destroy;

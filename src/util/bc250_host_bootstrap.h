@@ -5,6 +5,7 @@
  */
 #ifndef BC250_HOST_BOOTSTRAP_H
 #define BC250_HOST_BOOTSTRAP_H
+#include <stddef.h>
 #include <stdint.h>
 #define BC250_HOST_STYPE 0x42434831u
 #define BC250_HOST_VERSION 5u
@@ -26,17 +27,74 @@ struct bc250_host_adapter_query {
 /* Policy of the host for this instance. Chained next to struct bc250_host; a host that does not chain
  * it leaves every decision where it was. With the structure present the host alone decides on sparse
  * binding: BC250_HOST_POLICY_SPARSE turns it on, its absence turns it off, and the process environment
- * is not asked. reserved is zero. */
+ * is not asked. reserved is zero.
+ *
+ * Version 2 adds the submission-path knobs the winsys used to take from the environment and from the
+ * machine-wide file C:\BC250\tmp\amdgpu_wddm_radv.cfg. That file is gone (it was read by every process
+ * that loaded this ICD, dwm.exe on the GPU desktop route included, and no trial recorded its contents),
+ * so a host that wants a value other than the compiled default states it here, in its own binary.
+ *
+ * The host names in `specified` the knobs it is deciding, and only those fields are read. A knob the host
+ * does not name keeps the compiled default, which is the value the lab validated; the environment is then
+ * still consulted for it, so a bisect needs no new binary. Version 1, and a version 2 with specified 0,
+ * therefore behave exactly as before minus the file. */
 #define BC250_HOST_POLICY_STYPE 0x42434836u
-#define BC250_HOST_POLICY_VERSION 1u
+#define BC250_HOST_POLICY_VERSION 2u
 #define BC250_HOST_POLICY_SPARSE 1u
 #define BC250_HOST_POLICY_KNOWN_FLAGS BC250_HOST_POLICY_SPARSE
+/* Bits of `specified`, each naming one field of version 2. */
+#define BC250_HOST_POLICY_HAS_COALESCE 1u      /* coalesce: BC250_HOST_POLICY_COALESCE_* bits */
+#define BC250_HOST_POLICY_HAS_GATHER_SLOTS 2u  /* gather_slots: 4..32 submissions in flight per queue */
+#define BC250_HOST_POLICY_HAS_PROGRESS_GPU 4u  /* progress_gpu: 1 the GPU writes the progress value, 0 the kernel */
+#define BC250_HOST_POLICY_HAS_DEFERRED_DESTROY 8u /* deferred_destroy: 1 holds a freed BO until the GPU passed it, 0 frees at once */
+#define BC250_HOST_POLICY_KNOWN_SPECIFIED                                                                              \
+   (BC250_HOST_POLICY_HAS_COALESCE | BC250_HOST_POLICY_HAS_GATHER_SLOTS | BC250_HOST_POLICY_HAS_PROGRESS_GPU |          \
+    BC250_HOST_POLICY_HAS_DEFERRED_DESTROY)
+/* coalesce: merge the progress signal into the application's signal, and drop GPU waits the CPU already
+ * saw complete. Both are the compiled default. */
+#define BC250_HOST_POLICY_COALESCE_SIGNALS 1u
+#define BC250_HOST_POLICY_COALESCE_WAITS 2u
+#define BC250_HOST_POLICY_COALESCE_KNOWN (BC250_HOST_POLICY_COALESCE_SIGNALS | BC250_HOST_POLICY_COALESCE_WAITS)
+/* The accepted range of gather_slots, the contract's copy of BC250_GATHER_SLOTS_MIN/MAX; radv_wddm2_cs.h
+ * asserts the two agree. The instance validates against these without reaching into the winsys. */
+#define BC250_HOST_POLICY_GATHER_SLOTS_MIN 4u
+#define BC250_HOST_POLICY_GATHER_SLOTS_MAX 32u
 struct bc250_host_policy {
    uint32_t sType;
    const void *pNext;
    uint32_t version, size;
    uint32_t flags, reserved;
+   /* version 2 and later */
+   uint32_t specified;    /* BC250_HOST_POLICY_HAS_* */
+   uint32_t coalesce;     /* BC250_HOST_POLICY_COALESCE_* */
+   uint32_t gather_slots; /* 4..32 */
+   uint32_t progress_gpu; /* 0 or 1 */
+   uint32_t deferred_destroy; /* 0 or 1 */
+   uint32_t reserved2;        /* zero */
 };
+/* A version 1 policy is the structure up to `specified`, so its size is that offset. Both endpoints are
+ * built together, but a host built before version 2 keeps working: see radv_instance.c. */
+#define BC250_HOST_POLICY_SIZE_V1 ((uint32_t)offsetof(struct bc250_host_policy, specified))
+#if defined(_M_X64) || defined(__x86_64__)
+#ifdef __cplusplus
+static_assert(BC250_HOST_POLICY_SIZE_V1 == 32, "bc250_host_policy version 1 layout");
+static_assert(sizeof(bc250_host_policy) == 56, "bc250_host_policy version 2 layout");
+#else
+_Static_assert(BC250_HOST_POLICY_SIZE_V1 == 32, "bc250_host_policy version 1 layout");
+_Static_assert(sizeof(struct bc250_host_policy) == 56, "bc250_host_policy version 2 layout");
+#endif
+#endif
+/* The host's values for the winsys, as a copy the instance keeps. present is 0 for a host that chained no
+ * policy, and specified is 0 unless the policy was version 2 or later. */
+struct bc250_host_policy_values {
+   int present;
+   uint32_t flags, specified, coalesce, gather_slots, progress_gpu, deferred_destroy;
+};
+/* Whether the host decided this knob; the caller reads the matching field only then. */
+static inline int bc250_host_policy_has(const struct bc250_host_policy_values *values, uint32_t bit)
+{
+   return values && values->present && (values->specified & bit) != 0;
+}
 /* The sparse bit of an instance's experimental flags: the host's when it chained a policy, the
  * environment's otherwise. */
 static inline int bc250_host_policy_sparse_bit(int present, uint32_t flags, int environment)

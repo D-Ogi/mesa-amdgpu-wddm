@@ -575,6 +575,10 @@ fake_dispatch(void *userdata, uint32_t op, void *arg)
    }
 }
 
+/* The host's policy for the next make_ws, as radv_wddm2_winsys_create would have copied it in;
+ * NULL is a host that chained none. */
+static const struct bc250_host_policy_values *ws_policy;
+
 static struct radv_wddm2_winsys *
 make_ws(void)
 {
@@ -583,6 +587,8 @@ make_ws(void)
 
    struct radv_wddm2_winsys *ws = calloc(1, sizeof(*ws));
    ws->bc250 = true;
+   if (ws_policy)
+      ws->bc250_policy = *ws_policy;
    ws->host.sType = BC250_HOST_STYPE;
    ws->host.version = BC250_HOST_VERSION;
    ws->host.size = sizeof(ws->host);
@@ -1956,8 +1962,18 @@ cpu_wait_is(int index, uint32_t fence, uint64_t value)
 static const char *
 log_file(void)
 {
+   static char expanded[512];
    const char *path = getenv("BC250_DEFERRED_LOG");
-   return path && *path ? path : "deferred-test.log";
+   if (!path || !*path)
+      return "deferred-test.log";
+   /* The ICD expands %p in the name to the process id; a test that reads the log back does the same. */
+   const char *mark = strstr(path, "%p");
+   if (!mark)
+      return path;
+   if (!expanded[0])
+      snprintf(expanded, sizeof(expanded), "%.*s%lu%s", (int)(mark - path), path,
+               (unsigned long)GetCurrentProcessId(), mark + 2);
+   return expanded;
 }
 
 static char log_text[1 << 20];
@@ -2265,7 +2281,8 @@ test_deferred_witness(void)
    check(log_lines(lm, "witness in flight #1 ", line, sizeof(line)) == 1 && has(line, "class=cpu-upload size=65536 ") &&
             has(line, "flags=0x143(GTT_WC|CPU_ACCESS|NO_INTERPROCESS_SHARING|32BIT)") && has(line, "prio=30 ") &&
             has(line, "32bit=yes ") && has(line, "last_use=1 completed=0 published=1 held=yes ") &&
-            has(line, "bt=radv_wddm2_queue_binding_test.exe+0x"),
+            /* The module name is the harness's: build-radv-queue-tests.ps1 links queue-test.exe. */
+            has(line, ".exe+0x"),
          "its line names the class, size, flags, priority, the values and the destroy stack: %.200s", line);
 
    ws->base.buffer_destroy(&ws->base, unnamed);
@@ -2386,47 +2403,33 @@ test_deferred_witness(void)
    contract();
 }
 
+/* The knobs with no file: the environment alone, and the host's policy over it. */
 static void
-test_deferred_cfg(void)
+test_deferred_policy(void)
 {
-   char cfg[MAX_PATH], saved[MAX_PATH] = "";
-   const char *runner = getenv("BC250_DEFERRED_CFG");
-   if (runner)
-      snprintf(saved, sizeof(saved), "%s", runner);
-   snprintf(cfg, sizeof(cfg), "%s.cfg", log_file());
-   FILE *f = fopen(cfg, "wb");
-   if (!f) {
-      check(false, "configuration file %s", cfg);
-      return;
-   }
-   fputs("# deferred destruction\r\nBC250_DEFERRED_CAP_MB = 3\r\n  BC250_DEFERRED_WITNESS=0\r\n"
-         "BC250_DEFERRED_DESTROY=1   \r\nBC250_DEFERRED_CAP_MBX=9\r\n"
-         "BC250_DEFERRED_SUMMARY_S=5\r\nBC250_SUBMIT_COALESCE = signals\r\nBC250_GATHER_SLOTS=24\r\n"
-         "BC250_PROGRESS_FENCE = kernel\r\n",
-         f);
-   fclose(f);
-   _putenv_s("BC250_DEFERRED_CFG", cfg);
+   char line[4096];
    clear_deferred_env();
 
    long lm = log_mark();
    struct radv_wddm2_winsys *ws = make_ws();
-   char line[4096];
-   check(ws->deferred.enabled && !ws->deferred.witness && ws->deferred.cap_bytes == 3ull << 20,
-         "the file sets the knobs (a game Steam starts gets none of our environment)");
-   check(log_lines(lm, "deferred destroy: header version=3 ", line, sizeof(line)) == 1 &&
-            has(line, "destroy=on(cfg) witness=off(cfg) cap_mb=3(cfg) ") && has(line, "(read)") &&
-            has(line, " summary_s=5(cfg) coalesce=signals(cfg) gather_slots=24(cfg) progress_fence=kernel(cfg)"),
-         "the header says where each value came from: %.300s", line);
-   check(ws->summary.interval_ns == 5000000000ull && ws->bc250_merge_signals && !ws->bc250_drop_waits &&
-            ws->bc250_gather_slots == 24 && !ws->bc250_progress_gpu,
-         "the file sets the summary period, the coalescing, the gather slots and the progress fence");
+   check(ws->deferred.enabled && ws->deferred.witness && ws->deferred.cap_bytes == 512ull << 20 &&
+            log_lines(lm, "deferred destroy: header version=4 ", line, sizeof(line)) == 1 &&
+            has(line, "destroy=on(default) witness=on(default) cap_mb=512(default) ") &&
+            has(line, " policy=absent/00 ") &&
+            has(line, " summary_s=30(default) coalesce=on(default) gather_slots=16(default) progress_fence=gpu(default)"),
+         "no file and no policy: the compiled defaults, and the header says so: %.300s", line);
+   check(ws->bc250_gather_slots == 16 && ws->bc250_merge_signals && ws->bc250_drop_waits && ws->bc250_progress_gpu &&
+            ws->summary.interval_ns == 30000000000ull && ws->summary.next_ns == ws->summary.start_ns + 30000000000ull,
+         "defaults: 16 slots, both coalescings, a summary every 30 s from creation");
 
+   /* The environment, key by key, for a host that named nothing. */
    _putenv_s("BC250_DEFERRED_CAP_MB", "7");
+   _putenv_s("BC250_DEFERRED_WITNESS", "0");
    lm = log_mark();
    ws = make_ws();
    check(ws->deferred.cap_bytes == 7ull << 20 && !ws->deferred.witness &&
-            log_lines(lm, "cap_mb=7(env)", NULL, 0) == 1,
-         "the environment wins over the file, key by key");
+            log_lines(lm, "cap_mb=7(env)", NULL, 0) == 1 && log_lines(lm, "witness=off(env)", NULL, 0) == 1,
+         "the environment sets a knob the host did not name");
    _putenv_s("BC250_DEFERRED_CAP_MB", "lots");
    lm = log_mark();
    ws = make_ws();
@@ -2437,7 +2440,6 @@ test_deferred_cfg(void)
    check(!ws->deferred.cap_bytes, "BC250_DEFERRED_CAP_MB=0: no cap");
    clear_deferred_env();
 
-   /* The new knobs: the environment wins, and an invalid value or one out of range is the default. */
    _putenv_s("BC250_GATHER_SLOTS", "4");
    _putenv_s("BC250_SUBMIT_COALESCE", "waits");
    _putenv_s("BC250_DEFERRED_SUMMARY_S", "0");
@@ -2465,25 +2467,48 @@ test_deferred_cfg(void)
             log_lines(lm, " summary_s=30(invalid, default) coalesce=on(invalid, default)", NULL, 0) == 1 &&
             log_lines(lm, " progress_fence=gpu(invalid, default)", NULL, 0) == 1,
          "an invalid coalescing, period or progress fence: the defaults");
-   _putenv_s("BC250_PROGRESS_FENCE", "gpu");
-   lm = log_mark();
-   ws = make_ws();
-   check(ws->bc250_progress_gpu && log_lines(lm, " progress_fence=gpu(env)", NULL, 0) == 1,
-         "BC250_PROGRESS_FENCE=gpu in the environment wins over the file's kernel");
    clear_deferred_env();
 
-   remove(cfg);
+   /* A host that names a knob owns it: the environment is not asked, and the header says host. */
+   static const struct bc250_host_policy_values named = {
+      .present = 1,
+      .specified = BC250_HOST_POLICY_HAS_COALESCE | BC250_HOST_POLICY_HAS_GATHER_SLOTS |
+                   BC250_HOST_POLICY_HAS_PROGRESS_GPU | BC250_HOST_POLICY_HAS_DEFERRED_DESTROY,
+      .coalesce = BC250_HOST_POLICY_COALESCE_SIGNALS,
+      .gather_slots = 24,
+      .progress_gpu = 0,
+      .deferred_destroy = 0,
+   };
+   _putenv_s("BC250_SUBMIT_COALESCE", "0");
+   _putenv_s("BC250_GATHER_SLOTS", "8");
+   _putenv_s("BC250_PROGRESS_FENCE", "gpu");
+   _putenv_s("BC250_DEFERRED_DESTROY", "1");
+   ws_policy = &named;
    lm = log_mark();
    ws = make_ws();
-   check(ws->deferred.enabled && ws->deferred.witness && ws->deferred.cap_bytes == 512ull << 20 &&
-            log_lines(lm, "destroy=on(default) witness=on(default) cap_mb=512(default) ", line, sizeof(line)) == 1 &&
-            has(line, "(absent)") &&
-            has(line, " summary_s=30(default) coalesce=on(default) gather_slots=16(default) progress_fence=gpu(default)"),
-         "no file: the defaults: %.300s", line);
-   check(ws->bc250_gather_slots == 16 && ws->bc250_merge_signals && ws->bc250_drop_waits && ws->bc250_progress_gpu &&
-            ws->summary.interval_ns == 30000000000ull && ws->summary.next_ns == ws->summary.start_ns + 30000000000ull,
-         "defaults: 16 slots, both coalescings, a summary every 30 s from creation");
-   _putenv_s("BC250_DEFERRED_CFG", saved);
+   check(ws->bc250_merge_signals && !ws->bc250_drop_waits && ws->bc250_gather_slots == 24 &&
+            !ws->bc250_progress_gpu && !ws->deferred.enabled,
+         "the host's four values stand although the environment says otherwise for every one of them");
+   check(log_lines(lm, "deferred destroy: header version=4 ", line, sizeof(line)) == 1 &&
+            has(line, "destroy=off(host) ") && has(line, " policy=host/0f ") &&
+            has(line, " coalesce=signals(host) gather_slots=24(host) progress_fence=kernel(host)"),
+         "the header names the host for each: %.300s", line);
+   check(ws->deferred.witness && log_lines(lm, "witness=on(default)", NULL, 0) == 1,
+         "a knob the host did not name is untouched by the policy");
+
+   /* A host that names nothing (a version 1 policy, or a version 2 with specified 0) leaves the
+    * environment in charge, which is what every trial before this change measured. */
+   static const struct bc250_host_policy_values silent = {.present = 1};
+   ws_policy = &silent;
+   lm = log_mark();
+   ws = make_ws();
+   check(ws->bc250_gather_slots == 8 && !ws->bc250_merge_signals && !ws->bc250_drop_waits &&
+            ws->bc250_progress_gpu && ws->deferred.enabled &&
+            log_lines(lm, " policy=host/00 ", NULL, 0) == 1 &&
+            log_lines(lm, "gather_slots=8(env)", NULL, 0) == 1,
+         "a policy that names no knob: the environment, as before, and policy=host/00 in the header");
+   ws_policy = NULL;
+   clear_deferred_env();
    contract();
 }
 
@@ -4449,7 +4474,7 @@ static const struct {
    {"deferred_oom", test_deferred_oom},
    {"deferred_teardown", test_deferred_teardown},
    {"deferred_witness", test_deferred_witness},
-   {"deferred_cfg", test_deferred_cfg},
+   {"deferred_policy", test_deferred_policy},
    {"deferred_cost", test_deferred_cost},
    {"submit_coalesce", test_submit_coalesce},
    {"coalesce_hold", test_coalesce_hold},

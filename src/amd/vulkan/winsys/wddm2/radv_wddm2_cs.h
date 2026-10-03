@@ -29,6 +29,7 @@
 #define RADV_WDDM2_CS_H
 
 #include "radv_wddm2_winsys.h"
+#include "util/bc250_host_bootstrap.h"
 #include "radv_radeon_winsys.h"
 
 #include <stdint.h>
@@ -45,6 +46,9 @@ struct vk_wddm2_fence {
 #define BC250_GATHER_SLOTS_MIN     4u
 #define BC250_GATHER_SLOTS_DEFAULT 16u
 #define BC250_GATHER_SLOTS_MAX     32u
+_Static_assert(BC250_GATHER_SLOTS_MIN == BC250_HOST_POLICY_GATHER_SLOTS_MIN &&
+                  BC250_GATHER_SLOTS_MAX == BC250_HOST_POLICY_GATHER_SLOTS_MAX,
+               "the host policy contract and the winsys agree on the gather-slot range");
 struct bc250_gather_slot {
    struct radeon_winsys_bo *bo;
    uint8_t *map;

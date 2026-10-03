@@ -273,12 +273,41 @@ radv_instance_parse_bc250(struct radv_instance *instance, const VkInstanceCreate
          instance->bc250_adapter_query = true;
       } else if ((uint32_t)ext->sType == BC250_HOST_POLICY_STYPE) {
          const struct bc250_host_policy *policy = (const void *)ext;
-         if (instance->bc250_policy || policy->version != BC250_HOST_POLICY_VERSION ||
-             policy->size != sizeof(*policy) || (policy->flags & ~BC250_HOST_POLICY_KNOWN_FLAGS) ||
+         /* Version 1 is the structure up to `specified` and names no knob: a host built before the knobs
+          * moved here keeps working unchanged, which is why the size is checked against the version and
+          * not only against sizeof. Anything newer than we know is refused rather than half-read. */
+         if (instance->bc250_policy_values.present || (policy->flags & ~BC250_HOST_POLICY_KNOWN_FLAGS) ||
              policy->reserved)
             return VK_ERROR_INITIALIZATION_FAILED;
-         instance->bc250_policy = true;
-         instance->bc250_policy_flags = policy->flags;
+         if (policy->version == 1u) {
+            if (policy->size != BC250_HOST_POLICY_SIZE_V1)
+               return VK_ERROR_INITIALIZATION_FAILED;
+         } else if (policy->version == BC250_HOST_POLICY_VERSION) {
+            if (policy->size != sizeof(*policy) || (policy->specified & ~BC250_HOST_POLICY_KNOWN_SPECIFIED) ||
+                policy->reserved2)
+               return VK_ERROR_INITIALIZATION_FAILED;
+            if ((policy->specified & BC250_HOST_POLICY_HAS_COALESCE) &&
+                (policy->coalesce & ~BC250_HOST_POLICY_COALESCE_KNOWN))
+               return VK_ERROR_INITIALIZATION_FAILED;
+            if ((policy->specified & BC250_HOST_POLICY_HAS_GATHER_SLOTS) &&
+                (policy->gather_slots < BC250_HOST_POLICY_GATHER_SLOTS_MIN ||
+                 policy->gather_slots > BC250_HOST_POLICY_GATHER_SLOTS_MAX))
+               return VK_ERROR_INITIALIZATION_FAILED;
+            if (((policy->specified & BC250_HOST_POLICY_HAS_PROGRESS_GPU) && policy->progress_gpu > 1) ||
+                ((policy->specified & BC250_HOST_POLICY_HAS_DEFERRED_DESTROY) && policy->deferred_destroy > 1))
+               return VK_ERROR_INITIALIZATION_FAILED;
+         } else {
+            return VK_ERROR_INITIALIZATION_FAILED;
+         }
+         instance->bc250_policy_values.present = 1;
+         instance->bc250_policy_values.flags = policy->flags;
+         if (policy->version >= 2u) {
+            instance->bc250_policy_values.specified = policy->specified;
+            instance->bc250_policy_values.coalesce = policy->coalesce;
+            instance->bc250_policy_values.gather_slots = policy->gather_slots;
+            instance->bc250_policy_values.progress_gpu = policy->progress_gpu;
+            instance->bc250_policy_values.deferred_destroy = policy->deferred_destroy;
+         }
       } else if ((uint32_t)ext->sType == BC250_HOST_QUEUE_BINDING_STYPE) {
          const struct bc250_host_queue_binding *binding = (const void *)ext;
          if (binding->version != BC250_HOST_QUEUE_BINDING_VERSION || binding->size != sizeof(*binding) ||
@@ -288,7 +317,7 @@ radv_instance_parse_bc250(struct radv_instance *instance, const VkInstanceCreate
       }
    }
 
-   if ((instance->bc250_adapter_query || instance->bc250_policy) && !instance->bc250_host.dispatch)
+   if ((instance->bc250_adapter_query || instance->bc250_policy_values.present) && !instance->bc250_host.dispatch)
       return VK_ERROR_INITIALIZATION_FAILED;
    if (!queue_funcs)
       return VK_SUCCESS;
@@ -344,7 +373,8 @@ radv_CreateInstance(const VkInstanceCreateInfo *pCreateInfo, const VkAllocationC
    instance->experimental_flags = parse_debug_string(os_get_option("RADV_EXPERIMENTAL"), radv_experimental_options);
    /* A host with a policy decides on sparse binding for its instance; the other bits stay the environment's. */
    {
-      const int sparse = bc250_host_policy_sparse_bit(instance->bc250_policy, instance->bc250_policy_flags,
+      const int sparse = bc250_host_policy_sparse_bit(instance->bc250_policy_values.present,
+                                                     instance->bc250_policy_values.flags,
                                                       !!(instance->experimental_flags & RADV_EXPERIMENTAL_SPARSE));
       instance->experimental_flags &= ~RADV_EXPERIMENTAL_SPARSE;
       if (sparse)

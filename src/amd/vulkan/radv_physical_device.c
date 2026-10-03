@@ -108,7 +108,7 @@ radv_sparse_enabled(const struct radv_physical_device *pdev)
       return false;
 
    /* The host's off holds even where the winsys reports sparse support of its own. */
-   if (bc250_host_policy_sparse_refused(instance->bc250_policy, instance->bc250_policy_flags))
+   if (bc250_host_policy_sparse_refused(instance->bc250_policy_values.present, instance->bc250_policy_values.flags))
       return false;
 
    return pdev->info.has_sparse || (instance->experimental_flags & RADV_EXPERIMENTAL_SPARSE);
@@ -2767,7 +2767,7 @@ radv_physical_device_try_create(struct radv_instance *instance, drmDevicePtr drm
    pdev->wddm2_adapter = *wddm2_adapter;
    result = radv_wddm2_winsys_create(wddm2_adapter, instance->debug_flags,
                                      instance->bc250_host.dispatch ? &instance->bc250_host : NULL,
-                                     instance->bc250_adapter_query, &pdev->ws);
+                                     &instance->bc250_policy_values, instance->bc250_adapter_query, &pdev->ws);
    if (result != VK_SUCCESS)
       goto fail;
    pdev->info = *pdev->ws->query_info(pdev->ws);

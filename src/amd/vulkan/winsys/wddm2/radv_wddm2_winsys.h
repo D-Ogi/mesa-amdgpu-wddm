@@ -77,6 +77,8 @@ struct radv_wddm2_winsys {
     * BC250_GATHER_SLOTS, the gather ring of each queue (4..BC250_GATHER_SLOTS_MAX, 16 by default),
     * and BC250_SUBMIT_COALESCE: merge the progress signal into the application's signal call of the
     * same submission, and leave out GPU waits the CPU already sees complete (both by default). */
+   /* The host's copy of the knobs it decided, taken at creation; present is 0 without a policy. */
+   struct bc250_host_policy_values bc250_policy;
    unsigned bc250_gather_slots;
    bool bc250_merge_signals;
    bool bc250_drop_waits;
