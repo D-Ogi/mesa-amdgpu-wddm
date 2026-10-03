@@ -171,7 +171,9 @@ HRESULT Bc250EnsureSurface(Device *device, Resource *resource)
       struct pipe_resource desc=*resource->resource;
       desc.bind |= PIPE_BIND_DISPLAY_TARGET | PIPE_BIND_SHARED;
       struct pipe_resource *imported=device->pipe->screen->resource_from_handle(device->pipe->screen,&desc,&handle,0);
-      if (!imported) return E_OUTOFMEMORY;
+      // The allocation exists: a refused import (layout, format) is not an
+      // allocation failure, and E_OUTOFMEMORY would end DWM (BD-058).
+      if (!imported) return D3DDDIERR_APPLICATIONERROR;
       pipe_resource_reference(&resource->resource,NULL);
       resource->resource=imported;
       resource->presentReady=TRUE;
@@ -190,7 +192,7 @@ HRESULT Bc250EnsureSurface(Device *device, Resource *resource)
    desc.bind |= PIPE_BIND_DISPLAY_TARGET | PIPE_BIND_SHARED;
    struct pipe_resource *imported = device->pipe->screen->resource_from_handle(
        device->pipe->screen, &desc, &handle, 0);
-   if (!imported) return E_OUTOFMEMORY;
+   if (!imported) return D3DDDIERR_APPLICATIONERROR;
    pipe_resource_reference(&resource->resource, NULL);
    resource->resource = imported;
    resource->presentReady = TRUE;

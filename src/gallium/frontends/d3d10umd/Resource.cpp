@@ -358,7 +358,9 @@ CreateResource(D3D10DDI_HDEVICE hDevice,                                // IN
                                        templat.bind)) {
          debug_printf("%s: unsupported format %s\n",
                      __func__, util_format_name(templat.format));
-         SetError(hDevice, E_OUTOFMEMORY);
+         // Not an allocation failure: E_OUTOFMEMORY would end DWM (BD-058,
+         // see OpenResource).
+         SetError(hDevice, D3DDDIERR_APPLICATIONERROR);
          return;
       }
    }
@@ -496,6 +498,44 @@ CalcPrivateOpenedResourceSize(D3D10DDI_HDEVICE hDevice,                         
 }
 
 
+struct OpenedSurface { UINT magic, version, width, height, pitch, format; UINT64 size; };   // LB7A v1
+
+/*
+ * A refused or failed open is reported as D3DDDIERR_APPLICATIONERROR, which
+ * the runtime hands to the caller as DXGI_ERROR_INVALID_CALL. The other
+ * codes end the compositor: E_OUTOFMEMORY is on dwmcore's memory exhaustion
+ * list (fail-fast 0xC00001AD, BD-058), and any code outside the runtime's
+ * short list (E_NOTIMPL, E_INVALIDARG) becomes
+ * DXGI_ERROR_DRIVER_INTERNAL_ERROR, which removes the device. E_OUTOFMEMORY
+ * and D3DDDIERR_DEVICEREMOVED pass through only from a kernel callback.
+ *
+ * The runtime never calls DestroyResource for a handle whose open failed
+ * (pfnOpenResource remarks): release here what CreateResource made. The GPU
+ * VA and the residency reference belong to the opened allocation, which the
+ * runtime closes.
+ */
+static void
+RefuseOpen(D3D10DDI_HDEVICE hDevice, D3D10DDI_HRESOURCE hResource, D3DKMT_HANDLE allocation,
+           const OpenedSurface *data, UINT bpp, HRESULT hr, const char *why)
+{
+   if (hr != E_OUTOFMEMORY && hr != D3DDDIERR_DEVICEREMOVED)
+      hr = D3DDDIERR_APPLICATIONERROR;
+   const OpenedSurface none = {};
+   if (!data) data = &none;
+   BC250_ERROR("BC250 OpenResource refused allocation=%x %ux%u pitch=%u (importable %u) size=%llu format=%u: %s, "
+               "%08lx\n", allocation, data->width, data->height, data->pitch, (data->width * bpp + 255u) & ~255u,
+               (unsigned long long)data->size, data->format, why, hr);
+   Resource *resource = CastResource(hResource);
+   free(resource->transfers);
+   resource->transfers = NULL;
+   pipe_resource_reference(&resource->resource, NULL);
+   resource->allocation = 0;
+   resource->gpuVa = 0;
+   resource->presentReady = FALSE;
+   SetError(hDevice, hr);
+}
+
+
 /*
  * ----------------------------------------------------------------------
  *
@@ -513,15 +553,15 @@ OpenResource(D3D10DDI_HDEVICE hDevice,                            // IN
              D3D10DDI_HRTRESOURCE hRTResource)                    // IN
 {
    LOG_ENTRYPOINT();
-   struct SurfacePrivate { UINT magic, version, width, height, pitch, format; UINT64 size; };
+   memset(CastResource(hResource), 0, sizeof(Resource));
    if (pOpenResource->NumAllocations != 1 || !pOpenResource->pOpenAllocationInfo2) {
-      SetError(hDevice, E_NOTIMPL); return;
+      RefuseOpen(hDevice, hResource, 0, NULL, 4, E_NOTIMPL, "not one allocation"); return;
    }
    const D3DDDI_OPENALLOCATIONINFO2 *info = pOpenResource->pOpenAllocationInfo2;
-   if (!info->pPrivateDriverData || info->PrivateDriverDataSize < sizeof(SurfacePrivate)) {
-      SetError(hDevice, E_INVALIDARG); return;
+   if (!info->pPrivateDriverData || info->PrivateDriverDataSize < sizeof(OpenedSurface)) {
+      RefuseOpen(hDevice, hResource, info->hAllocation, NULL, 4, E_INVALIDARG, "no LB7A private data"); return;
    }
-   SurfacePrivate data;
+   OpenedSurface data;
    memcpy(&data, info->pPrivateDriverData, sizeof(data));
    // The compositor opens and samples the formats the shared table marks
    // COMPOSED. X8R8G8B8 is a kernel/GDI row there; this UMD has always
@@ -535,8 +575,20 @@ OpenResource(D3D10DDI_HDEVICE hDevice,                            // IN
    if (data.magic != 0x4137424c || data.version != 1 || !data.width || !data.height ||
        data.width > 8192 || data.height > 8192 || (data.pitch & 15u) ||
        data.pitch < ((data.width + 3u) & ~3u) * bpp ||
-       data.size < UINT64(data.pitch) * ((data.height + 3u) & ~3u)) { SetError(hDevice, E_INVALIDARG); return; }
-   if (format == DXGI_FORMAT_UNKNOWN) { SetError(hDevice, E_NOTIMPL); return; }
+       data.size < UINT64(data.pitch) * ((data.height + 3u) & ~3u)) {
+      RefuseOpen(hDevice, hResource, info->hAllocation, &data, bpp, E_INVALIDARG, "LB7A geometry"); return;
+   }
+   if (format == DXGI_FORMAT_UNKNOWN) {
+      RefuseOpen(hDevice, hResource, info->hAllocation, &data, bpp, E_NOTIMPL, "format not composed"); return;
+   }
+   // The hosted branch imports the allocation as a linear image with the LB7A
+   // pitch as its row pitch. RADV on GFX10 takes only its own linear pitch,
+   // the row rounded up to 256 bytes (ac_surface_override_offset_stride),
+   // which is also the pitch of every allocation this UMD makes
+   // (Bc250EnsureSurface). Refuse any other pitch before anything is created.
+   if (CastDevice(hDevice)->hosted_state && data.pitch != ((data.width * bpp + 255u) & ~255u)) {
+      RefuseOpen(hDevice, hResource, info->hAllocation, &data, bpp, E_INVALIDARG, "pitch not importable"); return;
+   }
    D3D10DDI_MIPINFO mip = {};
    mip.TexelWidth = mip.PhysicalWidth = data.width;
    mip.TexelHeight = mip.PhysicalHeight = data.height;
@@ -549,13 +601,21 @@ OpenResource(D3D10DDI_HDEVICE hDevice,                            // IN
    create.MipLevels = 1; create.ArraySize = 1;
    CreateResource(hDevice, &create, hResource, hRTResource);
    Resource *resource = CastResource(hResource);
-   if (!resource->resource) return;
+   if (!resource->resource) {
+      // CreateResource has set the error.
+      BC250_ERROR("BC250 OpenResource allocation=%x %ux%u format=%u: CreateResource failed\n", info->hAllocation,
+                  data.width, data.height, data.format);
+      free(resource->transfers);
+      resource->transfers = NULL;
+      return;
+   }
    resource->allocation = info->hAllocation;
    resource->surfacePitch = data.pitch;
    resource->surfaceBytes = data.size;
    HRESULT hr = Bc250EnsureSurface(CastDevice(hDevice), resource);
    DebugPrintf("BC250 OpenResource %08lx handle %x\n", hr, resource->allocation);
-   SetError(hDevice, hr);
+   if (FAILED(hr))
+      RefuseOpen(hDevice, hResource, info->hAllocation, &data, bpp, hr, "surface setup failed");
 }
 
 
