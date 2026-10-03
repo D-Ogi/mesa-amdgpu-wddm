@@ -67,6 +67,17 @@ struct radv_wddm2_winsys {
    bool dump_ibs;
    bool bc250_trace_submits; /* optional hot-path diagnostic output */
    bool bc250; /* caps blob was ours; allocate/context/submit use the BC2* contract */
+   /* What the caps blob said, as it was read, for the surf line of BC250_DRAW_STATS. Lab session 325
+    * found radeon_info::gb_addr_config 0 although the KMD's blob carries the golden constant at that
+    * offset and the only zeroing branch in ac_fill_tiling_info cannot apply here (BD-057), so the
+    * reading and the filled value are reported side by side. Zero when the blob was not ours. */
+   struct {
+      uint32_t magic;
+      uint32_t version;
+      uint32_t size;
+      uint32_t flags;
+      uint32_t gb_addr; /* the word at BC250_OFF_GB_ADDR, before ac_fill_tiling_info saw it */
+   } caps_blob;
    /* bc250 submission of several IBs: false (the default) writes IB2 calls into the gather
     * slot, true copies every IB into it (BC250_IB_NOCOPY=0, or BC250_IB_DWORDS set). */
    bool bc250_gather_copy;

@@ -169,6 +169,13 @@ radv_wddm2_try_bc250(struct radv_wddm2_winsys *ws, struct drm_amdgpu_info_device
    if (!NT_SUCCESS(status) || bc250_rd32(blob, 0) != BC250_CAPS_MAGIC || bc250_rd32(blob, 4) < 3)
       return false;
 
+   /* The blob as it arrived, for the surf line (BD-057). Read before anything derives from it. */
+   ws->caps_blob.magic = bc250_rd32(blob, 0);
+   ws->caps_blob.version = bc250_rd32(blob, 4);
+   ws->caps_blob.size = bc250_rd32(blob, 8);
+   ws->caps_blob.flags = bc250_rd32(blob, 12);
+   ws->caps_blob.gb_addr = bc250_rd32(blob, BC250_OFF_GB_ADDR);
+
    memcpy(dev, blob + BC250_OFF_DEVICE, sizeof(*dev));
    mem->vram.total_heap_size = bc250_rd64(blob, BC250_OFF_MEMORY + 0 * 32);
    mem->cpu_accessible_vram.total_heap_size = bc250_rd64(blob, BC250_OFF_MEMORY + 1 * 32);
@@ -247,8 +254,11 @@ radv_wddm2_try_bc250(struct radv_wddm2_winsys *ws, struct drm_amdgpu_info_device
                                    info->gfx_level >= GFX10 ? 3 : 0;
 
    ws->bc250 = true;
-   amdgpu_wddm_log("bc250: caps blob, device 0x%x family %u gfx %u\n", dev->device_id, info->family,
-           info->gfx_level);
+   amdgpu_wddm_log("bc250: caps blob, device 0x%x family %u gfx %u; blob version %u size %u flags 0x%x"
+                   " gb_addr_config read 0x%08x filled 0x%08x, has_graphics %u, tile pipes %u\n",
+                   dev->device_id, info->family, info->gfx_level, ws->caps_blob.version, ws->caps_blob.size,
+                   ws->caps_blob.flags, ws->caps_blob.gb_addr, info->gb_addr_config, info->has_graphics,
+                   info->num_tile_pipes);
    return true;
 }
 

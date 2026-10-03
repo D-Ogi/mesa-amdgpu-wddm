@@ -2262,16 +2262,23 @@ radv_wddm2_summary_write(struct radv_wddm2_winsys *ws, uint64_t now, uint64_t du
             if (parts[p].first == RADV_DRAW_STAT_SURF_FIRST && len < sizeof(counts)) {
                /* The levels, and the radeon_info fields the layout decisions are made from: so that a
                 * reading of the log alone says which chip configuration RADV was told about (hw_cu is the
-                * CU count the KMD's caps blob reports, which cumode.c patches to the applied CU mode). */
+                * CU count the KMD's caps blob reports, which cumode.c patches to the applied CU mode).
+                * hw_bc250 says the caps blob was ours, hw_blob_* its header as read and hw_gb_addr_blob
+                * the GB_ADDR_CONFIG word straight out of it, next to the hw_gb_addr the winsys ended up
+                * with and the hw_has_gfx that decides ac_fill_tiling_info's only zeroing branch: BD-057
+                * (session 325 held 0) is decided by which of those two is zero. */
                const struct radeon_info *gi = &ws->gpu_info;
                snprintf(counts + len, sizeof(counts) - len,
                         " alloc_vram_kib=%" PRIu64 " alloc_vram_vis_kib=%" PRIu64 " alloc_gtt_kib=%" PRIu64
                         " hw_cu=%u hw_rb=%u hw_tcc=%u hw_tcc_rb_nc=%u hw_l2_kib=%u hw_gb_addr=0x%08x"
-                        " hw_vram_vis_mib=%u hw_gart_mib=%u",
+                        " hw_vram_vis_mib=%u hw_gart_mib=%u hw_bc250=%u hw_blob_ver=%u hw_blob_size=%u"
+                        " hw_blob_flags=0x%x hw_gb_addr_blob=0x%08x hw_has_gfx=%u hw_tile_pipes=%u",
                         p_atomic_read(&ws->allocated_vram) >> 10, p_atomic_read(&ws->allocated_vram_vis) >> 10,
                         p_atomic_read(&ws->allocated_gtt) >> 10, gi->num_cu, gi->num_rb, gi->num_tcc_blocks,
                         gi->tcc_rb_non_coherent, gi->l2_cache_size >> 10, gi->gb_addr_config,
-                        (unsigned)(gi->vram_vis_size_kb >> 10), (unsigned)(gi->gart_size_kb >> 10));
+                        (unsigned)(gi->vram_vis_size_kb >> 10), (unsigned)(gi->gart_size_kb >> 10), ws->bc250,
+                        ws->caps_blob.version, ws->caps_blob.size, ws->caps_blob.flags, ws->caps_blob.gb_addr,
+                        gi->has_graphics, gi->num_tile_pipes);
             }
             radv_wddm2_deferred_line("periodic %s t=%" PRIu64 "s %s:%s", tag, t, parts[p].name, counts);
          }

@@ -3144,6 +3144,9 @@ radv_surf_stats_shader(struct radv_device *device, const struct radv_shader *sha
       counts[w32 ? RADV_DRAW_STAT_sf_sh_ge32 : RADV_DRAW_STAT_sf_sh_ge64] = 1;
       break;
    default:
+      /* The raytracing stages, which have their own wave size (rt_wave_size). */
+      if (mesa_shader_stage_is_rt(shader->info.stage))
+         counts[w32 ? RADV_DRAW_STAT_sf_sh_rt32 : RADV_DRAW_STAT_sf_sh_rt64] = 1;
       break;
    }
 

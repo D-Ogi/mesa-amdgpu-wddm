@@ -1593,6 +1593,44 @@ radv_wddm2_count_gather_wait(struct radv_wddm2_winsys *ws, uint64_t ns)
    }
 }
 
+/* bc250: BC250_DRAW_STATS, the submission half of RADV_DRAW_STATS_SURF: the BOs the submitted command
+ * streams name, by domain, counted once per stream per submission. Counting only, and only while the
+ * hook is set: it walks each stream's BO set, which the hot cs_add_buffer path is left out of on
+ * purpose (its direct-mapped cache is what makes binds cheap, trial 291).
+ */
+static void
+radv_wddm2_surf_stats_submit(struct radv_wddm2_winsys *ws, const struct radv_winsys_submit_info *submit)
+{
+   struct ac_cmdbuf *const *const arrays[] = {submit->cs_array, submit->initial_preamble_cs, submit->postamble_cs};
+   const unsigned counts_of[] = {submit->cs_count, submit->initial_preamble_count, submit->postamble_count};
+   uint32_t counts[RADV_DRAW_STAT_COUNT] = {0};
+   uint64_t gtt_bytes = 0, vram_bytes = 0;
+
+   counts[RADV_DRAW_STAT_sf_sub] = 1;
+
+   for (unsigned a = 0; a < ARRAY_SIZE(arrays); a++) {
+      for (unsigned i = 0; i < counts_of[a]; i++) {
+         struct radv_wddm2_cs *cs = radv_wddm2_cs(arrays[a][i]);
+
+         set_foreach (cs->buffers, entry) {
+            const struct radv_wddm2_bo *bo = (const struct radv_wddm2_bo *)entry->key;
+
+            counts[RADV_DRAW_STAT_sf_sub_bo]++;
+            if (bo->base.initial_domain & RADEON_DOMAIN_GTT) {
+               counts[RADV_DRAW_STAT_sf_sub_gtt]++;
+               gtt_bytes += bo->base.size;
+            } else {
+               vram_bytes += bo->base.size;
+            }
+         }
+      }
+   }
+
+   counts[RADV_DRAW_STAT_sf_sub_gtt_kib] = (uint32_t)((gtt_bytes + 1023) >> 10);
+   counts[RADV_DRAW_STAT_sf_sub_vram_kib] = (uint32_t)((vram_bytes + 1023) >> 10);
+   ws->base.draw_stats_add(&ws->base, counts);
+}
+
 static VkResult
 radv_wddm2_cs_submit(struct radeon_winsys_ctx *_ctx,
                      const struct radv_winsys_submit_info *submit,
@@ -1612,6 +1650,8 @@ radv_wddm2_cs_submit(struct radeon_winsys_ctx *_ctx,
    radv_wddm2_deferred_drain(ws);
    /* The periodic summary: one clock read, the lines only once the period has passed. */
    radv_wddm2_summary_tick(ws);
+   if (unlikely(ws->base.draw_stats_add))
+      radv_wddm2_surf_stats_submit(ws, submit);
 
    assert(queue->context_h != 0 && "Unsupported IP type");
 

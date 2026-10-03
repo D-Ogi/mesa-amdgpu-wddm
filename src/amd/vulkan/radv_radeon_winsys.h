@@ -396,11 +396,20 @@ enum radv_cs_dump_type {
  * Shaders (radv_shader_create_uncached, cache hits included, so these are shader objects made live):
  * sf_sh the shaders, sf_sh_w32 and sf_sh_w64 by wave size, sf_sh_ps32 / sf_sh_ps64 the fragment ones,
  * sf_sh_cs32 / sf_sh_cs64 the compute, task and mesh ones, sf_sh_ge32 / sf_sh_ge64 the geometry
- * engine ones (vertex, tessellation and geometry); sf_sh_ngg and sf_sh_ngg_pt the NGG and NGG
+ * engine ones (vertex, tessellation and geometry), sf_sh_rt32 / sf_sh_rt64 the raytracing stages
+ * (raygen, any hit, closest hit, miss, intersection, callable; RADV compiles them at rt_wave_size,
+ * 32 on GFX10 unless RADV_PERFTEST=rtwave64); sf_sh_ngg and sf_sh_ngg_pt the NGG and NGG
  * passthrough ones, sf_sh_nggc those with NGG culling; sf_sh_scratch the ones with scratch and
  * sf_sh_scratch_b their scratch bytes per wave; sf_sh_code_kib the rounded-up KiB of code;
  * sf_sh_waves_sum and sf_sh_vgpr_sum the sums of radv_shader::max_waves (the occupancy limit RADV
- * computes) and of the VGPR counts, for a mean over sf_sh. */
+ * computes) and of the VGPR counts, for a mean over sf_sh.
+ *
+ * Submissions (radv_wddm2_cs_submit, the BOs the submitted command streams name, counted once per
+ * stream per submission): sf_sub the submissions, sf_sub_bo the stream BO references, sf_sub_gtt and
+ * sf_sub_gtt_kib those in GTT and their KiB, sf_sub_vram_kib the KiB of the VRAM ones. Divided by the
+ * frames of a window this is the memory the GPU may touch per frame, by domain: an upper bound on how
+ * much of a frame's reads come out of the aperture rather than VRAM. A stream submitted twice counts
+ * twice; residency itself is the winsys's global list, not a per-submission one. */
 #define RADV_DRAW_STATS_SURF(X)                                                                             \
    X(sf_img) X(sf_img_rt) X(sf_img_ds) X(sf_img_uav) X(sf_img_srv) X(sf_img_ext) X(sf_img_mut)               \
    X(sf_img_msaa) X(sf_img_kib) X(sf_rt_kib) X(sf_ds_kib) X(sf_meta_kib) X(sf_lin) X(sf_lin_kib)             \
@@ -411,8 +420,9 @@ enum radv_cs_dump_type {
    X(sf_bo) X(sf_bo_vram) X(sf_bo_vram_kib) X(sf_bo_gtt) X(sf_bo_gtt_kib) X(sf_bo_shared)                    \
    X(sf_bo_32bit) X(sf_bo_vram_cpu) X(sf_bo_vram_cpu_kib) X(sf_bo_gtt_wc) X(sf_bo_gtt_cached)                \
    X(sf_bo_gl2byp) X(sf_sh) X(sf_sh_w32) X(sf_sh_w64) X(sf_sh_ps32) X(sf_sh_ps64) X(sf_sh_cs32)              \
-   X(sf_sh_cs64) X(sf_sh_ge32) X(sf_sh_ge64) X(sf_sh_ngg) X(sf_sh_ngg_pt) X(sf_sh_nggc) X(sf_sh_scratch)     \
-   X(sf_sh_scratch_b) X(sf_sh_code_kib) X(sf_sh_waves_sum) X(sf_sh_vgpr_sum)
+   X(sf_sh_cs64) X(sf_sh_ge32) X(sf_sh_ge64) X(sf_sh_rt32) X(sf_sh_rt64) X(sf_sh_ngg) X(sf_sh_ngg_pt)        \
+   X(sf_sh_nggc) X(sf_sh_scratch) X(sf_sh_scratch_b) X(sf_sh_code_kib) X(sf_sh_waves_sum) X(sf_sh_vgpr_sum)   \
+   X(sf_sub) X(sf_sub_bo) X(sf_sub_gtt) X(sf_sub_gtt_kib) X(sf_sub_vram_kib)
 
 #define RADV_DRAW_STATS(X) RADV_DRAW_STATS_DRAW(X) RADV_DRAW_STATS_SYNC(X) RADV_DRAW_STATS_SURF(X)
 
