@@ -169,7 +169,8 @@ radv_wddm2_try_bc250(struct radv_wddm2_winsys *ws, struct drm_amdgpu_info_device
    if (!NT_SUCCESS(status) || bc250_rd32(blob, 0) != BC250_CAPS_MAGIC || bc250_rd32(blob, 4) < 3)
       return false;
 
-   /* The blob as it arrived, for the surf line (BD-057). Read before anything derives from it. */
+   /* The blob as it arrived, for the surf line: read before anything derives from it, so that the log
+    * can be compared with what ends up in radeon_info (this is what closed BD-057). */
    ws->caps_blob.magic = bc250_rd32(blob, 0);
    ws->caps_blob.version = bc250_rd32(blob, 4);
    ws->caps_blob.size = bc250_rd32(blob, 8);

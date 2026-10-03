@@ -2265,8 +2265,11 @@ radv_wddm2_summary_write(struct radv_wddm2_winsys *ws, uint64_t now, uint64_t du
                 * CU count the KMD's caps blob reports, which cumode.c patches to the applied CU mode).
                 * hw_bc250 says the caps blob was ours, hw_blob_* its header as read and hw_gb_addr_blob
                 * the GB_ADDR_CONFIG word straight out of it, next to the hw_gb_addr the winsys ended up
-                * with and the hw_has_gfx that decides ac_fill_tiling_info's only zeroing branch: BD-057
-                * (session 325 held 0) is decided by which of those two is zero. */
+                * with and the hw_has_gfx that decides ac_fill_tiling_info's only zeroing branch. The
+                * pair witnesses the blob end to end: whichever of the two is zero names the side. That
+                * is how BD-057 was closed NOT-A-BUG, both being the golden constant.
+                * Note that hw_gb_addr, hw_gb_addr_blob and hw_blob_flags are printed in hex: a log
+                * reader that matches digits only reads all three as zero, which is what BD-057 was. */
                const struct radeon_info *gi = &ws->gpu_info;
                snprintf(counts + len, sizeof(counts) - len,
                         " alloc_vram_kib=%" PRIu64 " alloc_vram_vis_kib=%" PRIu64 " alloc_gtt_kib=%" PRIu64
