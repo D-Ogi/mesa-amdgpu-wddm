@@ -1591,6 +1591,9 @@ radv_GetPhysicalDeviceExternalBufferProperties(VkPhysicalDevice physicalDevice,
    case VK_EXTERNAL_MEMORY_HANDLE_TYPE_D3D12_HEAP_BIT:
       if (!pdev->vk.supported_extensions.KHR_external_memory_win32)
          break;
+      /* BD-038: the extension stays listed in hosted mode, but the host opens and shares no NT handle. */
+      if (radv_physical_device_instance(pdev)->bc250_host.dispatch)
+         break;
       flags = VK_EXTERNAL_MEMORY_FEATURE_EXPORTABLE_BIT | VK_EXTERNAL_MEMORY_FEATURE_IMPORTABLE_BIT;
       compat_flags = export_flags =
          VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_WIN32_BIT | VK_EXTERNAL_MEMORY_HANDLE_TYPE_D3D12_RESOURCE_BIT |

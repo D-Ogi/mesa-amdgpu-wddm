@@ -979,6 +979,11 @@ radv_wddm2_bo_from_handle(struct radeon_winsys *_ws, void *handle, unsigned prio
 
    *out_bo = NULL;
 
+   if (ws->host.dispatch) {
+      amdgpu_wddm_log("BC250 hosted: NT-handle memory import refused\n");
+      return VK_ERROR_INVALID_EXTERNAL_HANDLE;
+   }
+
    bo = radv_wddm2_bo_struct_alloc(ws);
    if (!bo)
       return VK_ERROR_OUT_OF_HOST_MEMORY;

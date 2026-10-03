@@ -935,8 +935,11 @@ radv_wddm2_winsys_create(const struct vk_dx_adapter_info *adapter_info,
    radv_wddm2_bo_init_functions(ws);
    radv_wddm2_cs_init_functions(ws);
 
-   ws->sync_binary_type = vk_sync_binary_get_type(&vk_wddm2_monitored_fence_type);
-   ws->sync_types[0] = &vk_wddm2_monitored_fence_type;
+   /* BD-038: a hosted device's fences have no NT handle, so their type offers no Win32 import or export. */
+   const struct vk_sync_type *fence_type =
+      host ? &vk_wddm2_monitored_fence_hosted_type : &vk_wddm2_monitored_fence_type;
+   ws->sync_binary_type = vk_sync_binary_get_type(fence_type);
+   ws->sync_types[0] = fence_type;
    ws->sync_types[1] = &ws->sync_binary_type.sync;
    ws->sync_types[2] = NULL;
 

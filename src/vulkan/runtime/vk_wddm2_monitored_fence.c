@@ -367,6 +367,22 @@ const struct vk_sync_type vk_wddm2_monitored_fence_type = {
    .import_win32_handle = vk_wddm2_monitored_fence_import_opaque_win32_handle,
 };
 
+const struct vk_sync_type vk_wddm2_monitored_fence_hosted_type = {
+   .size = sizeof(struct vk_wddm2_monitored_fence),
+   .features = VK_SYNC_FEATURE_TIMELINE |
+               VK_SYNC_FEATURE_GPU_WAIT |
+               VK_SYNC_FEATURE_CPU_WAIT |
+               VK_SYNC_FEATURE_CPU_SIGNAL |
+               VK_SYNC_FEATURE_WAIT_ANY |
+               VK_SYNC_FEATURE_WAIT_BEFORE_SIGNAL |
+               VK_SYNC_FEATURE_WAIT_PENDING,
+   .init = vk_wddm2_monitored_fence_init,
+   .finish = vk_wddm2_monitored_fence_finish,
+   .signal = vk_wddm2_monitored_fence_signal,
+   .get_value = vk_wddm2_monitored_fence_get_value,
+   .wait_many = vk_wddm2_monitored_fence_wait_many,
+};
+
 VkResult
 vk_wddm2_check_device_status(struct vk_device *device)
 {

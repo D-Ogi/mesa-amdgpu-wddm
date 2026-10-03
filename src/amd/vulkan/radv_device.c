@@ -2010,6 +2010,10 @@ radv_GetMemoryWin32HandlePropertiesKHR(VkDevice _device,
    VK_FROM_HANDLE(radv_device, device, _device);
    struct radv_physical_device *pdev = radv_device_physical(device);
 
+   /* BD-038: in hosted mode no Win32 handle can be imported (radv_host_import.h). */
+   if (device->vk.bc250_host.dispatch)
+      return vk_error(device, VK_ERROR_INVALID_EXTERNAL_HANDLE);
+
    switch (handleType) {
    case VK_EXTERNAL_MEMORY_HANDLE_TYPE_D3D12_RESOURCE_BIT: {
       enum radeon_bo_domain domains;

@@ -13,7 +13,8 @@
  *
  * Scope: the tests call the winsys hooks (ctx_create_bindable, ctx_bind,
  * ctx_unbind, cs_submit, the sparse hooks, ctx_destroy, and for host
- * imports buffer_from_hosted, buffer_map, buffer_destroy) directly. They do
+ * imports buffer_from_hosted, buffer_map, buffer_destroy, buffer_from_handle) directly, and the
+ * allocate-chain parser of radv_host_import.h. They do
  * not cover the instance chain parser (radv_instance.c), the public bind
  * and unbind entries with their queue lock (radv_queue.c) or the queue
  * count admission of vkCreateDevice (radv_device.c).
@@ -35,6 +36,7 @@
 #include "winsys/common/radv_winsys_cs.h"
 #include "vk_wddm2_monitored_fence.h"
 #include "util/bc250_host_bootstrap.h"
+#include "radv_host_import.h"
 #include "util/macros.h"
 #include "util/u_math.h"
 #include "util/set.h"
@@ -71,6 +73,7 @@ print_hex_data(FILE *fp, const void *data, uint32_t size)
 
 /* The application fences of the tests carry this type. */
 const struct vk_sync_type vk_wddm2_monitored_fence_type = {0};
+const struct vk_sync_type vk_wddm2_monitored_fence_hosted_type = {0};
 
 #define HOST_FAIL        ((int32_t)0xC0000001) /* STATUS_UNSUCCESSFUL */
 #define HOST_UNEXPECTED  ((int32_t)0xC0000002) /* STATUS_NOT_IMPLEMENTED */
@@ -4251,6 +4254,172 @@ test_lock_borrowed(void)
    contract();
 }
 
+/* BD-039: what vkAllocateMemory accepts around a host import (radv_host_import.h, the parser radv_alloc_memory
+ * calls). The chains of the three real callers pass; every other import, an export with a handle type, a
+ * capture address other than the VA, a second import block or a short import is refused. BD-038: in hosted
+ * mode a Win32 memory import is refused with or without a host import. */
+static VkResult
+parse_chain(const void *chain, uint64_t size, bool hosted, struct radv_host_import_request *req)
+{
+   const VkMemoryAllocateInfo info = {
+      .sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,
+      .pNext = chain,
+      .allocationSize = size,
+      .memoryTypeIndex = 0,
+   };
+   req->import = (const void *)(uintptr_t)1; /* the parser must write every field */
+   req->flags = 0xdead;
+   req->refused = "unset";
+   return radv_host_import_parse(&info, hosted, req);
+}
+
+static void
+test_host_import_chain(void)
+{
+   struct radv_host_import_request req;
+   const uint64_t va = 0x800000000ull, size = 65536;
+
+   /* D3D12 shell, heap-import.cpp: VkMemoryAllocateFlagsInfo (DEVICE_ADDRESS) -> flags-sType import with CPU_MAP. */
+   struct bc250_host_import d3d12 = {.sType = BC250_HOST_IMPORT_FLAGS_STYPE, .identity = (void *)0x10,
+                                     .allocation = 7, .flags = BC250_HOST_IMPORT_CPU_MAP, .va = va, .size = size};
+   VkMemoryAllocateFlagsInfo address = {.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_FLAGS_INFO, .pNext = &d3d12,
+                                        .flags = VK_MEMORY_ALLOCATE_DEVICE_ADDRESS_BIT};
+   check(parse_chain(&address, size, true, &req) == VK_SUCCESS && req.import == &d3d12 &&
+            req.flags == BC250_HOST_IMPORT_CPU_MAP && !req.refused,
+         "D3D12 shell heap import (address flags, CPU_MAP) accepted with its flags");
+
+   /* DXVK shell, runtime-image-memory.cpp: plain-sType import -> dedicated image; the flags bytes are not read. */
+   VkMemoryDedicatedAllocateInfo dedicated = {.sType = VK_STRUCTURE_TYPE_MEMORY_DEDICATED_ALLOCATE_INFO,
+                                              .image = (VkImage)(uintptr_t)0x20};
+   struct bc250_host_import dxvk = {.sType = BC250_HOST_IMPORT_STYPE, .pNext = &dedicated,
+                                    .identity = (void *)0x10, .allocation = 8, .flags = 0xffffffffu,
+                                    .va = va, .size = size};
+   check(parse_chain(&dxvk, size, true, &req) == VK_SUCCESS && req.import == &dxvk && req.flags == 0,
+         "DXVK shell image import (plain sType, dedicated) accepted, flags 0");
+
+   /* zink hosted (E34 runtime-import): import -> export with no handle type -> dedicated -> priority. */
+   VkMemoryPriorityAllocateInfoEXT priority = {.sType = VK_STRUCTURE_TYPE_MEMORY_PRIORITY_ALLOCATE_INFO_EXT,
+                                               .priority = 0.5f};
+   VkMemoryDedicatedAllocateInfo zink_dedicated = {.sType = VK_STRUCTURE_TYPE_MEMORY_DEDICATED_ALLOCATE_INFO,
+                                                   .pNext = &priority, .image = (VkImage)(uintptr_t)0x30};
+   VkExportMemoryAllocateInfo no_export = {.sType = VK_STRUCTURE_TYPE_EXPORT_MEMORY_ALLOCATE_INFO,
+                                           .pNext = &zink_dedicated, .handleTypes = 0};
+   struct bc250_host_import zink = {.sType = BC250_HOST_IMPORT_STYPE, .pNext = &no_export,
+                                    .identity = (void *)0x10, .allocation = 9, .va = va, .size = size};
+   check(parse_chain(&zink, size, true, &req) == VK_SUCCESS && req.import == &zink,
+         "zink hosted import (export of no handle type, dedicated, priority) accepted");
+
+   /* An allocation larger than the import, and the same import smaller than asked. */
+   check(parse_chain(&address, size / 2, true, &req) == VK_SUCCESS && req.import == &d3d12,
+         "an import larger than allocationSize accepted");
+   check(parse_chain(&address, size * 2, true, &req) == VK_ERROR_INVALID_EXTERNAL_HANDLE && !req.import &&
+            req.refused,
+         "an import smaller than allocationSize refused");
+
+   /* Without a host: refused (the instance carries none). */
+   check(parse_chain(&address, size, false, &req) == VK_ERROR_INVALID_EXTERNAL_HANDLE && !req.import,
+         "a host import on a device without a host refused");
+
+   /* Two import blocks, of either sType. */
+   struct bc250_host_import second = d3d12;
+   second.sType = BC250_HOST_IMPORT_STYPE;
+   second.pNext = NULL;
+   struct bc250_host_import first = d3d12;
+   first.pNext = &second;
+   check(parse_chain(&first, size, true, &req) == VK_ERROR_INVALID_EXTERNAL_HANDLE, "both import sTypes refused");
+   second.sType = BC250_HOST_IMPORT_FLAGS_STYPE;
+   check(parse_chain(&first, size, true, &req) == VK_ERROR_INVALID_EXTERNAL_HANDLE, "two flags-sType imports refused");
+
+   /* Any other import with a handle type. */
+   struct bc250_host_import tail = d3d12;
+   tail.pNext = NULL;
+#ifdef VK_USE_PLATFORM_WIN32_KHR
+   VkImportMemoryWin32HandleInfoKHR win32 = {.sType = VK_STRUCTURE_TYPE_IMPORT_MEMORY_WIN32_HANDLE_INFO_KHR,
+                                             .pNext = &tail,
+                                             .handleType = VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_WIN32_BIT,
+                                             .handle = (HANDLE)(uintptr_t)0x44};
+   check(parse_chain(&win32, size, true, &req) == VK_ERROR_INVALID_EXTERNAL_HANDLE,
+         "host import with a Win32 import refused");
+   win32.handleType = VK_EXTERNAL_MEMORY_HANDLE_TYPE_D3D12_RESOURCE_BIT;
+   check(parse_chain(&win32, size, true, &req) == VK_ERROR_INVALID_EXTERNAL_HANDLE,
+         "host import with a D3D12 resource import refused");
+   win32.handleType = 0;
+   check(parse_chain(&win32, size, true, &req) == VK_SUCCESS && req.import == &tail,
+         "a Win32 import block of no handle type imports nothing: accepted");
+#else
+   check(false, "the test is built without VK_USE_PLATFORM_WIN32_KHR");
+#endif
+   VkImportMemoryFdInfoKHR fd = {.sType = VK_STRUCTURE_TYPE_IMPORT_MEMORY_FD_INFO_KHR, .pNext = &tail,
+                                 .handleType = VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_FD_BIT, .fd = 3};
+   check(parse_chain(&fd, size, true, &req) == VK_ERROR_INVALID_EXTERNAL_HANDLE, "host import with an fd import refused");
+   static char page[4096];
+   VkImportMemoryHostPointerInfoEXT pointer = {.sType = VK_STRUCTURE_TYPE_IMPORT_MEMORY_HOST_POINTER_INFO_EXT,
+                                               .pNext = &tail,
+                                               .handleType = VK_EXTERNAL_MEMORY_HANDLE_TYPE_HOST_ALLOCATION_BIT_EXT,
+                                               .pHostPointer = page};
+   check(parse_chain(&pointer, size, true, &req) == VK_ERROR_INVALID_EXTERNAL_HANDLE,
+         "host import with a host pointer import refused");
+   VkBaseInStructure ahb = {.sType = VK_STRUCTURE_TYPE_IMPORT_ANDROID_HARDWARE_BUFFER_INFO_ANDROID,
+                            .pNext = (const void *)&tail};
+   check(parse_chain(&ahb, size, true, &req) == VK_ERROR_INVALID_EXTERNAL_HANDLE,
+         "host import with an Android hardware buffer import refused");
+
+   /* An export with a handle type. */
+   VkExportMemoryAllocateInfo export = {.sType = VK_STRUCTURE_TYPE_EXPORT_MEMORY_ALLOCATE_INFO, .pNext = &tail,
+                                        .handleTypes = VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_WIN32_BIT};
+   check(parse_chain(&export, size, true, &req) == VK_ERROR_INVALID_EXTERNAL_HANDLE,
+         "host import with an export refused");
+
+   /* An opaque capture address: only the import's own VA. */
+   VkMemoryOpaqueCaptureAddressAllocateInfo capture = {
+      .sType = VK_STRUCTURE_TYPE_MEMORY_OPAQUE_CAPTURE_ADDRESS_ALLOCATE_INFO, .pNext = &tail,
+      .opaqueCaptureAddress = va + 65536};
+   check(parse_chain(&capture, size, true, &req) == VK_ERROR_INVALID_EXTERNAL_HANDLE,
+         "host import with a capture address other than its VA refused");
+   capture.opaqueCaptureAddress = va;
+   check(parse_chain(&capture, size, true, &req) == VK_SUCCESS && req.import == &tail,
+         "host import with its own VA as capture address accepted");
+   capture.opaqueCaptureAddress = 0;
+   check(parse_chain(&capture, size, true, &req) == VK_SUCCESS && req.import == &tail,
+         "host import with capture address 0 accepted");
+
+   /* No host import at all. */
+   check(parse_chain(NULL, size, true, &req) == VK_SUCCESS && !req.import && !req.refused,
+         "a plain allocation: no import");
+   check(parse_chain(&export, size, false, &req) == VK_ERROR_INVALID_EXTERNAL_HANDLE,
+         "the export chain still names a host import: refused without a host");
+#ifdef VK_USE_PLATFORM_WIN32_KHR
+   VkImportMemoryWin32HandleInfoKHR plain_win32 = {.sType = VK_STRUCTURE_TYPE_IMPORT_MEMORY_WIN32_HANDLE_INFO_KHR,
+                                                   .handleType = VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_WIN32_BIT,
+                                                   .handle = (HANDLE)(uintptr_t)0x44};
+   check(parse_chain(&plain_win32, size, true, &req) == VK_ERROR_INVALID_EXTERNAL_HANDLE && req.refused,
+         "hosted: a Win32 import without a host import refused (BD-038)");
+   check(parse_chain(&plain_win32, size, false, &req) == VK_SUCCESS && !req.import,
+         "not hosted: a Win32 import is left to radv_alloc_memory as before");
+   VkExportMemoryAllocateInfo plain_export = {.sType = VK_STRUCTURE_TYPE_EXPORT_MEMORY_ALLOCATE_INFO,
+                                              .handleTypes = VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_WIN32_BIT};
+   check(parse_chain(&plain_export, size, true, &req) == VK_SUCCESS && !req.import,
+         "hosted: an export without a host import is not the parser's to refuse");
+#endif
+}
+
+/* BD-038: a hosted winsys refuses an NT-handle memory import before any host call: the host has no
+ * QueryResourceInfoFromNtHandle or OpenResourceFromNtHandle. */
+static void
+test_hosted_nt_import(void)
+{
+   clear_deferred_env();
+   struct radv_wddm2_winsys *ws = make_ws();
+   struct radeon_winsys_bo *bo = (struct radeon_winsys_bo *)(uintptr_t)1;
+   uint64_t size = 77;
+   const unsigned mark = h.n_ev;
+   check(ws->base.buffer_from_handle(&ws->base, (void *)(uintptr_t)0x44, 0, &bo, &size) ==
+               VK_ERROR_INVALID_EXTERNAL_HANDLE &&
+            bo == NULL && h.n_ev == mark,
+         "hosted NT-handle import refused, no BO, no host call (calls: %u)", h.n_ev - mark);
+   contract();
+}
+
 static const struct {
    const char *name;
    void (*run)(void);
@@ -4271,6 +4440,8 @@ static const struct {
    {"lock_ownership", test_lock_ownership},
    {"lock_kept", test_lock_kept},
    {"lock_borrowed", test_lock_borrowed},
+   {"host_import_chain", test_host_import_chain},
+   {"hosted_nt_import", test_hosted_nt_import},
    {"deferred_destroy", test_deferred_destroy},
    {"ib2_calls", test_ib2_calls},
    {"ib2_fallback", test_ib2_fallback},

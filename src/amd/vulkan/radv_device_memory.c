@@ -14,6 +14,7 @@
 #include "radv_android.h"
 #include "radv_buffer.h"
 #include "radv_entrypoints.h"
+#include "radv_host_import.h"
 #include "radv_image.h"
 
 #include "vk_debug_utils.h"
@@ -120,20 +121,15 @@ radv_alloc_memory(struct radv_device *device, const VkMemoryAllocateInfo *pAlloc
    unsigned priority =
       MIN2(RADV_BO_PRIORITY_APPLICATION_MAX - 1, (int)(priority_float * RADV_BO_PRIORITY_APPLICATION_MAX));
 
-   const struct bc250_host_import *host_import=NULL;
-   uint32_t host_import_flags=0;
-   for (const VkBaseInStructure *ext=pAllocateInfo->pNext;ext;ext=ext->pNext) {
-      if ((uint32_t)ext->sType==BC250_HOST_IMPORT_STYPE) {
-         host_import=(const void *)ext; host_import_flags=0; /* no flags field under this type */
-      } else if ((uint32_t)ext->sType==BC250_HOST_IMPORT_FLAGS_STYPE) {
-         host_import=(const void *)ext; host_import_flags=host_import->flags;
-      }
-   }
+   /* BD-038, BD-039: what may come with a host import, and no Win32 import in hosted mode. */
+   struct radv_host_import_request host={0};
+   result=radv_host_import_parse(pAllocateInfo,device->vk.bc250_host.dispatch!=NULL,&host);
+   if (result!=VK_SUCCESS) { result=vk_errorf(device,result,"%s",host.refused); goto fail; }
+   const struct bc250_host_import *host_import=host.import;
    if (host_import) {
-      if (!device->vk.bc250_host.dispatch || !device->ws->buffer_from_hosted ||
-          host_import->size<pAllocateInfo->allocationSize) { result=VK_ERROR_INVALID_EXTERNAL_HANDLE; goto fail; }
+      if (!device->ws->buffer_from_hosted) { result=VK_ERROR_INVALID_EXTERNAL_HANDLE; goto fail; }
       result=device->ws->buffer_from_hosted(device->ws,host_import->identity,host_import->allocation,
-                                           host_import_flags,host_import->va,host_import->size,&mem->bo);
+                                           host.flags,host_import->va,host_import->size,&mem->bo);
       if (result!=VK_SUCCESS) goto fail;
    } else if (mem->vk.ahardware_buffer) {
       result = radv_import_ahb_memory(device, mem, priority);

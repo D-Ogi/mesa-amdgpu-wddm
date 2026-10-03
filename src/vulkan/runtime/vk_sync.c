@@ -520,6 +520,9 @@ vk_sync_import_win32_handle(struct vk_device *device,
                             void *handle,
                             const wchar_t *name)
 {
+   if (!sync->type->import_win32_handle)
+      return vk_error(device, VK_ERROR_INVALID_EXTERNAL_HANDLE);
+
    VkResult result = sync->type->import_win32_handle(device, sync, handle, name);
    if (unlikely(result != VK_SUCCESS))
       return result;
@@ -535,6 +538,9 @@ vk_sync_export_win32_handle(struct vk_device *device,
                             struct vk_sync *sync,
                             void **handle)
 {
+   if (!sync->type->export_win32_handle)
+      return vk_error(device, VK_ERROR_INVALID_EXTERNAL_HANDLE);
+
    assert(sync->flags & VK_SYNC_IS_SHAREABLE);
 
    VkResult result = sync->type->export_win32_handle(device, sync, handle);

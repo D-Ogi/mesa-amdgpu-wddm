@@ -452,6 +452,8 @@ vk_common_ImportSemaphoreWin32HandleKHR(VkDevice _device,
 
       const struct vk_sync_type *sync_type =
          get_semaphore_sync_type(device->physical, semaphore->type, handle_type);
+      if (sync_type == NULL)
+         return vk_error(semaphore, VK_ERROR_INVALID_EXTERNAL_HANDLE);
 
       VkResult result = vk_sync_create(device, sync_type, 0 /* flags */,
                                        0 /* initial_value */, &temporary);

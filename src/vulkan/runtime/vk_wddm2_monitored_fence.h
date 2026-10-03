@@ -38,6 +38,10 @@ typedef void *HANDLE;
 struct vk_queue;
 
 extern const struct vk_sync_type vk_wddm2_monitored_fence_type;
+/* The same fence for a hosted device (BD-038): the host creates no NT handle for it (no ShareObjects in
+ * init) and opens none, so it has no Win32 import or export, and a semaphore of this type reports no
+ * OPAQUE_WIN32 or D3D12_FENCE handle type. */
+extern const struct vk_sync_type vk_wddm2_monitored_fence_hosted_type;
 
 struct vk_wddm2_monitored_fence {
    struct vk_sync base;
@@ -52,7 +56,7 @@ struct vk_wddm2_monitored_fence {
 static inline bool
 vk_sync_type_is_wddm2_monitored_fence(const struct vk_sync_type *type)
 {
-   return type == &vk_wddm2_monitored_fence_type;
+   return type == &vk_wddm2_monitored_fence_type || type == &vk_wddm2_monitored_fence_hosted_type;
 }
 
 static inline struct vk_wddm2_monitored_fence *
