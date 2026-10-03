@@ -270,7 +270,12 @@ HRESULT Bc250EnsureSurface(Device *device, Resource *resource)
    const UINT bpp = util_format_get_blocksize(resource->resource->format);
    struct SurfacePrivate { UINT magic, version, width, height, pitch, format; UINT64 size; };
    static_assert(sizeof(SurfacePrivate) == 32, "LB7A ABI");
-   const UINT pitchAlignment = resource->primary ? 256u : 64u;
+   // Every surface allocated here is a primary, a swap chain buffer or a
+   // shared resource, which DWM on the GPU route opens in the hosted UMD. That
+   // imports it as a linear image, and RADV on GFX10 takes only its own linear
+   // pitch there, the row rounded up to 256 bytes; at 64 bytes a window whose
+   // width is not a multiple of 64 pixels ended DWM (BD-058).
+   const UINT pitchAlignment = 256u;
    const UINT pitch = resource->allocation ? resource->surfacePitch :
       (width * bpp + pitchAlignment - 1) & ~(pitchAlignment - 1);
    const UINT64 bytes = resource->allocation ? resource->surfaceBytes :

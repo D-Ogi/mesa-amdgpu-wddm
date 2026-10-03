@@ -380,8 +380,8 @@ static void TestOpenRefusals(Device *device)
    printf("open refusals: %u cases, X8R8G8B8 open\n", (UINT)(sizeof(cases) / sizeof(cases[0])));
 }
 
-// The allocate path: 8-bit shared and primary surfaces send the same LB7A and
-// E26R bytes as before; R10G10B10A2 is not created by this UMD.
+// The allocate path: 8-bit shared and primary surfaces send LB7A at the 256-byte
+// pitch and the E26R bytes as before; R10G10B10A2 is not created by this UMD.
 static void TestCreateShared(Device *device)
 {
    D3D10DDI_HDEVICE hDevice = {device};
@@ -399,9 +399,9 @@ static void TestCreateShared(Device *device)
       UINT calls = allocateCalls;
       HRESULT hr = Create(hDevice, &r, c.format, width, height, D3D10_DDI_RESOURCE_MISC_SHARED,
                           c.primary ? &primary : NULL);
-      // The formula of the code before 10-bit surfaces could be opened.
-      const UINT alignment = c.primary ? 256u : 64u;
-      const UINT pitch = (width * 4 + alignment - 1) & ~(alignment - 1);
+      // Every surface has the 256-byte pitch the hosted UMD can import (BD-058):
+      // 67 pixels give 512 bytes, where the earlier 64-byte rule gave 320.
+      const UINT pitch = (width * 4 + 255u) & ~255u;
       Lb7a want = {0x4137424c, 1, width, height, pitch, c.ddi, UINT64(pitch) * ((height + 3) & ~3u)};
       const UINT group[4] = {0x52363245, 2, 1, (c.primary ? 1u : 0u) | 2u};
       CHECK(hr == S_OK && allocateCalls == calls + 1, "format %u primary %u: %08lx", c.ddi, c.primary, hr);
