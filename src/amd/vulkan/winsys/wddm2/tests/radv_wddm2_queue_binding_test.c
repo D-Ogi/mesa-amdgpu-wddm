@@ -90,6 +90,7 @@ struct obj {
    uint64_t value;    /* syncs: what the fence's CPU mapping shows */
    uint64_t gpu_va;   /* syncs: the FenceValueGPUVirtualAddress the host gave (h.gpu_va_mode) */
    void *mem;         /* allocations: Lock2 memory */
+   bool locked;       /* allocations: a Lock2 the host has not seen unlocked */
 };
 
 struct event {
@@ -139,6 +140,8 @@ static struct {
 
    unsigned queue_op_out_of_scope, cookie_mismatch, wrong_thread;
    unsigned dead_context, dead_sync, device_contexts, unexpected;
+   /* A DestroyAllocation2 of a locked allocation: refused, as the D3D12 shell's HostedDispatch refuses it. */
+   unsigned locked_destroy;
 
    /* The last SubmitCommand: its IB and its BC2S blob. */
    uint64_t submit_va;
@@ -488,6 +491,11 @@ fake_dispatch(void *userdata, uint32_t op, void *arg)
             h.unexpected++;
             continue;
          }
+         if (o->locked) {
+            h.locked_destroy++;
+            record(op, 0, 0, o->handle, NULL);
+            return HOST_FAIL;
+         }
          o->live = false;
          free(o->mem);
          o->mem = NULL;
@@ -533,6 +541,9 @@ fake_dispatch(void *userdata, uint32_t op, void *arg)
          h.unexpected++;
          return HOST_FAIL;
       }
+      if (o->locked)
+         h.unexpected++; /* the ICD keeps one lock per allocation */
+      o->locked = true;
       if (!o->mem)
          o->mem = calloc(1, LOCK_BYTES);
       l->pData = o->mem;
@@ -542,8 +553,10 @@ fake_dispatch(void *userdata, uint32_t op, void *arg)
    case BC250_HOST_Unlock2: {
       const D3DKMT_UNLOCK2 *u = arg;
       struct obj *o = find(h.allocs, h.n_allocs, u->hAllocation);
-      if (!o || !o->live)
-         h.unexpected++;
+      if (!o || !o->live || !o->locked)
+         h.unexpected++; /* an Unlock2 without its Lock2 */
+      if (o)
+         o->locked = false;
       record(op, 0, 0, u->hAllocation, NULL);
       return 0;
    }
@@ -776,6 +789,7 @@ contract(void)
          h.dead_sync);
    check(!h.device_contexts, "no device-level context (%u calls)", h.device_contexts);
    check(!h.unexpected, "no unexpected host call (%u)", h.unexpected);
+   check(!h.locked_destroy, "no allocation destroyed while locked (%u)", h.locked_destroy);
 }
 
 static void
@@ -4078,6 +4092,165 @@ test_draw_stats(void)
    contract();
 }
 
+/* BD-045: a CPU lock belongs to whoever releases the allocation. The fake host keeps one lock per allocation
+ * (a second Lock2 or an Unlock2 without one is unexpected) and refuses to destroy a locked allocation, as the
+ * D3D12 shell's HostedDispatch does. */
+static void
+test_lock_ownership(void)
+{
+   clear_deferred_env();
+   struct radv_wddm2_winsys *ws = make_ws();
+
+   /* Map, unmap, map again: Lock2, Unlock2, Lock2; destroy unlocks before anything else. */
+   struct radeon_winsys_bo *bo = gtt_bo(ws);
+   const uint32_t bo_h = bo->handle;
+   unsigned mark = h.n_ev;
+   void *ptr = ws->base.buffer_map(&ws->base, bo, false, NULL);
+   ws->base.buffer_unmap(&ws->base, bo, false);
+   void *again = ws->base.buffer_map(&ws->base, bo, false, NULL);
+   check(ptr && again && h.n_ev == mark + 3 && event_is((int)mark, BC250_HOST_Lock2, 0, 0, bo_h) &&
+            event_is((int)mark + 1, BC250_HOST_Unlock2, 0, 0, bo_h) &&
+            event_is((int)mark + 2, BC250_HOST_Lock2, 0, 0, bo_h),
+         "map, unmap, map: Lock2, Unlock2, Lock2 (calls: %u)", h.n_ev - mark);
+   mark = h.n_ev;
+   ws->base.buffer_destroy(&ws->base, bo);
+   const int unlock = find_op(mark, BC250_HOST_Unlock2, 0);
+   check(event_is(unlock, BC250_HOST_Unlock2, 0, 0, bo_h) && unlock < find_destroy(mark, bo_h) && !alloc_live(bo_h),
+         "destroy unlocks first, then destroys the allocation");
+
+   /* A failed Lock2 maps nothing, and nothing unlocks it later. */
+   bo = gtt_bo(ws);
+   const uint32_t nolock_h = bo->handle;
+   h.fail_op = BC250_HOST_Lock2;
+   h.fail_nth = 1;
+   h.fail_seen = h.fail_more = 0;
+   check(ws->base.buffer_map(&ws->base, bo, false, NULL) == NULL && h.fail_seen == 1, "a failed Lock2 maps nothing");
+   h.fail_op = 0;
+   mark = h.n_ev;
+   ws->base.buffer_unmap(&ws->base, bo, false);
+   ws->base.buffer_destroy(&ws->base, bo);
+   check(!count_op(mark, BC250_HOST_Unlock2) && !alloc_live(nolock_h),
+         "neither unmap nor destroy unlocks it (%u Unlock2), and the allocation goes", count_op(mark, BC250_HOST_Unlock2));
+
+   /* A failed Unlock2 at unmap keeps the lock and the pointer: the next map makes no host call, and destroy
+    * unlocks it. */
+   bo = gtt_bo(ws);
+   const uint32_t kept_h = bo->handle;
+   ptr = ws->base.buffer_map(&ws->base, bo, false, NULL);
+   h.fail_op = BC250_HOST_Unlock2;
+   h.fail_nth = 1;
+   h.fail_seen = h.fail_more = 0;
+   ws->base.buffer_unmap(&ws->base, bo, false);
+   h.fail_op = 0;
+   check(h.fail_seen == 1 && find(h.allocs, h.n_allocs, kept_h)->locked, "the unmap's Unlock2 failed; the host holds the lock");
+   mark = h.n_ev;
+   check(ws->base.buffer_map(&ws->base, bo, false, NULL) == ptr && h.n_ev == mark,
+         "the next map returns the same pointer, no host call");
+   ws->base.buffer_destroy(&ws->base, bo);
+   check(count_op(mark, BC250_HOST_Unlock2) == 1 && !alloc_live(kept_h), "destroy unlocks it once, then the allocation goes");
+   contract();
+}
+
+/* BD-045: an owned BO whose Unlock2 fails at destroy keeps its lock, VA, allocation and byte charge, and the
+ * drain points retry it, at most once per interval; teardown tries once more and leaves the rest to the host. */
+static void
+test_lock_kept(void)
+{
+   clear_deferred_env();
+   struct radv_wddm2_winsys *ws = make_ws();
+   const uint64_t gtt = ws->allocated_gtt;
+   struct radeon_winsys_bo *bo = gtt_bo(ws);
+   const uint32_t bo_h = bo->handle;
+   const uint64_t charged = ws->allocated_gtt;
+   check(charged > gtt && ws->base.buffer_map(&ws->base, bo, false, NULL) != NULL, "charged and mapped");
+
+   long log = log_mark();
+   h.fail_op = BC250_HOST_Unlock2;
+   h.fail_nth = 1;
+   h.fail_seen = 0;
+   h.fail_more = 1000;
+   unsigned mark = h.n_ev;
+   ws->base.buffer_destroy(&ws->base, bo);
+   check(count_op(mark, BC250_HOST_Unlock2) == 1 && !count_op(mark, BC250_HOST_Evict) &&
+            !count_op(mark, BC250_HOST_FreeGpuVirtualAddress) && !count_op(mark, BC250_HOST_DestroyAllocation2),
+         "a failed Unlock2 at destroy: no evict, VA free or allocation destroy follows");
+   check(alloc_live(bo_h) && find(h.allocs, h.n_allocs, bo_h)->locked && ws->allocated_gtt == charged &&
+            ws->deferred.locked_count == 1,
+         "the BO is kept: allocation live and locked, still charged, one kept (%u)", ws->deferred.locked_count);
+   check(log_lines(log, "kept: its allocation stays CPU-locked", NULL, 0) == 1, "one log line says so");
+
+   /* Within the interval a drain makes no host call. */
+   mark = h.n_ev;
+   radv_wddm2_deferred_drain(ws);
+   check(h.n_ev == mark, "a drain within the retry interval makes no host call");
+
+   /* Past it, the drain retries; the fault holds, so it is kept again, with no second log line. */
+   ws->deferred.locked_interval_ns = 0;
+   ws->deferred.locked_next_ns = 0;
+   mark = h.n_ev;
+   radv_wddm2_deferred_drain(ws);
+   check(count_op(mark, BC250_HOST_Unlock2) == 1 && !count_op(mark, BC250_HOST_DestroyAllocation2) &&
+            alloc_live(bo_h) && ws->deferred.locked_count == 1,
+         "the drain retries the Unlock2 once; it fails, the BO stays kept");
+   check(log_lines(log, "kept: its allocation stays CPU-locked", NULL, 0) == 1, "still one log line");
+
+   /* Once the host unlocks, the next drain releases everything. */
+   h.fail_op = 0;
+   mark = h.n_ev;
+   radv_wddm2_deferred_drain(ws);
+   const int unlock = find_op(mark, BC250_HOST_Unlock2, 0);
+   check(unlock >= 0 && count_op(mark, BC250_HOST_FreeGpuVirtualAddress) == 1 && unlock < find_destroy(mark, bo_h) &&
+            !alloc_live(bo_h) && ws->allocated_gtt == gtt && ws->deferred.locked_count == 0,
+         "the next drain unlocks, frees the VA and destroys the allocation; the byte charge goes");
+
+   /* At teardown the fault still holds: one more try, then the BO is left to the host. */
+   bo = gtt_bo(ws);
+   const uint32_t left_h = bo->handle;
+   ws->base.buffer_map(&ws->base, bo, false, NULL);
+   h.fail_op = BC250_HOST_Unlock2;
+   h.fail_nth = 1;
+   h.fail_seen = 0;
+   ws->base.buffer_destroy(&ws->base, bo);
+   ws->deferred.locked_interval_ns = 1000000000000ull;
+   log = log_mark();
+   mark = h.n_ev;
+   radv_wddm2_deferred_finish(ws);
+   check(count_op(mark, BC250_HOST_Unlock2) == 1 && !count_op(mark, BC250_HOST_DestroyAllocation2) && alloc_live(left_h) &&
+            ws->deferred.locked_count == 0,
+         "teardown tries the unlock once more, whatever the interval, and destroys nothing");
+   check(log_lines(log, "still CPU-locked at teardown", NULL, 0) == 1, "and says what it left to the host");
+   h.fail_op = 0;
+   find(h.allocs, h.n_allocs, left_h)->locked = false; /* the host releases it with the device */
+   contract();
+}
+
+/* BD-045: a host import whose Unlock2 fails at destroy: the lock passes to the host with its allocation. */
+static void
+test_lock_borrowed(void)
+{
+   clear_deferred_env();
+   struct radv_wddm2_winsys *ws = make_ws();
+   struct obj *mappable = host_alloc();
+   struct radeon_winsys_bo *bo = NULL;
+   check(ws->base.buffer_from_hosted(&ws->base, ws->host.identity, mappable->handle, BC250_HOST_IMPORT_CPU_MAP,
+                                     0x800000000ull, 65536, &bo) == VK_SUCCESS && bo,
+         "a mappable import");
+   check(ws->base.buffer_map(&ws->base, bo, false, NULL) == mappable->mem, "mapped through the host's Lock2");
+   h.fail_op = BC250_HOST_Unlock2;
+   h.fail_nth = 1;
+   h.fail_seen = 0;
+   h.fail_more = 1000;
+   const unsigned mark = h.n_ev;
+   ws->base.buffer_destroy(&ws->base, bo);
+   check(h.n_ev == mark + 1 && h.ev[mark].op == BC250_HOST_Unlock2,
+         "destroy makes exactly one Unlock2 (calls: %u)", h.n_ev - mark);
+   check(mappable->live && mappable->locked && ws->deferred.locked_count == 0,
+         "it fails: the allocation and its lock stay the host's, the ICD keeps nothing");
+   h.fail_op = 0;
+   mappable->locked = false; /* the host's to release */
+   contract();
+}
+
 static const struct {
    const char *name;
    void (*run)(void);
@@ -4095,6 +4268,9 @@ static const struct {
    {"review_wait_failure", test_review_wait_failure},
    {"review_destroy_failure", test_review_destroy_failure},
    {"hosted_map", test_hosted_map},
+   {"lock_ownership", test_lock_ownership},
+   {"lock_kept", test_lock_kept},
+   {"lock_borrowed", test_lock_borrowed},
    {"deferred_destroy", test_deferred_destroy},
    {"ib2_calls", test_ib2_calls},
    {"ib2_fallback", test_ib2_fallback},

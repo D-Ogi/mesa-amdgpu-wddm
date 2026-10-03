@@ -170,6 +170,14 @@ struct radv_wddm2_winsys {
       uint64_t forced;          /* destroyed unretired at teardown */
       uint64_t retries;          /* allocations retried after waiting for held BOs */
       uint64_t borrowed;         /* host imports destroyed: the host's, never held or witnessed; atomic */
+      /* BD-045: owned BOs whose CPU lock the host would not release at destroy. They keep the lock, the
+       * VA, the allocation and the byte charge; the drain points retry them (radv_wddm2_bo.c). */
+      struct list_head locked;   /* struct radv_wddm2_bo, through pool_link */
+      uint32_t locked_count;     /* atomic */
+      uint64_t locked_bytes;
+      uint64_t locked_next_ns;   /* the next retry */
+      uint64_t locked_interval_ns;
+      uint64_t unlock_failed;    /* Unlock2 calls that failed; atomic */
    } deferred;
 
    /* The periodic summary (radv_wddm2_bo.c): every BC250_DEFERRED_SUMMARY_S seconds (30 by default, 0

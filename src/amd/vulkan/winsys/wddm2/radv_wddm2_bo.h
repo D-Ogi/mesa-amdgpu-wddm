@@ -68,7 +68,9 @@ struct radv_wddm2_bo {
    uint32_t last_use_serial;  /* 0: no submission named the BO */
    uint8_t priority;          /* the RADV priority at creation, for the witness's class */
    bool destroyed;            /* buffer_destroy ran: the struct is held or waits in the pool */
-   struct list_head pool_link; /* ws->deferred.pool, once the struct waits for reuse */
+   bool lock_kept;            /* destroy_now kept it: Unlock2 failed on it at least once (BD-045) */
+   struct list_head pool_link; /* ws->deferred.pool, once the struct waits for reuse; ws->deferred.locked
+                                * while its CPU lock is kept */
 };
 
 static inline struct radv_wddm2_bo *

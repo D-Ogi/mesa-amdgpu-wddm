@@ -1207,23 +1207,34 @@ radv_wddm2_bo_map(struct radeon_winsys *_ws, struct radeon_winsys_bo *_bo,
    return lock.pData;
 }
 
-static void
-radv_wddm2_bo_unmap(struct radeon_winsys *_ws, struct radeon_winsys_bo *_bo, bool replace)
+/* Releases the BO's CPU lock. False if Unlock2 failed: the lock and the mapping are then still valid, and
+ * bo->map keeps them, so a later map returns the same pointer and a later destroy retries (BD-045). */
+static bool
+radv_wddm2_bo_unlock(struct radv_wddm2_bo *bo)
 {
-   struct radv_wddm2_bo *bo = radv_wddm2_bo(_bo);
-   ASSERTED NTSTATUS status;
-
    if (bo->map == NULL)
-      return;
+      return true;
 
    const D3DKMT_UNLOCK2 unlock = {
       .hDevice = bo->ws->device_h,
       .hAllocation = bo->base.handle,
    };
-   status = BC250_WDDM_CALL(&bo->ws->host, Unlock2, &unlock);
-   assert(NT_SUCCESS(status));
-   
+   const NTSTATUS status = BC250_WDDM_CALL(&bo->ws->host, Unlock2, &unlock);
+   if (!NT_SUCCESS(status)) {
+      if (p_atomic_inc_return(&bo->ws->deferred.unlock_failed) <= 16)
+         amdgpu_wddm_log("radv: Unlock2 of allocation 0x%x (%" PRIu64 " bytes%s) failed 0x%08lx; the lock is kept\n",
+                         bo->base.handle, bo->base.size, bo->borrowed ? ", host import" : "",
+                         (unsigned long)status);
+      return false;
+   }
    bo->map = NULL;
+   return true;
+}
+
+static void
+radv_wddm2_bo_unmap(struct radeon_winsys *_ws, struct radeon_winsys_bo *_bo, bool replace)
+{
+   radv_wddm2_bo_unlock(radv_wddm2_bo(_bo));
 }
 
 static VkResult
@@ -1275,13 +1286,44 @@ radv_wddm2_bo_make_resident(struct radeon_winsys *_ws, struct radeon_winsys_bo *
    return VK_SUCCESS;
 }
 
-/* Evict, unmap, free the VA and destroy the allocation, now. */
+/* BD-045: an owned BO whose CPU lock the host would not release. A host refuses to free the VA of a locked
+ * allocation or to destroy it (the D3D12 shell's HostedDispatch answers E_INVALIDARG), so nothing more is
+ * released: the BO keeps its allocation, VA and byte charge on ws->deferred.locked until a retry unlocks it.
+ * The struct is not in the pool, so pool_link is free to carry it. */
+static void
+radv_wddm2_bo_keep_locked(struct radv_wddm2_winsys *ws, struct radv_wddm2_bo *bo)
+{
+   simple_mtx_lock(&ws->deferred.lock);
+   if (!bo->lock_kept)
+      radv_wddm2_deferred_line("a %" PRIu64 "-byte BO kept: its allocation stays CPU-locked, retried at the drain points",
+                               bo->base.size);
+   bo->lock_kept = true;
+   bo->destroyed = true;
+   /* The first kept BO starts the interval: the destroy that just failed was its first try. */
+   if (!ws->deferred.locked_count)
+      ws->deferred.locked_next_ns = os_time_get_nano() + ws->deferred.locked_interval_ns;
+   list_addtail(&bo->pool_link, &ws->deferred.locked);
+   ws->deferred.locked_bytes += bo->base.size;
+   p_atomic_inc(&ws->deferred.locked_count);
+   simple_mtx_unlock(&ws->deferred.lock);
+}
+
+/* Unlock, evict, free the VA and destroy the allocation, now. The unlock comes first: a BO the host keeps
+ * locked is kept whole (radv_wddm2_bo_keep_locked), not half released. */
 static void
 radv_wddm2_bo_destroy_now(struct radv_wddm2_winsys *ws, struct radv_wddm2_bo *bo)
 {
-   struct radeon_winsys *_ws = &ws->base;
-   struct radeon_winsys_bo *_bo = &bo->base;
    ASSERTED NTSTATUS status;
+
+   if (!radv_wddm2_bo_unlock(bo)) {
+      if (!bo->borrowed) {
+         radv_wddm2_bo_keep_locked(ws, bo);
+         return;
+      }
+      /* A host import: the allocation and its lock are the host's, which releases both with the
+       * allocation. The ICD only forgets its pointer. */
+      bo->map = NULL;
+   }
 
    if (all_resident && !bo->base.is_virtual && !bo->borrowed) {
       D3DKMT_EVICT evict = {
@@ -1296,8 +1338,6 @@ radv_wddm2_bo_destroy_now(struct radv_wddm2_winsys *ws, struct radv_wddm2_bo *bo
          return;
       }
    }
-
-   radv_wddm2_bo_unmap(_ws, _bo, false);
 
    if (bo->borrowed) {
       radv_wddm2_bo_account(ws, bo, false);
@@ -1788,9 +1828,34 @@ radv_wddm2_deferred_destroy_list(struct radv_wddm2_winsys *ws, struct list_head 
    }
 }
 
+/* BD-045: destroys the kept BOs again, which retries their unlock; one that still fails is kept again.
+ * At most once per locked_interval_ns, unless final (teardown). */
+static void
+radv_wddm2_locked_retry(struct radv_wddm2_winsys *ws, bool final)
+{
+   struct list_head kept;
+   list_inithead(&kept);
+   simple_mtx_lock(&ws->deferred.lock);
+   const uint64_t now = os_time_get_nano();
+   if (final || now >= ws->deferred.locked_next_ns) {
+      list_splicetail(&ws->deferred.locked, &kept);
+      list_inithead(&ws->deferred.locked);
+      ws->deferred.locked_bytes = 0;
+      p_atomic_set(&ws->deferred.locked_count, 0);
+      ws->deferred.locked_next_ns = now + ws->deferred.locked_interval_ns;
+   }
+   simple_mtx_unlock(&ws->deferred.lock);
+   list_for_each_entry_safe (struct radv_wddm2_bo, bo, &kept, pool_link) {
+      list_del(&bo->pool_link);
+      radv_wddm2_bo_destroy_now(ws, bo);
+   }
+}
+
 void
 radv_wddm2_deferred_drain(struct radv_wddm2_winsys *ws)
 {
+   if (p_atomic_read(&ws->deferred.locked_count))
+      radv_wddm2_locked_retry(ws, false);
    if (!p_atomic_read(&ws->deferred.count))
       return;
    struct list_head ready;
@@ -2264,6 +2329,28 @@ radv_wddm2_deferred_finish(struct radv_wddm2_winsys *ws)
       radv_wddm2_witness_totals_locked(ws, &totals);
    simple_mtx_unlock(&ws->deferred.lock);
    radv_wddm2_deferred_destroy_list(ws, &rest);
+
+   /* BD-045: one last unlock of the kept BOs. What the host still keeps locked is its to release with the
+    * device; the ICD gives up only its structs. */
+   radv_wddm2_locked_retry(ws, true);
+   simple_mtx_lock(&ws->deferred.lock);
+   const uint32_t locked = ws->deferred.locked_count;
+   if (locked)
+      radv_wddm2_deferred_line("%u BOs (%" PRIu64 " MiB) still CPU-locked at teardown after %" PRIu64
+                               " failed unlocks: left to the host",
+                               locked, ws->deferred.locked_bytes >> 20, p_atomic_read(&ws->deferred.unlock_failed));
+   struct list_head kept;
+   list_inithead(&kept);
+   list_splicetail(&ws->deferred.locked, &kept);
+   list_inithead(&ws->deferred.locked);
+   ws->deferred.locked_bytes = 0;
+   p_atomic_set(&ws->deferred.locked_count, 0);
+   simple_mtx_unlock(&ws->deferred.lock);
+   list_for_each_entry_safe (struct radv_wddm2_bo, bo, &kept, pool_link) {
+      list_del(&bo->pool_link);
+      radv_wddm2_bo_struct_free(ws, bo);
+   }
+
    if (ws->deferred.witness)
       radv_wddm2_witness_totals_line("finish", &totals);
    /* The periodic lines once more, with the teardown's counts: what a session that ends cleanly did. */
@@ -2693,6 +2780,8 @@ radv_wddm2_bo_init_functions(struct radv_wddm2_winsys *ws)
    list_inithead(&ws->deferred.trackers);
    list_inithead(&ws->deferred.entries);
    list_inithead(&ws->deferred.pool);
+   list_inithead(&ws->deferred.locked);
+   ws->deferred.locked_interval_ns = 1000000000ull;
 
    /* Only the bc250 path has per-queue progress fences to wait on. */
    struct radv_wddm2_knobs knobs;
