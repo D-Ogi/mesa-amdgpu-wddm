@@ -157,8 +157,8 @@ disk_cache_get_function_identifier(void *ptr, blake3_hasher *ctx)
  * are widened for each call into the file system: a profile path need not fit the ANSI code page.
  *
  * The single-file (Fossilize) and database caches are not implemented here: fossilize_db.c needs flock() and
- * mesa_cache_db.c is POSIX-only. disk_cache_type_create() makes a database cache, such as RADV's built-in shader
- * cache, a multi-file one; the single-file cache gets no directory from disk_cache_generate_cache_dir() and stays off.
+ * mesa_cache_db.c is POSIX-only. disk_cache_type_create() makes a database or single-file cache, such as RADV's
+ * built-in shader cache or a main cache under MESA_DISK_CACHE_SINGLE_FILE, a multi-file one.
  */
 
 /* The size an entry takes on the disk, as st_blocks * 512 is on POSIX: its length rounded up to the 4 KiB cluster
@@ -1619,8 +1619,7 @@ process_has_default_cache_dir(void)
  *   %LOCALAPPDATA%/mesa_shader_cache, for a user account only
  *
  * If none applies, the cache stays off. Only the multi-file cache has a
- * Windows implementation; the single-file type gets no directory, and
- * disk_cache_type_create() never asks for the database type.
+ * Windows implementation; disk_cache_type_create() asks for no other type.
  *
  * If the mkdir param is set we create the directory if it doesn't already
  * exist, if it does not exist and the param is false NULL will be returned.

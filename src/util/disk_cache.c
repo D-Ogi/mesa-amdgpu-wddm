@@ -90,8 +90,18 @@ disk_cache_init_queue(struct disk_cache *cache)
     *
     * The queue will resize automatically when it's full, so adding new jobs
     * doesn't stall.
+    *
+    * On Windows one thread: the CPU and GPU of an APU share one die, and
+    * during a compile burst four writers compressing and writing entries
+    * (with the file system's kernel work) added heat while the game was
+    * already bound by it. One writer keeps up between bursts.
     */
-   return util_queue_init(&cache->cache_queue, "disk$", 32, 4,
+#if DETECT_OS_WINDOWS
+   const unsigned num_threads = 1;
+#else
+   const unsigned num_threads = 4;
+#endif
+   return util_queue_init(&cache->cache_queue, "disk$", 32, num_threads,
                           UTIL_QUEUE_INIT_RESIZE_IF_FULL |
                           UTIL_QUEUE_INIT_USE_MINIMUM_PRIORITY |
                           UTIL_QUEUE_INIT_SET_FULL_THREAD_AFFINITY, NULL);
@@ -112,10 +122,13 @@ disk_cache_type_create(const char *gpu_name,
    size_t cv_size = sizeof(cache_version);
 
 #if DETECT_OS_WINDOWS
-   /* The database cache has no Windows implementation: a cache of that type,
-    * such as a driver's custom cache, is a multi-file cache there instead.
+   /* The database and single-file caches have no Windows implementation: a
+    * cache of either type, such as a driver's custom cache or the main cache
+    * of a process whose launcher sets MESA_DISK_CACHE_SINGLE_FILE, is a
+    * multi-file cache there instead. Left as single-file, it would get no
+    * directory and stay off without a word.
     */
-   if (cache_type == DISK_CACHE_DATABASE)
+   if (cache_type == DISK_CACHE_DATABASE || cache_type == DISK_CACHE_SINGLE_FILE)
       cache_type = DISK_CACHE_MULTI_FILE;
 #endif
 
