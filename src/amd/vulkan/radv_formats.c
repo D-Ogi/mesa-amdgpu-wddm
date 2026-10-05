@@ -1223,7 +1223,7 @@ get_external_image_format_properties(struct radv_physical_device *pdev,
 
       flags = VK_EXTERNAL_MEMORY_FEATURE_DEDICATED_ONLY_BIT | VK_EXTERNAL_MEMORY_FEATURE_IMPORTABLE_BIT;
 
-      /* advertise EXPORTABLE only when radv_create_ahb_memory supports the format */
+      /* advertise EXPORTABLE only when radv supports the format */
       if (radv_android_gralloc_supports_format(pImageFormatInfo->format, image_usage))
          flags |= VK_EXTERNAL_MEMORY_FEATURE_EXPORTABLE_BIT;
 

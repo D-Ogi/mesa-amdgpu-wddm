@@ -135,10 +135,11 @@ VkResult genX(CreateQueryPool)(
    const VkQueryPoolPerformanceCreateInfoKHR *perf_query_info = NULL;
    struct intel_perf_counter_pass *counter_pass;
    struct intel_perf_query_info **pass_query;
+   uint8_t *oag_snapshots = NULL;
    uint32_t n_passes = 0;
    uint32_t data_offset = 0;
    VK_MULTIALLOC(ma);
-   VkResult result;
+   VkResult result = VK_SUCCESS;
    void* metrics_library_query_pool = NULL;
 
    assert(pCreateInfo->sType == VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO);
@@ -213,12 +214,19 @@ VkResult genX(CreateQueryPool)(
       vk_multialloc_add(&ma, &pass_query, struct intel_perf_query_info *,
                              n_passes);
       uint64s_per_slot = 1 /* availability */;
-      /* Align to the requirement of the layout */
-      uint64s_per_slot = align(uint64s_per_slot,
-                               DIV_ROUND_UP(layout->alignment, sizeof(uint64_t)));
-      data_offset = uint64s_per_slot * sizeof(uint64_t);
-      /* Add the query data for begin & end commands */
-      uint64s_per_slot += 2 * DIV_ROUND_UP(layout->size, sizeof(uint64_t));
+      if (pdevice->perf->oag_global_enable) {
+         data_offset = uint64s_per_slot * sizeof(uint64_t);
+         uint64s_per_slot += 2 * DIV_ROUND_UP(sizeof(struct anv_oag_boundary), 8);
+         vk_multialloc_add(&ma, &oag_snapshots, uint8_t,
+                           (pdevice->perf->oa_sample_size * 2 * n_passes * pCreateInfo->queryCount));
+      } else {
+         /* Align to the requirement of the layout */
+         uint64s_per_slot = align(uint64s_per_slot,
+                                  DIV_ROUND_UP(layout->alignment, sizeof(uint64_t)));
+         data_offset = uint64s_per_slot * sizeof(uint64_t);
+         /* Add the query data for begin & end commands */
+         uint64s_per_slot += 2 * DIV_ROUND_UP(layout->size, sizeof(uint64_t));
+      }
       /* Multiply by the number of passes */
       uint64s_per_slot *= n_passes;
       break;
@@ -277,12 +285,20 @@ VkResult genX(CreateQueryPool)(
                                      perf_query_info->pCounterIndices,
                                      perf_query_info->counterIndexCount,
                                      pool->counter_pass);
+      pool->oag_snapshots = oag_snapshots;
+      pool->oag_report_size = pdevice->perf->oa_sample_size;
       pool->n_passes = n_passes;
       pool->pass_query = pass_query;
       intel_perf_get_n_passes(pdevice->perf,
                               perf_query_info->pCounterIndices,
                               perf_query_info->counterIndexCount,
                               pool->pass_query);
+
+      if (pdevice->perf->oag_global_enable) {
+         result = anv_oag_alloc_query_ids(device, pool);
+         if (result != VK_SUCCESS)
+            goto fail;
+      }
    } else if (pool->vk.query_type == VK_QUERY_TYPE_VIDEO_ENCODE_FEEDBACK_KHR) {
       const VkVideoProfileInfoKHR* pVideoProfile = vk_find_struct_const(pCreateInfo->pNext, VIDEO_PROFILE_INFO_KHR);
       assert (pVideoProfile);
@@ -294,9 +310,15 @@ VkResult genX(CreateQueryPool)(
 
    /* For KHR_performance_query we need some space in the buffer for a small
     * batch updating ANV_PERF_QUERY_OFFSET_REG.
+    *
+    * This batch is emitted into a fixed size window with no growth callback,
+    * so it must be large enough for everything the preamble writes. In OAG
+    * mode it also loads ANV_PERF_QUERY_ID_OFFSET_REG, which does not fit in
+    * the 32 bytes the offset register alone needs.
     */
    if (pool->vk.query_type == VK_QUERY_TYPE_PERFORMANCE_QUERY_KHR) {
-      pool->khr_perf_preamble_stride = 32;
+      pool->khr_perf_preamble_stride =
+         pdevice->perf->oag_global_enable ? 64 : 32;
       pool->khr_perf_preambles_offset = size;
       size += (uint64_t)pool->n_passes * pool->khr_perf_preamble_stride;
    }
@@ -323,7 +345,14 @@ VkResult genX(CreateQueryPool)(
          mi_builder_init(&b, device->info, &batch);
          mi_store(&b, mi_reg64(ANV_PERF_QUERY_OFFSET_REG),
                       mi_imm(p * (uint64_t)pool->pass_size));
+         if (pool->oag_query_id_base != 0) {
+            mi_store(&b, mi_reg32(ANV_PERF_QUERY_ID_OFFSET_REG),
+                         mi_imm(p * pool->vk.query_count * 2));
+         }
          anv_batch_emit(&batch, GENX(MI_BATCH_BUFFER_END), bbe);
+
+         /* The preamble batch cannot grow, see khr_perf_preamble_stride. */
+         assert(batch.next <= batch.end);
       }
    }
 
@@ -343,6 +372,7 @@ VkResult genX(CreateQueryPool)(
    return VK_SUCCESS;
 
  fail:
+   anv_oag_free_query_ids(device, pool);
    vk_free2(&device->vk.alloc, pAllocator, pool);
 
    return result;
@@ -363,6 +393,8 @@ void genX(DestroyQueryPool)(
       if (!intel_perf_metrics_library_destroy_query_pool(device->physical->perf, pool->metrics_library_query_pool))
          vk_error(device, VK_ERROR_UNKNOWN);
    }
+
+   anv_oag_free_query_ids(device, pool);
 
    ANV_ADDR_BINDING_REPORT_BO_UNBIND(device, &pool->vk.base, pool->bo);
    ANV_RMV(resource_destroy, device, pool);
@@ -403,19 +435,6 @@ void genX(DestroyQueryPool)(
  * --------------------------------------------
  */
 
-static uint64_t
-khr_perf_query_availability_offset(struct anv_query_pool *pool, uint32_t query, uint32_t pass)
-{
-   return (query * (uint64_t)pool->stride) + (pass * (uint64_t)pool->pass_size);
-}
-
-static uint64_t
-khr_perf_query_data_offset(struct anv_query_pool *pool, uint32_t query, uint32_t pass, bool end)
-{
-   return khr_perf_query_availability_offset(pool, query, pass) +
-          pool->data_offset + (end ? pool->snapshot_size : 0);
-}
-
 static struct anv_address
 khr_perf_query_availability_address(struct anv_query_pool *pool, uint32_t query, uint32_t pass)
 {
@@ -425,11 +444,21 @@ khr_perf_query_availability_address(struct anv_query_pool *pool, uint32_t query,
 }
 
 static struct anv_address
-khr_perf_query_data_address(struct anv_query_pool *pool, uint32_t query, uint32_t pass, bool end)
+khr_perf_query_data_address(struct anv_query_pool *pool, uint32_t query,
+                            uint32_t pass, bool end)
 {
    return anv_address_add(
       (struct anv_address) { .bo = pool->bo, },
       khr_perf_query_data_offset(pool, query, pass, end));
+}
+
+static struct anv_address
+khr_perf_query_boundary_address(struct anv_query_pool *pool, uint32_t query,
+                                uint32_t pass, bool end)
+{
+   return anv_address_add(
+      (struct anv_address) { .bo = pool->bo, },
+      khr_perf_query_boundary_offset(pool, query, pass, end));
 }
 
 static bool
@@ -455,6 +484,25 @@ khr_perf_query_ensure_relocs(struct anv_cmd_buffer *cmd_buffer)
    }
 
    return true;
+}
+
+/* Record the address one of the commands of a performance query has to be
+ * patched with. @offset is relative to the pool BO, for pass 0; the pass the
+ * query is actually replayed with is added at execution time from
+ * ANV_PERF_QUERY_OFFSET_REG.
+ */
+static void
+khr_perf_query_push_reloc(struct anv_cmd_buffer *cmd_buffer,
+                          struct mi_builder *b, struct anv_query_pool *pool,
+                          uint32_t *reloc_idx, uint64_t offset)
+{
+   struct mi_value addr =
+      mi_iadd(b,
+              mi_imm(intel_canonical_address(pool->bo->offset + offset)),
+              mi_reg64(ANV_PERF_QUERY_OFFSET_REG));
+
+   cmd_buffer->self_mod_locations[(*reloc_idx)++] =
+      mi_store_relocated_address_reg64(b, addr);
 }
 
 /**
@@ -548,6 +596,178 @@ wait_for_available(struct anv_device *device,
    }
 
    return vk_device_set_lost(&device->vk, "query timeout");
+}
+
+/* OAG global triggered-report support (default on Xe2+).
+ *
+ * Each begin/end boundary of each (query, pass) writes a distinct marker to
+ * OAG_MMIOTRIGGER, which makes the OA unit emit a report carrying that marker,
+ * and brackets that trigger with reads of OAG_OATAILPTR. Those two tails
+ * delimit the region of the OA buffer the report must have landed in, so
+ * resolving a boundary is a bounded search of the (mapped) OA buffer rather
+ * than a scan of every report the stream has ever produced.
+ *
+ * Because the window is captured by the very execution that produced the
+ * snapshot, a query slot that is reset and reused can never resolve against a
+ * report left behind by an earlier execution.
+ */
+/* OAG_OASTATUS bits describing a loss of data. They are sticky, so only bits
+ * that appear between the two boundaries of a query affect that query, and any
+ * of them means its boundary reports cannot be trusted.
+ */
+#define ANV_OAG_STATUS_REPORT_LOST       (1u << 0)
+#define ANV_OAG_STATUS_BUFFER_OVERFLOW   (1u << 1)
+#define ANV_OAG_STATUS_MMIO_TRG_Q_FULL   (1u << 6)
+
+#define ANV_OAG_STATUS_FATAL             (ANV_OAG_STATUS_REPORT_LOST | \
+                                          ANV_OAG_STATUS_BUFFER_OVERFLOW | \
+                                          ANV_OAG_STATUS_MMIO_TRG_Q_FULL)
+
+/* How long to wait for the OA unit to write a triggered report out after the
+ * query it delimits has become available. This covers hardware latency only,
+ * everything scheduling related has already been waited for.
+ */
+#define ANV_OAG_RESOLVE_TIMEOUT_NS       (10 * 1000 * 1000)
+
+enum anv_oag_resolve_status {
+   /** Both boundary reports were found and accumulated. */
+   ANV_OAG_RESOLVED,
+   /** Not found yet, the OA unit may still be writing the report. */
+   ANV_OAG_PENDING,
+   /** The hardware reported dropping data covering this query. */
+   ANV_OAG_LOST,
+};
+
+static enum anv_oag_resolve_status
+anv_oag_accumulate_triggered(struct anv_device *device,
+                             struct anv_query_pool *pool,
+                             uint32_t query_index, uint32_t pass,
+                             const struct intel_perf_query_info *query,
+                             struct intel_perf_query_result *result)
+{
+   /* Snapshots live in host memory and receive the triggered OA reports from
+    * anv_oag_resolve_boundary(); the GPU-written boundaries stay in the BO.
+    */
+   void *begin_snapshot = pool->oag_snapshots +
+      khr_perf_query_snapshot_offset(pool, query_index, pass, false);
+   void *end_snapshot = pool->oag_snapshots +
+      khr_perf_query_snapshot_offset(pool, query_index, pass, true);
+   struct anv_oag_boundary *begin_boundary =
+      pool->bo->map + khr_perf_query_data_offset(pool, query_index, pass, false);
+   struct anv_oag_boundary *end_boundary =
+      pool->bo->map + khr_perf_query_data_offset(pool, query_index, pass, true);
+   const uint32_t begin_marker =
+      anv_oag_query_id(pool, query_index, pass, false);
+   const uint32_t end_marker =
+      anv_oag_query_id(pool, query_index, pass, true);
+
+   /* Sticky status bits that were not already set when the query started.
+    *
+    * Loss classification is best effort: OAG_OASTATUS is not writable from
+    * userspace batches and the kernel only clears it in stream read() paths
+    * this driver never exercises, so a bit that predates the query cannot be
+    * attributed to it — and once a bit is set, a genuine loss inside a later
+    * query window is equally invisible here. Such a query stays
+    * ANV_OAG_PENDING and surfaces through the resolve timeout instead of
+    * failing fast.
+    */
+   const uint32_t lost = end_boundary->oa_status & ~begin_boundary->oa_status;
+
+   simple_mtx_lock(&device->perf_oag.mutex);
+   const bool begin_resolved =
+      anv_oag_resolve_boundary(device, begin_boundary, begin_snapshot, begin_marker);
+   const bool end_resolved =
+      anv_oag_resolve_boundary(device, end_boundary, end_snapshot, end_marker);
+   simple_mtx_unlock(&device->perf_oag.mutex);
+
+   if (!begin_resolved || !end_resolved) {
+      /* OAG_OASTATUS tells us whether waiting any longer can help: a dropped
+       * report or an overrun OA buffer means the data is simply gone.
+       */
+      return (lost & ANV_OAG_STATUS_FATAL) ? ANV_OAG_LOST : ANV_OAG_PENDING;
+   }
+
+   if (lost & ANV_OAG_STATUS_FATAL)
+      return ANV_OAG_LOST;
+
+   intel_perf_query_result_read_frequencies(result, device->info,
+                                            begin_snapshot, end_snapshot);
+   intel_perf_query_result_accumulate(result, query,
+                                      begin_snapshot, end_snapshot);
+
+   return ANV_OAG_RESOLVED;
+}
+
+/* Accumulate every pass of one performance query into @pass_results.
+ *
+ * A query becoming available only means its triggers retired; the OA unit may
+ * still be writing the boundary reports out. That is a hardware latency, not a
+ * scheduling one, so it is retried under a much tighter bound than query
+ * availability itself.
+ */
+static enum anv_oag_resolve_status
+khr_perf_query_accumulate(struct anv_device *device,
+                          struct anv_query_pool *pool, uint32_t query,
+                          bool wait,
+                          struct intel_perf_query_result *pass_results)
+{
+   if (pool->oag_query_id_base == 0) {
+      /* The OAR snapshots were written directly by the command streamer, so
+       * there is never anything to wait for.
+       */
+      for (uint32_t p = 0; p < pool->n_passes; p++) {
+         intel_perf_query_result_clear(&pass_results[p]);
+         intel_perf_query_result_accumulate_fields(
+            &pass_results[p], pool->pass_query[p],
+            pool->bo->map + khr_perf_query_data_offset(pool, query, p, false),
+            pool->bo->map + khr_perf_query_data_offset(pool, query, p, true),
+            false /* no_oa_accumulate */);
+      }
+      return ANV_OAG_RESOLVED;
+   }
+
+   const uint64_t timeout =
+      os_time_get_absolute_timeout(ANV_OAG_RESOLVE_TIMEOUT_NS);
+   enum anv_oag_resolve_status resolve;
+   STACK_ARRAY(bool, accumulated, pool->n_passes);
+
+   memset(accumulated, 0, pool->n_passes * sizeof(*accumulated));
+
+   while (true) {
+      resolve = ANV_OAG_RESOLVED;
+
+      /* Each pass is accumulated exactly once, when it resolves; later
+       * iterations only retry the passes still waiting for their reports.
+       */
+      for (uint32_t p = 0; p < pool->n_passes; p++) {
+         if (accumulated[p])
+            continue;
+
+         intel_perf_query_result_clear(&pass_results[p]);
+
+         enum anv_oag_resolve_status pass_resolve =
+            anv_oag_accumulate_triggered(device, pool, query, p,
+                                         pool->pass_query[p],
+                                         &pass_results[p]);
+         if (pass_resolve == ANV_OAG_RESOLVED)
+            accumulated[p] = true;
+         else if (resolve != ANV_OAG_LOST)
+            resolve = pass_resolve;
+      }
+
+      if (resolve != ANV_OAG_PENDING || !wait ||
+          os_time_get_nano() >= timeout)
+         break;
+
+      /* What is being waited out is OA unit write-out latency, not
+       * scheduling; there is nothing to gain from hammering the buffer.
+       */
+      os_time_sleep(500);
+   }
+
+   STACK_ARRAY_FINISH(accumulated);
+
+   return resolve;
 }
 
 VkResult genX(GetQueryPoolResults)(
@@ -709,19 +929,42 @@ VkResult genX(GetQueryPoolResults)(
       }
 
       case VK_QUERY_TYPE_PERFORMANCE_QUERY_KHR: {
-         const struct anv_physical_device *pdevice = device->physical;
          assert((flags & (VK_QUERY_RESULT_WITH_AVAILABILITY_BIT |
                           VK_QUERY_RESULT_PARTIAL_BIT)) == 0);
-         for (uint32_t p = 0; p < pool->n_passes; p++) {
-            const struct intel_perf_query_info *query = pool->pass_query[p];
-            struct intel_perf_query_result result;
-            intel_perf_query_result_clear(&result);
-            intel_perf_query_result_accumulate_fields(&result, query,
-                                                      pool->bo->map + khr_perf_query_data_offset(pool, firstQuery + i, p, false),
-                                                      pool->bo->map + khr_perf_query_data_offset(pool, firstQuery + i, p, true),
-                                                      false /* no_oa_accumulate */);
-            anv_perf_write_pass_results(pdevice->perf, pool, p, &result, pData);
+         if (!write_results)
+            break;
+
+         STACK_ARRAY(struct intel_perf_query_result, pass_results,
+                     pool->n_passes);
+
+         enum anv_oag_resolve_status resolve =
+            khr_perf_query_accumulate(device, pool, firstQuery + i,
+                                      flags & VK_QUERY_RESULT_WAIT_BIT,
+                                      pass_results);
+
+         if (resolve == ANV_OAG_RESOLVED) {
+            for (uint32_t p = 0; p < pool->n_passes; p++)
+               anv_perf_write_pass_results(device->physical->perf, pool, p,
+                                           &pass_results[p], pData);
+         } else if (flags & VK_QUERY_RESULT_WAIT_BIT) {
+            /* With WAIT_BIT set, VK_NOT_READY is not a legal result, and the
+             * boundary reports are not coming: they were either dropped by
+             * the OA unit (ANV_OAG_LOST) or never showed up within the
+             * resolve timeout. Escalate the same way wait_for_available()
+             * does rather than fabricate counter values.
+             */
+            STACK_ARRAY_FINISH(pass_results);
+            return vk_device_set_lost(&device->vk,
+                                      "performance query boundary reports "
+                                      "unrecoverable");
+         } else {
+            /* Without WAIT_BIT this is a legal answer. On ANV_OAG_LOST the
+             * data will never arrive; the application has to reset the query
+             * and execute it again.
+             */
+            status = VK_NOT_READY;
          }
+         STACK_ARRAY_FINISH(pass_results);
          break;
       }
 
@@ -842,6 +1085,22 @@ emit_zero_queries(struct anv_cmd_buffer *cmd_buffer,
          for (uint32_t p = 0; p < pool->n_passes; p++) {
             mi_memset(b, khr_perf_query_data_address(pool, first_index + i, p, false),
                          0, 2 * pool->snapshot_size);
+            /* No trigger was ever fired for these queries, so their boundary
+             * reports will never show up in the OA buffer. Flag them zeroed
+             * so the resolve path clears the host snapshots and accumulates
+             * them (to zero) instead of waiting for reports that do not
+             * exist.
+             */
+            if (pool->oag_query_id_base != 0) {
+               for (uint32_t end = 0; end < 2; end++) {
+                  mi_store(b,
+                           mi_mem64(anv_address_add(
+                              khr_perf_query_boundary_address(
+                                 pool, first_index + i, p, end),
+                              offsetof(struct anv_oag_boundary, resolved))),
+                           mi_imm(ANV_OAG_ZEROED_MAGIC));
+               }
+            }
             emit_query_mi_availability(b,
                                        khr_perf_query_availability_address(pool, first_index + i, p),
                                        true);
@@ -951,6 +1210,19 @@ void genX(CmdResetQueryPool)(
 
       for (uint32_t i = 0; i < queryCount; i++) {
          for (uint32_t p = 0; p < pool->n_passes; p++) {
+            if (pool->oag_query_id_base != 0) {
+               /* Drop the whole boundary trailer, not just the "resolved"
+                * flag: a stale OATAIL window must never be able to resolve a
+                * snapshot that the next execution has not written yet.
+                */
+               for (uint32_t end = 0; end < 2; end++) {
+                  mi_memset(&b,
+                            khr_perf_query_boundary_address(pool,
+                                                            firstQuery + i, p,
+                                                            end),
+                            0, sizeof(struct anv_oag_boundary));
+               }
+            }
             emit_query_mi_availability(
                &b,
                khr_perf_query_availability_address(pool, firstQuery + i, p),
@@ -990,14 +1262,22 @@ void genX(ResetQueryPool)(
    ANV_FROM_HANDLE(anv_query_pool, pool, queryPool);
 
    for (uint32_t i = 0; i < queryCount; i++) {
+      uint32_t q = firstQuery + i;
       if (pool->vk.query_type == VK_QUERY_TYPE_PERFORMANCE_QUERY_KHR) {
          for (uint32_t p = 0; p < pool->n_passes; p++) {
-            uint64_t *pass_slot = pool->bo->map +
-               khr_perf_query_availability_offset(pool, firstQuery + i, p);
-            *pass_slot = 0;
+            uint64_t *slot = pool->bo->map +
+               khr_perf_query_availability_offset(pool, q, p);
+            *slot = 0;
+            if (pool->oag_query_id_base != 0) {
+               for (uint32_t end = 0; end < 2; end++) {
+                  memset(pool->bo->map +
+                         khr_perf_query_boundary_offset(pool, q, p, end),
+                         0, sizeof(struct anv_oag_boundary));
+               }
+            }
          }
       } else {
-         uint64_t *slot = query_slot(pool, firstQuery + i);
+         uint64_t *slot = query_slot(pool, q);
          *slot = 0;
       }
    }
@@ -1042,6 +1322,76 @@ emit_xfb_query(struct mi_builder *b, uint32_t stream,
                mi_reg64(GENX(SO_NUM_PRIMS_WRITTEN0_num) + stream * 8));
    mi_store(b, mi_mem64(anv_address_add(addr, 16)),
                mi_reg64(GENX(SO_PRIM_STORAGE_NEEDED0_num) + stream * 8));
+}
+
+/* OAG registers read back from the command streamer around a triggered report.
+ *
+ * On xe these are whitelisted for userspace RING_FORCE_TO_NONPRIV batches on
+ * RENDER/COMPUTE while a sampling OA stream is open: OAG_MMIOTRIGGER is
+ * read/write, and OAG_OAHEADPTR is readable with a 16 byte range which also
+ * covers OAG_OATAILPTR and OAG_OABUFFER. OAG_OASTATUS is readable too.
+ */
+#define OAG_TAIL_REG        0xDB04
+#define OAG_BUFFER_REG      0xDB08
+#define OAG_STATUS_REG      0xDAFC
+
+/* OAG on-demand report trigger register (OAG_MMIOTRIGGER). Writing a marker to
+ * it makes the OA unit emit a report at that exact point in the command
+ * stream, carrying the marker in the report context-id field. Used to bracket
+ * a query with exact boundary reports for the OAG performance-query resolve.
+ */
+#define OAG_MMIOTRIGGER_REG 0xDB1C
+
+/* The register stores that make up one OAG boundary, in emission order.
+ *
+ * Each one needs a self-modifying relocation, so both the batch emission
+ * (emit_perf_khr_oag_boundary) and the relocation setup
+ * (emit_perf_khr_oag_relocs) walk this table to stay in lockstep.
+ */
+static const struct {
+   uint32_t reg;
+   size_t   offset;
+} oag_boundary_stores[] = {
+   { OAG_TAIL_REG,   offsetof(struct anv_oag_boundary, tail_pre)  },
+   { OAG_STATUS_REG, offsetof(struct anv_oag_boundary, oa_status) },
+   /* The trigger is fired here, between the two OATAIL samples. */
+   { OAG_TAIL_REG,   offsetof(struct anv_oag_boundary, tail_post) },
+   { OAG_BUFFER_REG, offsetof(struct anv_oag_boundary, oa_buffer) },
+};
+
+/* Index in oag_boundary_stores[] the MMIO trigger is emitted in front of. */
+#define OAG_TRIGGER_STORE_IDX 2
+
+/* Emit the OAG boundary of a performance query: sample the OA tail and status,
+ * fire the trigger, then sample the tail again and record the OA buffer base.
+ * The two tails delimit the region of the OA buffer the triggered report must
+ * have landed in.
+ */
+static void
+emit_perf_khr_oag_boundary(struct anv_cmd_buffer *cmd_buffer,
+                           struct anv_query_pool *pool,
+                           struct mi_builder *b,
+                           struct anv_address query_addr,
+                           uint32_t query, bool end)
+{
+   STATIC_ASSERT(ARRAY_SIZE(oag_boundary_stores) == ANV_OAG_BOUNDARY_STORES);
+
+   for (uint32_t i = 0; i < ARRAY_SIZE(oag_boundary_stores); i++) {
+      if (i == OAG_TRIGGER_STORE_IDX) {
+         mi_store(b, mi_reg32(OAG_MMIOTRIGGER_REG),
+                     mi_iadd(b, mi_imm(anv_oag_query_id(pool, query, 0, end)),
+                                mi_reg32(ANV_PERF_QUERY_ID_OFFSET_REG)));
+      }
+
+      void *dws = anv_batch_emitn(&cmd_buffer->batch,
+                                  GENX(MI_STORE_REGISTER_MEM_length),
+                                  GENX(MI_STORE_REGISTER_MEM),
+                                  .RegisterAddress = oag_boundary_stores[i].reg,
+                                  .MemoryAddress = query_addr /* overwritten */);
+      mi_resolve_relocated_address_token(
+         b, cmd_buffer->self_mod_locations[cmd_buffer->perf_reloc_idx++],
+         dws + GENX(MI_STORE_REGISTER_MEM_MemoryAddress_start) / 8);
+   }
 }
 
 static void
@@ -1189,47 +1539,48 @@ void genX(CmdBeginQueryIndexedEXT)(
 
       const struct anv_physical_device *pdevice = cmd_buffer->device->physical;
       const struct intel_perf_query_field_layout *layout = &pdevice->perf->query_layout;
+      const bool oag = pool->oag_query_id_base != 0;
 
       uint32_t reloc_idx = 0;
       for (uint32_t end = 0; end < 2; end++) {
-         for (uint32_t r = 0; r < layout->n_fields; r++) {
-            const struct intel_perf_query_field *field =
-               &layout->fields[end ? r : (layout->n_fields - 1 - r)];
-            struct mi_value reg_addr =
-               mi_iadd(
-                  &b,
-                  mi_imm(intel_canonical_address(pool->bo->offset +
-                                                 khr_perf_query_data_offset(pool, query, 0, end) +
-                                                 field->location)),
-                  mi_reg64(ANV_PERF_QUERY_OFFSET_REG));
-            cmd_buffer->self_mod_locations[reloc_idx++] =
-               mi_store_relocated_address_reg64(&b, reg_addr);
+         /* In OAG mode the MI_RPC field is replaced by a trigger write, which
+          * needs no relocation, and the stores bracketing it. The SRM fields
+          * are not emitted at all: they read the context-relative OAR
+          * sub-unit, which is zero for GT-wide counters.
+          */
+         if (oag) {
+            const uint64_t boundary_offset =
+               khr_perf_query_data_offset(pool, query, 0 /* pass */, end);
 
-            if (field->type != INTEL_PERF_QUERY_FIELD_TYPE_MI_RPC &&
-                field->size == 8) {
-               reg_addr =
-                  mi_iadd(
-                     &b,
-                     mi_imm(intel_canonical_address(pool->bo->offset +
-                                                    khr_perf_query_data_offset(pool, query, 0, end) +
-                                                    field->location + 4)),
-                     mi_reg64(ANV_PERF_QUERY_OFFSET_REG));
-               cmd_buffer->self_mod_locations[reloc_idx++] =
-                  mi_store_relocated_address_reg64(&b, reg_addr);
+            for (uint32_t s = 0; s < ARRAY_SIZE(oag_boundary_stores); s++) {
+               khr_perf_query_push_reloc(cmd_buffer, &b, pool, &reloc_idx,
+                                         boundary_offset +
+                                         oag_boundary_stores[s].offset);
+            }
+         } else {
+            const uint64_t data_offset =
+               khr_perf_query_data_offset(pool, query, 0 /* pass */, end);
+
+            for (uint32_t r = 0; r < layout->n_fields; r++) {
+               const struct intel_perf_query_field *field =
+                  &layout->fields[end ? r : (layout->n_fields - 1 - r)];
+
+               khr_perf_query_push_reloc(cmd_buffer, &b, pool, &reloc_idx,
+                                         data_offset + field->location);
+
+               /* 64bit registers are stored with two MI_STORE_REGISTER_MEM. */
+               if (field->type != INTEL_PERF_QUERY_FIELD_TYPE_MI_RPC &&
+                   field->size == 8) {
+                  khr_perf_query_push_reloc(cmd_buffer, &b, pool, &reloc_idx,
+                                            data_offset + field->location + 4);
+               }
             }
          }
       }
 
-      struct mi_value availability_write_offset =
-         mi_iadd(
-            &b,
-            mi_imm(
-               intel_canonical_address(
-                  pool->bo->offset +
-                  khr_perf_query_availability_offset(pool, query, 0 /* pass */))),
-            mi_reg64(ANV_PERF_QUERY_OFFSET_REG));
-      cmd_buffer->self_mod_locations[reloc_idx++] =
-         mi_store_relocated_address_reg64(&b, availability_write_offset);
+      khr_perf_query_push_reloc(cmd_buffer, &b, pool, &reloc_idx,
+                                khr_perf_query_availability_offset(pool, query,
+                                                                   0 /* pass */));
 
       assert(reloc_idx == pdevice->n_perf_query_commands);
 
@@ -1250,16 +1601,29 @@ void genX(CmdBeginQueryIndexedEXT)(
             &layout->fields[layout->n_fields - 1 - r];
          void *dws;
 
+         /* In OAG mode only the MI_RPC field is emitted, replaced by an OAG
+          * MMIO trigger and its delimiting register stores; the dead
+          * OAR-relative SRM stores are skipped.
+          */
+         if (oag && field->type != INTEL_PERF_QUERY_FIELD_TYPE_MI_RPC)
+            continue;
+
          switch (field->type) {
          case INTEL_PERF_QUERY_FIELD_TYPE_MI_RPC:
-            dws = anv_batch_emitn(&cmd_buffer->batch,
-                                  GENX(MI_REPORT_PERF_COUNT_length),
-                                  GENX(MI_REPORT_PERF_COUNT),
-                                  .MemoryAddress = query_addr /* Will be overwritten */);
-            mi_resolve_relocated_address_token(
-               &b,
-               cmd_buffer->self_mod_locations[cmd_buffer->perf_reloc_idx++],
-               dws + GENX(MI_REPORT_PERF_COUNT_MemoryAddress_start) / 8);
+            if (oag) {
+               emit_perf_khr_oag_boundary(cmd_buffer, pool, &b,
+                                          anv_address_add(query_addr, pool->data_offset),
+                                          query, false /* end */);
+            } else {
+               dws = anv_batch_emitn(&cmd_buffer->batch,
+                                     GENX(MI_REPORT_PERF_COUNT_length),
+                                     GENX(MI_REPORT_PERF_COUNT),
+                                     .MemoryAddress = query_addr /* Will be overwritten */);
+               mi_resolve_relocated_address_token(
+                  &b,
+                  cmd_buffer->self_mod_locations[cmd_buffer->perf_reloc_idx++],
+                  dws + GENX(MI_REPORT_PERF_COUNT_MemoryAddress_start) / 8);
+            }
             break;
 
          case INTEL_PERF_QUERY_FIELD_TYPE_SRM_PERFCNT:
@@ -1357,6 +1721,12 @@ void genX(CmdEndQueryIndexedEXT)(
 
    struct mi_builder b;
    mi_builder_init(&b, cmd_buffer->device->info, &cmd_buffer->batch);
+   /* Required before emitting MI_MATH on Gfx12.5+, where its MOCS field must
+    * not be zero. The OAG boundary of a performance query computes its trigger
+    * id with mi_iadd().
+    */
+   const uint32_t mocs = anv_mocs_for_address(cmd_buffer->device, &query_addr);
+   mi_builder_set_mocs(&b, mocs);
 
    switch (pool->vk.query_type) {
    case VK_QUERY_TYPE_OCCLUSION:
@@ -1457,21 +1827,35 @@ void genX(CmdEndQueryIndexedEXT)(
 
       const struct anv_physical_device *pdevice = cmd_buffer->device->physical;
       const struct intel_perf_query_field_layout *layout = &pdevice->perf->query_layout;
+      const bool oag = pool->oag_query_id_base != 0;
 
       void *dws;
       for (uint32_t r = 0; r < layout->n_fields; r++) {
          const struct intel_perf_query_field *field = &layout->fields[r];
 
+         /* In OAG mode only the MI_RPC field is emitted, replaced by an OAG
+          * MMIO trigger and its delimiting register stores; the dead
+          * OAR-relative SRM stores are skipped.
+          */
+         if (oag && field->type != INTEL_PERF_QUERY_FIELD_TYPE_MI_RPC)
+            continue;
+
          switch (field->type) {
          case INTEL_PERF_QUERY_FIELD_TYPE_MI_RPC:
-            dws = anv_batch_emitn(&cmd_buffer->batch,
-                                  GENX(MI_REPORT_PERF_COUNT_length),
-                                  GENX(MI_REPORT_PERF_COUNT),
-                                  .MemoryAddress = query_addr /* Will be overwritten */);
-            mi_resolve_relocated_address_token(
-               &b,
-               cmd_buffer->self_mod_locations[cmd_buffer->perf_reloc_idx++],
-               dws + GENX(MI_REPORT_PERF_COUNT_MemoryAddress_start) / 8);
+            if (oag) {
+               emit_perf_khr_oag_boundary(cmd_buffer, pool, &b,
+                                          anv_address_add(query_addr, pool->data_offset),
+                                          query, true /* end */);
+            } else {
+               dws = anv_batch_emitn(&cmd_buffer->batch,
+                                     GENX(MI_REPORT_PERF_COUNT_length),
+                                     GENX(MI_REPORT_PERF_COUNT),
+                                     .MemoryAddress = query_addr /* Will be overwritten */);
+               mi_resolve_relocated_address_token(
+                  &b,
+                  cmd_buffer->self_mod_locations[cmd_buffer->perf_reloc_idx++],
+                  dws + GENX(MI_REPORT_PERF_COUNT_MemoryAddress_start) / 8);
+            }
             break;
 
          case INTEL_PERF_QUERY_FIELD_TYPE_SRM_PERFCNT:
@@ -1925,11 +2309,17 @@ copy_query_results_with_shader(struct anv_cmd_buffer *cmd_buffer,
     * consistent pipeline mode.
     */
    if (cmd_buffer->state.current_pipeline == UINT32_MAX) {
-      if (anv_cmd_buffer_is_render_queue(cmd_buffer))
-         genX(flush_pipeline_select_3d)(cmd_buffer);
-      else
+      if (anv_cmd_buffer_blorp_uses_compute(cmd_buffer))
          genX(flush_pipeline_select_gpgpu)(cmd_buffer, false);
+      else
+         genX(flush_pipeline_select_3d)(cmd_buffer);
    }
+
+#if GFX_VER >= 20
+   /* On Gfx20+ there is no pipeline switching cost and we run everything on the 3D engine */
+   if (anv_cmd_buffer_is_render_queue(cmd_buffer))
+      genX(flush_pipeline_select_3d)(cmd_buffer);
+#endif
 
    if ((cmd_buffer->state.queries.buffer_write_bits |
         cmd_buffer->state.queries.clear_bits) & ANV_PIPE_RENDER_TARGET_CACHE_FLUSH_BIT)

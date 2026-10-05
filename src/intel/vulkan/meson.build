@@ -253,6 +253,7 @@ libanv_files = files(
 
 anv_deps = [
   dep_libdrm,
+  dep_regex,
   dep_valgrind,
   idep_genxml,
   idep_mesautil,

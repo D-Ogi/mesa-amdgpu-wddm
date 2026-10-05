@@ -246,7 +246,7 @@ d3d12_replace_buffer_storage(struct pipe_context *pctx,
    struct pipe_resource *pdst,
    struct pipe_resource *psrc,
    unsigned minimum_num_rebinds,
-   uint32_t rebind_mask,
+   uint64_t rebind_mask,
    uint32_t delete_buffer_id)
 {
    struct d3d12_resource *dst = d3d12_resource(pdst);

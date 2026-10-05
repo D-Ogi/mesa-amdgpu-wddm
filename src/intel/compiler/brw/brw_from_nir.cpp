@@ -5884,7 +5884,10 @@ brw_from_nir_emit_memory_access(nir_to_brw_state &ntb,
 
       const nir_src &addr = instr->src[is_store ? 1 : 0];
 
-      if (devinfo->verx10 >= 125) {
+      if (s.key->use_efficient_64bit) {
+         binding_type = LSC_ADDR_SURFTYPE_SS;
+         srcs[MEMORY_LOGICAL_BINDING] = brw_get_scratch64_surface_state_addr(&s);
+      } else if (devinfo->verx10 >= 125) {
          binding_type = LSC_ADDR_SURFTYPE_SS;
 
          const brw_builder ubld = bld.exec_all().group(8 * reg_unit(devinfo), 0);

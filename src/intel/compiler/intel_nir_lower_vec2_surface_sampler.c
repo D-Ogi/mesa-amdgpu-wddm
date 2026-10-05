@@ -113,9 +113,21 @@ lower_intrinsic(nir_builder *b, nir_intrinsic_instr *intrin, void *_)
    case nir_intrinsic_bindless_image_store:
    case nir_intrinsic_bindless_image_atomic:
    case nir_intrinsic_bindless_image_atomic_swap: {
+      nir_src *surface = nir_get_io_index_src(intrin);
+
+      /* For now Iris is building the 64-bit surface address directly with a
+       * single nir_resource_intel result instead of the vec2 (low, high) dword
+       * pair produced by the bindless-descriptor path.
+       * So there's nothing to lower in that case, the handle is already a
+       * single 64-bit value.
+       * We might change that in the future to use the vec2 (low, high) dword
+       * pair as well to benefit from the sendg messages that has a index field.
+       */
+      if (surface->ssa->num_components != 2 || surface->ssa->bit_size != 32)
+         return false;
+
       b->cursor = nir_before_instr(&intrin->instr);
 
-      nir_src *surface = nir_get_io_index_src(intrin);
       struct source_extract s = extract_handle_offset(
          b, surface->ssa, 64 * 31 /* 5 bits */, 64);
       nir_src_rewrite(surface, s.ret);
@@ -138,24 +150,31 @@ lower_tex(nir_builder *b, nir_tex_instr *tex, void *_)
    if (index != -1) {
       b->cursor = nir_before_instr(&tex->instr);
 
-      struct source_extract s =
-         extract_handle_offset(b, tex->src[index].src.ssa,
-                               64 * 31 /* 5 bits */, 64);
-      nir_src_rewrite(&tex->src[index].src, s.ret);
-      tex->texture_index = s.const_index;
-      progress = true;
+      nir_def *handle = tex->src[index].src.ssa;
+
+      /* See return ealier comment in lower_intrinsic() */
+      if (handle->num_components == 2 && handle->bit_size == 32) {
+         struct source_extract s = extract_handle_offset(b, handle,
+                                                         64 * 31 /* 5 bits */, 64);
+         nir_src_rewrite(&tex->src[index].src, s.ret);
+         tex->texture_index = s.const_index;
+         progress = true;
+      }
    }
 
    index = nir_tex_instr_src_index(tex, nir_tex_src_sampler_handle);
    if (index != -1) {
       b->cursor = nir_before_instr(&tex->instr);
 
-      struct source_extract s =
-         extract_handle_offset(b, tex->src[index].src.ssa,
-                               32 * 7 /* 3 bits */, 32);
-      nir_src_rewrite(&tex->src[index].src, s.ret);
-      tex->sampler_index = s.const_index;
-      progress = true;
+      nir_def *handle = tex->src[index].src.ssa;
+
+      if (handle->num_components == 2 && handle->bit_size == 32) {
+         struct source_extract s = extract_handle_offset(b, handle,
+                                                         32 * 7 /* 3 bits */, 32);
+         nir_src_rewrite(&tex->src[index].src, s.ret);
+         tex->sampler_index = s.const_index;
+         progress = true;
+      }
    }
 
    return progress;

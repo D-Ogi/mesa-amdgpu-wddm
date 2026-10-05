@@ -324,7 +324,7 @@ class VulkanReservedMarshalingCodegen(VulkanTypeIterator):
         if needConsistencyCheck and featureExpr is None:
             self.cgen.beginIf("!(%s)" % checkName)
             self.cgen.stmt(
-                "fprintf(stderr, \"fatal: %s inconsistent between guest and host\\n\")" % (access))
+                "GFXSTREAM_ERROR(\"fatal: %s inconsistent between guest and host\")" % (access))
             self.cgen.endIf()
 
     def onCheckWithNullOptionalStringFeature(self, vulkanType):
@@ -1021,8 +1021,9 @@ class VulkanReservedMarshaling(VulkanWrapperGenerator):
         def fatalDefault(cgen):
             cgen.line("// fatal; the switch is only taken if the extension struct is known")
             if self.variant != "guest":
-                cgen.stmt("fprintf(stderr, \" %s, Unhandled Vulkan structure type %s [%d], aborting.\\n\", __func__, string_VkStructureType(VkStructureType(structType)), structType)")
-            cgen.stmt("abort()")
+                cgen.stmt("GFXSTREAM_FATAL(\"%s, Unhandled Vulkan structure type %s [%d], aborting.\", __func__, string_VkStructureType(VkStructureType(structType)), structType)")
+            else:
+                cgen.stmt("abort()")
             pass
 
         self.emitForEachStructExtension(

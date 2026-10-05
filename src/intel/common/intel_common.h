@@ -42,6 +42,8 @@ bool
 intel_register_blocks_supported(const struct intel_device_info *devinfo,
                                 int num_regs);
 
+uint8_t intel_sampler_state_size(bool uses_efficient_64bit);
+
 #ifdef __cplusplus
 }
 #endif

@@ -243,7 +243,9 @@ struct brw_base_prog_key {
 
    enum intel_atomic_branch_cases atomic_branch_flags:3;
 
-   uint32_t padding:21;
+   enum intel_code_motion code_motion:2;
+
+   uint32_t padding:19;
 };
 
 /**

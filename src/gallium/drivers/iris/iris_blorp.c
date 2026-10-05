@@ -38,18 +38,20 @@ stream_state(struct iris_batch *batch,
              struct u_upload_mgr *uploader,
              unsigned size,
              unsigned alignment,
-             uint32_t *out_offset,
+             uint64_t *out_offset,
              struct iris_bo **out_bo)
 {
    struct pipe_resource *res = NULL;
    void *ptr = NULL;
+   uint32_t offset32;
 
-   u_upload_alloc_ref(uploader, 0, size, alignment, out_offset, &res, &ptr);
+   u_upload_alloc_ref(uploader, 0, size, alignment, &offset32, &res, &ptr);
+   *out_offset = offset32;
 
    struct iris_bo *bo = iris_resource_bo(res);
    iris_use_pinned_bo(batch, bo, false, IRIS_DOMAIN_NONE);
 
-   iris_record_state_size(batch->state_sizes,
+   iris_record_state_size(bo->bufmgr, batch->state_sizes,
                           bo->address + *out_offset, size);
 
    /* If the caller has asked for a BO, we leave them the responsibility of
@@ -58,9 +60,12 @@ stream_state(struct iris_batch *batch,
     */
    if (out_bo)
       *out_bo = bo;
+   else if (iris_bufmgr_is_eff_64bit_enabled(bo->bufmgr))
+      *out_offset += bo->address;
    else
       *out_offset += iris_bo_offset_from_base_address(bo);
 
+   assert(iris_bufmgr_is_eff_64bit_enabled(bo->bufmgr) || (*out_offset < UINT32_MAX));
    pipe_resource_reference(&res, NULL);
 
    return ptr;
@@ -130,9 +135,12 @@ blorp_alloc_dynamic_state(struct blorp_batch *blorp_batch,
 {
    struct iris_context *ice = blorp_batch->blorp->driver_ctx;
    struct iris_batch *batch = blorp_batch->driver_batch;
+   uint64_t offset64;
+   void *ret = stream_state(batch, ice->state.dynamic_uploader,
+                            size, alignment, &offset64, NULL);
 
-   return stream_state(batch, ice->state.dynamic_uploader,
-                       size, alignment, offset, NULL);
+   *offset = offset64;
+   return ret;
 }
 
 static struct blorp_address
@@ -166,9 +174,11 @@ blorp_alloc_binding_table(struct blorp_batch *blorp_batch,
    *out_bt_offset = bt_offset;
 
    for (unsigned i = 0; i < num_entries; i++) {
+      uint64_t surface_offsets64bit;
       surface_maps[i] = stream_state(batch, ice->state.surface_uploader,
                                      state_size, state_alignment,
-                                     &surface_offsets[i], NULL);
+                                     &surface_offsets64bit, NULL);
+      surface_offsets[i] = surface_offsets64bit;
       bt_map[i] = surface_offsets[i] - surf_base_offset;
    }
 
@@ -195,7 +205,7 @@ blorp_alloc_vertex_buffer(struct blorp_batch *blorp_batch,
    struct iris_context *ice = blorp_batch->blorp->driver_ctx;
    struct iris_batch *batch = blorp_batch->driver_batch;
    struct iris_bo *bo;
-   uint32_t offset;
+   uint64_t offset;
 
    void *map = stream_state(batch, ice->ctx.const_uploader, size, 64,
                             &offset, &bo);
@@ -512,6 +522,7 @@ genX(init_blorp)(struct iris_context *ice)
 #if GFX_VER >= 9
    const struct blorp_config config = {
       .enable_tbimr = screen->driconf.enable_tbimr,
+      .use_efficient_64bit = iris_bufmgr_is_eff_64bit_enabled(screen->bufmgr),
    };
    blorp_init_brw(&ice->blorp, ice, &screen->isl_dev, screen->brw, &config);
 #else

@@ -1035,7 +1035,6 @@ struct pipe_caps {
    bool viewport_mask;
    bool alpha_to_coverage_dither_control;
    bool map_unsynchronized_thread_safe;
-   bool blend_equation_advanced;
    bool nir_atomics_as_deref;
    bool no_clip_on_copy_tex;
    bool shader_atomic_int64;
@@ -1125,6 +1124,7 @@ struct pipe_caps {
    unsigned rasterizer_subpixel_bits;
    unsigned mixed_color_depth_bits;
    unsigned fbfetch;
+   unsigned blend_equation_advanced;
    unsigned sparse_buffer_page_size;
    unsigned max_combined_shader_output_resources;
    unsigned framebuffer_msaa_constraints;

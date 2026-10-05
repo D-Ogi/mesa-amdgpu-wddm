@@ -193,6 +193,9 @@ public:
    brw_reg final_gs_vertex_count;
    brw_reg control_data_bits;
 
+   /* Only used in efficient 64-bit mode */
+   brw_reg scratch64_surface;
+
    struct {
       unsigned control_data_bits_per_vertex;
       unsigned control_data_header_size_bits;
@@ -451,3 +454,5 @@ struct brw_to_binary_params {
 };
 
 const unsigned *brw_to_binary(const brw_to_binary_params *p);
+
+brw_reg brw_get_scratch64_surface_state_addr(brw_shader *shader);

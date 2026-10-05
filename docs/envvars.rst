@@ -411,8 +411,8 @@ Core Mesa environment variables
 
 .. envvar:: MESA_VK_TRACE_PER_SUBMIT
 
-   Enables per-submit capture for compute-only workload. Disabled by default
-   and only valid with MESA_VK_TRACE=rgp.
+   Enables per-submit capture which may be helpful for compute-only workloads.
+   Disabled by default and only valid with MESA_VK_TRACE=rgp.
 
 .. envvar:: MESA_VK_TRACE_FRAME
 
@@ -632,6 +632,8 @@ Intel driver environment variables
    ``sf``
       emit messages about the strips & fans unit (for old gens, includes
       the SF program)
+   ``shader-hash``
+      emit dummy MOV instructions at the end of shaders with the shader hash
    ``soft64``
       enable implementation of software 64bit floating point support
    ``sparse``
@@ -1524,7 +1526,7 @@ RADV driver environment variables
    ``syncshaders``
       synchronize shaders after all draws/dispatches
    ``zerovram``
-      initialize all memory allocated in VRAM as zero
+      initialize all memory allocated in VRAM as zero (deprecated)
    ``vs``
       Dump vertex shaders.
    ``tcs``

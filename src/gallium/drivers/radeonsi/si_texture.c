@@ -223,8 +223,7 @@ static int si_init_surface(struct si_screen *sscreen, struct radeon_surf *surfac
             flags |= RADEON_SURF_NO_HTILE;
       }
 
-      if (!is_imported && (!(ptex->bind & PIPE_BIND_SCANOUT) ||
-                           sscreen->info.gfx12_supports_display_dcc)) {
+      if (!is_imported) {
          enum pipe_format format = util_format_get_depth_only(ptex->format);
 
          /* These should be set for both color and Z/S. */

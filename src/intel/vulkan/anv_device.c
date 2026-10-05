@@ -429,8 +429,7 @@ anv_device_bind_null_va(struct anv_device *device,
 static VkResult
 anv_device_init_vma_heaps(struct anv_device *device)
 {
-   if (pthread_mutex_init(&device->vma_mutex, NULL) != 0)
-      return vk_error(device, VK_ERROR_INITIALIZATION_FAILED);
+   simple_mtx_init(&device->vma_mutex, mtx_plain);
 
    if (device->physical->uses_efficient_64bit) {
       util_vma_heap_init(&device->vma_desc,
@@ -489,7 +488,7 @@ anv_device_finish_vma_heaps(struct anv_device *device)
       util_vma_heap_finish(&device->vma_dynamic_visible);
       util_vma_heap_finish(&device->vma_lo);
    }
-   pthread_mutex_destroy(&device->vma_mutex);
+   simple_mtx_destroy(&device->vma_mutex);
 }
 
 static VkResult
@@ -983,10 +982,7 @@ VkResult anv_CreateDevice(
    list_inithead(&device->memory_objects);
    list_inithead(&device->image_private_objects);
 
-   if (pthread_mutex_init(&device->mutex, NULL) != 0) {
-      result = vk_error(device, VK_ERROR_INITIALIZATION_FAILED);
-      goto fail_vmas;
-   }
+   simple_mtx_init(&device->mutex, mtx_plain);
 
    if (mtx_init(&device->fault.mutex, mtx_plain) != thrd_success) {
       result = vk_error(device, VK_ERROR_INITIALIZATION_FAILED);
@@ -1390,6 +1386,7 @@ VkResult anv_CreateDevice(
  fail_queues:
    for (uint32_t i = 0; i < device->queue_count; i++)
       anv_queue_finish(&device->queues[i]);
+   anv_device_perf_finish(device);
    anv_device_finish_descriptors_view(device);
    anv_device_finish_embedded_samplers(device);
    anv_device_finish_blorp(device);
@@ -1464,8 +1461,7 @@ VkResult anv_CreateDevice(
  fail_fault_mutex:
    mtx_destroy(&device->fault.mutex);
  fail_mutex:
-   pthread_mutex_destroy(&device->mutex);
- fail_vmas:
+   simple_mtx_destroy(&device->mutex);
    anv_device_finish_vma_heaps(device);
  fail_queues_alloc:
    vk_free(&device->vk.alloc, device->queues);
@@ -1528,6 +1524,8 @@ void anv_DestroyDevice(
    vk_pipeline_cache_destroy(device->vk.mem_cache, NULL);
 
    anv_device_finish_embedded_samplers(device);
+
+   anv_device_perf_finish(device);
 
    if (ANV_SUPPORT_RT && device->info->has_ray_tracing) {
       ANV_DMR_BO_FREE(&device->vk.base, device->btd_fifo_bo);
@@ -1605,7 +1603,7 @@ void anv_DestroyDevice(
    u_cnd_monotonic_destroy(&device->fault.lost_cnd);
    mtx_destroy(&device->fault.mutex);
 
-   pthread_mutex_destroy(&device->mutex);
+   simple_mtx_destroy(&device->mutex);
 
    simple_mtx_destroy(&device->accel_struct_build.mutex);
    simple_mtx_destroy(&device->fp64_mutex);
@@ -1685,7 +1683,7 @@ anv_vma_alloc(struct anv_device *device,
               uint64_t client_address,
               struct util_vma_heap **out_vma_heap)
 {
-   pthread_mutex_lock(&device->vma_mutex);
+   simple_mtx_lock(&device->vma_mutex);
 
    uint64_t addr = 0;
    *out_vma_heap = anv_vma_heap_for_flags(device, alloc_flags);
@@ -1716,7 +1714,7 @@ anv_vma_alloc(struct anv_device *device,
    addr = util_vma_heap_alloc(*out_vma_heap, size, align);
 
 done:
-   pthread_mutex_unlock(&device->vma_mutex);
+   simple_mtx_unlock(&device->vma_mutex);
 
    if (addr == 0 && client_address) {
       mesa_logi("Virtual address allocation failed, consider running with "
@@ -1741,11 +1739,11 @@ anv_vma_free(struct anv_device *device,
 
    const uint64_t addr_48b = intel_48b_address(address);
 
-   pthread_mutex_lock(&device->vma_mutex);
+   simple_mtx_lock(&device->vma_mutex);
 
    util_vma_heap_free(vma_heap, addr_48b, size);
 
-   pthread_mutex_unlock(&device->vma_mutex);
+   simple_mtx_unlock(&device->vma_mutex);
 }
 
 VkResult anv_AllocateMemory(
@@ -2078,9 +2076,9 @@ VkResult anv_AllocateMemory(
       goto fail;
    }
 
-   pthread_mutex_lock(&device->mutex);
+   simple_mtx_lock(&device->mutex);
    list_addtail(&mem->link, &device->memory_objects);
-   pthread_mutex_unlock(&device->mutex);
+   simple_mtx_unlock(&device->mutex);
 
    ANV_RMV(heap_create, device, mem, false, 0);
    ANV_DMR_BO_ALLOC_IMPORT(&mem->vk.base, mem->bo, result,
@@ -2179,9 +2177,9 @@ void anv_FreeMemory(
    if (mem == NULL)
       return;
 
-   pthread_mutex_lock(&device->mutex);
+   simple_mtx_lock(&device->mutex);
    list_del(&mem->link);
-   pthread_mutex_unlock(&device->mutex);
+   simple_mtx_unlock(&device->mutex);
 
    if (mem->map) {
       const VkMemoryUnmapInfo unmap = {

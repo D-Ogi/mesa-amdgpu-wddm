@@ -101,7 +101,7 @@ anv_cmd_buffer_ensure_rcs_companion(struct anv_cmd_buffer *cmd_buffer)
       return VK_SUCCESS;
 
    VkResult result = VK_SUCCESS;
-   pthread_mutex_lock(&cmd_buffer->device->mutex);
+   simple_mtx_lock(&cmd_buffer->device->mutex);
    VK_FROM_HANDLE(vk_command_pool, pool,
                   cmd_buffer->device->companion_rcs_cmd_pool);
    assert(pool != NULL);
@@ -118,7 +118,7 @@ anv_cmd_buffer_ensure_rcs_companion(struct anv_cmd_buffer *cmd_buffer)
       cmd_buffer->companion_rcs_cmd_buffer, cmd_buffer->vk.level);
 
 unlock_and_return:
-   pthread_mutex_unlock(&cmd_buffer->device->mutex);
+   simple_mtx_unlock(&cmd_buffer->device->mutex);
    return result;
 }
 
@@ -250,7 +250,7 @@ anv_cmd_buffer_destroy(struct vk_command_buffer *vk_cmd_buffer)
       container_of(vk_cmd_buffer, struct anv_cmd_buffer, vk);
    struct anv_device *device = cmd_buffer->device;
 
-   pthread_mutex_lock(&device->mutex);
+   simple_mtx_lock(&device->mutex);
    if (cmd_buffer->companion_rcs_cmd_buffer) {
       destroy_cmd_buffer(cmd_buffer->companion_rcs_cmd_buffer);
       cmd_buffer->companion_rcs_cmd_buffer = NULL;
@@ -259,7 +259,7 @@ anv_cmd_buffer_destroy(struct vk_command_buffer *vk_cmd_buffer)
    ANV_RMV(cmd_buffer_destroy, cmd_buffer->device, cmd_buffer);
 
    destroy_cmd_buffer(cmd_buffer);
-   pthread_mutex_unlock(&device->mutex);
+   simple_mtx_unlock(&device->mutex);
 }
 
 static void

@@ -28,6 +28,7 @@
 #include "v3dv_version_dispatch.h"
 #include "vk_format.h"
 #include "vk_log.h"
+#include "vk_synchronization.h"
 
 #define V3D_VERSION 42
 #include "v3dv_format_table.h"
@@ -39,6 +40,69 @@ num_subpass_attachments(const VkSubpassDescription2 *desc)
           desc->colorAttachmentCount +
           (desc->pResolveAttachments ? desc->colorAttachmentCount : 0) +
           (desc->pDepthStencilAttachment != NULL);
+}
+
+/* FIXME: this only tracks input attachments that read from other
+ * color attachments in the same subpass. Ideally, we would want
+ * to support input attachments that read from previous subpasses
+ * too, but that would require more work.
+ */
+static bool
+is_tlb_color_input_self_dependency(const VkSubpassDependency2 *dependency)
+{
+   if (dependency->srcSubpass == VK_SUBPASS_EXTERNAL)
+      return false;
+
+   if (dependency->srcSubpass != dependency->dstSubpass)
+      return false;
+
+   if (!(dependency->dependencyFlags & VK_DEPENDENCY_BY_REGION_BIT))
+      return false;
+
+   if (dependency->viewOffset != 0)
+      return false;
+
+   const VkMemoryBarrier2 *barrier =
+      vk_find_struct_const(dependency->pNext, MEMORY_BARRIER_2);
+   VkPipelineStageFlags2 src_stage_mask =
+      barrier ? barrier->srcStageMask : dependency->srcStageMask;
+   VkPipelineStageFlags2 dst_stage_mask =
+      barrier ? barrier->dstStageMask : dependency->dstStageMask;
+   VkAccessFlags2 src_access_mask =
+      barrier ? barrier->srcAccessMask : dependency->srcAccessMask;
+   VkAccessFlags2 dst_access_mask =
+      barrier ? barrier->dstAccessMask : dependency->dstAccessMask;
+
+   src_stage_mask = vk_expand_pipeline_stage_flags2(src_stage_mask);
+   dst_stage_mask = vk_expand_pipeline_stage_flags2(dst_stage_mask);
+   src_access_mask = vk_expand_src_access_flags2(src_stage_mask, src_access_mask);
+   dst_access_mask = vk_expand_dst_access_flags2(dst_stage_mask, dst_access_mask);
+
+   return (src_stage_mask & VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT) &&
+          (dst_stage_mask & VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT) &&
+          (src_access_mask & VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT) &&
+          (dst_access_mask & VK_ACCESS_2_INPUT_ATTACHMENT_READ_BIT);
+}
+
+static void
+subpass_setup_tlb_input_attachments(struct v3dv_subpass *subpass)
+{
+   memset(subpass->tlb_input_attachment_location, UINT8_MAX,
+          sizeof(subpass->tlb_input_attachment_location));
+
+   for (uint32_t input = 0; input < subpass->input_count; input++) {
+      const uint32_t attachment = subpass->input_attachments[input].attachment;
+      if (attachment == VK_ATTACHMENT_UNUSED)
+         continue;
+
+      for (uint32_t rt = 0; rt < subpass->color_count; rt++) {
+         if (subpass->color_attachments[rt].attachment != attachment)
+            continue;
+
+         subpass->tlb_input_attachment_location[input] = FRAG_RESULT_DATA0 + rt;
+         break;
+      }
+   }
 }
 
 static void
@@ -306,11 +370,20 @@ v3dv_CreateRenderPass2(VkDevice _device,
          subpass->resolve_depth = false;
          subpass->resolve_stencil = false;
       }
+
+      subpass_setup_tlb_input_attachments(subpass);
    }
 
    pass_find_subpass_range_for_attachments(device, pass);
 
-   /* FIXME: handle subpass dependencies */
+   for (uint32_t i = 0; i < pCreateInfo->dependencyCount; i++) {
+      const VkSubpassDependency2 *dependency = &pCreateInfo->pDependencies[i];
+      if (!is_tlb_color_input_self_dependency(dependency))
+         continue;
+
+      pass->subpasses[dependency->srcSubpass].has_tlb_color_input_self_dependency = true;
+      /* FIXME: handle other subpass dependencies? */
+   }
 
    *pRenderPass = v3dv_render_pass_to_handle(pass);
 

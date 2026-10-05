@@ -909,7 +909,9 @@ jay_inst_is_unordered(const struct intel_device_info *devinfo,
 {
    return I->op == JAY_OPCODE_SEND ||
           I->op == JAY_OPCODE_DPAS ||
-          (devinfo->ver < 20 && I->op == JAY_OPCODE_MATH);
+          (devinfo->ver < 20 && I->op == JAY_OPCODE_MATH) ||
+          (devinfo->ver < 20 &&
+           (I->type == JAY_TYPE_F64 || jay_src_type(I, 0) == JAY_TYPE_F64));
 }
 
 /*

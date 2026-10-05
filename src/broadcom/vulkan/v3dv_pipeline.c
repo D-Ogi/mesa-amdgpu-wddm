@@ -294,6 +294,69 @@ lower_intrinsics(nir_shader *s)
                                        nir_metadata_control_flow, NULL);
 }
 
+static bool
+get_tlb_input_attachment_index(nir_tex_instr *tex,
+                               uint32_t *input_attachment_index)
+{
+   const int texture_src =
+      nir_tex_instr_src_index(tex, nir_tex_src_texture_deref);
+   nir_deref_instr *deref = nir_src_as_deref(tex->src[texture_src].src);
+   nir_variable *var = nir_deref_instr_get_variable(deref);
+   uint32_t index = var->data.index;
+
+   if (deref->deref_type == nir_deref_type_array)
+      index += nir_src_as_uint(deref->arr.index);
+
+   if (index >= MAX_INPUT_ATTACHMENTS)
+      return false;
+
+   *input_attachment_index = index;
+   return true;
+}
+
+static bool
+lower_tlb_input_attachment_instr(nir_builder *b, nir_tex_instr *tex, void *data)
+{
+   if (tex->sampler_dim != GLSL_SAMPLER_DIM_SUBPASS &&
+       tex->sampler_dim != GLSL_SAMPLER_DIM_SUBPASS_MS)
+      return false;
+
+   uint32_t input_attachment_index;
+   if (!get_tlb_input_attachment_index(tex, &input_attachment_index))
+      return false;
+
+   const struct v3dv_subpass *subpass = data;
+   const uint32_t location =
+      subpass->tlb_input_attachment_location[input_attachment_index];
+   if (location == UINT8_MAX)
+      return false;
+
+   b->cursor = nir_before_instr(&tex->instr);
+
+   nir_def *sample = tex->sampler_dim == GLSL_SAMPLER_DIM_SUBPASS_MS ?
+      tex->src[nir_tex_instr_src_index(tex, nir_tex_src_ms_index)].src.ssa :
+      nir_imm_int(b, 0);
+
+   nir_def *result = nir_load_tile_image(b, tex->def.num_components,
+                                         tex->def.bit_size,
+                                         nir_imm_int(b, 0), sample,
+                                         .dest_type = tex->dest_type,
+                                         .io_semantics = (nir_io_semantics) {
+                                           .location = location,
+                                           .num_slots = 1,
+                                         });
+
+   nir_def_replace(&tex->def, result);
+   return true;
+}
+
+static bool
+lower_tlb_input_attachments(nir_shader *nir, struct v3dv_subpass *subpass)
+{
+   return nir_shader_tex_pass(nir, lower_tlb_input_attachment_instr,
+                              nir_metadata_control_flow, subpass);
+}
+
 static void
 preprocess_nir(nir_shader *nir)
 {
@@ -2051,6 +2114,18 @@ pipeline_populate_graphics_key(struct v3dv_pipeline *pipeline,
 
    key->software_blend = pipeline->blend.use_software;
 
+   struct v3dv_render_pass *pass =
+      v3dv_render_pass_from_handle(pCreateInfo->renderPass);
+   if (pass) {
+      const struct v3dv_subpass *subpass = &pass->subpasses[pCreateInfo->subpass];
+      memcpy(key->tlb_input_attachment_location,
+             subpass->tlb_input_attachment_location,
+             sizeof(key->tlb_input_attachment_location));
+   } else {
+      memset(key->tlb_input_attachment_location, UINT8_MAX,
+             sizeof(key->tlb_input_attachment_location));
+   }
+
    struct vk_render_pass_state *ri = &pipeline->rendering_info;
    for (uint32_t i = 0; i < ri->color_attachment_count; i++) {
       if (ri->color_attachment_formats[i] == VK_FORMAT_UNDEFINED)
@@ -2658,6 +2733,11 @@ pipeline_compile_graphics(struct v3dv_pipeline *pipeline,
       link_shaders(p_stage_vs->nir, p_stage_fs->nir);
    }
 
+   V3DV_FROM_HANDLE(v3dv_render_pass, pass, pCreateInfo->renderPass);
+   if (pass) {
+      struct v3dv_subpass *subpass = &pass->subpasses[pCreateInfo->subpass];
+      NIR_PASS(_, p_stage_fs->nir, lower_tlb_input_attachments, subpass);
+   }
    pipeline_lower_nir(pipeline, p_stage_fs, pipeline->layout);
    lower_fs_io(p_stage_fs->nir);
 

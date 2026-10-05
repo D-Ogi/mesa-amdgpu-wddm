@@ -149,10 +149,8 @@ struct radv_device {
 
    struct radv_meta_state meta_state;
 
-   struct radv_queue *queues[RADV_MAX_QUEUE_FAMILIES];
-   struct radv_queue *queues_protected[RADV_MAX_QUEUE_FAMILIES];
-   int queue_count[RADV_MAX_QUEUE_FAMILIES];
-   int queue_count_protected[RADV_MAX_QUEUE_FAMILIES];
+   struct radv_queue *queues;
+   uint32_t queue_count;
 
    bool pbb_allowed;
    uint32_t scratch_waves;
@@ -378,8 +376,6 @@ VkResult radv_device_set_pstate(struct radv_device *device, bool enable, uint64_
 VkResult radv_device_acquire_performance_counters(struct radv_device *device, uint64_t timeout);
 
 void radv_device_release_performance_counters(struct radv_device *device);
-
-bool radv_device_should_clear_vram(const struct radv_device *device);
 
 VkResult radv_device_init_utrace(struct radv_device *device);
 

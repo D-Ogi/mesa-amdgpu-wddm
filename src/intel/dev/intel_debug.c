@@ -121,12 +121,12 @@ static const struct debug_control_bitset debug_control[] = {
    OPT1("dispatch_bkp",      DEBUG_DISPATCH_BKP),
    OPT1("bat-stats",         DEBUG_BATCH_STATS),
    OPT1("reg-pressure",      DEBUG_REG_PRESSURE),
-   OPT1("shader-print",      DEBUG_SHADER_PRINT),
    OPT1("cl-quiet",          DEBUG_CL_QUIET),
    OPT1("no-send-gather",    DEBUG_NO_SEND_GATHER),
    OPT1("no-vrt",            DEBUG_NO_VRT),
    OPT1("no-jay",            DEBUG_NO_JAY),
    OPT1("shaders-lineno",    DEBUG_SHADERS_LINENO),
+   OPT1("shader-hash",       DEBUG_SHADER_HASH),
    { NULL, }
 #undef OPT1
 #undef OPT2
@@ -228,7 +228,8 @@ process_intel_debug_variable_once(void)
     */
    intel_simd_overridden =
       ((intel_simd & DEBUG_FS_SIMD) ? (1 << MESA_SHADER_FRAGMENT) : 0) |
-      ((intel_simd & DEBUG_CS_SIMD) ? (1 << MESA_SHADER_COMPUTE)  : 0) |
+      ((intel_simd & DEBUG_CS_SIMD) ? (1 << MESA_SHADER_COMPUTE |
+                                       1 << MESA_SHADER_KERNEL)    : 0) |
       ((intel_simd & DEBUG_TS_SIMD) ? (1 << MESA_SHADER_TASK)     : 0) |
       ((intel_simd & DEBUG_MS_SIMD) ? (1 << MESA_SHADER_MESH)     : 0) |
       ((intel_simd & DEBUG_RT_SIMD) ? (1 << MESA_SHADER_RAYGEN |
@@ -305,10 +306,10 @@ intel_use_jay_for_stage(const struct intel_device_info *devinfo,
    bool allowed = (by_default || intel_force_probe_jay);
 
    /* INTEL_JAY=fs enables per-stage on allowed platforms. INTEL_DEBUG=no-jay
-    * disables on supported platforms.
+    * or a driver's devinfo->no_jay disables on supported platforms.
     */
    return ((allowed && (use_jay & BITFIELD_BIT(stage))) ||
-           (by_default && !INTEL_DEBUG(DEBUG_NO_JAY)));
+           (by_default && !INTEL_DEBUG(DEBUG_NO_JAY) && !devinfo->no_jay));
 }
 
 bool

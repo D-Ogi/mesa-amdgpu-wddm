@@ -51,7 +51,6 @@
 
 #include "pipe/p_context.h"
 #include "pipe/p_defines.h"
-#include "pipe/p_shader_tokens.h"
 #include "draw/draw_context.h"
 #include "draw/draw_nir.h"
 

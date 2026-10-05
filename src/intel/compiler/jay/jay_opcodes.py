@@ -171,8 +171,8 @@ op('deswizzle_even', 1, 'f32', Props.NO_MASK, ['bool src_hi'])
 # Return the UGPR[4] vector base + (0, 1, 2, 3, 4, 5, 6, 7) as packed 16-bit.
 op('lane_id_8', 0, 'u16', 0, ['unsigned base'])
 
-# Build a GPR from two UGPR[16] ranges.
-op('zip_ugpr16', 2, 'u32')
+# Build a GPR by pasting UGPR ranges.
+op('zip', 4, 'u32')
 
 # Sample ID calculation
 op('extract_byte_per_8lanes', 2, 'u32')

@@ -703,7 +703,7 @@ kk_get_device_properties(
       .independentResolveNone = true,
       .independentResolve = true,
       .driverID = VK_DRIVER_ID_MESA_KOSMICKRISP,
-      .conformanceVersion = (VkConformanceVersion){1, 4, 3, 2},
+      .conformanceVersion = (VkConformanceVersion){1, 4, 6, 2},
       .denormBehaviorIndependence = VK_SHADER_FLOAT_CONTROLS_INDEPENDENCE_NONE,
       .roundingModeIndependence = VK_SHADER_FLOAT_CONTROLS_INDEPENDENCE_NONE,
       .shaderSignedZeroInfNanPreserveFloat16 = true,

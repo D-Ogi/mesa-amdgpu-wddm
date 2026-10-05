@@ -183,6 +183,19 @@ anv_physical_device_init_drirc(struct anv_physical_device *device)
       device->drirc.perf.rt_tile_y = 0;
    }
 
+   switch (device->drirc.perf.code_motion) {
+   case INTEL_CODE_MOTION_DEFAULT:
+   case INTEL_CODE_MOTION_LICM:
+   case INTEL_CODE_MOTION_GCM:
+      break;
+   default:
+      mesa_logw("Invalid value provided for drirc intel_code_motion=%d, "
+                "reverting to the compiler default.",
+                device->drirc.perf.code_motion);
+      device->drirc.perf.code_motion = INTEL_CODE_MOTION_DEFAULT;
+      break;
+   }
+
    return VK_SUCCESS;
 }
 
@@ -416,6 +429,14 @@ get_device_extensions(const struct anv_physical_device *device,
       .KHR_multiview                         = true,
       .KHR_performance_query =
          device->perf &&
+         /* The KHR profiling lock's OA stream and a metrics-library
+          * configuration activation (VK_INTEL_performance_query, advertised
+          * below when INTEL_USE_METRICS_LIBRARY is set) reprogram the same OA
+          * unit, so the two paths would silently corrupt each other's
+          * counters. The metrics library is an explicit per-process opt-in,
+          * so advertise only one of the two.
+          */
+         !device->perf->use_metrics_library &&
          (intel_perf_has_hold_preemption(device->perf) ||
           INTEL_DEBUG(DEBUG_NO_OACONFIG)) &&
          !ANV_DEBUG(NO_SECONDARY_CALL),
@@ -746,7 +767,7 @@ get_features(const struct anv_physical_device *pdevice,
       .shaderInt8                          = !pdevice->drirc.debug.no_16bit,
 
       .descriptorIndexing                                 = true,
-      .shaderInputAttachmentArrayDynamicIndexing          = false,
+      .shaderInputAttachmentArrayDynamicIndexing          = true,
       .shaderUniformTexelBufferArrayDynamicIndexing       = true,
       .shaderStorageTexelBufferArrayDynamicIndexing       = true,
       .shaderUniformBufferArrayNonUniformIndexing         = true,
@@ -968,8 +989,8 @@ get_features(const struct anv_physical_device *pdevice,
       .shaderSharedFloat64AtomicAdd =  false,
       .shaderImageFloat32Atomics =     true,
       .shaderImageFloat32AtomicAdd =   pdevice->info.ver >= 20,
-      .sparseImageFloat32Atomics =     false,
-      .sparseImageFloat32AtomicAdd =   false,
+      .sparseImageFloat32Atomics =     has_sparse_or_fake,
+      .sparseImageFloat32AtomicAdd =   has_sparse_or_fake && pdevice->info.ver >= 20,
 
       /* VK_EXT_shader_atomic_float2 */
       .shaderBufferFloat16Atomics      = pdevice->info.has_lsc,
@@ -984,8 +1005,8 @@ get_features(const struct anv_physical_device *pdevice,
       .shaderSharedFloat16AtomicMinMax = pdevice->info.has_lsc,
       .shaderSharedFloat32AtomicMinMax = true,
       .shaderSharedFloat64AtomicMinMax = false,
-      .shaderImageFloat32AtomicMinMax  = false,
-      .sparseImageFloat32AtomicMinMax  = false,
+      .shaderImageFloat32AtomicMinMax  = pdevice->info.ver >= 20,
+      .sparseImageFloat32AtomicMinMax  = has_sparse_or_fake && pdevice->info.ver >= 20,
 
       /* VK_KHR_shader_clock */
       .shaderSubgroupClock = true,
@@ -2727,20 +2748,14 @@ anv_physical_device_init_heaps(struct anv_physical_device *device, int fd)
 static VkResult
 anv_physical_device_init_uuids(struct anv_physical_device *device)
 {
-   const struct build_id_note *note =
-      build_id_find_nhdr_for_addr(anv_physical_device_init_uuids);
-   if (!note) {
+   blake3_hasher build_id_ctx;
+   _mesa_blake3_init(&build_id_ctx);
+   if (!disk_cache_get_function_identifier(anv_physical_device_init_uuids,
+                                           &build_id_ctx)) {
       return vk_errorf(device, VK_ERROR_INITIALIZATION_FAILED,
                        "Failed to find build-id");
    }
-
-   unsigned build_id_len = build_id_length(note);
-   if (build_id_len < BUILD_ID_EXPECTED_HASH_LENGTH) {
-      return vk_errorf(device, VK_ERROR_INITIALIZATION_FAILED,
-                       "build-id too short.  It needs to be a SHA");
-   }
-
-   copy_build_id_to_sha1(device->driver_build_sha1, note);
+   _mesa_blake3_final(&build_id_ctx, device->driver_build_sha1);
 
    /* Fills device->shader_binary_uuid, which the pipeline cache UUID and the
     * disk cache id below are also taken from.
@@ -2948,7 +2963,8 @@ anv_physical_device_init_queue_families(struct anv_physical_device *pdevice)
       if (blit_count > 0) {
          pdevice->queue.families[family_count++] = (struct anv_queue_family) {
             .queueFlags = VK_QUEUE_TRANSFER_BIT |
-                          protected_flag,
+                          protected_flag |
+                          sparse_flags,
             .queueCount = blit_count,
             .engine_class = INTEL_ENGINE_CLASS_COPY,
          };
@@ -3226,6 +3242,8 @@ anv_physical_device_try_create(struct vk_instance *vk_instance,
 
    device->can_get_vm_faults =
       !device->has_scratch_page && xe_gem_supports_get_vm_faults(device->local_fd);
+
+   device->info.no_jay = device->drirc.perf.disable_jay;
 
    device->compiler = brw_compiler_create(NULL, &device->info);
    if (device->compiler == NULL) {

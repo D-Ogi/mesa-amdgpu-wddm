@@ -12,6 +12,9 @@
 #include "pan_desc.h"
 #include "pan_util.h"
 
+#include "vk_android.h"
+#include "vk_render_pass.h"
+
 static enum pan_fb_load_op
 get_att_fb_load_op(const VkRenderingAttachmentInfo *att)
 {
@@ -148,11 +151,20 @@ render_state_set_color_attachment(struct panvk_cmd_buffer *cmdbuf,
    struct panvk_image *img =
       container_of(iview->vk.image, struct panvk_image, vk);
 
+   /* With Android efr, the image view can be the YUV resolve target. Map it to
+    * the resolved RGBA format targeted by the graphics pipeline.
+    */
+   VkFormat fmt = iview->vk.format;
+   if (vk_format_get_ycbcr_info(fmt)) {
+      fmt = vk_external_format_to_efr_format(fmt);
+      assert(fmt != VK_FORMAT_UNDEFINED);
+   }
+
    render->bound_attachments |= MESA_VK_RP_ATTACHMENT_COLOR_BIT(index);
    render->color_attachments.iviews[index] = iview;
    render->color_attachments.preload_iviews[index] =
       ms2ss ? iview_ss : NULL;
-   render->color_attachments.fmts[index] = iview->vk.format;
+   render->color_attachments.fmts[index] = fmt;
    render->color_attachments.samples[index] = img->vk.samples;
 
 #if PAN_ARCH < 9
@@ -210,6 +222,7 @@ render_state_set_color_attachment(struct panvk_cmd_buffer *cmdbuf,
       const struct panvk_resolve_attachment resolve = {
          .dst_iview = ms2ss ? iview_ss : resolve_iview,
          .mode = att->resolveMode,
+         .flags = vk_get_rendering_attachment_flags(att),
       };
       assert(resolve.dst_iview != NULL);
       assert(resolve.dst_iview->pview.nr_samples == 1);
@@ -217,8 +230,17 @@ render_state_set_color_attachment(struct panvk_cmd_buffer *cmdbuf,
       const struct pan_image *resolve_pimage =
          pan_image_view_get_color_plane(&resolve.dst_iview->pview).image;
 
+      /* The tile buffer holds linear values, an in-tile resolve always
+       * applies the transfer function.
+       */
+      const bool skip_transfer_function =
+         (resolve.flags &
+          VK_RENDERING_ATTACHMENT_RESOLVE_SKIP_TRANSFER_FUNCTION_BIT_KHR) &&
+         vk_format_is_srgb(fmt);
+
       if ((ms2ss || att->storeOp != VK_ATTACHMENT_STORE_OP_STORE) &&
-          !avoid_direct_resolve_to(resolve_pimage)) {
+          !avoid_direct_resolve_to(resolve_pimage) &&
+          !skip_transfer_function) {
          render->fb.resolve.rts[index] = (struct pan_fb_resolve_target) {
             .in_bounds = {
                .resolve = PAN_FB_RESOLVE_RT(index),

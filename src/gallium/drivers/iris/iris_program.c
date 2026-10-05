@@ -25,7 +25,9 @@
 #include "compiler/nir/nir.h"
 #include "compiler/nir/nir_builder.h"
 #include "compiler/nir/nir_serialize.h"
+#include "intel/common/intel_common.h"
 #include "intel/compiler/brw/brw_compiler.h"
+#include "intel/compiler/brw/brw_eu.h"
 #include "intel/compiler/brw/brw_nir.h"
 #include "intel/compiler/intel_nir.h"
 #include "intel/compiler/intel_prim.h"
@@ -44,8 +46,9 @@ vue_layout(bool separate_shader)
    return separate_shader ? INTEL_VUE_LAYOUT_SEPARATE : INTEL_VUE_LAYOUT_FIXED;
 }
 
-#define KEY_INIT(prefix)                                   \
-   .prefix.program_string_id = ish->program_id
+#define KEY_INIT(prefix, efficient_64bit)                 \
+   .prefix.program_string_id = ish->program_id,           \
+   .prefix.use_efficient_64bit = efficient_64bit
 #define BRW_KEY_INIT(base_key, _vue_layout) \
    .base.vue_layout = _vue_layout
 
@@ -532,6 +535,7 @@ iris_to_brw_vs_key(const struct iris_screen *screen,
    return (struct brw_vs_prog_key) {
       BRW_KEY_INIT(key->vue.base, key->vue.layout),
       .max_payload_percent = 90,
+      .base.use_efficient_64bit = key->vue.base.use_efficient_64bit,
    };
 }
 
@@ -545,6 +549,7 @@ iris_to_brw_tcs_key(const struct iris_screen *screen,
       .input_vertices = key->input_vertices,
       .patch_outputs_written = key->patch_outputs_written,
       .outputs_written = key->outputs_written,
+      .base.use_efficient_64bit = key->vue.base.use_efficient_64bit,
    };
 }
 
@@ -556,6 +561,7 @@ iris_to_brw_tes_key(const struct iris_screen *screen,
       BRW_KEY_INIT(key->vue.base, key->vue.layout),
       .patch_inputs_read = key->patch_inputs_read,
       .inputs_read = key->inputs_read,
+      .base.use_efficient_64bit = key->vue.base.use_efficient_64bit,
    };
 }
 
@@ -565,6 +571,7 @@ iris_to_brw_gs_key(const struct iris_screen *screen,
 {
    return (struct brw_gs_prog_key) {
       BRW_KEY_INIT(key->vue.base, key->vue.layout),
+      .base.use_efficient_64bit = key->vue.base.use_efficient_64bit,
    };
 }
 
@@ -580,6 +587,7 @@ iris_to_brw_fs_key(const struct iris_screen *screen,
       .persample_interp = key->persample_interp ? INTEL_ALWAYS : INTEL_NEVER,
       .multisample_fbo = key->multisample_fbo ? INTEL_ALWAYS : INTEL_NEVER,
       .ignore_sample_mask_out = !key->multisample_fbo,
+      .base.use_efficient_64bit = key->base.use_efficient_64bit,
    };
 }
 
@@ -589,6 +597,7 @@ iris_to_brw_cs_key(const struct iris_screen *screen,
 {
    return (struct brw_cs_prog_key) {
       BRW_KEY_INIT(key->base, INTEL_VUE_LAYOUT_SEPARATE),
+      .base.use_efficient_64bit = key->base.use_efficient_64bit,
    };
 }
 
@@ -678,7 +687,7 @@ upload_state(struct u_upload_mgr *uploader,
              unsigned alignment)
 {
    void *p = NULL;
-   u_upload_alloc_ref(uploader, 0, size, alignment, &ref->offset, &ref->res, &p);
+   iris_u_upload_alloc_ref_to_iris_state_ref(uploader, 0, size, alignment, ref, &p);
    return p;
 }
 
@@ -702,7 +711,8 @@ iris_upload_ubo_ssbo_surf_state(struct iris_context *ice,
 
    struct iris_resource *res = (void *) buf->buffer;
    struct iris_bo *surf_bo = iris_resource_bo(surf_state->res);
-   surf_state->offset += iris_bo_offset_from_base_address(surf_bo);
+   surf_state->offset += iris_bufmgr_is_eff_64bit_enabled(res->bo->bufmgr) ?
+                            res->bo->address : iris_bo_offset_from_base_address(surf_bo);
 
    const bool dataport =
       ssbo || !intel_indirect_ubos_use_sampler(screen->devinfo);
@@ -1342,6 +1352,140 @@ rewrite_src_with_bti(nir_builder *b, struct iris_binding_table *bt,
    nir_src_rewrite(src, bti);
 }
 
+/**
+ * Load the 64-bit GPU address of this stage's 64-bit binding table, i.e.
+ * the array of SURFACE_STATEs built by iris_populate_64bit_binding_table().
+ */
+static nir_def *
+iris_load_eff_64bit_surfaces_base_address(nir_builder *b)
+{
+   if (b->shader->info.stage == MESA_SHADER_COMPUTE) {
+      return nir_load_inline_data_intel(b, 1, 64, nir_imm_int(b, 0),
+                                        .base = 0, .range = 8);
+   }
+
+   return nir_load_push_data_intel(b, 1, 64, nir_imm_int(b, 0),
+                                   .base = 0, .range = 8);
+}
+
+/**
+ * Load the 64-bit GPU address of this stage's sampler-state table, i.e.
+ * the array of SAMPLER_STATE_EXTENDED records built by
+ * iris_upload_sampler_states().
+ */
+static nir_def *
+iris_load_eff_64bit_sampler_base_address(nir_builder *b)
+{
+   if (b->shader->info.stage == MESA_SHADER_COMPUTE) {
+      return nir_load_inline_data_intel(b, 1, 64, nir_imm_int(b, 0),
+                                        .base = 8, .range = 8);
+   }
+
+   return nir_load_push_data_intel(b, 1, 64, nir_imm_int(b, 0),
+                                   .base = 8, .range = 8);
+}
+
+/**
+ * Rewrite a surface index source into a 64-bit surface-state address,
+ * wrapped in a nir_resource_intel handle, instead of a binding table index.
+ *
+ * This is used in efficient 64bit addressing mode, rather than looking up
+ * the surface through the binding table, the shader computes the GPU
+ * address of the SURFACE_STATE record directly.
+ * Each surface's slot within that array is still determined by the
+ * same <group, index> -> compacted-slot-number mapping used for BTIs
+ * (iris_group_index_to_bti()), just multiplied by the SURFACE_STATE size
+ * instead of being used as a raw binding table index.
+ */
+static void
+rewrite_src_with_surface_address(nir_builder *b,
+                                 struct iris_binding_table *bt,
+                                 nir_instr *instr, nir_src *src,
+                                 enum iris_surface_group group,
+                                 unsigned ss_size)
+{
+   assert(bt->surf_count[group] > 0);
+
+   b->cursor = nir_before_instr(instr);
+
+   nir_def *base_addr = iris_load_eff_64bit_surfaces_base_address(b);
+   nir_def *byte_offset;
+
+   if (nir_src_is_const(*src)) {
+      uint32_t index = nir_src_as_uint(*src);
+      uint32_t slot = iris_group_index_to_bti(bt, group, index);
+      byte_offset = nir_imm_int(b, slot * ss_size);
+   } else {
+      assert(bt->used_mask[group] == BITFIELD64_MASK(bt->surf_count[group]));
+      nir_def *slot = nir_iadd_imm(b, src->ssa, bt->offsets[group]);
+      byte_offset = nir_imul_imm(b, nir_u2u32(b, slot), ss_size);
+   }
+
+   nir_def *addr64 = nir_iadd(b, base_addr, nir_u2u64(b, byte_offset));
+   nir_def *handle = nir_resource_intel(
+      b,
+      1, /* num_components */
+      64, /* bit size */
+      addr64, /* set_offset */
+      addr64, /* surface_index */
+      nir_imm_int(b, 0), /* array_index */
+      nir_imm_int(b, 0), /* bindless_base_offset */
+      .desc_set = 0,
+      .binding = 0,
+      .resource_access_intel = nir_resource_intel_internal);
+
+   nir_src_rewrite(src, handle);
+}
+
+/**
+ * Rewrite a nir_tex_instr's texture/sampler index into a 64-bit
+ * nir_resource_intel handle (nir_tex_src_texture_handle /
+ * nir_tex_src_sampler_handle), analogous to rewrite_src_with_surface_address().
+ *
+ * The texture handle addresses into the same 64-bit binding table used for
+ * UBO/SSBO/images (built by iris_populate_64bit_binding_table()).
+ * The sampler handle addresses into the separate sampler-state table instead,
+ * whose base address is delivered via a different push constant
+ * (see iris_load_eff_64bit_sampler_base_address()), its per-sampler stride is
+ * the SAMPLER_STATE_EXTENDED size instead of the SURFACE_STATE size.
+ */
+static void
+rewrite_tex_with_surface_address(nir_builder *b,
+                                 nir_tex_instr *tex,
+                                 nir_def *base_addr,
+                                 uint32_t slot,
+                                 nir_def *dynamic_index,
+                                 uint32_t state_size,
+                                 nir_tex_src_type src_type)
+{
+   b->cursor = nir_before_instr(&tex->instr);
+
+   nir_def *byte_offset;
+
+   if (dynamic_index) {
+      nir_def *slot_def = nir_iadd_imm(b, dynamic_index, slot);
+
+      byte_offset = nir_imul_imm(b, nir_u2u32(b, slot_def), state_size);
+   } else {
+      byte_offset = nir_imm_int(b, slot * state_size);
+   }
+
+   nir_def *addr64 = nir_iadd(b, base_addr, nir_u2u64(b, byte_offset));
+   nir_def *handle = nir_resource_intel(
+      b,
+      1, /* num_components */
+      64, /* bit size */
+      addr64, /* set_offset */
+      addr64, /* surface_index */
+      nir_imm_int(b, 0), /* array_index */
+      nir_imm_int(b, 0), /* bindless_base_offset */
+      .desc_set = 0,
+      .binding = 0,
+      .resource_access_intel = nir_resource_intel_internal);
+
+   nir_tex_instr_add_src(tex, src_type, handle);
+}
+
 static void
 mark_used_with_src(struct iris_binding_table *bt, nir_src *src,
                    enum iris_surface_group group)
@@ -1371,7 +1515,7 @@ skip_compacting_binding_tables(void)
  * Set up the binding table indices and apply to the shader.
  */
 static void
-iris_setup_binding_table(const struct intel_device_info *devinfo,
+iris_setup_binding_table(const struct iris_screen *screen,
                          struct nir_shader *nir,
                          struct iris_binding_table *bt,
                          unsigned num_render_targets,
@@ -1379,6 +1523,8 @@ iris_setup_binding_table(const struct intel_device_info *devinfo,
                          unsigned num_cbufs,
                          bool use_null_rt)
 {
+   const struct intel_device_info *devinfo = screen->devinfo;
+   const bool use_efficient_64bit = iris_bufmgr_is_eff_64bit_enabled(screen->bufmgr);
    const struct shader_info *info = &nir->info;
 
    memset(bt, 0, sizeof(*bt));
@@ -1393,9 +1539,9 @@ iris_setup_binding_table(const struct intel_device_info *devinfo,
          BITFIELD64_MASK(num_render_targets);
 
       /* Setup render target read surface group in order to support non-coherent
-       * framebuffer fetch on Gfx8
+       * framebuffer fetch.
        */
-      if (devinfo->ver == 8 && info->outputs_read) {
+      if (!brw_can_coherent_fb_fetch(devinfo) && info->outputs_read) {
          bt->surf_count[IRIS_SURFACE_GROUP_RENDER_TARGET_READ] = num_render_targets;
          bt->used_mask[IRIS_SURFACE_GROUP_RENDER_TARGET_READ] =
             BITFIELD64_MASK(num_render_targets);
@@ -1449,7 +1595,7 @@ iris_setup_binding_table(const struct intel_device_info *devinfo,
             break;
 
          case nir_intrinsic_load_output:
-            if (devinfo->ver == 8) {
+            if (!brw_can_coherent_fb_fetch(devinfo)) {
                mark_used_with_src(bt, &intrin->src[0],
                                   IRIS_SURFACE_GROUP_RENDER_TARGET_READ);
             }
@@ -1496,14 +1642,13 @@ iris_setup_binding_table(const struct intel_device_info *devinfo,
     * surfaces.  After this point, the functions to go between "group indices"
     * and binding table indices can be used.
     */
-   uint32_t next = 0;
+   bt->total_surf_count = 0;
    for (int i = 0; i < IRIS_SURFACE_GROUP_COUNT; i++) {
       if (bt->used_mask[i] != 0) {
-         bt->offsets[i] = next;
-         next += util_bitcount64(bt->used_mask[i]);
+         bt->offsets[i] = bt->total_surf_count;
+         bt->total_surf_count += util_bitcount64(bt->used_mask[i]);
       }
    }
-   bt->size_bytes = next * 4;
 
    if (INTEL_DEBUG(DEBUG_BT)) {
       iris_print_binding_table(stderr, mesa_shader_stage_name(info->stage), bt);
@@ -1519,14 +1664,68 @@ iris_setup_binding_table(const struct intel_device_info *devinfo,
       nir_foreach_instr_safe (instr, block) {
          if (instr->type == nir_instr_type_tex) {
             nir_tex_instr *tex = nir_instr_as_tex(instr);
+            enum iris_surface_group group;
+            unsigned group_index;
+
             if (tex->texture_index < 64) {
-               tex->texture_index =
-                  iris_group_index_to_bti(bt, IRIS_SURFACE_GROUP_TEXTURE_LOW64,
-                                          tex->texture_index);
+               group = IRIS_SURFACE_GROUP_TEXTURE_LOW64;
+               group_index = tex->texture_index;
             } else {
-               tex->texture_index =
-                  iris_group_index_to_bti(bt, IRIS_SURFACE_GROUP_TEXTURE_HIGH64,
-                                          tex->texture_index - 64);
+               group = IRIS_SURFACE_GROUP_TEXTURE_HIGH64;
+               group_index = tex->texture_index - 64;
+            }
+
+            if (use_efficient_64bit) {
+               uint32_t slot = iris_group_index_to_bti(bt, group, group_index);
+
+               b.cursor = nir_before_instr(instr);
+
+               int tex_offset_idx = nir_tex_instr_src_index(tex, nir_tex_src_texture_offset);
+               nir_def *tex_dynamic_index = NULL;
+
+               if (tex_offset_idx >= 0) {
+                  assert(bt->used_mask[group] == BITFIELD64_MASK(bt->surf_count[group]));
+                  tex_dynamic_index = tex->src[tex_offset_idx].src.ssa;
+                  nir_tex_instr_remove_src(tex, tex_offset_idx);
+               }
+
+               nir_def *surf_base_addr = iris_load_eff_64bit_surfaces_base_address(&b);
+               rewrite_tex_with_surface_address(&b, tex, surf_base_addr, slot,
+                                                tex_dynamic_index,
+                                                screen->isl_dev.ss.size,
+                                                nir_tex_src_texture_handle);
+               tex->texture_index = 0;
+
+               int sampler_offset_idx = nir_tex_instr_src_index(tex, nir_tex_src_sampler_offset);
+
+               if (nir_tex_instr_need_sampler(tex)) {
+                  nir_def *sampler_base_addr = iris_load_eff_64bit_sampler_base_address(&b);
+                  uint32_t state_size = intel_sampler_state_size(use_efficient_64bit);
+                  nir_def *sampler_dynamic_index = NULL;
+
+                  if (sampler_offset_idx >= 0) {
+                     sampler_dynamic_index = tex->src[sampler_offset_idx].src.ssa;
+                     nir_tex_instr_remove_src(tex, sampler_offset_idx);
+                  }
+
+                  rewrite_tex_with_surface_address(&b, tex, sampler_base_addr,
+                                                   tex->sampler_index,
+                                                   sampler_dynamic_index,
+                                                   state_size,
+                                                   nir_tex_src_sampler_handle);
+               } else {
+                  /* Some instructions don't need a sampler, but may still carry
+                   * a leftover sampler_offset source from the front-end
+                   * (since texture and sampler indices are combined in GL).
+                   * Remove it instead of leaving a stale 32-bit offset behind,
+                   * which would later fail the 64-bit sampler assertion in the backend.
+                   */
+                  if (sampler_offset_idx >= 0)
+                     nir_tex_instr_remove_src(tex, sampler_offset_idx);
+               }
+               tex->sampler_index = 0;
+            } else {
+               tex->texture_index = iris_group_index_to_bti(bt, group, group_index);
             }
             continue;
          }
@@ -1543,22 +1742,40 @@ iris_setup_binding_table(const struct intel_device_info *devinfo,
          case nir_intrinsic_image_atomic_swap:
          case nir_intrinsic_image_load_raw_intel:
          case nir_intrinsic_image_store_raw_intel:
-            rewrite_src_with_bti(&b, bt, instr, &intrin->src[0],
-                                 IRIS_SURFACE_GROUP_IMAGE);
+            if (use_efficient_64bit) {
+               rewrite_src_with_surface_address(&b, bt, instr, &intrin->src[0],
+                                                IRIS_SURFACE_GROUP_IMAGE,
+                                                screen->isl_dev.ss.size);
+            } else {
+               rewrite_src_with_bti(&b, bt, instr, &intrin->src[0],
+                                    IRIS_SURFACE_GROUP_IMAGE);
+            }
             break;
 
          case nir_intrinsic_load_ubo:
-            rewrite_src_with_bti(&b, bt, instr, &intrin->src[0],
-                                 IRIS_SURFACE_GROUP_UBO);
+            if (use_efficient_64bit) {
+               rewrite_src_with_surface_address(&b, bt, instr, &intrin->src[0],
+                                                IRIS_SURFACE_GROUP_UBO,
+                                                screen->isl_dev.ss.size);
+            } else {
+               rewrite_src_with_bti(&b, bt, instr, &intrin->src[0],
+                                    IRIS_SURFACE_GROUP_UBO);
+            }
             break;
 
          case nir_intrinsic_store_ssbo:
-            rewrite_src_with_bti(&b, bt, instr, &intrin->src[1],
-                                 IRIS_SURFACE_GROUP_SSBO);
+            if (use_efficient_64bit) {
+               rewrite_src_with_surface_address(&b, bt, instr, &intrin->src[1],
+                                                IRIS_SURFACE_GROUP_SSBO,
+                                                screen->isl_dev.ss.size);
+            } else {
+               rewrite_src_with_bti(&b, bt, instr, &intrin->src[1],
+                                    IRIS_SURFACE_GROUP_SSBO);
+            }
             break;
 
          case nir_intrinsic_load_output:
-            if (devinfo->ver == 8) {
+            if (!brw_can_coherent_fb_fetch(devinfo)) {
                /* We're using a BTI as the load_output offset here which
                 * breaks newer NIR assumptions.
                 */
@@ -1566,8 +1783,15 @@ iris_setup_binding_table(const struct intel_device_info *devinfo,
                io_sem.no_validate = true;
                nir_intrinsic_set_io_semantics(intrin, io_sem);
 
-               rewrite_src_with_bti(&b, bt, instr, &intrin->src[0],
-                                    IRIS_SURFACE_GROUP_RENDER_TARGET_READ);
+               if (use_efficient_64bit) {
+                  rewrite_src_with_surface_address(&b, bt, instr,
+                                                   &intrin->src[0],
+                                                   IRIS_SURFACE_GROUP_RENDER_TARGET_READ,
+                                                   screen->isl_dev.ss.size);
+               } else {
+                  rewrite_src_with_bti(&b, bt, instr, &intrin->src[0],
+                                       IRIS_SURFACE_GROUP_RENDER_TARGET_READ);
+               }
             }
             break;
 
@@ -1575,24 +1799,55 @@ iris_setup_binding_table(const struct intel_device_info *devinfo,
          case nir_intrinsic_ssbo_atomic:
          case nir_intrinsic_ssbo_atomic_swap:
          case nir_intrinsic_load_ssbo:
-            rewrite_src_with_bti(&b, bt, instr, &intrin->src[0],
-                                 IRIS_SURFACE_GROUP_SSBO);
+            if (use_efficient_64bit) {
+               rewrite_src_with_surface_address(&b, bt, instr, &intrin->src[0],
+                                                IRIS_SURFACE_GROUP_SSBO,
+                                                screen->isl_dev.ss.size);
+            } else {
+               rewrite_src_with_bti(&b, bt, instr, &intrin->src[0],
+                                    IRIS_SURFACE_GROUP_SSBO);
+            }
             break;
 
-         case nir_intrinsic_load_num_workgroups:
+         case nir_intrinsic_load_num_workgroups: {
             b.cursor = nir_before_instr(instr);
+
+            nir_def *ubo_index;
+
+            if (use_efficient_64bit) {
+               uint32_t slot = iris_group_index_to_bti(bt, IRIS_SURFACE_GROUP_CS_WORK_GROUPS, 0);
+               nir_def *base_addr = iris_load_eff_64bit_surfaces_base_address(&b);
+               nir_def *addr64 = nir_iadd_imm(&b, base_addr, slot * screen->isl_dev.ss.size);
+
+               ubo_index = nir_resource_intel(
+                  &b,
+                  1, /* num_components */
+                  64, /* bit size */
+                  addr64, /* set_offset */
+                  addr64, /* surface_index */
+                  nir_imm_int(&b, 0), /* array_index */
+                  nir_imm_int(&b, 0), /* bindless_base_offset */
+                  .desc_set = 0,
+                  .binding = 0,
+                  .resource_access_intel = nir_resource_intel_internal);
+            } else {
+               uint32_t offset = bt->offsets[IRIS_SURFACE_GROUP_CS_WORK_GROUPS];
+
+               ubo_index = nir_imm_int(&b, offset);
+            }
+
             nir_def_replace(
                &intrin->def,
                nir_load_ubo(&b,
                             intrin->def.num_components,
                             intrin->def.bit_size,
-                            nir_imm_int(&b, bt->offsets[
-                                           IRIS_SURFACE_GROUP_CS_WORK_GROUPS]),
+                            ubo_index,
                             nir_imm_int(&b, 0),
                             .range_base = 0,
                             .range = intrin->def.num_components *
                                      intrin->def.bit_size / 8));
             break;
+         }
 
          default:
             break;
@@ -1859,7 +2114,27 @@ brw_apply_ubo_ranges(const struct iris_screen *screen,
                      struct iris_ubo_range ubo_ranges[4],
                      struct brw_stage_prog_data *prog_data)
 {
-   iris_nir_analyze_ubo_ranges(screen->devinfo, nir, ubo_ranges);
+   const bool need_reserved_64bits_binding_tables = iris_bufmgr_is_eff_64bit_enabled(screen->bufmgr) &&
+                                                    mesa_shader_stage_is_compute(nir->info.stage) == false;
+   struct iris_ubo_range *first_avail_ubo_range = ubo_ranges;
+   uint8_t used_push_regs = 0;
+   uint8_t ubo_range_len = 4;
+
+   /* When 64bits addressing mode is enabled the first register is reserved for
+    * the binding tables addresses
+    */
+   if (need_reserved_64bits_binding_tables) {
+      ubo_ranges[0].block = 0;
+      ubo_ranges[0].length = screen->devinfo->grf_size / REG_SIZE;
+      ubo_ranges[0].start = 0;
+      ubo_ranges[0].reserved_64bits_binding_tables = true;
+
+      first_avail_ubo_range = &ubo_ranges[1];
+      used_push_regs += ubo_ranges[0].length;
+      ubo_range_len--;
+   }
+
+   iris_nir_analyze_ubo_ranges(screen->devinfo, nir, first_avail_ubo_range, ubo_range_len, used_push_regs);
    NIR_PASS(_, nir, iris_nir_lower_ubo_ranges, ubo_ranges);
 
    if (ubo_ranges[0].length == 0 &&
@@ -1914,7 +2189,7 @@ iris_compile_vs(struct iris_screen *screen,
                        &num_system_values, &num_cbufs);
 
    struct iris_binding_table bt;
-   iris_setup_binding_table(devinfo, nir, &bt, /* num_render_targets */ 0,
+   iris_setup_binding_table(screen, nir, &bt, /* num_render_targets */ 0,
                             num_system_values, num_cbufs, false);
 
    const char *error;
@@ -2028,7 +2303,7 @@ iris_update_compiled_vs(struct iris_context *ice)
       ice->shaders.uncompiled[MESA_SHADER_VERTEX];
 
    struct iris_vs_prog_key key = {
-      KEY_INIT(vue.base),
+      KEY_INIT(vue.base, iris_bufmgr_is_eff_64bit_enabled(screen->bufmgr)),
       .vue.layout = vue_layout(ish->nir->info.separate_shader),
    };
    screen->vtbl.populate_vs_key(ice, &ish->nir->info, last_vue_stage(ice), &key);
@@ -2175,7 +2450,7 @@ iris_compile_tcs(struct iris_screen *screen,
 
    iris_setup_uniforms(devinfo, mem_ctx, nir, &system_values,
                        &num_system_values, &num_cbufs);
-   iris_setup_binding_table(devinfo, nir, &bt, /* num_render_targets */ 0,
+   iris_setup_binding_table(screen, nir, &bt, /* num_render_targets */ 0,
                             num_system_values, num_cbufs, false);
 
    const char *error = NULL;
@@ -2280,6 +2555,7 @@ iris_update_compiled_tcs(struct iris_context *ice)
    struct iris_tcs_prog_key key = {
       .vue.base.program_string_id = tcs ? tcs->program_id : 0,
       .vue.layout = vue_layout(tcs ? tcs->nir->info.separate_shader : false),
+      .vue.base.use_efficient_64bit = iris_bufmgr_is_eff_64bit_enabled(screen->bufmgr),
       ._tes_primitive_mode = tes_info->tess._primitive_mode,
       .input_vertices =
          !tcs || intel_use_tcs_multi_patch(devinfo) ? ice->state.vertices_per_patch : 0,
@@ -2376,7 +2652,7 @@ iris_compile_tes(struct iris_screen *screen,
                        &num_system_values, &num_cbufs);
 
    struct iris_binding_table bt;
-   iris_setup_binding_table(devinfo, nir, &bt, /* num_render_targets */ 0,
+   iris_setup_binding_table(screen, nir, &bt, /* num_render_targets */ 0,
                             num_system_values, num_cbufs, false);
 
    const char *error;
@@ -2494,7 +2770,7 @@ iris_update_compiled_tes(struct iris_context *ice)
       ice->shaders.uncompiled[MESA_SHADER_TESS_EVAL];
 
    struct iris_tes_prog_key key = {
-      KEY_INIT(vue.base),
+      KEY_INIT(vue.base, iris_bufmgr_is_eff_64bit_enabled(screen->bufmgr)),
       .vue.layout = vue_layout(ish->nir->info.separate_shader),
    };
    get_unified_tess_slots(ice, &key.inputs_read, &key.patch_inputs_read);
@@ -2570,7 +2846,7 @@ iris_compile_gs(struct iris_screen *screen,
                        &num_system_values, &num_cbufs);
 
    struct iris_binding_table bt;
-   iris_setup_binding_table(devinfo, nir, &bt, /* num_render_targets */ 0,
+   iris_setup_binding_table(screen, nir, &bt, /* num_render_targets */ 0,
                             num_system_values, num_cbufs, false);
 
    const char *error;
@@ -2684,7 +2960,7 @@ iris_update_compiled_gs(struct iris_context *ice)
 
    if (ish) {
       struct iris_gs_prog_key key = {
-         KEY_INIT(vue.base),
+         KEY_INIT(vue.base, iris_bufmgr_is_eff_64bit_enabled(screen->bufmgr)),
          .vue.layout = vue_layout(ish->nir->info.separate_shader),
       };
       screen->vtbl.populate_gs_key(ice, &ish->nir->info, last_vue_stage(ice), &key);
@@ -2726,6 +3002,27 @@ iris_force_dual_color_blend(nir_shader *nir)
       var->data.location = FRAG_RESULT_DATA0;
       var->data.index = 1;
    }
+}
+
+static nir_def *
+iris_rt_write_efficient_64bit(nir_builder *b, signed rt, void *data)
+{
+   const struct isl_device *isl_dev = data;
+   nir_def *addr = iris_load_eff_64bit_surfaces_base_address(b);
+
+   if (rt > 0) {
+      nir_def *offset = nir_imm_int(b, (uint32_t)(rt * isl_dev->ss.size));
+      nir_def *addr_lo = nir_unpack_64_2x32_split_x(b, addr);
+      nir_def *addr_hi = nir_unpack_64_2x32_split_y(b, addr);
+
+      nir_def *new_lo = nir_iadd(b, addr_lo, offset);
+      nir_def *carry = nir_uadd_carry(b, addr_lo, offset);
+      nir_def *new_hi = nir_iadd(b, addr_hi, carry);
+
+      addr = nir_pack_64_2x32_split(b, new_lo, new_hi);
+   }
+
+   return addr;
 }
 
 /**
@@ -2773,7 +3070,7 @@ iris_compile_fs(struct iris_screen *screen,
                                key->alpha_to_coverage) ? 1 : 0;
 
    struct iris_binding_table bt;
-   iris_setup_binding_table(devinfo, nir, &bt,
+   iris_setup_binding_table(screen, nir, &bt,
                             MAX2(key->nr_color_regions, null_rts),
                             num_system_values, num_cbufs, null_rts != 0);
 
@@ -2801,6 +3098,11 @@ iris_compile_fs(struct iris_screen *screen,
          .max_polygons = UCHAR_MAX,
          .vue_map = vue_map,
       };
+
+      if (key->base.use_efficient_64bit) {
+         params.rt_write_cb = iris_rt_write_efficient_64bit;
+         params.rt_write_data = (void *)&screen->isl_dev;
+      }
 
       program = iris_backend_compile(screen, mem_ctx, &params.base);
       error = params.base.error_str;
@@ -2884,7 +3186,7 @@ iris_update_compiled_fs(struct iris_context *ice)
       ice->shaders.uncompiled[MESA_SHADER_FRAGMENT];
    struct iris_screen *screen = (struct iris_screen *)ice->ctx.screen;
    struct iris_fs_prog_key key = {
-      KEY_INIT(base),
+      KEY_INIT(base, iris_bufmgr_is_eff_64bit_enabled(screen->bufmgr)),
       .vue_layout = vue_layout(ish->nir->info.separate_shader),
    };
    screen->vtbl.populate_fs_key(ice, &ish->nir->info, &key);
@@ -3117,7 +3419,7 @@ iris_compile_cs(struct iris_screen *screen,
                        &system_values, &num_system_values, &num_cbufs);
 
    struct iris_binding_table bt;
-   iris_setup_binding_table(devinfo, nir, &bt, /* num_render_targets */ 0,
+   iris_setup_binding_table(screen, nir, &bt, /* num_render_targets */ 0,
                             num_system_values, num_cbufs, false);
 
    const char *error;
@@ -3217,7 +3519,9 @@ iris_update_compiled_cs(struct iris_context *ice)
    struct iris_uncompiled_shader *ish =
       ice->shaders.uncompiled[MESA_SHADER_COMPUTE];
    struct iris_screen *screen = (struct iris_screen *)ice->ctx.screen;
-   struct iris_cs_prog_key key = { KEY_INIT(base) };
+   struct iris_cs_prog_key key = {
+      KEY_INIT(base, iris_bufmgr_is_eff_64bit_enabled(screen->bufmgr)),
+   };
    screen->vtbl.populate_cs_key(ice, &key);
 
    struct iris_compiled_shader *old = ice->shaders.prog[IRIS_CACHE_CS];
@@ -3269,10 +3573,106 @@ iris_fill_cs_push_const_buffer(struct iris_screen *screen,
       dst[8 * t] = t;
 }
 
+static struct iris_scratch_buffer *
+iris_scratch_buffer_create(struct iris_screen *screen,
+                           unsigned per_thread_scratch)
+{
+   const struct intel_device_info *devinfo = screen->devinfo;
+
+   assert(per_thread_scratch > 0);
+   struct iris_scratch_buffer *buf = malloc(sizeof(struct iris_scratch_buffer));
+   if (!buf)
+      return NULL;
+
+   pipe_reference_init(&buf->ref, 1);
+   buf->per_thread_scratch = per_thread_scratch;
+
+   uint32_t size = per_thread_scratch * devinfo->max_scratch_ids[MESA_SHADER_COMPUTE];
+   buf->bo = iris_bo_alloc(screen->bufmgr, "scratch", size, 1024,
+                           IRIS_MEMZONE_SHADER, BO_ALLOC_PLAIN);
+   if (!buf->bo) {
+      free(buf);
+      return NULL;
+   }
+
+   buf->surf_bo = iris_bo_alloc(screen->bufmgr, "scratch surface state",
+                                screen->isl_dev.ss.size, 64,
+                                IRIS_MEMZONE_SCRATCH, BO_ALLOC_CPU_VISIBLE);
+   if (!buf->surf_bo) {
+      iris_bo_unreference(buf->bo);
+      free(buf);
+      return NULL;
+   }
+
+   void *map = iris_bo_map(NULL, buf->surf_bo, MAP_WRITE);
+   isl_buffer_fill_state(&screen->isl_dev, map,
+                         .address = buf->bo->address,
+                         .size_B = buf->bo->size,
+                         .format = ISL_FORMAT_RAW,
+                         .swizzle = ISL_SWIZZLE_IDENTITY,
+                         .usage = 0,
+                         .mocs = iris_mocs(buf->bo, &screen->isl_dev, 0),
+                         .stride_B = per_thread_scratch,
+                         .is_scratch = true);
+   iris_bo_unmap(buf->surf_bo);
+
+   return buf;
+}
+
+void
+iris_scratch_buffer_reference(struct iris_scratch_buffer **dst,
+                              struct iris_scratch_buffer *src)
+{
+   struct iris_scratch_buffer *old_dst = *dst;
+
+   if (pipe_reference(old_dst ? &old_dst->ref : NULL, src ? &src->ref : NULL)) {
+      iris_bo_unreference(old_dst->bo);
+      iris_bo_unreference(old_dst->surf_bo);
+      free(old_dst);
+   }
+
+   *dst = src;
+}
+
+/**
+ * Get a reference to the screen's shared scratch buffer for efficient
+ * 64-bit addressing mode, the caller owns and must eventually release
+ * with iris_scratch_buffer_reference(&ptr, NULL).
+ */
+struct iris_scratch_buffer *
+iris_get_shared_scratch_buffer(struct iris_screen *screen,
+                               unsigned per_thread_scratch)
+{
+   assert(iris_bufmgr_is_eff_64bit_enabled(screen->bufmgr));
+   simple_mtx_lock(&screen->scratch_buffer_mutex);
+
+   struct iris_scratch_buffer *cur = screen->scratch_buffer;
+
+   per_thread_scratch = align(per_thread_scratch, 64);
+   if (!cur || cur->per_thread_scratch < per_thread_scratch) {
+      /* It has an initial reference count of 1 that iris_screen owns. */
+      struct iris_scratch_buffer *new = iris_scratch_buffer_create(screen, per_thread_scratch);
+
+      /* Update screen->scratch_buffer, descrese reference(iris_screen reference)
+       * of the old iris_scratch_buffer if any, increase reference of the new
+       * one for caller.
+       */
+      iris_scratch_buffer_reference(&screen->scratch_buffer, new);
+   } else {
+      struct iris_scratch_buffer *tmp = NULL;
+      /* Increase reference for caller, decreased in iris_delete_shader_variant() */
+      iris_scratch_buffer_reference(&tmp, screen->scratch_buffer);
+   }
+
+   simple_mtx_unlock(&screen->scratch_buffer_mutex);
+
+   return screen->scratch_buffer;
+}
+
 /**
  * Allocate scratch BOs as needed for the given per-thread size and stage.
  */
-struct iris_bo *
+static struct iris_bo *
 iris_get_scratch_space(struct iris_context *ice,
                        unsigned per_thread_scratch,
                        mesa_shader_stage stage)
@@ -3305,7 +3705,7 @@ iris_get_scratch_space(struct iris_context *ice,
    return *bop;
 }
 
-const struct iris_state_ref *
+static const struct iris_state_ref *
 iris_get_scratch_surf(struct iris_context *ice,
                       unsigned per_thread_scratch)
 {
@@ -3340,6 +3740,51 @@ iris_get_scratch_surf(struct iris_context *ice,
                          .is_scratch = true);
 
    return ref;
+}
+
+uint32_t
+iris_pin_scratch_space(struct iris_context *ice,
+                       struct iris_batch *batch,
+                       const struct iris_compiled_shader *shader)
+{
+   struct iris_screen *screen = (struct iris_screen *)ice->ctx.screen;
+   uint32_t scratch_addr = 0;
+
+   if (iris_bufmgr_is_eff_64bit_enabled(batch->screen->bufmgr)) {
+      /* The scratch surface address was already baked into the shader's
+       * instructions at compile time (see iris_upload_shader()).
+       * We just need to keep the buffer resident for this batch.
+       */
+      if (shader->scratch_buffer) {
+         iris_use_pinned_bo(batch, shader->scratch_buffer->bo,
+                            true, IRIS_DOMAIN_NONE);
+         iris_use_pinned_bo(batch, shader->scratch_buffer->surf_bo,
+                            false, IRIS_DOMAIN_NONE);
+      }
+
+      return 0;
+   }
+
+   if (shader->total_scratch > 0) {
+      struct iris_bo *scratch_bo =
+         iris_get_scratch_space(ice, shader->total_scratch, shader->stage);
+      iris_use_pinned_bo(batch, scratch_bo, true, IRIS_DOMAIN_NONE);
+
+      if (screen->devinfo->verx10 >= 125) {
+         const struct iris_state_ref *ref =
+            iris_get_scratch_surf(ice, shader->total_scratch);
+         iris_use_pinned_bo(batch, iris_resource_bo(ref->res),
+                            false, IRIS_DOMAIN_NONE);
+         scratch_addr = ref->offset +
+                        iris_resource_bo(ref->res)->address -
+                        IRIS_MEMZONE_SCRATCH_START;
+         assert(util_is_aligned(scratch_addr, 64) && scratch_addr < (1 << 26));
+      } else {
+         scratch_addr = scratch_bo->address;
+      }
+   }
+
+   return scratch_addr;
 }
 
 /* ------------------------------------------------------------------- */
@@ -3428,7 +3873,9 @@ iris_create_compute_state(struct pipe_context *ctx,
    // XXX: disallow more than 64KB of shared variables
 
    if (screen->precompile) {
-      struct iris_cs_prog_key key = { KEY_INIT(base) };
+      struct iris_cs_prog_key key = {
+         KEY_INIT(base, iris_bufmgr_is_eff_64bit_enabled(screen->bufmgr)),
+      };
 
       struct iris_compiled_shader *shader =
          iris_create_shader_variant(screen, NULL, MESA_SHADER_COMPUTE,
@@ -3474,7 +3921,9 @@ iris_get_compute_state_subgroup_size(struct pipe_context *ctx, void *state,
    struct u_upload_mgr *uploader = ice->shaders.uploader_driver;
    struct iris_uncompiled_shader *ish = state;
 
-   struct iris_cs_prog_key key = { KEY_INIT(base) };
+   struct iris_cs_prog_key key = {
+      KEY_INIT(base, iris_bufmgr_is_eff_64bit_enabled(screen->bufmgr)),
+   };
    screen->vtbl.populate_cs_key(ice, &key);
 
    bool added;
@@ -3554,15 +4003,14 @@ iris_create_shader_state(struct pipe_context *ctx,
          ish->nos |= (1ull << IRIS_NOS_RASTERIZER);
 
       key.vs = (struct iris_vs_prog_key) {
-         KEY_INIT(vue.base),
-         .vue.layout = vue_layout(ish->nir->info.separate_shader),
+         KEY_INIT(vue.base, iris_bufmgr_is_eff_64bit_enabled(screen->bufmgr)),
       };
       key_size = sizeof(key.vs);
       break;
 
    case MESA_SHADER_TESS_CTRL: {
       key.tcs = (struct iris_tcs_prog_key) {
-         KEY_INIT(vue.base),
+         KEY_INIT(vue.base, iris_bufmgr_is_eff_64bit_enabled(screen->bufmgr)),
          .vue.layout = vue_layout(ish->nir->info.separate_shader),
          // XXX: make sure the linker fills this out from the TES...
          ._tes_primitive_mode =
@@ -3590,7 +4038,7 @@ iris_create_shader_state(struct pipe_context *ctx,
          ish->nos |= (1ull << IRIS_NOS_RASTERIZER);
 
       key.tes = (struct iris_tes_prog_key) {
-         KEY_INIT(vue.base),
+         KEY_INIT(vue.base, iris_bufmgr_is_eff_64bit_enabled(screen->bufmgr)),
          .vue.layout = vue_layout(ish->nir->info.separate_shader),
          // XXX: not ideal, need TCS output/TES input unification
          .inputs_read = info->inputs_read,
@@ -3604,7 +4052,7 @@ iris_create_shader_state(struct pipe_context *ctx,
       ish->nos |= (1ull << IRIS_NOS_RASTERIZER);
 
       key.gs = (struct iris_gs_prog_key) {
-         KEY_INIT(vue.base),
+         KEY_INIT(vue.base, iris_bufmgr_is_eff_64bit_enabled(screen->bufmgr)),
          .vue.layout = vue_layout(ish->nir->info.separate_shader),
       };
       key_size = sizeof(key.gs);
@@ -3638,7 +4086,7 @@ iris_create_shader_state(struct pipe_context *ctx,
          util_bitcount64(info->inputs_read & BRW_FS_VARYING_INPUT_MASK) <= 16;
 
       key.fs = (struct iris_fs_prog_key) {
-         KEY_INIT(base),
+         KEY_INIT(base, iris_bufmgr_is_eff_64bit_enabled(screen->bufmgr)),
          .vue_layout = vue_layout(ish->nir->info.separate_shader),
          .nr_color_regions = util_bitcount(color_outputs) ?: dual_color,
          .coherent_fb_fetch = devinfo->ver >= 9 && devinfo->ver < 20,

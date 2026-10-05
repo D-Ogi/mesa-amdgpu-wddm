@@ -277,7 +277,8 @@ st_update_blend( struct st_context *st )
       blend->logicop_func = ctx->Color._LogicOp;
    }
    else if (ctx->Color.BlendEnabled &&
-            ctx->Color._AdvancedBlendMode != PIPE_ADVANCED_BLEND_NONE) {
+            ctx->Color._AdvancedBlendMode != PIPE_ADVANCED_BLEND_NONE &&
+            _mesa_advanced_blend_mode_is_native(ctx, ctx->Color._AdvancedBlendMode)) {
       blend->advanced_blend_func = ctx->Color._AdvancedBlendMode;
    }
    else if (ctx->Color.BlendEnabled &&

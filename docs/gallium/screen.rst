@@ -619,7 +619,7 @@ Capability about the features and limits of the driver/GPU.
 * ``pipe_caps.viewport_mask``: Whether ``TGSI_SEMANTIC_VIEWPORT_MASK`` and ``TGSI_PROPERTY_LAYER_VIEWPORT_RELATIVE`` are supported (see :ext:`GL_NV_viewport_array2`).
 * ``pipe_caps.map_unsynchronized_thread_safe``: Whether mapping a buffer as unsynchronized from any thread is safe.
 * ``pipe_caps.glsl_zero_init``: Choose a default zero initialization some GLSL variables. If ``1``, then all GLSL shader variables and gl_FragColor are initialized to zero. If ``2``, then shader out variables are not initialized but function out variables are.
-* ``pipe_caps.blend_equation_advanced``: Driver supports blend equation advanced without necessarily supporting FBFETCH.
+* ``pipe_caps.blend_equation_advanced``: Bitmask of ``enum pipe_advanced_blend_mode`` modes the driver blends natively through ``pipe_blend_state::advanced_blend_func``, without necessarily supporting FBFETCH. Modes not in the mask are lowered into the fragment shader, which requires FBFETCH. :ext:`GL_KHR_blend_equation_advanced` is exposed when the mask covers all its modes (``PIPE_ADVANCED_BLEND_KHR_MODES_MASK``) or FBFETCH fills the gap.
 * ``pipe_caps.nir_atomics_as_deref``: Whether NIR atomics instructions should reference atomics as NIR derefs instead of by indices.
 * ``pipe_caps.no_clip_on_copy_tex``: Driver doesn't want x/y/width/height clipped based on src size when doing a copy texture operation (e.g.: may want out-of-bounds reads that produce 0 instead of leaving the texture content undefined)
 * ``pipe_caps.max_texture_mb``: Maximum texture size in MB (default is 1024)

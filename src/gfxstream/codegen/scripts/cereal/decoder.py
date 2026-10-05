@@ -665,7 +665,7 @@ def decode_vkInvalidateMappedMemoryRanges(typeInfo, api, cgen):
 
 def decode_unsupported_api(typeInfo, api, cgen):
     cgen.line(f"// Decoding {api.name} is not supported. This should not run.")
-    cgen.stmt(f"fprintf(stderr, \"stream %p: fatal: decoding unsupported API {api.name}\\n\", ioStream)");
+    cgen.stmt(f"GFXSTREAM_ERROR(\"stream %p: fatal: decoding unsupported API {api.name}\", ioStream)")
     cgen.stmt("__builtin_trap()")
 
 custom_decodes = {

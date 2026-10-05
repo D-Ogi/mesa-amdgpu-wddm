@@ -218,14 +218,14 @@ genX(emit_simpler_shader_init_fragment)(struct anv_simple_shader *state)
 #endif
 
       ps.KernelStartPointer0 =
-         anv_shader_internal_get_pointer(device, state->kernel) +
+         anv_shader_get_pointer(device, &state->kernel->kernel) +
          brw_fs_prog_data_prog_offset(prog_data, ps, 0);
       ps.KernelStartPointer1 =
-         anv_shader_internal_get_pointer(device, state->kernel) +
+         anv_shader_get_pointer(device, &state->kernel->kernel) +
          brw_fs_prog_data_prog_offset(prog_data, ps, 1);
 #if GFX_VER < 20
       ps.KernelStartPointer2 =
-         anv_shader_internal_get_pointer(device, state->kernel) +
+         anv_shader_get_pointer(device, &state->kernel->kernel) +
          brw_fs_prog_data_prog_offset(prog_data, ps, 2);
 #endif
 
@@ -622,7 +622,7 @@ genX(emit_simple_shader_dispatch)(struct anv_simple_shader *state,
             .Post_sync_opn3.MOCS       = anv_mocs(device, NULL, 0),
             .InterfaceDescriptor = (struct GENX(INTERFACE_DESCRIPTOR_DATA_2)) {
                .KernelStartPointer                 =
-                  anv_shader_internal_get_pointer(device, state->kernel) +
+                  anv_shader_get_pointer(device, &state->kernel->kernel) +
                   brw_cs_prog_data_prog_offset(prog_data, dispatch.simd_size),
                .RegistersPerThread                 = intel_register_blocks(
                   devinfo, prog_data->base.grf_used),

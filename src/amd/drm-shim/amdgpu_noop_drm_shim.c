@@ -233,8 +233,8 @@ drm_shim_driver_init(void)
    shim_device.driver_ioctls = amdgpu_ioctls;
    shim_device.driver_ioctl_count = ARRAY_SIZE(amdgpu_ioctls);
 
-   shim_device.version_major = 3;
-   shim_device.version_minor = 54;
+   shim_device.version_major = AC_AMDGPU_DRM_MAJOR;
+   shim_device.version_minor = AC_AMDGPU_DRM_MINOR;
    shim_device.version_patchlevel = 0;
 
    /* make drmGetDevices2 and drmProcessPciDevice happy */

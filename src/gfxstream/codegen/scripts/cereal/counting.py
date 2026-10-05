@@ -147,7 +147,7 @@ class VulkanCountingCodegen(VulkanTypeIterator):
         if needConsistencyCheck and featureExpr is None:
             self.cgen.beginIf("!(%s)" % checkName)
             self.cgen.stmt(
-                "fprintf(stderr, \"fatal: %s inconsistent between guest and host\\n\")" % (access))
+                "GFXSTREAM_ERROR(\"fatal: %s inconsistent between guest and host\")" % (access))
             self.cgen.endIf()
 
 

@@ -709,6 +709,7 @@ visit_phi(isel_context* ctx, nir_phi_instr* instr)
       phi->operands[i++] = get_phi_operand(ctx, src.second, dst.regClass());
    phi->definitions[0] = Definition(dst);
    ctx->block->instructions.emplace(ctx->block->instructions.begin(), std::move(phi));
+   emit_split_vector(ctx, dst, instr->def.num_components);
 }
 
 void

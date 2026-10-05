@@ -34,6 +34,19 @@
 
 #include "goldfish_vk_extension_structs_guest.h"
 #include "goldfish_vk_private_defs.h"
+#include "util/log.h"
+
+#ifndef GFXSTREAM_ERROR
+#define GFXSTREAM_ERROR(...) mesa_loge(__VA_ARGS__)
+#endif
+
+#ifndef GFXSTREAM_FATAL
+#define GFXSTREAM_FATAL(...)    \
+    do {                        \
+        mesa_loge(__VA_ARGS__); \
+        abort();                \
+    } while (0)
+#endif
 
 namespace gfxstream {
 namespace vk {
@@ -108,8 +121,8 @@ void unmarshal_VkAllocationCallbacks(VulkanStreamGuest* vkStream, VkStructureTyp
     check_pUserData = (void*)(uintptr_t)vkStream->getBe64();
     if (forUnmarshaling->pUserData) {
         if (!(check_pUserData)) {
-            fprintf(stderr,
-                    "fatal: forUnmarshaling->pUserData inconsistent between guest and host\n");
+            GFXSTREAM_ERROR(
+                "fatal: forUnmarshaling->pUserData inconsistent between guest and host");
         }
         vkStream->read((void*)forUnmarshaling->pUserData, sizeof(uint8_t));
     }
@@ -136,9 +149,8 @@ void unmarshal_VkApplicationInfo(VulkanStreamGuest* vkStream, VkStructureType ro
         check_pApplicationName = (const char*)(uintptr_t)vkStream->getBe64();
         if (forUnmarshaling->pApplicationName) {
             if (!(check_pApplicationName)) {
-                fprintf(stderr,
-                        "fatal: forUnmarshaling->pApplicationName inconsistent between guest and "
-                        "host\n");
+                GFXSTREAM_ERROR(
+                    "fatal: forUnmarshaling->pApplicationName inconsistent between guest and host");
             }
             vkStream->loadStringInPlace((char**)&forUnmarshaling->pApplicationName);
         }
@@ -153,9 +165,8 @@ void unmarshal_VkApplicationInfo(VulkanStreamGuest* vkStream, VkStructureType ro
         check_pEngineName = (const char*)(uintptr_t)vkStream->getBe64();
         if (forUnmarshaling->pEngineName) {
             if (!(check_pEngineName)) {
-                fprintf(
-                    stderr,
-                    "fatal: forUnmarshaling->pEngineName inconsistent between guest and host\n");
+                GFXSTREAM_ERROR(
+                    "fatal: forUnmarshaling->pEngineName inconsistent between guest and host");
             }
             vkStream->loadStringInPlace((char**)&forUnmarshaling->pEngineName);
         }
@@ -202,9 +213,8 @@ void unmarshal_VkInstanceCreateInfo(VulkanStreamGuest* vkStream, VkStructureType
     check_pApplicationInfo = (const VkApplicationInfo*)(uintptr_t)vkStream->getBe64();
     if (forUnmarshaling->pApplicationInfo) {
         if (!(check_pApplicationInfo)) {
-            fprintf(
-                stderr,
-                "fatal: forUnmarshaling->pApplicationInfo inconsistent between guest and host\n");
+            GFXSTREAM_ERROR(
+                "fatal: forUnmarshaling->pApplicationInfo inconsistent between guest and host");
         }
         unmarshal_VkApplicationInfo(vkStream, rootType,
                                     (VkApplicationInfo*)(forUnmarshaling->pApplicationInfo));
@@ -537,9 +547,8 @@ void unmarshal_VkDeviceCreateInfo(VulkanStreamGuest* vkStream, VkStructureType r
     check_pEnabledFeatures = (const VkPhysicalDeviceFeatures*)(uintptr_t)vkStream->getBe64();
     if (forUnmarshaling->pEnabledFeatures) {
         if (!(check_pEnabledFeatures)) {
-            fprintf(
-                stderr,
-                "fatal: forUnmarshaling->pEnabledFeatures inconsistent between guest and host\n");
+            GFXSTREAM_ERROR(
+                "fatal: forUnmarshaling->pEnabledFeatures inconsistent between guest and host");
         }
         unmarshal_VkPhysicalDeviceFeatures(
             vkStream, rootType, (VkPhysicalDeviceFeatures*)(forUnmarshaling->pEnabledFeatures));
@@ -855,9 +864,8 @@ void unmarshal_VkBufferCreateInfo(VulkanStreamGuest* vkStream, VkStructureType r
     check_pQueueFamilyIndices = (const uint32_t*)(uintptr_t)vkStream->getBe64();
     if (forUnmarshaling->pQueueFamilyIndices) {
         if (!(check_pQueueFamilyIndices)) {
-            fprintf(stderr,
-                    "fatal: forUnmarshaling->pQueueFamilyIndices inconsistent between guest and "
-                    "host\n");
+            GFXSTREAM_ERROR(
+                "fatal: forUnmarshaling->pQueueFamilyIndices inconsistent between guest and host");
         }
         vkStream->read((uint32_t*)forUnmarshaling->pQueueFamilyIndices,
                        forUnmarshaling->queueFamilyIndexCount * sizeof(const uint32_t));
@@ -890,9 +898,8 @@ void unmarshal_VkImageCreateInfo(VulkanStreamGuest* vkStream, VkStructureType ro
     check_pQueueFamilyIndices = (const uint32_t*)(uintptr_t)vkStream->getBe64();
     if (forUnmarshaling->pQueueFamilyIndices) {
         if (!(check_pQueueFamilyIndices)) {
-            fprintf(stderr,
-                    "fatal: forUnmarshaling->pQueueFamilyIndices inconsistent between guest and "
-                    "host\n");
+            GFXSTREAM_ERROR(
+                "fatal: forUnmarshaling->pQueueFamilyIndices inconsistent between guest and host");
         }
         vkStream->read((uint32_t*)forUnmarshaling->pQueueFamilyIndices,
                        forUnmarshaling->queueFamilyIndexCount * sizeof(const uint32_t));
@@ -1015,9 +1022,8 @@ void unmarshal_VkCommandBufferBeginInfo(VulkanStreamGuest* vkStream, VkStructure
     check_pInheritanceInfo = (const VkCommandBufferInheritanceInfo*)(uintptr_t)vkStream->getBe64();
     if (forUnmarshaling->pInheritanceInfo) {
         if (!(check_pInheritanceInfo)) {
-            fprintf(
-                stderr,
-                "fatal: forUnmarshaling->pInheritanceInfo inconsistent between guest and host\n");
+            GFXSTREAM_ERROR(
+                "fatal: forUnmarshaling->pInheritanceInfo inconsistent between guest and host");
         }
         unmarshal_VkCommandBufferInheritanceInfo(
             vkStream, rootType,
@@ -1244,9 +1250,8 @@ void unmarshal_VkPipelineShaderStageCreateInfo(VulkanStreamGuest* vkStream,
     check_pSpecializationInfo = (const VkSpecializationInfo*)(uintptr_t)vkStream->getBe64();
     if (forUnmarshaling->pSpecializationInfo) {
         if (!(check_pSpecializationInfo)) {
-            fprintf(stderr,
-                    "fatal: forUnmarshaling->pSpecializationInfo inconsistent between guest and "
-                    "host\n");
+            GFXSTREAM_ERROR(
+                "fatal: forUnmarshaling->pSpecializationInfo inconsistent between guest and host");
         }
         unmarshal_VkSpecializationInfo(
             vkStream, rootType, (VkSpecializationInfo*)(forUnmarshaling->pSpecializationInfo));
@@ -1447,9 +1452,8 @@ void unmarshal_VkDescriptorSetLayoutBinding(VulkanStreamGuest* vkStream, VkStruc
     check_pImmutableSamplers = (const VkSampler*)(uintptr_t)vkStream->getBe64();
     if (forUnmarshaling->pImmutableSamplers) {
         if (!(check_pImmutableSamplers)) {
-            fprintf(
-                stderr,
-                "fatal: forUnmarshaling->pImmutableSamplers inconsistent between guest and host\n");
+            GFXSTREAM_ERROR(
+                "fatal: forUnmarshaling->pImmutableSamplers inconsistent between guest and host");
         }
         if (forUnmarshaling->descriptorCount) {
             uint64_t* cgen_var_0_0;
@@ -1505,8 +1509,8 @@ void unmarshal_VkWriteDescriptorSet(VulkanStreamGuest* vkStream, VkStructureType
     check_pImageInfo = (const VkDescriptorImageInfo*)(uintptr_t)vkStream->getBe64();
     if (forUnmarshaling->pImageInfo) {
         if (!(check_pImageInfo)) {
-            fprintf(stderr,
-                    "fatal: forUnmarshaling->pImageInfo inconsistent between guest and host\n");
+            GFXSTREAM_ERROR(
+                "fatal: forUnmarshaling->pImageInfo inconsistent between guest and host");
         }
         if ((!(vkStream->getFeatureBits() & VULKAN_STREAM_FEATURE_IGNORED_HANDLES_BIT) ||
              ((VK_DESCRIPTOR_TYPE_SAMPLER == forUnmarshaling->descriptorType) ||
@@ -1531,8 +1535,8 @@ void unmarshal_VkWriteDescriptorSet(VulkanStreamGuest* vkStream, VkStructureType
     check_pBufferInfo = (const VkDescriptorBufferInfo*)(uintptr_t)vkStream->getBe64();
     if (forUnmarshaling->pBufferInfo) {
         if (!(check_pBufferInfo)) {
-            fprintf(stderr,
-                    "fatal: forUnmarshaling->pBufferInfo inconsistent between guest and host\n");
+            GFXSTREAM_ERROR(
+                "fatal: forUnmarshaling->pBufferInfo inconsistent between guest and host");
         }
         if ((!(vkStream->getFeatureBits() & VULKAN_STREAM_FEATURE_IGNORED_HANDLES_BIT) ||
              ((VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER == forUnmarshaling->descriptorType) ||
@@ -1556,9 +1560,8 @@ void unmarshal_VkWriteDescriptorSet(VulkanStreamGuest* vkStream, VkStructureType
     check_pTexelBufferView = (const VkBufferView*)(uintptr_t)vkStream->getBe64();
     if (forUnmarshaling->pTexelBufferView) {
         if (!(check_pTexelBufferView)) {
-            fprintf(
-                stderr,
-                "fatal: forUnmarshaling->pTexelBufferView inconsistent between guest and host\n");
+            GFXSTREAM_ERROR(
+                "fatal: forUnmarshaling->pTexelBufferView inconsistent between guest and host");
         }
         if ((!(vkStream->getFeatureBits() & VULKAN_STREAM_FEATURE_IGNORED_HANDLES_BIT) ||
              ((VK_DESCRIPTOR_TYPE_UNIFORM_TEXEL_BUFFER == forUnmarshaling->descriptorType) ||
@@ -1760,8 +1763,8 @@ void unmarshal_VkPipelineMultisampleStateCreateInfo(
     check_pSampleMask = (const VkSampleMask*)(uintptr_t)vkStream->getBe64();
     if (forUnmarshaling->pSampleMask) {
         if (!(check_pSampleMask)) {
-            fprintf(stderr,
-                    "fatal: forUnmarshaling->pSampleMask inconsistent between guest and host\n");
+            GFXSTREAM_ERROR(
+                "fatal: forUnmarshaling->pSampleMask inconsistent between guest and host");
         }
         vkStream->read(
             (VkSampleMask*)forUnmarshaling->pSampleMask,
@@ -1857,8 +1860,8 @@ void unmarshal_VkPipelineViewportStateCreateInfo(
     check_pViewports = (const VkViewport*)(uintptr_t)vkStream->getBe64();
     if (forUnmarshaling->pViewports) {
         if (!(check_pViewports)) {
-            fprintf(stderr,
-                    "fatal: forUnmarshaling->pViewports inconsistent between guest and host\n");
+            GFXSTREAM_ERROR(
+                "fatal: forUnmarshaling->pViewports inconsistent between guest and host");
         }
         if (forUnmarshaling) {
             for (uint32_t i = 0; i < (uint32_t)forUnmarshaling->viewportCount; ++i) {
@@ -1874,8 +1877,8 @@ void unmarshal_VkPipelineViewportStateCreateInfo(
     check_pScissors = (const VkRect2D*)(uintptr_t)vkStream->getBe64();
     if (forUnmarshaling->pScissors) {
         if (!(check_pScissors)) {
-            fprintf(stderr,
-                    "fatal: forUnmarshaling->pScissors inconsistent between guest and host\n");
+            GFXSTREAM_ERROR(
+                "fatal: forUnmarshaling->pScissors inconsistent between guest and host");
         }
         if (forUnmarshaling) {
             for (uint32_t i = 0; i < (uint32_t)forUnmarshaling->scissorCount; ++i) {
@@ -1943,9 +1946,8 @@ void unmarshal_VkGraphicsPipelineCreateInfo(VulkanStreamGuest* vkStream, VkStruc
         (const VkPipelineTessellationStateCreateInfo*)(uintptr_t)vkStream->getBe64();
     if (forUnmarshaling->pTessellationState) {
         if (!(check_pTessellationState)) {
-            fprintf(
-                stderr,
-                "fatal: forUnmarshaling->pTessellationState inconsistent between guest and host\n");
+            GFXSTREAM_ERROR(
+                "fatal: forUnmarshaling->pTessellationState inconsistent between guest and host");
         }
         if (hasTessellation) {
             unmarshal_VkPipelineTessellationStateCreateInfo(
@@ -1961,8 +1963,8 @@ void unmarshal_VkGraphicsPipelineCreateInfo(VulkanStreamGuest* vkStream, VkStruc
     check_pViewportState = (const VkPipelineViewportStateCreateInfo*)(uintptr_t)vkStream->getBe64();
     if (forUnmarshaling->pViewportState) {
         if (!(check_pViewportState)) {
-            fprintf(stderr,
-                    "fatal: forUnmarshaling->pViewportState inconsistent between guest and host\n");
+            GFXSTREAM_ERROR(
+                "fatal: forUnmarshaling->pViewportState inconsistent between guest and host");
         }
         if (hasRasterization) {
             unmarshal_VkPipelineViewportStateCreateInfo(
@@ -1992,9 +1994,8 @@ void unmarshal_VkGraphicsPipelineCreateInfo(VulkanStreamGuest* vkStream, VkStruc
         (const VkPipelineMultisampleStateCreateInfo*)(uintptr_t)vkStream->getBe64();
     if (forUnmarshaling->pMultisampleState) {
         if (!(check_pMultisampleState)) {
-            fprintf(
-                stderr,
-                "fatal: forUnmarshaling->pMultisampleState inconsistent between guest and host\n");
+            GFXSTREAM_ERROR(
+                "fatal: forUnmarshaling->pMultisampleState inconsistent between guest and host");
         }
         if (hasRasterization) {
             unmarshal_VkPipelineMultisampleStateCreateInfo(
@@ -2011,9 +2012,8 @@ void unmarshal_VkGraphicsPipelineCreateInfo(VulkanStreamGuest* vkStream, VkStruc
         (const VkPipelineDepthStencilStateCreateInfo*)(uintptr_t)vkStream->getBe64();
     if (forUnmarshaling->pDepthStencilState) {
         if (!(check_pDepthStencilState)) {
-            fprintf(
-                stderr,
-                "fatal: forUnmarshaling->pDepthStencilState inconsistent between guest and host\n");
+            GFXSTREAM_ERROR(
+                "fatal: forUnmarshaling->pDepthStencilState inconsistent between guest and host");
         }
         if (hasRasterization) {
             unmarshal_VkPipelineDepthStencilStateCreateInfo(
@@ -2030,9 +2030,8 @@ void unmarshal_VkGraphicsPipelineCreateInfo(VulkanStreamGuest* vkStream, VkStruc
         (const VkPipelineColorBlendStateCreateInfo*)(uintptr_t)vkStream->getBe64();
     if (forUnmarshaling->pColorBlendState) {
         if (!(check_pColorBlendState)) {
-            fprintf(
-                stderr,
-                "fatal: forUnmarshaling->pColorBlendState inconsistent between guest and host\n");
+            GFXSTREAM_ERROR(
+                "fatal: forUnmarshaling->pColorBlendState inconsistent between guest and host");
         }
         if (hasRasterization) {
             unmarshal_VkPipelineColorBlendStateCreateInfo(
@@ -2048,8 +2047,8 @@ void unmarshal_VkGraphicsPipelineCreateInfo(VulkanStreamGuest* vkStream, VkStruc
     check_pDynamicState = (const VkPipelineDynamicStateCreateInfo*)(uintptr_t)vkStream->getBe64();
     if (forUnmarshaling->pDynamicState) {
         if (!(check_pDynamicState)) {
-            fprintf(stderr,
-                    "fatal: forUnmarshaling->pDynamicState inconsistent between guest and host\n");
+            GFXSTREAM_ERROR(
+                "fatal: forUnmarshaling->pDynamicState inconsistent between guest and host");
         }
         unmarshal_VkPipelineDynamicStateCreateInfo(
             vkStream, rootType,
@@ -2170,9 +2169,8 @@ void unmarshal_VkSubpassDescription(VulkanStreamGuest* vkStream, VkStructureType
     check_pResolveAttachments = (const VkAttachmentReference*)(uintptr_t)vkStream->getBe64();
     if (forUnmarshaling->pResolveAttachments) {
         if (!(check_pResolveAttachments)) {
-            fprintf(stderr,
-                    "fatal: forUnmarshaling->pResolveAttachments inconsistent between guest and "
-                    "host\n");
+            GFXSTREAM_ERROR(
+                "fatal: forUnmarshaling->pResolveAttachments inconsistent between guest and host");
         }
         if (forUnmarshaling) {
             for (uint32_t i = 0; i < (uint32_t)forUnmarshaling->colorAttachmentCount; ++i) {
@@ -2188,9 +2186,9 @@ void unmarshal_VkSubpassDescription(VulkanStreamGuest* vkStream, VkStructureType
     check_pDepthStencilAttachment = (const VkAttachmentReference*)(uintptr_t)vkStream->getBe64();
     if (forUnmarshaling->pDepthStencilAttachment) {
         if (!(check_pDepthStencilAttachment)) {
-            fprintf(stderr,
-                    "fatal: forUnmarshaling->pDepthStencilAttachment inconsistent between guest "
-                    "and host\n");
+            GFXSTREAM_ERROR(
+                "fatal: forUnmarshaling->pDepthStencilAttachment inconsistent between guest and "
+                "host");
         }
         unmarshal_VkAttachmentReference(
             vkStream, rootType, (VkAttachmentReference*)(forUnmarshaling->pDepthStencilAttachment));
@@ -2311,8 +2309,8 @@ void unmarshal_VkRenderPassBeginInfo(VulkanStreamGuest* vkStream, VkStructureTyp
     check_pClearValues = (const VkClearValue*)(uintptr_t)vkStream->getBe64();
     if (forUnmarshaling->pClearValues) {
         if (!(check_pClearValues)) {
-            fprintf(stderr,
-                    "fatal: forUnmarshaling->pClearValues inconsistent between guest and host\n");
+            GFXSTREAM_ERROR(
+                "fatal: forUnmarshaling->pClearValues inconsistent between guest and host");
         }
         if (forUnmarshaling) {
             for (uint32_t i = 0; i < (uint32_t)forUnmarshaling->clearValueCount; ++i) {
@@ -3649,9 +3647,8 @@ void unmarshal_VkTimelineSemaphoreSubmitInfo(VulkanStreamGuest* vkStream, VkStru
     check_pWaitSemaphoreValues = (const uint64_t*)(uintptr_t)vkStream->getBe64();
     if (forUnmarshaling->pWaitSemaphoreValues) {
         if (!(check_pWaitSemaphoreValues)) {
-            fprintf(stderr,
-                    "fatal: forUnmarshaling->pWaitSemaphoreValues inconsistent between guest and "
-                    "host\n");
+            GFXSTREAM_ERROR(
+                "fatal: forUnmarshaling->pWaitSemaphoreValues inconsistent between guest and host");
         }
         vkStream->read((uint64_t*)forUnmarshaling->pWaitSemaphoreValues,
                        forUnmarshaling->waitSemaphoreValueCount * sizeof(const uint64_t));
@@ -3663,9 +3660,9 @@ void unmarshal_VkTimelineSemaphoreSubmitInfo(VulkanStreamGuest* vkStream, VkStru
     check_pSignalSemaphoreValues = (const uint64_t*)(uintptr_t)vkStream->getBe64();
     if (forUnmarshaling->pSignalSemaphoreValues) {
         if (!(check_pSignalSemaphoreValues)) {
-            fprintf(stderr,
-                    "fatal: forUnmarshaling->pSignalSemaphoreValues inconsistent between guest and "
-                    "host\n");
+            GFXSTREAM_ERROR(
+                "fatal: forUnmarshaling->pSignalSemaphoreValues inconsistent between guest and "
+                "host");
         }
         vkStream->read((uint64_t*)forUnmarshaling->pSignalSemaphoreValues,
                        forUnmarshaling->signalSemaphoreValueCount * sizeof(const uint64_t));
@@ -3866,8 +3863,8 @@ void unmarshal_VkDescriptorSetLayoutBindingFlagsCreateInfo(
     check_pBindingFlags = (const VkDescriptorBindingFlags*)(uintptr_t)vkStream->getBe64();
     if (forUnmarshaling->pBindingFlags) {
         if (!(check_pBindingFlags)) {
-            fprintf(stderr,
-                    "fatal: forUnmarshaling->pBindingFlags inconsistent between guest and host\n");
+            GFXSTREAM_ERROR(
+                "fatal: forUnmarshaling->pBindingFlags inconsistent between guest and host");
         }
         vkStream->read((VkDescriptorBindingFlags*)forUnmarshaling->pBindingFlags,
                        forUnmarshaling->bindingCount * sizeof(const VkDescriptorBindingFlags));
@@ -4145,9 +4142,8 @@ void unmarshal_VkSubpassDescription2(VulkanStreamGuest* vkStream, VkStructureTyp
     check_pResolveAttachments = (const VkAttachmentReference2*)(uintptr_t)vkStream->getBe64();
     if (forUnmarshaling->pResolveAttachments) {
         if (!(check_pResolveAttachments)) {
-            fprintf(stderr,
-                    "fatal: forUnmarshaling->pResolveAttachments inconsistent between guest and "
-                    "host\n");
+            GFXSTREAM_ERROR(
+                "fatal: forUnmarshaling->pResolveAttachments inconsistent between guest and host");
         }
         if (forUnmarshaling) {
             for (uint32_t i = 0; i < (uint32_t)forUnmarshaling->colorAttachmentCount; ++i) {
@@ -4163,9 +4159,9 @@ void unmarshal_VkSubpassDescription2(VulkanStreamGuest* vkStream, VkStructureTyp
     check_pDepthStencilAttachment = (const VkAttachmentReference2*)(uintptr_t)vkStream->getBe64();
     if (forUnmarshaling->pDepthStencilAttachment) {
         if (!(check_pDepthStencilAttachment)) {
-            fprintf(stderr,
-                    "fatal: forUnmarshaling->pDepthStencilAttachment inconsistent between guest "
-                    "and host\n");
+            GFXSTREAM_ERROR(
+                "fatal: forUnmarshaling->pDepthStencilAttachment inconsistent between guest and "
+                "host");
         }
         unmarshal_VkAttachmentReference2(
             vkStream, rootType,
@@ -4274,9 +4270,9 @@ void unmarshal_VkSubpassDescriptionDepthStencilResolve(
         (const VkAttachmentReference2*)(uintptr_t)vkStream->getBe64();
     if (forUnmarshaling->pDepthStencilResolveAttachment) {
         if (!(check_pDepthStencilResolveAttachment)) {
-            fprintf(stderr,
-                    "fatal: forUnmarshaling->pDepthStencilResolveAttachment inconsistent between "
-                    "guest and host\n");
+            GFXSTREAM_ERROR(
+                "fatal: forUnmarshaling->pDepthStencilResolveAttachment inconsistent between guest "
+                "and host");
         }
         unmarshal_VkAttachmentReference2(
             vkStream, rootType,
@@ -5469,9 +5465,8 @@ void unmarshal_VkRenderingInfo(VulkanStreamGuest* vkStream, VkStructureType root
     check_pDepthAttachment = (const VkRenderingAttachmentInfo*)(uintptr_t)vkStream->getBe64();
     if (forUnmarshaling->pDepthAttachment) {
         if (!(check_pDepthAttachment)) {
-            fprintf(
-                stderr,
-                "fatal: forUnmarshaling->pDepthAttachment inconsistent between guest and host\n");
+            GFXSTREAM_ERROR(
+                "fatal: forUnmarshaling->pDepthAttachment inconsistent between guest and host");
         }
         unmarshal_VkRenderingAttachmentInfo(
             vkStream, rootType, (VkRenderingAttachmentInfo*)(forUnmarshaling->pDepthAttachment));
@@ -5482,9 +5477,8 @@ void unmarshal_VkRenderingInfo(VulkanStreamGuest* vkStream, VkStructureType root
     check_pStencilAttachment = (const VkRenderingAttachmentInfo*)(uintptr_t)vkStream->getBe64();
     if (forUnmarshaling->pStencilAttachment) {
         if (!(check_pStencilAttachment)) {
-            fprintf(
-                stderr,
-                "fatal: forUnmarshaling->pStencilAttachment inconsistent between guest and host\n");
+            GFXSTREAM_ERROR(
+                "fatal: forUnmarshaling->pStencilAttachment inconsistent between guest and host");
         }
         unmarshal_VkRenderingAttachmentInfo(
             vkStream, rootType, (VkRenderingAttachmentInfo*)(forUnmarshaling->pStencilAttachment));
@@ -5507,9 +5501,9 @@ void unmarshal_VkPipelineRenderingCreateInfo(VulkanStreamGuest* vkStream, VkStru
     check_pColorAttachmentFormats = (const VkFormat*)(uintptr_t)vkStream->getBe64();
     if (forUnmarshaling->pColorAttachmentFormats) {
         if (!(check_pColorAttachmentFormats)) {
-            fprintf(stderr,
-                    "fatal: forUnmarshaling->pColorAttachmentFormats inconsistent between guest "
-                    "and host\n");
+            GFXSTREAM_ERROR(
+                "fatal: forUnmarshaling->pColorAttachmentFormats inconsistent between guest and "
+                "host");
         }
         vkStream->read((VkFormat*)forUnmarshaling->pColorAttachmentFormats,
                        forUnmarshaling->colorAttachmentCount * sizeof(const VkFormat));
@@ -5637,9 +5631,8 @@ void unmarshal_VkPhysicalDeviceVulkan14Properties(
     check_pCopySrcLayouts = (VkImageLayout*)(uintptr_t)vkStream->getBe64();
     if (forUnmarshaling->pCopySrcLayouts) {
         if (!(check_pCopySrcLayouts)) {
-            fprintf(
-                stderr,
-                "fatal: forUnmarshaling->pCopySrcLayouts inconsistent between guest and host\n");
+            GFXSTREAM_ERROR(
+                "fatal: forUnmarshaling->pCopySrcLayouts inconsistent between guest and host");
         }
         vkStream->read((VkImageLayout*)forUnmarshaling->pCopySrcLayouts,
                        forUnmarshaling->copySrcLayoutCount * sizeof(VkImageLayout));
@@ -5651,9 +5644,8 @@ void unmarshal_VkPhysicalDeviceVulkan14Properties(
     check_pCopyDstLayouts = (VkImageLayout*)(uintptr_t)vkStream->getBe64();
     if (forUnmarshaling->pCopyDstLayouts) {
         if (!(check_pCopyDstLayouts)) {
-            fprintf(
-                stderr,
-                "fatal: forUnmarshaling->pCopyDstLayouts inconsistent between guest and host\n");
+            GFXSTREAM_ERROR(
+                "fatal: forUnmarshaling->pCopyDstLayouts inconsistent between guest and host");
         }
         vkStream->read((VkImageLayout*)forUnmarshaling->pCopyDstLayouts,
                        forUnmarshaling->copyDstLayoutCount * sizeof(VkImageLayout));
@@ -5894,9 +5886,8 @@ void unmarshal_VkPhysicalDeviceHostImageCopyProperties(
     check_pCopySrcLayouts = (VkImageLayout*)(uintptr_t)vkStream->getBe64();
     if (forUnmarshaling->pCopySrcLayouts) {
         if (!(check_pCopySrcLayouts)) {
-            fprintf(
-                stderr,
-                "fatal: forUnmarshaling->pCopySrcLayouts inconsistent between guest and host\n");
+            GFXSTREAM_ERROR(
+                "fatal: forUnmarshaling->pCopySrcLayouts inconsistent between guest and host");
         }
         vkStream->read((VkImageLayout*)forUnmarshaling->pCopySrcLayouts,
                        forUnmarshaling->copySrcLayoutCount * sizeof(VkImageLayout));
@@ -5908,9 +5899,8 @@ void unmarshal_VkPhysicalDeviceHostImageCopyProperties(
     check_pCopyDstLayouts = (VkImageLayout*)(uintptr_t)vkStream->getBe64();
     if (forUnmarshaling->pCopyDstLayouts) {
         if (!(check_pCopyDstLayouts)) {
-            fprintf(
-                stderr,
-                "fatal: forUnmarshaling->pCopyDstLayouts inconsistent between guest and host\n");
+            GFXSTREAM_ERROR(
+                "fatal: forUnmarshaling->pCopyDstLayouts inconsistent between guest and host");
         }
         vkStream->read((VkImageLayout*)forUnmarshaling->pCopyDstLayouts,
                        forUnmarshaling->copyDstLayoutCount * sizeof(VkImageLayout));
@@ -6160,9 +6150,8 @@ void unmarshal_VkBindDescriptorSetsInfo(VulkanStreamGuest* vkStream, VkStructure
     check_pDynamicOffsets = (const uint32_t*)(uintptr_t)vkStream->getBe64();
     if (forUnmarshaling->pDynamicOffsets) {
         if (!(check_pDynamicOffsets)) {
-            fprintf(
-                stderr,
-                "fatal: forUnmarshaling->pDynamicOffsets inconsistent between guest and host\n");
+            GFXSTREAM_ERROR(
+                "fatal: forUnmarshaling->pDynamicOffsets inconsistent between guest and host");
         }
         vkStream->read((uint32_t*)forUnmarshaling->pDynamicOffsets,
                        forUnmarshaling->dynamicOffsetCount * sizeof(const uint32_t));
@@ -6412,9 +6401,9 @@ void unmarshal_VkRenderingAreaInfo(VulkanStreamGuest* vkStream, VkStructureType 
     check_pColorAttachmentFormats = (const VkFormat*)(uintptr_t)vkStream->getBe64();
     if (forUnmarshaling->pColorAttachmentFormats) {
         if (!(check_pColorAttachmentFormats)) {
-            fprintf(stderr,
-                    "fatal: forUnmarshaling->pColorAttachmentFormats inconsistent between guest "
-                    "and host\n");
+            GFXSTREAM_ERROR(
+                "fatal: forUnmarshaling->pColorAttachmentFormats inconsistent between guest and "
+                "host");
         }
         vkStream->read((VkFormat*)forUnmarshaling->pColorAttachmentFormats,
                        forUnmarshaling->colorAttachmentCount * sizeof(const VkFormat));
@@ -6451,9 +6440,9 @@ void unmarshal_VkRenderingAttachmentLocationInfo(
     check_pColorAttachmentLocations = (const uint32_t*)(uintptr_t)vkStream->getBe64();
     if (forUnmarshaling->pColorAttachmentLocations) {
         if (!(check_pColorAttachmentLocations)) {
-            fprintf(stderr,
-                    "fatal: forUnmarshaling->pColorAttachmentLocations inconsistent between guest "
-                    "and host\n");
+            GFXSTREAM_ERROR(
+                "fatal: forUnmarshaling->pColorAttachmentLocations inconsistent between guest and "
+                "host");
         }
         vkStream->read((uint32_t*)forUnmarshaling->pColorAttachmentLocations,
                        forUnmarshaling->colorAttachmentCount * sizeof(const uint32_t));
@@ -6476,9 +6465,9 @@ void unmarshal_VkRenderingInputAttachmentIndexInfo(
     check_pColorAttachmentInputIndices = (const uint32_t*)(uintptr_t)vkStream->getBe64();
     if (forUnmarshaling->pColorAttachmentInputIndices) {
         if (!(check_pColorAttachmentInputIndices)) {
-            fprintf(stderr,
-                    "fatal: forUnmarshaling->pColorAttachmentInputIndices inconsistent between "
-                    "guest and host\n");
+            GFXSTREAM_ERROR(
+                "fatal: forUnmarshaling->pColorAttachmentInputIndices inconsistent between guest "
+                "and host");
         }
         vkStream->read((uint32_t*)forUnmarshaling->pColorAttachmentInputIndices,
                        forUnmarshaling->colorAttachmentCount * sizeof(const uint32_t));
@@ -6489,9 +6478,9 @@ void unmarshal_VkRenderingInputAttachmentIndexInfo(
     check_pDepthInputAttachmentIndex = (const uint32_t*)(uintptr_t)vkStream->getBe64();
     if (forUnmarshaling->pDepthInputAttachmentIndex) {
         if (!(check_pDepthInputAttachmentIndex)) {
-            fprintf(stderr,
-                    "fatal: forUnmarshaling->pDepthInputAttachmentIndex inconsistent between guest "
-                    "and host\n");
+            GFXSTREAM_ERROR(
+                "fatal: forUnmarshaling->pDepthInputAttachmentIndex inconsistent between guest and "
+                "host");
         }
         vkStream->read((uint32_t*)forUnmarshaling->pDepthInputAttachmentIndex,
                        sizeof(const uint32_t));
@@ -6502,9 +6491,9 @@ void unmarshal_VkRenderingInputAttachmentIndexInfo(
     check_pStencilInputAttachmentIndex = (const uint32_t*)(uintptr_t)vkStream->getBe64();
     if (forUnmarshaling->pStencilInputAttachmentIndex) {
         if (!(check_pStencilInputAttachmentIndex)) {
-            fprintf(stderr,
-                    "fatal: forUnmarshaling->pStencilInputAttachmentIndex inconsistent between "
-                    "guest and host\n");
+            GFXSTREAM_ERROR(
+                "fatal: forUnmarshaling->pStencilInputAttachmentIndex inconsistent between guest "
+                "and host");
         }
         vkStream->read((uint32_t*)forUnmarshaling->pStencilInputAttachmentIndex,
                        sizeof(const uint32_t));
@@ -6566,8 +6555,8 @@ void unmarshal_VkPresentRegionKHR(VulkanStreamGuest* vkStream, VkStructureType r
     check_pRectangles = (const VkRectLayerKHR*)(uintptr_t)vkStream->getBe64();
     if (forUnmarshaling->pRectangles) {
         if (!(check_pRectangles)) {
-            fprintf(stderr,
-                    "fatal: forUnmarshaling->pRectangles inconsistent between guest and host\n");
+            GFXSTREAM_ERROR(
+                "fatal: forUnmarshaling->pRectangles inconsistent between guest and host");
         }
         if (forUnmarshaling) {
             for (uint32_t i = 0; i < (uint32_t)forUnmarshaling->rectangleCount; ++i) {
@@ -6593,8 +6582,7 @@ void unmarshal_VkPresentRegionsKHR(VulkanStreamGuest* vkStream, VkStructureType 
     check_pRegions = (const VkPresentRegionKHR*)(uintptr_t)vkStream->getBe64();
     if (forUnmarshaling->pRegions) {
         if (!(check_pRegions)) {
-            fprintf(stderr,
-                    "fatal: forUnmarshaling->pRegions inconsistent between guest and host\n");
+            GFXSTREAM_ERROR("fatal: forUnmarshaling->pRegions inconsistent between guest and host");
         }
         if (forUnmarshaling) {
             for (uint32_t i = 0; i < (uint32_t)forUnmarshaling->swapchainCount; ++i) {
@@ -6738,7 +6726,7 @@ void unmarshal_VkPipelineExecutableInternalRepresentationKHR(
     check_pData = (void*)(uintptr_t)vkStream->getBe64();
     if (forUnmarshaling->pData) {
         if (!(check_pData)) {
-            fprintf(stderr, "fatal: forUnmarshaling->pData inconsistent between guest and host\n");
+            GFXSTREAM_ERROR("fatal: forUnmarshaling->pData inconsistent between guest and host");
         }
         vkStream->read((void*)forUnmarshaling->pData, forUnmarshaling->dataSize * sizeof(uint8_t));
     }
@@ -6859,8 +6847,8 @@ void unmarshal_VkPhysicalDeviceLayeredApiPropertiesListKHR(
     check_pLayeredApis = (VkPhysicalDeviceLayeredApiPropertiesKHR*)(uintptr_t)vkStream->getBe64();
     if (forUnmarshaling->pLayeredApis) {
         if (!(check_pLayeredApis)) {
-            fprintf(stderr,
-                    "fatal: forUnmarshaling->pLayeredApis inconsistent between guest and host\n");
+            GFXSTREAM_ERROR(
+                "fatal: forUnmarshaling->pLayeredApis inconsistent between guest and host");
         }
         if (forUnmarshaling) {
             for (uint32_t i = 0; i < (uint32_t)forUnmarshaling->layeredApiCount; ++i) {
@@ -6975,7 +6963,7 @@ void unmarshal_VkNativeBufferANDROID(VulkanStreamGuest* vkStream, VkStructureTyp
     check_handle = (const uint32_t*)(uintptr_t)vkStream->getBe64();
     if (forUnmarshaling->handle) {
         if (!(check_handle)) {
-            fprintf(stderr, "fatal: forUnmarshaling->handle inconsistent between guest and host\n");
+            GFXSTREAM_ERROR("fatal: forUnmarshaling->handle inconsistent between guest and host");
         }
         vkStream->read((uint32_t*)forUnmarshaling->handle, sizeof(const uint32_t));
     }
@@ -7171,9 +7159,9 @@ void unmarshal_VkDrmFormatModifierPropertiesListEXT(
         (VkDrmFormatModifierPropertiesEXT*)(uintptr_t)vkStream->getBe64();
     if (forUnmarshaling->pDrmFormatModifierProperties) {
         if (!(check_pDrmFormatModifierProperties)) {
-            fprintf(stderr,
-                    "fatal: forUnmarshaling->pDrmFormatModifierProperties inconsistent between "
-                    "guest and host\n");
+            GFXSTREAM_ERROR(
+                "fatal: forUnmarshaling->pDrmFormatModifierProperties inconsistent between guest "
+                "and host");
         }
         if (forUnmarshaling) {
             for (uint32_t i = 0; i < (uint32_t)forUnmarshaling->drmFormatModifierCount; ++i) {
@@ -7205,9 +7193,8 @@ void unmarshal_VkPhysicalDeviceImageDrmFormatModifierInfoEXT(
     check_pQueueFamilyIndices = (const uint32_t*)(uintptr_t)vkStream->getBe64();
     if (forUnmarshaling->pQueueFamilyIndices) {
         if (!(check_pQueueFamilyIndices)) {
-            fprintf(stderr,
-                    "fatal: forUnmarshaling->pQueueFamilyIndices inconsistent between guest and "
-                    "host\n");
+            GFXSTREAM_ERROR(
+                "fatal: forUnmarshaling->pQueueFamilyIndices inconsistent between guest and host");
         }
         vkStream->read((uint32_t*)forUnmarshaling->pQueueFamilyIndices,
                        forUnmarshaling->queueFamilyIndexCount * sizeof(const uint32_t));
@@ -7286,9 +7273,9 @@ void unmarshal_VkDrmFormatModifierPropertiesList2EXT(
         (VkDrmFormatModifierProperties2EXT*)(uintptr_t)vkStream->getBe64();
     if (forUnmarshaling->pDrmFormatModifierProperties) {
         if (!(check_pDrmFormatModifierProperties)) {
-            fprintf(stderr,
-                    "fatal: forUnmarshaling->pDrmFormatModifierProperties inconsistent between "
-                    "guest and host\n");
+            GFXSTREAM_ERROR(
+                "fatal: forUnmarshaling->pDrmFormatModifierProperties inconsistent between guest "
+                "and host");
         }
         if (forUnmarshaling) {
             for (uint32_t i = 0; i < (uint32_t)forUnmarshaling->drmFormatModifierCount; ++i) {
@@ -7679,9 +7666,8 @@ void unmarshal_VkImageCompressionControlEXT(VulkanStreamGuest* vkStream, VkStruc
     check_pFixedRateFlags = (VkImageCompressionFixedRateFlagsEXT*)(uintptr_t)vkStream->getBe64();
     if (forUnmarshaling->pFixedRateFlags) {
         if (!(check_pFixedRateFlags)) {
-            fprintf(
-                stderr,
-                "fatal: forUnmarshaling->pFixedRateFlags inconsistent between guest and host\n");
+            GFXSTREAM_ERROR(
+                "fatal: forUnmarshaling->pFixedRateFlags inconsistent between guest and host");
         }
         vkStream->read((VkImageCompressionFixedRateFlagsEXT*)forUnmarshaling->pFixedRateFlags,
                        forUnmarshaling->compressionControlPlaneCount *
@@ -7768,8 +7754,7 @@ void unmarshal_VkFrameBoundaryEXT(VulkanStreamGuest* vkStream, VkStructureType r
     check_pImages = (const VkImage*)(uintptr_t)vkStream->getBe64();
     if (forUnmarshaling->pImages) {
         if (!(check_pImages)) {
-            fprintf(stderr,
-                    "fatal: forUnmarshaling->pImages inconsistent between guest and host\n");
+            GFXSTREAM_ERROR("fatal: forUnmarshaling->pImages inconsistent between guest and host");
         }
         if (forUnmarshaling->imageCount) {
             uint64_t* cgen_var_0_0;
@@ -7787,8 +7772,7 @@ void unmarshal_VkFrameBoundaryEXT(VulkanStreamGuest* vkStream, VkStructureType r
     check_pBuffers = (const VkBuffer*)(uintptr_t)vkStream->getBe64();
     if (forUnmarshaling->pBuffers) {
         if (!(check_pBuffers)) {
-            fprintf(stderr,
-                    "fatal: forUnmarshaling->pBuffers inconsistent between guest and host\n");
+            GFXSTREAM_ERROR("fatal: forUnmarshaling->pBuffers inconsistent between guest and host");
         }
         if (forUnmarshaling->bufferCount) {
             uint64_t* cgen_var_1_0;
@@ -7807,7 +7791,7 @@ void unmarshal_VkFrameBoundaryEXT(VulkanStreamGuest* vkStream, VkStructureType r
     check_pTag = (const void*)(uintptr_t)vkStream->getBe64();
     if (forUnmarshaling->pTag) {
         if (!(check_pTag)) {
-            fprintf(stderr, "fatal: forUnmarshaling->pTag inconsistent between guest and host\n");
+            GFXSTREAM_ERROR("fatal: forUnmarshaling->pTag inconsistent between guest and host");
         }
         vkStream->read((void*)forUnmarshaling->pTag,
                        forUnmarshaling->tagSize * sizeof(const uint8_t));
@@ -7933,8 +7917,8 @@ void unmarshal_VkDebugMetadataGuestProcessNameGOOGLE(
         check_pName = (const char*)(uintptr_t)vkStream->getBe64();
         if (forUnmarshaling->pName) {
             if (!(check_pName)) {
-                fprintf(stderr,
-                        "fatal: forUnmarshaling->pName inconsistent between guest and host\n");
+                GFXSTREAM_ERROR(
+                    "fatal: forUnmarshaling->pName inconsistent between guest and host");
             }
             vkStream->loadStringInPlace((char**)&forUnmarshaling->pName);
         }
@@ -7971,8 +7955,8 @@ void unmarshal_VkDebugMetadataGuestThreadNameGOOGLE(
         check_pName = (const char*)(uintptr_t)vkStream->getBe64();
         if (forUnmarshaling->pName) {
             if (!(check_pName)) {
-                fprintf(stderr,
-                        "fatal: forUnmarshaling->pName inconsistent between guest and host\n");
+                GFXSTREAM_ERROR(
+                    "fatal: forUnmarshaling->pName inconsistent between guest and host");
             }
             vkStream->loadStringInPlace((char**)&forUnmarshaling->pName);
         }

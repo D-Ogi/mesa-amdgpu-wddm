@@ -49,6 +49,19 @@
 #include "goldfish_vk_private_defs.h"
 #include "goldfish_vk_reserved_marshaling_guest.h"
 #include "goldfish_vk_transform_guest.h"
+#include "util/log.h"
+
+#ifndef GFXSTREAM_ERROR
+#define GFXSTREAM_ERROR(...) mesa_loge(__VA_ARGS__)
+#endif
+
+#ifndef GFXSTREAM_FATAL
+#define GFXSTREAM_FATAL(...)    \
+    do {                        \
+        mesa_loge(__VA_ARGS__); \
+        abort();                \
+    } while (0)
+#endif
 
 namespace gfxstream {
 namespace vk {
@@ -312,7 +325,7 @@ VkResult VkEncoder::vkEnumeratePhysicalDevices(VkInstance instance, uint32_t* pP
     check_pPhysicalDeviceCount = (uint32_t*)(uintptr_t)stream->getBe64();
     if (pPhysicalDeviceCount) {
         if (!(check_pPhysicalDeviceCount)) {
-            fprintf(stderr, "fatal: pPhysicalDeviceCount inconsistent between guest and host\n");
+            GFXSTREAM_ERROR("fatal: pPhysicalDeviceCount inconsistent between guest and host");
         }
         stream->read((uint32_t*)pPhysicalDeviceCount, sizeof(uint32_t));
     }
@@ -322,7 +335,7 @@ VkResult VkEncoder::vkEnumeratePhysicalDevices(VkInstance instance, uint32_t* pP
     check_pPhysicalDevices = (VkPhysicalDevice*)(uintptr_t)stream->getBe64();
     if (pPhysicalDevices) {
         if (!(check_pPhysicalDevices)) {
-            fprintf(stderr, "fatal: pPhysicalDevices inconsistent between guest and host\n");
+            GFXSTREAM_ERROR("fatal: pPhysicalDevices inconsistent between guest and host");
         }
         if ((*pPhysicalDeviceCount)) {
             uint64_t* cgen_var_4_0;
@@ -683,8 +696,7 @@ void VkEncoder::vkGetPhysicalDeviceQueueFamilyProperties(
     check_pQueueFamilyPropertyCount = (uint32_t*)(uintptr_t)stream->getBe64();
     if (pQueueFamilyPropertyCount) {
         if (!(check_pQueueFamilyPropertyCount)) {
-            fprintf(stderr,
-                    "fatal: pQueueFamilyPropertyCount inconsistent between guest and host\n");
+            GFXSTREAM_ERROR("fatal: pQueueFamilyPropertyCount inconsistent between guest and host");
         }
         stream->read((uint32_t*)pQueueFamilyPropertyCount, sizeof(uint32_t));
     }
@@ -694,7 +706,7 @@ void VkEncoder::vkGetPhysicalDeviceQueueFamilyProperties(
     check_pQueueFamilyProperties = (VkQueueFamilyProperties*)(uintptr_t)stream->getBe64();
     if (pQueueFamilyProperties) {
         if (!(check_pQueueFamilyProperties)) {
-            fprintf(stderr, "fatal: pQueueFamilyProperties inconsistent between guest and host\n");
+            GFXSTREAM_ERROR("fatal: pQueueFamilyProperties inconsistent between guest and host");
         }
         if (pQueueFamilyPropertyCount) {
             for (uint32_t i = 0; i < (uint32_t)(*pQueueFamilyPropertyCount); ++i) {
@@ -1177,7 +1189,7 @@ VkResult VkEncoder::vkEnumerateInstanceExtensionProperties(const char* pLayerNam
     check_pPropertyCount = (uint32_t*)(uintptr_t)stream->getBe64();
     if (pPropertyCount) {
         if (!(check_pPropertyCount)) {
-            fprintf(stderr, "fatal: pPropertyCount inconsistent between guest and host\n");
+            GFXSTREAM_ERROR("fatal: pPropertyCount inconsistent between guest and host");
         }
         stream->read((uint32_t*)pPropertyCount, sizeof(uint32_t));
     }
@@ -1187,7 +1199,7 @@ VkResult VkEncoder::vkEnumerateInstanceExtensionProperties(const char* pLayerNam
     check_pProperties = (VkExtensionProperties*)(uintptr_t)stream->getBe64();
     if (pProperties) {
         if (!(check_pProperties)) {
-            fprintf(stderr, "fatal: pProperties inconsistent between guest and host\n");
+            GFXSTREAM_ERROR("fatal: pProperties inconsistent between guest and host");
         }
         if (pPropertyCount) {
             for (uint32_t i = 0; i < (uint32_t)(*pPropertyCount); ++i) {
@@ -1335,7 +1347,7 @@ VkResult VkEncoder::vkEnumerateDeviceExtensionProperties(VkPhysicalDevice physic
     check_pPropertyCount = (uint32_t*)(uintptr_t)stream->getBe64();
     if (pPropertyCount) {
         if (!(check_pPropertyCount)) {
-            fprintf(stderr, "fatal: pPropertyCount inconsistent between guest and host\n");
+            GFXSTREAM_ERROR("fatal: pPropertyCount inconsistent between guest and host");
         }
         stream->read((uint32_t*)pPropertyCount, sizeof(uint32_t));
     }
@@ -1345,7 +1357,7 @@ VkResult VkEncoder::vkEnumerateDeviceExtensionProperties(VkPhysicalDevice physic
     check_pProperties = (VkExtensionProperties*)(uintptr_t)stream->getBe64();
     if (pProperties) {
         if (!(check_pProperties)) {
-            fprintf(stderr, "fatal: pProperties inconsistent between guest and host\n");
+            GFXSTREAM_ERROR("fatal: pProperties inconsistent between guest and host");
         }
         if (pPropertyCount) {
             for (uint32_t i = 0; i < (uint32_t)(*pPropertyCount); ++i) {
@@ -1442,7 +1454,7 @@ VkResult VkEncoder::vkEnumerateInstanceLayerProperties(uint32_t* pPropertyCount,
     check_pPropertyCount = (uint32_t*)(uintptr_t)stream->getBe64();
     if (pPropertyCount) {
         if (!(check_pPropertyCount)) {
-            fprintf(stderr, "fatal: pPropertyCount inconsistent between guest and host\n");
+            GFXSTREAM_ERROR("fatal: pPropertyCount inconsistent between guest and host");
         }
         stream->read((uint32_t*)pPropertyCount, sizeof(uint32_t));
     }
@@ -1452,7 +1464,7 @@ VkResult VkEncoder::vkEnumerateInstanceLayerProperties(uint32_t* pPropertyCount,
     check_pProperties = (VkLayerProperties*)(uintptr_t)stream->getBe64();
     if (pProperties) {
         if (!(check_pProperties)) {
-            fprintf(stderr, "fatal: pProperties inconsistent between guest and host\n");
+            GFXSTREAM_ERROR("fatal: pProperties inconsistent between guest and host");
         }
         if (pPropertyCount) {
             for (uint32_t i = 0; i < (uint32_t)(*pPropertyCount); ++i) {
@@ -1559,7 +1571,7 @@ VkResult VkEncoder::vkEnumerateDeviceLayerProperties(VkPhysicalDevice physicalDe
     check_pPropertyCount = (uint32_t*)(uintptr_t)stream->getBe64();
     if (pPropertyCount) {
         if (!(check_pPropertyCount)) {
-            fprintf(stderr, "fatal: pPropertyCount inconsistent between guest and host\n");
+            GFXSTREAM_ERROR("fatal: pPropertyCount inconsistent between guest and host");
         }
         stream->read((uint32_t*)pPropertyCount, sizeof(uint32_t));
     }
@@ -1569,7 +1581,7 @@ VkResult VkEncoder::vkEnumerateDeviceLayerProperties(VkPhysicalDevice physicalDe
     check_pProperties = (VkLayerProperties*)(uintptr_t)stream->getBe64();
     if (pProperties) {
         if (!(check_pProperties)) {
-            fprintf(stderr, "fatal: pProperties inconsistent between guest and host\n");
+            GFXSTREAM_ERROR("fatal: pProperties inconsistent between guest and host");
         }
         if (pPropertyCount) {
             for (uint32_t i = 0; i < (uint32_t)(*pPropertyCount); ++i) {
@@ -2664,8 +2676,8 @@ void VkEncoder::vkGetImageSparseMemoryRequirements(
     check_pSparseMemoryRequirementCount = (uint32_t*)(uintptr_t)stream->getBe64();
     if (pSparseMemoryRequirementCount) {
         if (!(check_pSparseMemoryRequirementCount)) {
-            fprintf(stderr,
-                    "fatal: pSparseMemoryRequirementCount inconsistent between guest and host\n");
+            GFXSTREAM_ERROR(
+                "fatal: pSparseMemoryRequirementCount inconsistent between guest and host");
         }
         stream->read((uint32_t*)pSparseMemoryRequirementCount, sizeof(uint32_t));
     }
@@ -2676,8 +2688,7 @@ void VkEncoder::vkGetImageSparseMemoryRequirements(
         (VkSparseImageMemoryRequirements*)(uintptr_t)stream->getBe64();
     if (pSparseMemoryRequirements) {
         if (!(check_pSparseMemoryRequirements)) {
-            fprintf(stderr,
-                    "fatal: pSparseMemoryRequirements inconsistent between guest and host\n");
+            GFXSTREAM_ERROR("fatal: pSparseMemoryRequirements inconsistent between guest and host");
         }
         if (pSparseMemoryRequirementCount) {
             for (uint32_t i = 0; i < (uint32_t)(*pSparseMemoryRequirementCount); ++i) {
@@ -2811,7 +2822,7 @@ void VkEncoder::vkGetPhysicalDeviceSparseImageFormatProperties(
     check_pPropertyCount = (uint32_t*)(uintptr_t)stream->getBe64();
     if (pPropertyCount) {
         if (!(check_pPropertyCount)) {
-            fprintf(stderr, "fatal: pPropertyCount inconsistent between guest and host\n");
+            GFXSTREAM_ERROR("fatal: pPropertyCount inconsistent between guest and host");
         }
         stream->read((uint32_t*)pPropertyCount, sizeof(uint32_t));
     }
@@ -2821,7 +2832,7 @@ void VkEncoder::vkGetPhysicalDeviceSparseImageFormatProperties(
     check_pProperties = (VkSparseImageFormatProperties*)(uintptr_t)stream->getBe64();
     if (pProperties) {
         if (!(check_pProperties)) {
-            fprintf(stderr, "fatal: pProperties inconsistent between guest and host\n");
+            GFXSTREAM_ERROR("fatal: pProperties inconsistent between guest and host");
         }
         if (pPropertyCount) {
             for (uint32_t i = 0; i < (uint32_t)(*pPropertyCount); ++i) {
@@ -6941,7 +6952,7 @@ VkResult VkEncoder::vkGetPipelineCacheData(VkDevice device, VkPipelineCache pipe
     check_pDataSize = (size_t*)(uintptr_t)stream->getBe64();
     if (pDataSize) {
         if (!(check_pDataSize)) {
-            fprintf(stderr, "fatal: pDataSize inconsistent between guest and host\n");
+            GFXSTREAM_ERROR("fatal: pDataSize inconsistent between guest and host");
         }
         (*pDataSize) = (size_t)stream->getBe64();
     }
@@ -6951,7 +6962,7 @@ VkResult VkEncoder::vkGetPipelineCacheData(VkDevice device, VkPipelineCache pipe
     check_pData = (void*)(uintptr_t)stream->getBe64();
     if (pData) {
         if (!(check_pData)) {
-            fprintf(stderr, "fatal: pData inconsistent between guest and host\n");
+            GFXSTREAM_ERROR("fatal: pData inconsistent between guest and host");
         }
         stream->read((void*)pData, (*pDataSize) * sizeof(uint8_t));
     }
@@ -11428,8 +11439,7 @@ VkResult VkEncoder::vkEnumeratePhysicalDeviceGroups(
     check_pPhysicalDeviceGroupCount = (uint32_t*)(uintptr_t)stream->getBe64();
     if (pPhysicalDeviceGroupCount) {
         if (!(check_pPhysicalDeviceGroupCount)) {
-            fprintf(stderr,
-                    "fatal: pPhysicalDeviceGroupCount inconsistent between guest and host\n");
+            GFXSTREAM_ERROR("fatal: pPhysicalDeviceGroupCount inconsistent between guest and host");
         }
         stream->read((uint32_t*)pPhysicalDeviceGroupCount, sizeof(uint32_t));
     }
@@ -11440,8 +11450,8 @@ VkResult VkEncoder::vkEnumeratePhysicalDeviceGroups(
         (VkPhysicalDeviceGroupProperties*)(uintptr_t)stream->getBe64();
     if (pPhysicalDeviceGroupProperties) {
         if (!(check_pPhysicalDeviceGroupProperties)) {
-            fprintf(stderr,
-                    "fatal: pPhysicalDeviceGroupProperties inconsistent between guest and host\n");
+            GFXSTREAM_ERROR(
+                "fatal: pPhysicalDeviceGroupProperties inconsistent between guest and host");
         }
         if (pPhysicalDeviceGroupCount) {
             for (uint32_t i = 0; i < (uint32_t)(*pPhysicalDeviceGroupCount); ++i) {
@@ -11722,8 +11732,8 @@ void VkEncoder::vkGetImageSparseMemoryRequirements2(
     check_pSparseMemoryRequirementCount = (uint32_t*)(uintptr_t)stream->getBe64();
     if (pSparseMemoryRequirementCount) {
         if (!(check_pSparseMemoryRequirementCount)) {
-            fprintf(stderr,
-                    "fatal: pSparseMemoryRequirementCount inconsistent between guest and host\n");
+            GFXSTREAM_ERROR(
+                "fatal: pSparseMemoryRequirementCount inconsistent between guest and host");
         }
         stream->read((uint32_t*)pSparseMemoryRequirementCount, sizeof(uint32_t));
     }
@@ -11734,8 +11744,7 @@ void VkEncoder::vkGetImageSparseMemoryRequirements2(
         (VkSparseImageMemoryRequirements2*)(uintptr_t)stream->getBe64();
     if (pSparseMemoryRequirements) {
         if (!(check_pSparseMemoryRequirements)) {
-            fprintf(stderr,
-                    "fatal: pSparseMemoryRequirements inconsistent between guest and host\n");
+            GFXSTREAM_ERROR("fatal: pSparseMemoryRequirements inconsistent between guest and host");
         }
         if (pSparseMemoryRequirementCount) {
             for (uint32_t i = 0; i < (uint32_t)(*pSparseMemoryRequirementCount); ++i) {
@@ -12096,8 +12105,7 @@ void VkEncoder::vkGetPhysicalDeviceQueueFamilyProperties2(
     check_pQueueFamilyPropertyCount = (uint32_t*)(uintptr_t)stream->getBe64();
     if (pQueueFamilyPropertyCount) {
         if (!(check_pQueueFamilyPropertyCount)) {
-            fprintf(stderr,
-                    "fatal: pQueueFamilyPropertyCount inconsistent between guest and host\n");
+            GFXSTREAM_ERROR("fatal: pQueueFamilyPropertyCount inconsistent between guest and host");
         }
         stream->read((uint32_t*)pQueueFamilyPropertyCount, sizeof(uint32_t));
     }
@@ -12107,7 +12115,7 @@ void VkEncoder::vkGetPhysicalDeviceQueueFamilyProperties2(
     check_pQueueFamilyProperties = (VkQueueFamilyProperties2*)(uintptr_t)stream->getBe64();
     if (pQueueFamilyProperties) {
         if (!(check_pQueueFamilyProperties)) {
-            fprintf(stderr, "fatal: pQueueFamilyProperties inconsistent between guest and host\n");
+            GFXSTREAM_ERROR("fatal: pQueueFamilyProperties inconsistent between guest and host");
         }
         if (pQueueFamilyPropertyCount) {
             for (uint32_t i = 0; i < (uint32_t)(*pQueueFamilyPropertyCount); ++i) {
@@ -12293,7 +12301,7 @@ void VkEncoder::vkGetPhysicalDeviceSparseImageFormatProperties2(
     check_pPropertyCount = (uint32_t*)(uintptr_t)stream->getBe64();
     if (pPropertyCount) {
         if (!(check_pPropertyCount)) {
-            fprintf(stderr, "fatal: pPropertyCount inconsistent between guest and host\n");
+            GFXSTREAM_ERROR("fatal: pPropertyCount inconsistent between guest and host");
         }
         stream->read((uint32_t*)pPropertyCount, sizeof(uint32_t));
     }
@@ -12303,7 +12311,7 @@ void VkEncoder::vkGetPhysicalDeviceSparseImageFormatProperties2(
     check_pProperties = (VkSparseImageFormatProperties2*)(uintptr_t)stream->getBe64();
     if (pProperties) {
         if (!(check_pProperties)) {
-            fprintf(stderr, "fatal: pProperties inconsistent between guest and host\n");
+            GFXSTREAM_ERROR("fatal: pProperties inconsistent between guest and host");
         }
         if (pPropertyCount) {
             for (uint32_t i = 0; i < (uint32_t)(*pPropertyCount); ++i) {
@@ -14305,7 +14313,7 @@ VkResult VkEncoder::vkGetPhysicalDeviceToolProperties(
     check_pToolCount = (uint32_t*)(uintptr_t)stream->getBe64();
     if (pToolCount) {
         if (!(check_pToolCount)) {
-            fprintf(stderr, "fatal: pToolCount inconsistent between guest and host\n");
+            GFXSTREAM_ERROR("fatal: pToolCount inconsistent between guest and host");
         }
         stream->read((uint32_t*)pToolCount, sizeof(uint32_t));
     }
@@ -14315,7 +14323,7 @@ VkResult VkEncoder::vkGetPhysicalDeviceToolProperties(
     check_pToolProperties = (VkPhysicalDeviceToolProperties*)(uintptr_t)stream->getBe64();
     if (pToolProperties) {
         if (!(check_pToolProperties)) {
-            fprintf(stderr, "fatal: pToolProperties inconsistent between guest and host\n");
+            GFXSTREAM_ERROR("fatal: pToolProperties inconsistent between guest and host");
         }
         if (pToolCount) {
             for (uint32_t i = 0; i < (uint32_t)(*pToolCount); ++i) {
@@ -15341,8 +15349,8 @@ void VkEncoder::vkGetDeviceImageSparseMemoryRequirements(
     check_pSparseMemoryRequirementCount = (uint32_t*)(uintptr_t)stream->getBe64();
     if (pSparseMemoryRequirementCount) {
         if (!(check_pSparseMemoryRequirementCount)) {
-            fprintf(stderr,
-                    "fatal: pSparseMemoryRequirementCount inconsistent between guest and host\n");
+            GFXSTREAM_ERROR(
+                "fatal: pSparseMemoryRequirementCount inconsistent between guest and host");
         }
         stream->read((uint32_t*)pSparseMemoryRequirementCount, sizeof(uint32_t));
     }
@@ -15353,8 +15361,7 @@ void VkEncoder::vkGetDeviceImageSparseMemoryRequirements(
         (VkSparseImageMemoryRequirements2*)(uintptr_t)stream->getBe64();
     if (pSparseMemoryRequirements) {
         if (!(check_pSparseMemoryRequirements)) {
-            fprintf(stderr,
-                    "fatal: pSparseMemoryRequirements inconsistent between guest and host\n");
+            GFXSTREAM_ERROR("fatal: pSparseMemoryRequirements inconsistent between guest and host");
         }
         if (pSparseMemoryRequirementCount) {
             for (uint32_t i = 0; i < (uint32_t)(*pSparseMemoryRequirementCount); ++i) {
@@ -18223,8 +18230,7 @@ void VkEncoder::vkGetPhysicalDeviceQueueFamilyProperties2KHR(
     check_pQueueFamilyPropertyCount = (uint32_t*)(uintptr_t)stream->getBe64();
     if (pQueueFamilyPropertyCount) {
         if (!(check_pQueueFamilyPropertyCount)) {
-            fprintf(stderr,
-                    "fatal: pQueueFamilyPropertyCount inconsistent between guest and host\n");
+            GFXSTREAM_ERROR("fatal: pQueueFamilyPropertyCount inconsistent between guest and host");
         }
         stream->read((uint32_t*)pQueueFamilyPropertyCount, sizeof(uint32_t));
     }
@@ -18234,7 +18240,7 @@ void VkEncoder::vkGetPhysicalDeviceQueueFamilyProperties2KHR(
     check_pQueueFamilyProperties = (VkQueueFamilyProperties2*)(uintptr_t)stream->getBe64();
     if (pQueueFamilyProperties) {
         if (!(check_pQueueFamilyProperties)) {
-            fprintf(stderr, "fatal: pQueueFamilyProperties inconsistent between guest and host\n");
+            GFXSTREAM_ERROR("fatal: pQueueFamilyProperties inconsistent between guest and host");
         }
         if (pQueueFamilyPropertyCount) {
             for (uint32_t i = 0; i < (uint32_t)(*pQueueFamilyPropertyCount); ++i) {
@@ -18421,7 +18427,7 @@ void VkEncoder::vkGetPhysicalDeviceSparseImageFormatProperties2KHR(
     check_pPropertyCount = (uint32_t*)(uintptr_t)stream->getBe64();
     if (pPropertyCount) {
         if (!(check_pPropertyCount)) {
-            fprintf(stderr, "fatal: pPropertyCount inconsistent between guest and host\n");
+            GFXSTREAM_ERROR("fatal: pPropertyCount inconsistent between guest and host");
         }
         stream->read((uint32_t*)pPropertyCount, sizeof(uint32_t));
     }
@@ -18431,7 +18437,7 @@ void VkEncoder::vkGetPhysicalDeviceSparseImageFormatProperties2KHR(
     check_pProperties = (VkSparseImageFormatProperties2*)(uintptr_t)stream->getBe64();
     if (pProperties) {
         if (!(check_pProperties)) {
-            fprintf(stderr, "fatal: pProperties inconsistent between guest and host\n");
+            GFXSTREAM_ERROR("fatal: pProperties inconsistent between guest and host");
         }
         if (pPropertyCount) {
             for (uint32_t i = 0; i < (uint32_t)(*pPropertyCount); ++i) {
@@ -19947,8 +19953,8 @@ void VkEncoder::vkGetImageSparseMemoryRequirements2KHR(
     check_pSparseMemoryRequirementCount = (uint32_t*)(uintptr_t)stream->getBe64();
     if (pSparseMemoryRequirementCount) {
         if (!(check_pSparseMemoryRequirementCount)) {
-            fprintf(stderr,
-                    "fatal: pSparseMemoryRequirementCount inconsistent between guest and host\n");
+            GFXSTREAM_ERROR(
+                "fatal: pSparseMemoryRequirementCount inconsistent between guest and host");
         }
         stream->read((uint32_t*)pSparseMemoryRequirementCount, sizeof(uint32_t));
     }
@@ -19959,8 +19965,7 @@ void VkEncoder::vkGetImageSparseMemoryRequirements2KHR(
         (VkSparseImageMemoryRequirements2*)(uintptr_t)stream->getBe64();
     if (pSparseMemoryRequirements) {
         if (!(check_pSparseMemoryRequirements)) {
-            fprintf(stderr,
-                    "fatal: pSparseMemoryRequirements inconsistent between guest and host\n");
+            GFXSTREAM_ERROR("fatal: pSparseMemoryRequirements inconsistent between guest and host");
         }
         if (pSparseMemoryRequirementCount) {
             for (uint32_t i = 0; i < (uint32_t)(*pSparseMemoryRequirementCount); ++i) {
@@ -20705,7 +20710,7 @@ VkResult VkEncoder::vkGetPipelineExecutablePropertiesKHR(
     check_pExecutableCount = (uint32_t*)(uintptr_t)stream->getBe64();
     if (pExecutableCount) {
         if (!(check_pExecutableCount)) {
-            fprintf(stderr, "fatal: pExecutableCount inconsistent between guest and host\n");
+            GFXSTREAM_ERROR("fatal: pExecutableCount inconsistent between guest and host");
         }
         stream->read((uint32_t*)pExecutableCount, sizeof(uint32_t));
     }
@@ -20715,7 +20720,7 @@ VkResult VkEncoder::vkGetPipelineExecutablePropertiesKHR(
     check_pProperties = (VkPipelineExecutablePropertiesKHR*)(uintptr_t)stream->getBe64();
     if (pProperties) {
         if (!(check_pProperties)) {
-            fprintf(stderr, "fatal: pProperties inconsistent between guest and host\n");
+            GFXSTREAM_ERROR("fatal: pProperties inconsistent between guest and host");
         }
         if (pExecutableCount) {
             for (uint32_t i = 0; i < (uint32_t)(*pExecutableCount); ++i) {
@@ -20842,7 +20847,7 @@ VkResult VkEncoder::vkGetPipelineExecutableStatisticsKHR(
     check_pStatisticCount = (uint32_t*)(uintptr_t)stream->getBe64();
     if (pStatisticCount) {
         if (!(check_pStatisticCount)) {
-            fprintf(stderr, "fatal: pStatisticCount inconsistent between guest and host\n");
+            GFXSTREAM_ERROR("fatal: pStatisticCount inconsistent between guest and host");
         }
         stream->read((uint32_t*)pStatisticCount, sizeof(uint32_t));
     }
@@ -20852,7 +20857,7 @@ VkResult VkEncoder::vkGetPipelineExecutableStatisticsKHR(
     check_pStatistics = (VkPipelineExecutableStatisticKHR*)(uintptr_t)stream->getBe64();
     if (pStatistics) {
         if (!(check_pStatistics)) {
-            fprintf(stderr, "fatal: pStatistics inconsistent between guest and host\n");
+            GFXSTREAM_ERROR("fatal: pStatistics inconsistent between guest and host");
         }
         if (pStatisticCount) {
             for (uint32_t i = 0; i < (uint32_t)(*pStatisticCount); ++i) {
@@ -20986,8 +20991,8 @@ VkResult VkEncoder::vkGetPipelineExecutableInternalRepresentationsKHR(
     check_pInternalRepresentationCount = (uint32_t*)(uintptr_t)stream->getBe64();
     if (pInternalRepresentationCount) {
         if (!(check_pInternalRepresentationCount)) {
-            fprintf(stderr,
-                    "fatal: pInternalRepresentationCount inconsistent between guest and host\n");
+            GFXSTREAM_ERROR(
+                "fatal: pInternalRepresentationCount inconsistent between guest and host");
         }
         stream->read((uint32_t*)pInternalRepresentationCount, sizeof(uint32_t));
     }
@@ -20998,8 +21003,7 @@ VkResult VkEncoder::vkGetPipelineExecutableInternalRepresentationsKHR(
         (VkPipelineExecutableInternalRepresentationKHR*)(uintptr_t)stream->getBe64();
     if (pInternalRepresentations) {
         if (!(check_pInternalRepresentations)) {
-            fprintf(stderr,
-                    "fatal: pInternalRepresentations inconsistent between guest and host\n");
+            GFXSTREAM_ERROR("fatal: pInternalRepresentations inconsistent between guest and host");
         }
         if (pInternalRepresentationCount) {
             for (uint32_t i = 0; i < (uint32_t)(*pInternalRepresentationCount); ++i) {
@@ -22032,8 +22036,8 @@ void VkEncoder::vkGetDeviceImageSparseMemoryRequirementsKHR(
     check_pSparseMemoryRequirementCount = (uint32_t*)(uintptr_t)stream->getBe64();
     if (pSparseMemoryRequirementCount) {
         if (!(check_pSparseMemoryRequirementCount)) {
-            fprintf(stderr,
-                    "fatal: pSparseMemoryRequirementCount inconsistent between guest and host\n");
+            GFXSTREAM_ERROR(
+                "fatal: pSparseMemoryRequirementCount inconsistent between guest and host");
         }
         stream->read((uint32_t*)pSparseMemoryRequirementCount, sizeof(uint32_t));
     }
@@ -22044,8 +22048,7 @@ void VkEncoder::vkGetDeviceImageSparseMemoryRequirementsKHR(
         (VkSparseImageMemoryRequirements2*)(uintptr_t)stream->getBe64();
     if (pSparseMemoryRequirements) {
         if (!(check_pSparseMemoryRequirements)) {
-            fprintf(stderr,
-                    "fatal: pSparseMemoryRequirements inconsistent between guest and host\n");
+            GFXSTREAM_ERROR("fatal: pSparseMemoryRequirements inconsistent between guest and host");
         }
         if (pSparseMemoryRequirementCount) {
             for (uint32_t i = 0; i < (uint32_t)(*pSparseMemoryRequirementCount); ++i) {
@@ -23740,7 +23743,7 @@ VkResult VkEncoder::vkGetPhysicalDeviceToolPropertiesEXT(
     check_pToolCount = (uint32_t*)(uintptr_t)stream->getBe64();
     if (pToolCount) {
         if (!(check_pToolCount)) {
-            fprintf(stderr, "fatal: pToolCount inconsistent between guest and host\n");
+            GFXSTREAM_ERROR("fatal: pToolCount inconsistent between guest and host");
         }
         stream->read((uint32_t*)pToolCount, sizeof(uint32_t));
     }
@@ -23750,7 +23753,7 @@ VkResult VkEncoder::vkGetPhysicalDeviceToolPropertiesEXT(
     check_pToolProperties = (VkPhysicalDeviceToolProperties*)(uintptr_t)stream->getBe64();
     if (pToolProperties) {
         if (!(check_pToolProperties)) {
-            fprintf(stderr, "fatal: pToolProperties inconsistent between guest and host\n");
+            GFXSTREAM_ERROR("fatal: pToolProperties inconsistent between guest and host");
         }
         if (pToolCount) {
             for (uint32_t i = 0; i < (uint32_t)(*pToolCount); ++i) {
@@ -25561,7 +25564,7 @@ VkResult VkEncoder::vkMapMemoryIntoAddressSpaceGOOGLE(VkDevice device, VkDeviceM
     check_pAddress = (uint64_t*)(uintptr_t)stream->getBe64();
     if (pAddress) {
         if (!(check_pAddress)) {
-            fprintf(stderr, "fatal: pAddress inconsistent between guest and host\n");
+            GFXSTREAM_ERROR("fatal: pAddress inconsistent between guest and host");
         }
         stream->read((uint64_t*)pAddress, sizeof(uint64_t));
     }
@@ -26335,7 +26338,7 @@ VkResult VkEncoder::vkGetMemoryHostAddressInfoGOOGLE(VkDevice device, VkDeviceMe
     check_pAddress = (uint64_t*)(uintptr_t)stream->getBe64();
     if (pAddress) {
         if (!(check_pAddress)) {
-            fprintf(stderr, "fatal: pAddress inconsistent between guest and host\n");
+            GFXSTREAM_ERROR("fatal: pAddress inconsistent between guest and host");
         }
         stream->read((uint64_t*)pAddress, sizeof(uint64_t));
     }
@@ -26345,7 +26348,7 @@ VkResult VkEncoder::vkGetMemoryHostAddressInfoGOOGLE(VkDevice device, VkDeviceMe
     check_pSize = (uint64_t*)(uintptr_t)stream->getBe64();
     if (pSize) {
         if (!(check_pSize)) {
-            fprintf(stderr, "fatal: pSize inconsistent between guest and host\n");
+            GFXSTREAM_ERROR("fatal: pSize inconsistent between guest and host");
         }
         stream->read((uint64_t*)pSize, sizeof(uint64_t));
     }
@@ -26355,7 +26358,7 @@ VkResult VkEncoder::vkGetMemoryHostAddressInfoGOOGLE(VkDevice device, VkDeviceMe
     check_pHostmemId = (uint64_t*)(uintptr_t)stream->getBe64();
     if (pHostmemId) {
         if (!(check_pHostmemId)) {
-            fprintf(stderr, "fatal: pHostmemId inconsistent between guest and host\n");
+            GFXSTREAM_ERROR("fatal: pHostmemId inconsistent between guest and host");
         }
         stream->read((uint64_t*)pHostmemId, sizeof(uint64_t));
     }
@@ -27080,7 +27083,7 @@ void VkEncoder::vkCollectDescriptorPoolIdsGOOGLE(VkDevice device, VkDescriptorPo
     check_pPoolIds = (uint64_t*)(uintptr_t)stream->getBe64();
     if (pPoolIds) {
         if (!(check_pPoolIds)) {
-            fprintf(stderr, "fatal: pPoolIds inconsistent between guest and host\n");
+            GFXSTREAM_ERROR("fatal: pPoolIds inconsistent between guest and host");
         }
         stream->read((uint64_t*)pPoolIds, (*pPoolIdCount) * sizeof(uint64_t));
     }

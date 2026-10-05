@@ -305,11 +305,10 @@ radv_video_destroy_session(struct radv_device *device, struct radv_video_session
    struct radeon_winsys_bo *emb_bo = NULL;
    VkResult result;
 
-   for (uint32_t i = 0; i < RADV_MAX_QUEUE_FAMILIES; i++) {
-      if (device->queue_count[i]) {
-         queue = device->queues[i];
-         if (queue->state.qf == RADV_QUEUE_VIDEO_DEC)
-            break;
+   for (uint32_t i = 0; i < device->queue_count; i++) {
+      if (device->queues[i].state.qf == RADV_QUEUE_VIDEO_DEC) {
+         queue = &device->queues[i];
+         break;
       }
    }
    assert(queue && queue->state.qf == RADV_QUEUE_VIDEO_DEC);
@@ -683,6 +682,11 @@ radv_GetPhysicalDeviceVideoCapabilitiesKHR(VkPhysicalDevice physicalDevice, cons
          rgb_caps->xChromaOffsets = VK_VIDEO_ENCODE_RGB_CHROMA_OFFSET_COSITED_EVEN_BIT_VALVE;
          rgb_caps->yChromaOffsets = VK_VIDEO_ENCODE_RGB_CHROMA_OFFSET_MIDPOINT_BIT_VALVE |
                                     VK_VIDEO_ENCODE_RGB_CHROMA_OFFSET_COSITED_EVEN_BIT_VALVE;
+         if (pdev->info.vcn_ip_version >= VCN_5_0_0) {
+            /* FW bug: only BT709/Limited and BT2020/Full works, so we only expose BT709/Limited */
+            rgb_caps->rgbModels = VK_VIDEO_ENCODE_RGB_MODEL_CONVERSION_YCBCR_709_BIT_VALVE;
+            rgb_caps->rgbRanges = VK_VIDEO_ENCODE_RGB_RANGE_COMPRESSION_NARROW_RANGE_BIT_VALVE;
+         }
       }
 
       if (feedback2_caps) {

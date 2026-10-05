@@ -130,13 +130,6 @@ option(
 )
 
 option(
-  'gallium-d3d10umd',
-  type : 'boolean',
-  value : false,
-  description : 'build gallium D3D10 WDDM UMD frontend.',
-)
-
-option(
   'gallium-rusticl',
   type : 'boolean',
   value : false,
@@ -193,13 +186,6 @@ option(
   value : [],
   choices : ['spirv', 'spirv64', 'all'],
   description : 'Link libclc SPIR-V statically.',
-)
-
-option(
-  'd3d-drivers-path',
-  type : 'string',
-  value : '',
-  description : 'Location of D3D drivers. Default: $libdir/d3d',
 )
 
 option(

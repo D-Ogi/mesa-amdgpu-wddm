@@ -32,9 +32,23 @@
 
 #include <cstring>
 
-#include "ResourceTracker.h"
 #include "goldfish_vk_extension_structs_guest.h"
 #include "goldfish_vk_private_defs.h"
+#include "util/log.h"
+
+#ifndef GFXSTREAM_ERROR
+#define GFXSTREAM_ERROR(...) mesa_loge(__VA_ARGS__)
+#endif
+
+#ifndef GFXSTREAM_FATAL
+#define GFXSTREAM_FATAL(...)    \
+    do {                        \
+        mesa_loge(__VA_ARGS__); \
+        abort();                \
+    } while (0)
+#endif
+
+#include "ResourceTracker.h"
 
 namespace gfxstream {
 namespace vk {

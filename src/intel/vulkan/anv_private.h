@@ -27,7 +27,6 @@
 #include <stdlib.h>
 #include <stdio.h>
 #include <stdbool.h>
-#include <pthread.h>
 #include <assert.h>
 #include <stdint.h>
 #include "drm-uapi/drm_fourcc.h"
@@ -949,7 +948,7 @@ uint32_t anv_scratch_pool_get_surf(struct anv_device *device,
 /** Implements a BO cache that ensures a 1-1 mapping of GEM BOs to anv_bos */
 struct anv_bo_cache {
    struct util_sparse_array bo_map;
-   pthread_mutex_t mutex;
+   simple_mtx_t mutex;
 };
 
 VkResult anv_bo_cache_init(struct anv_bo_cache *cache,
@@ -2638,7 +2637,7 @@ struct anv_device {
     };
     int                                         fd;
 
-    pthread_mutex_t                             vma_mutex;
+    simple_mtx_t                                vma_mutex;
     struct util_vma_heap                        vma_lo;
     struct util_vma_heap                        vma_hi;
     struct util_vma_heap                        vma_null_initialized;
@@ -2783,7 +2782,7 @@ struct anv_device {
     struct anv_shader_internal                 *internal_kernels[ANV_INTERNAL_KERNEL_COUNT];
     const struct intel_l3_config               *internal_kernels_l3_config;
 
-    pthread_mutex_t                             mutex;
+    simple_mtx_t                                mutex;
 
     struct intel_batch_decode_ctx               decoder[ANV_MAX_QUEUE_FAMILIES];
     /*
@@ -2795,6 +2794,33 @@ struct anv_device {
     int                                         perf_fd; /* -1 if no opened */
     struct anv_queue                            *perf_queue;
     struct intel_bind_timeline                  perf_timeline;
+    /* State for the global OAG triggered-report performance query path (xe,
+     * Xe2+). Boundary reports are resolved straight out of the mapped OA
+     * buffer using the OATAIL window captured around each MMIO trigger, so no
+     * report is ever copied into a driver side cache.
+     */
+    struct {
+       simple_mtx_t                             mutex;
+       /* Read-only mapping of the kernel OA buffer, NULL when not mapped. */
+       void                                    *oa_buffer;
+       /* Size of the mapping, as returned by the KMD. */
+       uint64_t                                 oa_buffer_size;
+       /* Usable ring size: oa_buffer_size truncated to a whole number of
+        * reports, so generally not a power of two.
+        */
+       uint32_t                                 oa_buffer_circ_size;
+       /* Monotonic allocator for per query-slot trigger markers. */
+       uint32_t                                 next_query_id;
+       /* Number of live performance query pools holding a marker range. The
+        * allocator is only rewound when this drops back to zero.
+        */
+       uint32_t                                 n_query_pools;
+       /* Every pool holding a marker range, so that releasing the profiling
+        * lock can resolve their outstanding boundaries before the OA buffer
+        * mapping goes away.
+        */
+       struct list_head                         pools;
+    }                                           perf_oag;
 
     struct intel_aux_map_context                *aux_map_ctx;
 
@@ -5618,20 +5644,11 @@ anv_shader_internal_unref(struct anv_device *device, struct anv_shader_internal 
 
 static inline uint64_t
 anv_shader_get_pointer(const struct anv_device *device,
-                       const struct anv_shader *shader)
+                       const struct anv_shader_alloc *shader_alloc)
 {
    return device->physical->uses_efficient_64bit ?
-      (device->physical->va.shader_heap.addr + shader->kernel.offset) :
-      shader->kernel.offset;
-}
-
-static inline uint64_t
-anv_shader_internal_get_pointer(const struct anv_device *device,
-                                const struct anv_shader_internal *shader)
-{
-   return device->physical->uses_efficient_64bit ?
-      (device->physical->va.shader_heap.addr + shader->kernel.offset) :
-      shader->kernel.offset;
+      (device->physical->va.shader_heap.addr + shader_alloc->offset) :
+      shader_alloc->offset;
 }
 
 void anv_shader_init_uuid(struct anv_physical_device *device);
@@ -6865,6 +6882,13 @@ struct anv_query_pool {
    struct intel_perf_counter_pass                *counter_pass;
    uint32_t                                     n_passes;
    struct intel_perf_query_info                 **pass_query;
+   /** First MMIO-trigger query ID; each query owns begin/end IDs. */
+   uint32_t                                     oag_query_id_base;
+   uint32_t                                     oag_report_size;
+   /** Link in anv_device::perf_oag.pools while holding a marker range. */
+   struct list_head                             oag_link;
+
+   void                                        *oag_snapshots;
 
    /* Video encoding queries */
    VkVideoCodecOperationFlagsKHR                codec;
@@ -7136,6 +7160,12 @@ enum anv_vid_mem_av1_types {
       __VA_ARGS__                                                            \
    }
 
+#define ANV_VID_PIC(dev_, bo_, ...)                                          \
+   (struct GENX(VDENC_SURFACE_CONTROL_BITS)) {                               \
+      .MOCS = anv_mocs(dev_, bo_, 0),                                        \
+      __VA_ARGS__                                                            \
+   }
+
 #define ANV_VID_MEM_INIT(buf_, field_, dev_, vid_, type_, ...)               \
    do {                                                                      \
       (buf_).field_##Address = ANV_VID_MEM_ADDR(vid_, type_);                \
@@ -7345,9 +7375,106 @@ struct anv_performance_configuration_intel {
    uint64_t                   config_id;
 };
 
+/* Global OAG triggered-report performance queries (xe KMD, Xe2+).
+ *
+ * Every begin/end boundary of every (query, pass) writes a distinct 32-bit
+ * marker to OAG_MMIOTRIGGER, which makes the OA unit emit a report carrying
+ * that marker in the context-id field. Markers are allocated from a high,
+ * monotonically increasing range so they cannot collide with a real context id
+ * appearing in the same field of a periodic report.
+ */
+#define ANV_OAG_QUERY_ID_FIRST   0x80000000u
+
+/* Register stores emitted around each OAG MMIO trigger. */
+#define ANV_OAG_BOUNDARY_STORES  4
+
+/* Written by the GPU at the tail of every begin/end snapshot of an OAG
+ * performance query and used at resolve time to locate the triggered report
+ * inside the mapped OA buffer.
+ */
+struct anv_oag_boundary {
+   /** OAG_OATAILPTR sampled immediately before the MMIO trigger. */
+   uint32_t tail_pre;
+   /** OAG_OASTATUS sampled immediately before the MMIO trigger. */
+   uint32_t oa_status;
+   /** OAG_OATAILPTR sampled immediately after the MMIO trigger. */
+   uint32_t tail_post;
+   /** OAG_OABUFFER, whose top bits hold the GGTT base of the OA buffer. The
+    * tails are GGTT addresses; this is what turns them into buffer offsets.
+    */
+   uint32_t oa_buffer;
+   /** Set once the triggered report has been copied over the snapshot, so a
+    * second vkGetQueryPoolResults() does not have to find it again (by then it
+    * may well have been overwritten).
+    */
+   uint64_t resolved;
+};
+
+/* Value written to anv_oag_boundary::resolved, "OAGREPOR" in ASCII. */
+#define ANV_OAG_RESOLVED_MAGIC   UINT64_C(0x4f41475245504f52)
+
+/* Written by the GPU for queries that never fired a trigger, "OAGZEROD" in
+ * ASCII. Their host snapshots are zeroed at resolve time.
+ */
+#define ANV_OAG_ZEROED_MAGIC     UINT64_C(0x4f41475a45524f44)
+
+static inline uint64_t
+khr_perf_query_availability_offset(const struct anv_query_pool *pool,
+                                   uint32_t query, uint32_t pass)
+{
+   return (query * (uint64_t)pool->stride) + (pass * (uint64_t)pool->pass_size);
+}
+
+static inline uint64_t
+khr_perf_query_data_offset(const struct anv_query_pool *pool, uint32_t query,
+                           uint32_t pass, bool end)
+{
+   return khr_perf_query_availability_offset(pool, query, pass) +
+          pool->data_offset + (end ? pool->snapshot_size : 0);
+}
+
+static inline uint64_t
+khr_perf_query_snapshot_offset(const struct anv_query_pool *pool, uint32_t query,
+                               uint32_t pass, bool end)
+{
+   return (uint64_t)pool->oag_report_size * 2 *
+          ((uint64_t)pool->n_passes * query + pass) +
+          (end ? pool->oag_report_size : 0);
+}
+
+/* Offset of the OAG boundary trailer of a snapshot, i.e. the OATAIL window and
+ * the OASTATUS/OABUFFER values the GPU records around the MMIO trigger, plus
+ * the "already copied out of the OA buffer" marker.
+ */
+static inline uint64_t
+khr_perf_query_boundary_offset(const struct anv_query_pool *pool,
+                               uint32_t query, uint32_t pass, bool end)
+{
+   return khr_perf_query_data_offset(pool, query, pass, end) +
+          pool->snapshot_size - sizeof(struct anv_oag_boundary);
+}
+
+static inline uint32_t
+anv_oag_query_id(const struct anv_query_pool *pool, uint32_t query,
+                 uint32_t pass, bool end)
+{
+   return pool->oag_query_id_base +
+          (pass * pool->vk.query_count + query) * 2 + end;
+}
+
+VkResult anv_oag_alloc_query_ids(struct anv_device *device,
+                                 struct anv_query_pool *pool);
+void anv_oag_free_query_ids(struct anv_device *device,
+                            struct anv_query_pool *pool);
+bool anv_oag_resolve_boundary(struct anv_device *device,
+                              struct anv_oag_boundary *boundary,
+                              void *snapshot, uint32_t marker);
+void anv_oag_resolve_all_pools(struct anv_device *device);
+
 void anv_physical_device_init_va_ranges(struct anv_physical_device *device);
 void anv_physical_device_init_perf(struct anv_physical_device *device, int fd);
 void anv_device_perf_init(struct anv_device *device);
+void anv_device_perf_finish(struct anv_device *device);
 void anv_device_perf_close(struct anv_device *device);
 void anv_perf_write_pass_results(struct intel_perf_config *perf,
                                  struct anv_query_pool *pool, uint32_t pass,
@@ -7547,68 +7674,49 @@ VK_DEFINE_NONDISP_HANDLE_CASTS(anv_indirect_execution_set, base,
 #  undef genX
 #endif
 
-static inline void
-anv_emit_device_memory_report(struct vk_device* device,
-                              VkDeviceMemoryReportEventTypeEXT type,
-                              uint64_t mem_obj_id,
-                              VkDeviceSize size,
-                              VkObjectType obj_type,
-                              uint64_t obj_handle,
-                              uint32_t heap_index)
-{
-   if (likely(!device->memory_reports))
-      return;
-
-   vk_emit_device_memory_report(device, type, mem_obj_id, size,
-                                obj_type, obj_handle, heap_index);
-}
-
 /* VK_EXT_device_memory_report specific reporting macros */
-#define ANV_DMR_BO_REPORT(_obj, _bo, _type) \
-   anv_emit_device_memory_report( \
-      (_obj)->device, _type, \
-      (_type) == VK_DEVICE_MEMORY_REPORT_EVENT_TYPE_ALLOCATION_FAILED_EXT ? \
-      0 : (_bo)->offset, \
-      (_type) == VK_DEVICE_MEMORY_REPORT_EVENT_TYPE_ALLOCATION_FAILED_EXT ? \
-      0 : (_bo)->actual_size, \
-      (_obj)->type, vk_object_to_u64_handle(_obj), 0)
-#define ANV_DMR_BO_ALLOC(_obj, _bo, _result)   \
-   ANV_DMR_BO_REPORT(_obj, _bo, \
-                     (_result) == VK_SUCCESS ? \
-                      VK_DEVICE_MEMORY_REPORT_EVENT_TYPE_ALLOCATE_EXT : \
-                     VK_DEVICE_MEMORY_REPORT_EVENT_TYPE_ALLOCATION_FAILED_EXT)
-#define ANV_DMR_BO_FREE(_obj, _bo) \
-   ANV_DMR_BO_REPORT(_obj, _bo, \
-                     VK_DEVICE_MEMORY_REPORT_EVENT_TYPE_FREE_EXT)
-#define ANV_DMR_BO_ALLOC_IMPORT(_obj, _bo, _result, _import) \
-   ANV_DMR_BO_REPORT(_obj, _bo, \
-                     (_result) == VK_SUCCESS ? \
-                     ((_import) ? \
-                      VK_DEVICE_MEMORY_REPORT_EVENT_TYPE_IMPORT_EXT : \
-                      VK_DEVICE_MEMORY_REPORT_EVENT_TYPE_ALLOCATE_EXT) : \
-                     VK_DEVICE_MEMORY_REPORT_EVENT_TYPE_ALLOCATION_FAILED_EXT)
-#define ANV_DMR_BO_FREE_IMPORT(_obj, _bo, _import) \
-   ANV_DMR_BO_REPORT(_obj, _bo, \
-                     (_import) ? \
-                     VK_DEVICE_MEMORY_REPORT_EVENT_TYPE_UNIMPORT_EXT : \
-                     VK_DEVICE_MEMORY_REPORT_EVENT_TYPE_FREE_EXT)
+#define ANV_DMR_BO_ALLOC(_obj, _bo, _result) \
+vk_device_memory_report_emit( \
+   (_obj)->device, _result, /* is_alloc */ true, /* is_import */ false, \
+   (_result) == VK_SUCCESS ? (_bo)->offset : 0, \
+   (_result) == VK_SUCCESS ? (_bo)->actual_size : 0, \
+   (_obj)->type, vk_object_to_u64_handle(_obj), 0)
 
-#define ANV_DMR_SP_REPORT(_obj, _pool, _state, _type) \
-   anv_emit_device_memory_report( \
-      (_obj)->device, _type, \
-      (_type) == VK_DEVICE_MEMORY_REPORT_EVENT_TYPE_ALLOCATION_FAILED_EXT ? \
-      0 : \
-      anv_address_physical(anv_state_pool_state_address((_pool), (_state))), \
-      (_type) == VK_DEVICE_MEMORY_REPORT_EVENT_TYPE_ALLOCATION_FAILED_EXT ? \
-      0 : (_state).alloc_size, \
-      (_obj)->type, vk_object_to_u64_handle(_obj), 0)
+#define ANV_DMR_BO_FREE(_obj, _bo) \
+vk_device_memory_report_emit( \
+   (_obj)->device, VK_SUCCESS, /* is_alloc */ false, /* is_import */ false, \
+   (_bo)->offset, (_bo)->actual_size, \
+   (_obj)->type, vk_object_to_u64_handle(_obj), 0)
+
+#define ANV_DMR_BO_ALLOC_IMPORT(_obj, _bo, _result, _import) \
+vk_device_memory_report_emit( \
+   (_obj)->device, _result, /* is_alloc */ true, (_import), \
+   (_result) == VK_SUCCESS ? (_bo)->offset : 0, \
+   (_result) == VK_SUCCESS ? (_bo)->actual_size : 0, \
+   (_obj)->type, vk_object_to_u64_handle(_obj), 0)
+
+#define ANV_DMR_BO_FREE_IMPORT(_obj, _bo, _import) \
+vk_device_memory_report_emit( \
+   (_obj)->device, VK_SUCCESS, /* is_alloc */ false, (_import), \
+   (_bo)->offset, (_bo)->actual_size, \
+   (_obj)->type, vk_object_to_u64_handle(_obj), 0)
+
 #define ANV_DMR_SP_ALLOC(_obj, _pool, _state) \
-      ANV_DMR_SP_REPORT(_obj, _pool, _state, \
-                        (_state).alloc_size == 0 ? \
-                        VK_DEVICE_MEMORY_REPORT_EVENT_TYPE_ALLOCATION_FAILED_EXT : \
-                        VK_DEVICE_MEMORY_REPORT_EVENT_TYPE_ALLOCATE_EXT)
+vk_device_memory_report_emit( \
+   (_obj)->device, \
+   (_state).alloc_size == 0 ? VK_ERROR_OUT_OF_DEVICE_MEMORY : VK_SUCCESS, \
+   /* is_alloc */ true, /* is_import */ false, \
+   (_state).alloc_size == 0 ? 0 : \
+   anv_address_physical(anv_state_pool_state_address((_pool), (_state))), \
+   (_state).alloc_size, \
+   (_obj)->type, vk_object_to_u64_handle(_obj), 0)
+
 #define ANV_DMR_SP_FREE(_obj, _pool, _state) \
-      ANV_DMR_SP_REPORT(_obj, _pool, _state, VK_DEVICE_MEMORY_REPORT_EVENT_TYPE_FREE_EXT)
+vk_device_memory_report_emit( \
+   (_obj)->device, VK_SUCCESS, /* is_alloc */ false, /* is_import */ false, \
+   anv_address_physical(anv_state_pool_state_address((_pool), (_state))), \
+   (_state).alloc_size, \
+   (_obj)->type, vk_object_to_u64_handle(_obj), 0)
 
 /* Address binding report macro helpers for VK_EXT_device_address_binding_report.
  *

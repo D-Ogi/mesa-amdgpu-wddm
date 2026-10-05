@@ -2635,7 +2635,9 @@ radv_graphics_shaders_compile(const struct radv_compiler_info *compiler_info, st
       NIR_PASS(_, stages[MESA_SHADER_FRAGMENT].nir, nir_opt_dce);
 
       const bool vrs_may_be_enabled =
-         gfx_state->vrs_may_be_enabled && !stages[MESA_SHADER_FRAGMENT].nir->info.fs.sample_mask_in_declared;
+         gfx_state->vrs_may_be_enabled && !(stages[MESA_SHADER_FRAGMENT].nir->info.fs.sample_mask_in_declared ||
+                                            stages[MESA_SHADER_FRAGMENT].nir->info.fs.sample_mask_out_declared);
+
       NIR_PASS(_, stages[MESA_SHADER_FRAGMENT].nir, radv_nir_lower_opt_fs_frag_pos, vrs_may_be_enabled,
                gfx_state->ms.sample_shading_enable || stages[MESA_SHADER_FRAGMENT].nir->info.fs.uses_sample_shading);
 

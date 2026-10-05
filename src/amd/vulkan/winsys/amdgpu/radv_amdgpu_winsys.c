@@ -268,7 +268,6 @@ radv_amdgpu_winsys_create(int fd, const struct radeon_info *info, const BITSET_W
    simple_mtx_init(&ws->vm_ioctl_lock, mtx_plain);
 
    ws->perftest = perftest_flags;
-   ws->zero_all_vram_allocs = BITSET_TEST(debug_flags, RADV_DEBUG_ZERO_VRAM);
    ws->debug_vm = BITSET_TEST(debug_flags, RADV_DEBUG_VM);
    u_rwlock_init(&ws->global_bo_list.lock);
    list_inithead(&ws->log_bo_list);

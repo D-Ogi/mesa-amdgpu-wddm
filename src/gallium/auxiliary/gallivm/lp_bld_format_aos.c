@@ -735,7 +735,8 @@ lp_build_fetch_rgba_aos(struct gallivm_state *gallivm,
     * s3tc rgb formats
     */
 
-   if (format_desc->layout == UTIL_FORMAT_LAYOUT_S3TC) {
+   if (UTIL_ARCH_LITTLE_ENDIAN &&
+       format_desc->layout == UTIL_FORMAT_LAYOUT_S3TC) {
       struct lp_type tmp_type;
       LLVMValueRef tmp;
 
@@ -763,7 +764,8 @@ lp_build_fetch_rgba_aos(struct gallivm_state *gallivm,
     * rgtc rgb formats
     */
 
-   if (format_desc->layout == UTIL_FORMAT_LAYOUT_RGTC) {
+   if (UTIL_ARCH_LITTLE_ENDIAN &&
+       format_desc->layout == UTIL_FORMAT_LAYOUT_RGTC) {
       struct lp_type tmp_type;
       LLVMValueRef tmp;
 

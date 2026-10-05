@@ -46,14 +46,13 @@ enum radeon_bo_flag { /* bitfield */
                       RADEON_FLAG_READ_ONLY = (1 << 7),
                       RADEON_FLAG_32BIT = (1 << 8),
                       RADEON_FLAG_PREFER_LOCAL_BO = (1 << 9),
-                      RADEON_FLAG_ZERO_VRAM = (1 << 10),
-                      RADEON_FLAG_REPLAYABLE = (1 << 11),
-                      RADEON_FLAG_DISCARDABLE = (1 << 12),
-                      RADEON_FLAG_GFX12_ALLOW_DCC = (1 << 13),
-                      RADEON_FLAG_VM_UPDATE_WAIT = (1 << 14),
-                      RADEON_FLAG_VM_PAD_1PAGE = (1 << 15),
-                      RADEON_FLAG_ENCRYPTED = (1 << 16),
-                      RADEON_FLAG_EMULATE_SPARSE_RESIDENCY = (1 << 17),
+                      RADEON_FLAG_REPLAYABLE = (1 << 10),
+                      RADEON_FLAG_DISCARDABLE = (1 << 11),
+                      RADEON_FLAG_GFX12_ALLOW_DCC = (1 << 12),
+                      RADEON_FLAG_VM_UPDATE_WAIT = (1 << 13),
+                      RADEON_FLAG_VM_PAD_1PAGE = (1 << 14),
+                      RADEON_FLAG_ENCRYPTED = (1 << 15),
+                      RADEON_FLAG_EMULATE_SPARSE_RESIDENCY = (1 << 16),
 };
 
 enum radeon_ctx_priority {

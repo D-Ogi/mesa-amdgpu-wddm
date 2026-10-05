@@ -97,3 +97,11 @@ dEQP-VK.tessellation.tesscoord.triangles_equal_spacing_execution_mode_in_tesc
 dEQP-VK.texture.explicit_lod.2d.sizes.128x128_linear_linear_mipmap_linear_clamp
 dEQP-VK.texture.explicit_lod.2d.sizes.128x128_linear_linear_mipmap_linear_repeat
 nir-stress=dEQP-VK.ray_query.builtin.instanceid.tese.triangles
+
+# Nightly run expectations update
+dEQP-VK.compute.pipeline.cooperative_matrix.khr_a.subgroupscope.tensorlayout4d.float16_float16.buffer.rowmajor.tensorlayout
+dEQP-VK.compute.shader_object_binary.cooperative_matrix.khr_b.subgroupscope.tensorlayout1d.float16_float16.buffer.rowmajor.tensorlayout
+dEQP-VK.compute.shader_object_spirv.cooperative_matrix.khr_a.subgroupscope.tensorlayout1dclip.sint8_sint8.buffer.rowmajor.tensorlayout
+dEQP-VK.compute.shader_object_spirv.cooperative_matrix.khr_r.subgroupscope.tensorlayout2d.float16_float16.buffer.rowmajor.tensorlayout
+dEQP-VK.compute.shader_object_spirv.cooperative_matrix.khr_r.subgroupscope.tensorlayout2dclip.float16_float16.buffer.rowmajor.tensorlayout
+

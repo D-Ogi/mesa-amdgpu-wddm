@@ -995,6 +995,10 @@ __ssa_srcp_n(struct ir3_instruction *instr, unsigned n)
    list_for_each_entry_safe (struct ir3_block, __block, __list, node)
 #define foreach_block_rev(__block, __list)                                     \
    list_for_each_entry_rev (struct ir3_block, __block, __list, node)
+#define foreach_block_from(__block, __list, __start)                           \
+   list_for_each_entry_from (struct ir3_block, __block, __start, __list, node)
+#define foreach_main_block(__block, __ir)                                      \
+   foreach_block_from (__block, &__ir->block_list, ir3_after_preamble(__ir))
 
 /* iterators for arrays: */
 #define foreach_array(__array, __list)                                         \

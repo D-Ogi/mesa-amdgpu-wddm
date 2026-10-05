@@ -5799,10 +5799,7 @@ apply_QCTDD13523866(struct ir3_context *ctx)
    struct ir3 *ir = ctx->ir;
    struct ir3_instruction *alu = NULL;
 
-   foreach_block (block, &ir->block_list) {
-      if (block->in_early_preamble)
-         continue;
-
+   foreach_main_block (block, ir) {
       foreach_instr (instr, &block->instr_list) {
          if (is_mov(instr) || !is_alu(instr))
             continue;

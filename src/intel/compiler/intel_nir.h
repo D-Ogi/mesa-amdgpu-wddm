@@ -58,6 +58,12 @@ enum intel_atomic_branch_cases {
    INTEL_ATOMIC_BRANCH_MIN = 1 << 2,
 };
 
+enum intel_code_motion {
+   INTEL_CODE_MOTION_DEFAULT = 0,
+   INTEL_CODE_MOTION_LICM = 1,
+   INTEL_CODE_MOTION_GCM = 2,
+};
+
 bool intel_nir_opt_atomic_branch(nir_shader *shader, unsigned enabled_cases);
 
 bool intel_nir_pulls_at_sample(nir_shader *shader);

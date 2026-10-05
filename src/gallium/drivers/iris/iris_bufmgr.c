@@ -224,6 +224,8 @@ struct iris_bufmgr {
 
    struct iris_bo *dummy_aux_bo;
    struct iris_bo *mem_fence_bo;
+
+   bool enable_efficient_64bit;
 };
 
 static simple_mtx_t global_bufmgr_list_mutex = SIMPLE_MTX_INITIALIZER;
@@ -2404,7 +2406,7 @@ iris_bufmgr_init_global_vm(struct iris_bufmgr *bufmgr)
  * \param fd File descriptor of the opened DRM device.
  */
 static struct iris_bufmgr *
-iris_bufmgr_create(struct intel_device_info *devinfo, int fd, bool bo_reuse)
+iris_bufmgr_create(struct intel_device_info *devinfo, int fd, bool bo_reuse, struct driOptionCache *options)
 {
    if (devinfo->gtt_size <= IRIS_MEMZONE_OTHER_START)
       return NULL;
@@ -2445,6 +2447,9 @@ iris_bufmgr_create(struct intel_device_info *devinfo, int fd, bool bo_reuse)
 
    if (!iris_bufmgr_init_global_vm(bufmgr))
       goto error_init_vm;
+
+   bufmgr->enable_efficient_64bit = devinfo->verx10 >= 350 &&
+                                    driQueryOptionb(options, "intel_enable_efficient_64bit");
 
    STATIC_ASSERT(IRIS_MEMZONE_SHADER_START == 0ull);
    const uint64_t _4GB = 1ull << 32;
@@ -2633,7 +2638,7 @@ iris_bufmgr_create_screen_id(struct iris_bufmgr *bufmgr)
  * \param fd File descriptor of the opened DRM device.
  */
 struct iris_bufmgr *
-iris_bufmgr_get_for_fd(int fd, bool bo_reuse)
+iris_bufmgr_get_for_fd(int fd, bool bo_reuse, struct driOptionCache *options)
 {
    struct intel_device_info devinfo;
    struct stat st;
@@ -2670,7 +2675,7 @@ iris_bufmgr_get_for_fd(int fd, bool bo_reuse)
    }
 #endif
 
-   bufmgr = iris_bufmgr_create(&devinfo, fd, bo_reuse);
+   bufmgr = iris_bufmgr_create(&devinfo, fd, bo_reuse, options);
    if (bufmgr)
       list_addtail(&bufmgr->link, &global_bufmgr_list);
 
@@ -2793,4 +2798,10 @@ struct iris_bo *
 iris_bufmgr_get_mem_fence_bo(struct iris_bufmgr *bufmgr)
 {
    return bufmgr->mem_fence_bo;
+}
+
+bool
+iris_bufmgr_is_eff_64bit_enabled(const struct iris_bufmgr *bufmgr)
+{
+   return bufmgr->enable_efficient_64bit;
 }

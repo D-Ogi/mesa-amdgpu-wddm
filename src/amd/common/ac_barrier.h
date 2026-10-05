@@ -71,14 +71,18 @@ enum ac_barrier_flags {
    AC_BARRIER_SYNC_PS = 1u << 14,
    AC_BARRIER_SYNC_CS = 1u << 15,
 
+   /* Sync all shaders, CB, DB, and event-based query writes, but CB/DB caches are left alone. */
+   AC_BARRIER_SYNC_BOTTOM_OF_PIPE = 1u << 16,
+
    /* Pipeline stats events */
-   AC_BARRIER_PIPELINESTAT_START = 1u << 16,
-   AC_BARRIER_PIPELINESTAT_STOP = 1u << 17,
+   AC_BARRIER_PIPELINESTAT_START = 1u << 17,
+   AC_BARRIER_PIPELINESTAT_STOP = 1u << 18,
 };
 
 #define AC_BARRIER_ALL_COMPUTE \
-   (AC_BARRIER_INV_ICACHE | AC_BARRIER_INV_SMEM | AC_BARRIER_INV_VMEM | \
-    AC_BARRIER_INV_L2 | AC_BARRIER_WB_L2 | AC_BARRIER_SYNC_CS)
+   (AC_BARRIER_INV_ICACHE | AC_BARRIER_INV_SMEM | AC_BARRIER_INV_VMEM | AC_BARRIER_INV_L2 | \
+    AC_BARRIER_WB_L2 | AC_BARRIER_INV_L2_METADATA | AC_BARRIER_SYNC_CS | AC_BARRIER_SYNC_BOTTOM_OF_PIPE | \
+    AC_BARRIER_PIPELINESTAT_START | AC_BARRIER_PIPELINESTAT_STOP)
 
 /* PWS (Pixel Wait Sync) acquire point, i.e. the pipeline stage at which a
  * GFX11+ PWS ACQUIRE waits for a preceding RELEASE. The acquire point is

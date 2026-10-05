@@ -919,8 +919,7 @@ radv_update_preamble_cs(struct radv_queue_state *queue, struct radv_device *devi
       /* We write the control buffer from the CPU, so need to grant CPU access to the BO.
        * The draw ring needs to be zero-initialized otherwise the ready bits will be incorrect.
        */
-      uint32_t task_rings_bo_flags =
-         RADEON_FLAG_CPU_ACCESS | RADEON_FLAG_NO_INTERPROCESS_SHARING | RADEON_FLAG_ZERO_VRAM;
+      uint32_t task_rings_bo_flags = RADEON_FLAG_CPU_ACCESS | RADEON_FLAG_NO_INTERPROCESS_SHARING;
 
       result = radv_bo_create(device, NULL, pdev->task_info.bo_size_bytes, 256, RADEON_DOMAIN_VRAM, task_rings_bo_flags,
                               RADV_BO_PRIORITY_SCRATCH, 0, true, &task_rings_bo);
@@ -1357,7 +1356,7 @@ radv_create_gang_wait_preambles_postambles(struct radv_queue *queue)
    VkResult r = VK_SUCCESS;
    struct radeon_winsys *ws = device->ws;
    struct radeon_winsys_bo *gang_sem_bo = NULL;
-   enum radeon_bo_flag gang_sem_bo_flags = RADEON_FLAG_NO_INTERPROCESS_SHARING | RADEON_FLAG_ZERO_VRAM;
+   enum radeon_bo_flag gang_sem_bo_flags = RADEON_FLAG_NO_INTERPROCESS_SHARING;
 
    /* Gang wait preamble is executed before the main preamble which means it may be
     * before a cache flush, which may cause the CP to read stale values. Bypass the

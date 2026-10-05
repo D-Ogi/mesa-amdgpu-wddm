@@ -27,36 +27,26 @@ panvk_memory_emit_report(struct panvk_device *device,
    struct panvk_physical_device *pdev =
       to_panvk_physical_device(device->vk.physical);
 
-   if (likely(!device->vk.memory_reports))
-      return;
+   const bool is_alloc = alloc_info != NULL;
 
    if (result != VK_SUCCESS) {
       const uint32_t heap_index =
          pdev->memory.types[alloc_info->memoryTypeIndex].heapIndex;
-      vk_emit_device_memory_report(
-         &device->vk, VK_DEVICE_MEMORY_REPORT_EVENT_TYPE_ALLOCATION_FAILED_EXT,
-         /* mem_obj_id */ 0, alloc_info->allocationSize,
-         VK_OBJECT_TYPE_DEVICE_MEMORY,
-         /* obj_handle */ 0, heap_index);
+      vk_device_memory_report_emit(&device->vk, result, is_alloc,
+                                   /* is_import */ false,
+                                   /* mem_obj_id */ 0,
+                                   alloc_info->allocationSize,
+                                   VK_OBJECT_TYPE_DEVICE_MEMORY,
+                                   /* obj_handle */ 0, heap_index);
       return;
-   }
-
-   VkDeviceMemoryReportEventTypeEXT type;
-   if (alloc_info) {
-      type = mem->vk.import_handle_type
-                ? VK_DEVICE_MEMORY_REPORT_EVENT_TYPE_IMPORT_EXT
-                : VK_DEVICE_MEMORY_REPORT_EVENT_TYPE_ALLOCATE_EXT;
-   } else {
-      type = mem->vk.import_handle_type
-                ? VK_DEVICE_MEMORY_REPORT_EVENT_TYPE_UNIMPORT_EXT
-                : VK_DEVICE_MEMORY_REPORT_EVENT_TYPE_FREE_EXT;
    }
 
    const uint32_t heap_index =
       pdev->memory.types[mem->vk.memory_type_index].heapIndex;
-   vk_emit_device_memory_report(&device->vk, type, mem->bo->handle,
-                                mem->bo->size, VK_OBJECT_TYPE_DEVICE_MEMORY,
-                                (uintptr_t)(mem), heap_index);
+   vk_device_memory_report_emit(
+      &device->vk, result, is_alloc, mem->vk.import_handle_type != 0,
+      mem->bo->handle, mem->bo->size, VK_OBJECT_TYPE_DEVICE_MEMORY,
+      (uintptr_t)(mem), heap_index);
 }
 
 VKAPI_ATTR VkResult VKAPI_CALL

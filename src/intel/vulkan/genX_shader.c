@@ -566,7 +566,7 @@ emit_vs_shader(struct anv_batch *batch,
    anv_shader_emit_tmp(batch, vs_dwords, GENX(3DSTATE_VS), vs) {
       vs.Enable               = true;
       vs.StatisticsEnable     = true;
-      vs.KernelStartPointer   = anv_shader_get_pointer(device, shader);
+      vs.KernelStartPointer   = anv_shader_get_pointer(device, &shader->kernel);
 #if GFX_VER < 20
       vs.SIMD8DispatchEnable  =
          vs_prog_data->base.dispatch_mode == DISPATCH_MODE_SIMD8;
@@ -633,7 +633,7 @@ emit_hs_shader(struct anv_batch *batch,
    anv_shader_emit_tmp(batch, hs_dwords, GENX(3DSTATE_HS), hs) {
       hs.Enable = true;
       hs.StatisticsEnable = true;
-      hs.KernelStartPointer = anv_shader_get_pointer(device, shader);
+      hs.KernelStartPointer = anv_shader_get_pointer(device, &shader->kernel);
       hs.SamplerCount = get_sampler_count(device, shader);
       hs.BindingTableEntryCount = get_surface_count(device, shader);
 
@@ -738,7 +738,7 @@ emit_ds_shader(struct anv_batch *batch,
    anv_shader_emit_tmp(batch, ds_dwords, GENX(3DSTATE_DS), ds) {
       ds.Enable = true;
       ds.StatisticsEnable = true;
-      ds.KernelStartPointer = anv_shader_get_pointer(device, shader);
+      ds.KernelStartPointer = anv_shader_get_pointer(device, &shader->kernel);
       ds.SamplerCount = get_sampler_count(device, shader);
       ds.BindingTableEntryCount = get_surface_count(device, shader);
       ds.MaximumNumberofThreads = devinfo->max_tes_threads - 1;
@@ -799,7 +799,7 @@ emit_gs_shader(struct anv_batch *batch,
    anv_shader_emit_tmp(batch, gs_dwords, GENX(3DSTATE_GS), gs) {
       gs.Enable                  = true;
       gs.StatisticsEnable        = true;
-      gs.KernelStartPointer      = anv_shader_get_pointer(device, shader);
+      gs.KernelStartPointer      = anv_shader_get_pointer(device, &shader->kernel);
 #if GFX_VER < 20
       gs.DispatchMode            = gs_prog_data->base.dispatch_mode;
 #endif
@@ -892,7 +892,7 @@ emit_task_shader(struct anv_batch *batch,
    }
 
    anv_shader_emit(batch, shader, ts.shader, GENX(3DSTATE_TASK_SHADER), task) {
-      task.KernelStartPointer                = anv_shader_get_pointer(device, shader);
+      task.KernelStartPointer                = anv_shader_get_pointer(device, &shader->kernel);
       task.SIMDSize                          = task_dispatch.simd_size / 16;
       task.MessageSIMD                       = task.SIMDSize;
       task.NumberofThreadsinGPGPUThreadGroup = task_dispatch.threads;
@@ -981,7 +981,7 @@ emit_mesh_shader(struct anv_batch *batch,
    }
 
    anv_shader_emit(batch, shader, ms.shader, GENX(3DSTATE_MESH_SHADER), mesh) {
-      mesh.KernelStartPointer                = anv_shader_get_pointer(device, shader);
+      mesh.KernelStartPointer                = anv_shader_get_pointer(device, &shader->kernel);
       mesh.SIMDSize                          = mesh_dispatch.simd_size / 16;
       mesh.MessageSIMD                       = mesh.SIMDSize;
       mesh.NumberofThreadsinGPGPUThreadGroup = mesh_dispatch.threads;
@@ -1187,7 +1187,7 @@ emit_cs_shader(struct anv_batch *batch,
          .Post_sync_opn2.MOCS    = anv_mocs(device, NULL, 0),
          .Post_sync_opn3.MOCS    = anv_mocs(device, NULL, 0),
          .InterfaceDescriptor    = (struct GENX(INTERFACE_DESCRIPTOR_DATA_2)) {
-            .KernelStartPointer                 = anv_shader_get_pointer(device, shader),
+            .KernelStartPointer                 = anv_shader_get_pointer(device, &shader->kernel),
             .RegistersPerThread                 = intel_register_blocks(devinfo,
                                                                         cs_prog_data->base.grf_used),
             .NumberofThreadsinGPGPUThreadGroup  = dispatch.threads,
@@ -1235,7 +1235,7 @@ emit_cs_shader(struct anv_batch *batch,
             .MOCS                        = anv_mocs(device, NULL, 0),
          },
          .InterfaceDescriptor            = {
-            .KernelStartPointer                = anv_shader_get_pointer(device, shader),
+            .KernelStartPointer                = anv_shader_get_pointer(device, &shader->kernel),
             .SamplerCount                      = get_sampler_count(device, shader),
             .BindingTableEntryCount            = MIN2(get_surface_count(device, shader), 31),
             .NumberofThreadsinGPGPUThreadGroup = dispatch.threads,
@@ -1284,7 +1284,7 @@ emit_cs_shader(struct anv_batch *batch,
 
       struct GENX(INTERFACE_DESCRIPTOR_DATA) desc = {
          .KernelStartPointer     =
-            anv_shader_get_pointer(device, shader) +
+            anv_shader_get_pointer(device, &shader->kernel) +
             brw_cs_prog_data_prog_offset(cs_prog_data, dispatch.simd_size),
 
          .SamplerCount           = get_sampler_count(device, shader),

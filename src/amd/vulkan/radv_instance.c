@@ -325,6 +325,11 @@ radv_CreateInstance(const VkInstanceCreateInfo *pCreateInfo, const VkAllocationC
    if (RADV_DEBUG(instance, STARTUP))
       fprintf(stderr, "radv: info: Created an instance.\n");
 
+   if (RADV_DEBUG(instance, ZERO_VRAM)) {
+      fprintf(stderr, "radv: WARNING: RADV_DEBUG=zerovram is deprecated and it will be removed in"
+                      " future Mesa releases.\n");
+   }
+
    VG(VALGRIND_CREATE_MEMPOOL(instance, 0, false));
 
    *pInstance = radv_instance_to_handle(instance);

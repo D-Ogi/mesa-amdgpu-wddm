@@ -19,15 +19,21 @@ max_simd_width(const jay_shader *shader, const jay_inst *I)
       return 4;
    }
 
+   unsigned grf_simd = shader->devinfo->ver >= 20 ? 16 : 8;
+
+   /* These special instructions need to be split for various reasons. */
+   if (I->op == JAY_OPCODE_DESWIZZLE_ODD ||
+       I->op == JAY_OPCODE_MUL_32 ||
+       I->op == JAY_OPCODE_ZIP ||
+       jay_clobbers_address_reg(I)) {
+      return grf_simd;
+   }
+
    /* These special instructions need to be split for various reasons. */
    if (I->op == JAY_OPCODE_EXPAND_QUAD ||
        I->op == JAY_OPCODE_EXTRACT_SUBSPAN_INFO ||
        I->op == JAY_OPCODE_EXTRACT_BYTE_PER_8LANES ||
-       I->op == JAY_OPCODE_OFFSET_PACKED_PIXEL_COORDS ||
-       I->op == JAY_OPCODE_DESWIZZLE_ODD ||
-       I->op == JAY_OPCODE_MUL_32 ||
-       I->op == JAY_OPCODE_ZIP_UGPR16 ||
-       jay_clobbers_address_reg(I)) {
+       I->op == JAY_OPCODE_OFFSET_PACKED_PIXEL_COORDS) {
       return 16;
    }
 

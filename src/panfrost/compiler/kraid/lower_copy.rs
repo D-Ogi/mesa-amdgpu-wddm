@@ -127,8 +127,22 @@ fn lower_copy(b: &mut impl Builder, copy: OpCopy) {
         debug_assert!(copy.dst_type.total_bits() >= 16);
         debug_assert!(!copy.dst.lanes.is_byte());
 
-        // Handle non-zero immediates with MOV.i32
-        if let SrcRef::Imm32(imm) = copy.src.src_ref {
+        if let SrcRef::Imm64(imm) = copy.src.src_ref {
+            // Handle non-zero 64-bit immediates with two MOV.i32
+            assert!(copy.dst_type == DataType::I64);
+            let imm = copy.src.swizzle.fold_u64(imm.get()).unwrap();
+            b.push_op(OpMov {
+                dst: copy.dst.clone().word(0),
+                dst_type: DataType::I32,
+                src: (imm as u32).into(),
+            });
+            b.push_op(OpMov {
+                dst: copy.dst.word(1),
+                dst_type: DataType::I32,
+                src: ((imm >> 32) as u32).into(),
+            });
+        } else if let SrcRef::Imm32(imm) = copy.src.src_ref {
+            // Handle non-zero 32-bit immediates with MOV.i32
             assert!(copy.dst_type.total_bits() <= 32);
             let imm = copy.src.swizzle.fold_u32(imm.get()).unwrap();
             let mov_type = if copy.dst.lanes.is_half() {
@@ -149,18 +163,7 @@ fn lower_copy(b: &mut impl Builder, copy: OpCopy) {
                 dst_type: DataType::I32,
                 src: copy.src,
             });
-        } else if copy.dst_type.total_bits() == 64
-            && copy.src.swizzle == Swizzle::NONE
-        {
-            b.push_op(OpIAdd {
-                dst: copy.dst,
-                dst_type: DataType::I64,
-                saturate: false,
-                srcs: [copy.src, 0u32.into()],
-            });
         } else {
-            // Everything else is ShiftLop
-
             // Upgrade to a 32-bit type.  The lane mask will take care of
             // masking off the unused components
             let bits = copy.dst_type.bits();
@@ -168,16 +171,29 @@ fn lower_copy(b: &mut impl Builder, copy: OpCopy) {
             let comps = 32_u8.div_ceil(bits);
             let dst_type = DataType::v(comps, DataType::u(bits));
 
-            b.push_op(OpShiftLop {
-                dst: copy.dst,
+            // Try to use IAdd if we can to try and prioritize the CVT pipe
+            // over the SFU pipe.
+            let op = Op::from(OpIAdd {
+                dst: copy.dst.clone(),
                 dst_type,
-                shift_op: ShiftOp::None,
-                logic_op: LogicOp::None,
-                not_result: false,
-                src0: copy.src,
-                shift: 0_u8.into(),
-                src2: 0_u32.into(),
+                saturate: false,
+                srcs: [copy.src.clone(), 0u32.into()],
             });
+            let src = &op.srcs()[0];
+            if b.model().op_src_supports_swizzle(&op, src, src.swizzle) {
+                b.push_op(op);
+            } else {
+                b.push_op(OpShiftLop {
+                    dst: copy.dst,
+                    dst_type,
+                    shift_op: ShiftOp::None,
+                    logic_op: LogicOp::None,
+                    not_result: false,
+                    src0: copy.src,
+                    shift: 0_u8.into(),
+                    src2: 0_u32.into(),
+                });
+            }
         }
     }
 }

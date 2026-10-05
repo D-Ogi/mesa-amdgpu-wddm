@@ -38,7 +38,7 @@ static int si_video_get_param(struct pipe_screen *screen, enum pipe_video_profil
       return 1;
 
    case PIPE_VIDEO_CAP_SKIP_CLEAR_SURFACE:
-      return sscreen->info.has_default_zerovram_support;
+      return 1;
 
    default:
       break;

@@ -1215,8 +1215,7 @@ radv_image_create_layout(struct radv_device *device, struct radv_image_create_in
             ac_surface_zero_dcc_fields(&image->planes[0].surface);
       }
 
-      if (pdev->info.gfx_level >= GFX12 &&
-          (!radv_surface_has_scanout(device, &create_info) || pdev->info.gfx12_supports_display_dcc)) {
+      if (pdev->info.gfx_level >= GFX12) {
          const enum pipe_format format = radv_format_to_pipe_format(image->vk.format);
 
          /* Set DCC tilings for both color and depth/stencil. */

@@ -138,13 +138,14 @@ nv30_init_screen_caps(struct nv30_screen *screen)
    caps->supported_prim_modes_with_restart =
    caps->supported_prim_modes = BITFIELD_MASK(MESA_PRIM_COUNT);
    /* nv4x capabilities */
-   caps->blend_equation_separate =
-   caps->npot_textures =
    caps->conditional_render =
    caps->texture_mirror_clamp =
    caps->texture_mirror_clamp_to_edge =
    caps->primitive_restart =
    caps->primitive_restart_fixed_index = eng3d->oclass >= NV40_3D_CLASS;
+   /* nv4x only, but we need to fake these to get gles 2.0 on nv3x */
+   caps->blend_equation_separate = true;
+   caps->npot_textures = true;
    /* unsupported */
    caps->emulate_nonfixed_primitive_restart = false;
    caps->depth_clip_disable_separate = false;

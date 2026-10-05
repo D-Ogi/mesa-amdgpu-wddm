@@ -7,6 +7,7 @@
 
 #include "slice.h"
 #include "tar.h"
+#include "util/os_file.h"
 #include "util/os_time.h"
 #include "util/ralloc.h"
 #include "util/u_debug.h"
@@ -41,7 +42,7 @@ ensure_output_dir(const char *dir)
    if (stat(dir, &st) == 0)
       return S_ISDIR(st.st_mode);
 
-   return mkdir(dir, 0755) == 0;
+   return os_mkdir(dir, 0755) == 0;
 }
 
 static bool

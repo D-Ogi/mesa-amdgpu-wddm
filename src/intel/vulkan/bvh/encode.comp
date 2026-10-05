@@ -354,8 +354,10 @@ main()
     * at the end of the IR BVH, and we let the lane with
     * gl_GlobalInvocationID.x == 0 to take care of it.
     */
-   uint32_t global_id = DEREF(args.header).ir_internal_node_count -
-      (gl_GlobalInvocationID.x + push_args.start_node_offset + 1);
+   uint32_t global_id =
+      clamp(DEREF(args.header).ir_internal_node_count -
+            (gl_GlobalInvocationID.x + push_args.start_node_offset + 1),
+            0, DEREF(args.header).ir_internal_node_count - 1);
 
    uint32_t intermediate_leaf_node_size = vk_ir_node_size(args.geometry_type);
 

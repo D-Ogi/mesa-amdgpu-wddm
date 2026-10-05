@@ -393,7 +393,6 @@ struct radv_cmd_state {
    bool depth_clip_enable;
 
    uint32_t last_cb_target_mask;
-   uint32_t last_ia_multi_vgt_param;
    uint32_t last_ge_cntl;
    uint32_t last_num_instances;
    uint32_t last_first_instance;
@@ -496,11 +495,11 @@ struct radv_cmd_buffer {
 
    struct radv_cmd_buffer_queue_state queue_state;
 
-   struct radeon_winsys_bo *gfx9_fence_bo_tmz;
-   struct radeon_winsys_bo *gfx9_eop_bug_bo_tmz;
-   uint64_t gfx9_fence_va;
-   uint32_t gfx9_fence_idx;
-   uint64_t gfx9_eop_bug_va;
+   struct radeon_winsys_bo *eop_fence_bo_tmz;
+   struct radeon_winsys_bo *eop_bug_bo_tmz;
+   uint64_t eop_fence_va;
+   uint32_t eop_fence_idx;
+   uint64_t eop_bug_va;
 
    struct set vs_prologs;
    struct set ps_epilogs;

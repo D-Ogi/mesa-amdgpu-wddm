@@ -269,6 +269,16 @@ class IOStream;
 #include <string>
 #include <vector>
 
+#include "util/log.h"
+
+#ifndef GFXSTREAM_ERROR
+#define GFXSTREAM_ERROR(...) mesa_loge(__VA_ARGS__)
+#endif
+
+#ifndef GFXSTREAM_FATAL
+#define GFXSTREAM_FATAL(...) do {{ mesa_loge(__VA_ARGS__); abort(); }} while (0)
+#endif
+
 """ % VULKAN_STREAM_TYPE_GUEST
 
         functableImplInclude = """
@@ -419,6 +429,16 @@ using DlSymFunc = void* (void*, const char*);
 #include "goldfish_vk_private_defs.h"
 
 #include <cstring>
+
+#include "util/log.h"
+
+#ifndef GFXSTREAM_ERROR
+#define GFXSTREAM_ERROR(...) mesa_loge(__VA_ARGS__)
+#endif
+
+#ifndef GFXSTREAM_FATAL
+#define GFXSTREAM_FATAL(...) do { mesa_loge(__VA_ARGS__); abort(); } while (0)
+#endif
 """
         countingIncludes = """
 #include "vk_platform_compat.h"
@@ -433,6 +453,8 @@ using DlSymFunc = void* (void*, const char*);
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+
+#include "gfxstream/common/logging.h"
 """
 
         decoderSnapshotHeaderIncludes = f"""

@@ -605,6 +605,9 @@ etna_emit_state(struct etna_context *ctx)
    }
    if (unlikely(dirty & (ETNA_DIRTY_FRAMEBUFFER)) && screen->info->halti >= 3)
       /*014BC*/ EMIT_STATE(PE_MEM_CONFIG, ctx->framebuffer.PE_MEM_CONFIG);
+   if (unlikely(dirty & (ETNA_DIRTY_BLEND)) &&
+       VIV_FEATURE(screen, ETNA_FEATURE_PE_ADVANCE_BLEND_PART0))
+      /*014C0*/ EMIT_STATE(PE_ADVANCED_ALPHA_CONFIG, etna_blend_state(ctx->blend)->PE_ADVANCED_ALPHA_CONFIG);
    if (unlikely(dirty & (ETNA_DIRTY_FRAMEBUFFER | ETNA_DIRTY_TS))) {
       /*01654*/ EMIT_STATE(TS_MEM_CONFIG, ctx->framebuffer.TS_MEM_CONFIG);
       /*01658*/ EMIT_STATE_RELOC(TS_COLOR_STATUS_BASE, &ctx->framebuffer.TS_COLOR_STATUS_BASE);

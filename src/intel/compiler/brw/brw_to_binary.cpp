@@ -2083,6 +2083,11 @@ brw_generator::generate_code(const brw_shader &s,
       }
    }
 
+   if (INTEL_DEBUG(DEBUG_SHADER_HASH)) {
+      append_MOV(retype(brw_null_reg(), BRW_TYPE_UD), brw_imm_ud(prog_data->source_hash & 0xffffffff));
+      append_MOV(retype(brw_null_reg(), BRW_TYPE_UD), brw_imm_ud(prog_data->source_hash >> 32));
+   }
+
 #ifndef NDEBUG
    /* Pad with NULLs so annotations same size as gen_insts. */
    label_annotations.resize(gen_insts.size(), NULL);
@@ -2262,9 +2267,9 @@ brw_generator::generate_code(const brw_shader &s,
          files[0] = stderr;
 
       if (params->archiver) {
-         const char *filename =
-            ralloc_asprintf(mem_ctx, "GEN%d/0", dispatch_width);
-         files[1] = debug_archiver_start_file(params->archiver, filename);
+         files[1] = debug_archiver_start_file(
+            params->archiver,
+            ralloc_asprintf(mem_ctx, "GEN%d/0", dispatch_width));
       }
 
       for (unsigned i = 0; i < ARRAY_SIZE(files); i++) {
@@ -2305,6 +2310,13 @@ brw_generator::generate_code(const brw_shader &s,
       }
 
       if (params->archiver) {
+         debug_archiver_finish_file(params->archiver);
+
+         FILE *bin_dump =
+            debug_archiver_start_file(
+               params->archiver,
+               ralloc_asprintf(mem_ctx, "GEN%d/0.bin", dispatch_width));
+         fwrite(output, 1, output_size, bin_dump);
          debug_archiver_finish_file(params->archiver);
       }
    }

@@ -903,18 +903,6 @@ if with_gallium_mediafoundation_test
   endif
 endif
 
-d3d_drivers_path = get_option('d3d-drivers-path')
-if d3d_drivers_path == ''
-  d3d_drivers_path = join_paths(get_option('prefix'), get_option('libdir'), 'd3d')
-endif
-
-with_gallium_st_d3d10umd =  get_option('gallium-d3d10umd')
-if with_gallium_st_d3d10umd
-  if not with_gallium_swrast
-    error('The d3d10umd state tracker requires gallium softpipe/llvmpipe.')
-  endif
-endif
-
 if host_machine.cpu_family() == 'ppc64' and host_machine.endian() == 'little'
   if cc.compiles('''
       #include <altivec.h>
@@ -1864,7 +1852,7 @@ endif
 
 if cc.has_function('dl_iterate_phdr')
   pre_args += '-DHAVE_DL_ITERATE_PHDR'
-elif with_intel_vk or with_intel_hasvk
+elif with_intel_hasvk
   error('Intel "Anvil" Vulkan driver requires the dl_iterate_phdr function')
 endif
 
@@ -2268,7 +2256,6 @@ endif
 
 with_wayland_bind_display = with_platform_wayland and get_option('legacy-wayland').contains('bind-wayland-display')
 if with_platform_wayland
-  dep_wl_protocols = dependency('wayland-protocols', version : '>= 1.41', default_options: [ 'tests=false' ])
   dep_wayland_client = dependency('wayland-client', version : '>=1.18')
   dep_wayland_server = dependency('wayland-server', version : '>=1.18')
   if with_egl

@@ -48,6 +48,8 @@ typedef struct brw_pass_tracker {
 
    const struct brw_base_prog_key *key;
 
+   enum intel_code_motion code_motion;
+
    bool progress;
 
    /* Filled with the last line that made progress.

@@ -503,6 +503,16 @@ _mesa_bufferobj_map_range(struct gl_context *ctx,
          transfer_flags &= ~PIPE_MAP_UNSYNCHRONIZED;
    }
 
+   /* Some games keep a large buffer, where they map the entire buffer with the
+    * GL_MAP_INVALIDATE_BUFFER_BIT or GL_MAP_INVALIDATE_RANGE_BIT (but specify
+    * the range as the whole buffer), and only write to a portion of the buffer
+    * each time - so each subsequent map/write will discard the data that was
+    * previously written. This option tells the driver to ignore
+    * invalidating the entire buffer and keep the existing data in the buffer.
+    */
+   if (unlikely(ctx->st_opts->ignore_map_invalidate_buffer))
+      transfer_flags &= ~PIPE_MAP_DISCARD_WHOLE_RESOURCE;
+
    if (ctx->Const.ForceMapBufferSynchronized)
       transfer_flags &= ~PIPE_MAP_UNSYNCHRONIZED;
 

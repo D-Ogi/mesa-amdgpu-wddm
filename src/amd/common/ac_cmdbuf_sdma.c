@@ -332,6 +332,31 @@ ac_emit_sdma_copy_tiled_sub_window(struct ac_cmdbuf *cs, const struct radeon_inf
    const bool dcc =
       info->sdma_ip_version >= SDMA_7_0 ? (linear->is_compressed || tiled->is_compressed)
                                         : tiled->is_compressed;
+   uint32_t tiled_cp = 0, linear_cp = 0;
+   bool cpv = false;
+
+   if (info->sdma_ip_version == SDMA_5_2) {
+      uint32_t rd_cp = SDMA_5_2_CP_LLC_NOALLOC;
+      uint32_t wr_cp = SDMA_5_2_CP_LLC_NOALLOC;
+
+      if (dcc) {
+         /* SDMA 5.2 (GFX10.3) seems to have a cache coherency issue with GL2
+          * and DCC which causes random corruption. Overwrite the default
+          * cache policy and force NOA for writes and LRU for reads which
+          * seems the only combination to workaround it.
+          */
+         rd_cp |= SDMA_5_2_CP_GL2_LRU;
+         wr_cp |= SDMA_5_2_CP_GL2_NOA;
+      } else {
+         /* Use the default cache policy. */
+         rd_cp |= SDMA_5_2_CP_GL2_NOA;
+         wr_cp |= SDMA_5_2_CP_GL2_BYPASS;
+      }
+
+      tiled_cp = detile ? rd_cp : wr_cp;
+      linear_cp = detile ? wr_cp : rd_cp;
+      cpv = true;
+   }
 
    /* Sanity checks. */
    const bool uses_depth = linear->offset.z != 0 || tiled->offset.z != 0 || depth != 1;
@@ -343,7 +368,8 @@ ac_emit_sdma_copy_tiled_sub_window(struct ac_cmdbuf *cs, const struct radeon_inf
 
    ac_cmdbuf_begin(cs);
    ac_cmdbuf_emit(SDMA_PACKET(SDMA_OPCODE_COPY, SDMA_COPY_SUB_OPCODE_TILED_SUB_WINDOW, (tmz ? 4 : 0)) |
-                  dcc << 19 | detile << 31 | header_dword);
+                  dcc << 19 | detile << 31 | header_dword |
+                  SDMA_5_2_COPY_TILED_SUB_WINDOW_CPV(cpv));
    ac_cmdbuf_emit(tiled->va);
    ac_cmdbuf_emit(tiled->va >> 32);
    ac_cmdbuf_emit(tiled->offset.x | tiled->offset.y << 16);
@@ -360,7 +386,10 @@ ac_emit_sdma_copy_tiled_sub_window(struct ac_cmdbuf *cs, const struct radeon_inf
       ac_cmdbuf_emit(depth);
    } else {
       ac_cmdbuf_emit((width - 1) | (height - 1) << 16);
-      ac_cmdbuf_emit((depth - 1));
+      ac_cmdbuf_emit((depth - 1) |
+                     (cpv ? SDMA_5_2_COPY_TILED_SUB_WINDOW_TILED_CP(tiled_cp) |
+                            SDMA_5_2_COPY_TILED_SUB_WINDOW_LINEAR_CP(linear_cp)
+                          : 0));
    }
 
    if (dcc) {
@@ -392,6 +421,8 @@ ac_emit_sdma_copy_t2t_sub_window(struct ac_cmdbuf *cs, const struct radeon_info 
       ac_sdma_get_tiled_header_dword(info->sdma_ip_version, src);
    const uint32_t src_info_dword = ac_sdma_get_tiled_info_dword(info, src);
    const uint32_t dst_info_dword = ac_sdma_get_tiled_info_dword(info, dst);
+   uint32_t src_cp = 0, dst_cp = 0;
+   bool cpv = false;
 
    /* Sanity checks. */
    assert(info->sdma_ip_version >= SDMA_4_0);
@@ -414,9 +445,30 @@ ac_emit_sdma_copy_t2t_sub_window(struct ac_cmdbuf *cs, const struct radeon_info 
    /* 0 = compress (src is uncompressed), 1 = decompress (src is compressed). */
    const uint32_t dcc_dir = src->is_compressed && !dst->is_compressed;
 
+   if (info->sdma_ip_version == SDMA_5_2) {
+      src_cp = SDMA_5_2_CP_LLC_NOALLOC;
+      dst_cp = SDMA_5_2_CP_LLC_NOALLOC;
+      cpv = true;
+
+      /* SDMA 5.2 (GFX10.3) seems to have a cache coherency issue with GL2 and
+       * DCC which causes random corruption. Overwrite the default cache
+       * policy and force NOA for writes and LRU for reads which seems the
+       * only combination to workaround it.
+       */
+      if (dcc) {
+         src_cp |= SDMA_5_2_CP_GL2_LRU;
+         dst_cp |= SDMA_5_2_CP_GL2_NOA;
+      } else {
+         /* Use the default cache policy. */
+         src_cp |= SDMA_5_2_CP_GL2_NOA;
+         dst_cp |= SDMA_5_2_CP_GL2_BYPASS;
+      }
+   }
+
    ac_cmdbuf_begin(cs);
    ac_cmdbuf_emit(SDMA_PACKET(SDMA_OPCODE_COPY, SDMA_COPY_SUB_OPCODE_T2T_SUB_WINDOW, 0) |
-                  dcc << 19 | dcc_dir << 31 | src_header_dword);
+                  dcc << 19 | dcc_dir << 31 | src_header_dword |
+                  SDMA_5_2_COPY_T2T_SUB_WINDOW_CPV(cpv));
    ac_cmdbuf_emit(src->va);
    ac_cmdbuf_emit(src->va >> 32);
    ac_cmdbuf_emit(src->offset.x | src->offset.y << 16);
@@ -430,7 +482,10 @@ ac_emit_sdma_copy_t2t_sub_window(struct ac_cmdbuf *cs, const struct radeon_info 
    ac_cmdbuf_emit((dst->extent.height - 1) | (dst->extent.depth - 1) << 16);
    ac_cmdbuf_emit(dst_info_dword);
    ac_cmdbuf_emit((width - 1) | (height - 1) << 16);
-   ac_cmdbuf_emit((depth - 1));
+   ac_cmdbuf_emit((depth - 1) |
+                  (cpv ? SDMA_5_2_COPY_T2T_SUB_WINDOW_SRC_CP(src_cp) |
+                         SDMA_5_2_COPY_T2T_SUB_WINDOW_DST_CP(dst_cp)
+                       : 0));
 
    if (dcc) {
       if (info->sdma_ip_version >= SDMA_7_0) {

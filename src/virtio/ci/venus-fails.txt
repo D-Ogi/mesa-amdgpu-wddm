@@ -20,3 +20,7 @@ dEQP-VK.mesh_shader.ext.smoke.optimized_lib.depth_only_triangles_position_compon
 
 # VKCTS 1.4.5.3 -> 1.4.6.1 uprev
 dEQP-VK.sparse_resources.buffer.texel_buffers.sparse_residency.uniform_texel_buffer_sparse_fetch_size_2_10_r32ui,Fail
+
+# Nightly run expectations update
+dEQP-VK.tessellation.tesscoord.isolines_equal_spacing_execution_mode_in_tesc,Fail
+

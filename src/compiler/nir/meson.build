@@ -84,7 +84,6 @@ with_nir_headers_only = not with_gfx_compute or (
   not [
     with_gallium_va,
     with_any_vk,
-    with_gallium_st_d3d10umd,
     with_gallium_rusticl,
     with_microsoft_clc,
     with_spirv_to_dxil,

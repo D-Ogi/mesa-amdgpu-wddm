@@ -325,3 +325,9 @@ intel_register_blocks_supported(const struct intel_device_info *devinfo,
    const unsigned n = (num_regs / 32) - 1;
    return intel_register_blocks_bits(devinfo) & (1u << n);
 }
+
+uint8_t
+intel_sampler_state_size(bool uses_efficient_64bit)
+{
+   return uses_efficient_64bit ? 32 : 16;
+}

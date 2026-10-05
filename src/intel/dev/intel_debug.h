@@ -86,7 +86,6 @@ enum intel_debug_flag {
    DEBUG_DISPATCH_BKP,
    DEBUG_BATCH_STATS,
    DEBUG_REG_PRESSURE,
-   DEBUG_SHADER_PRINT,
    DEBUG_CL_QUIET,
    DEBUG_BVH_BLAS,
    DEBUG_BVH_TLAS,
@@ -104,6 +103,7 @@ enum intel_debug_flag {
    DEBUG_RT_NO_AHS,
    DEBUG_RT_NO_CHS,
    DEBUG_SHADERS_LINENO,
+   DEBUG_SHADER_HASH,
    /* Keep the stages grouped */
    DEBUG_VS,
    DEBUG_TCS,
@@ -191,6 +191,7 @@ intel_simd_debug_allowed_modes(mesa_shader_stage stage)
 {
    switch (stage) {
    case MESA_SHADER_COMPUTE:
+   case MESA_SHADER_KERNEL:
       return (intel_simd & DEBUG_CS_SIMD) >> (ffsll(DEBUG_CS_SIMD8) - 1);
    case MESA_SHADER_TASK:
       return (intel_simd & DEBUG_TS_SIMD) >> (ffsll(DEBUG_TS_SIMD8) - 1);

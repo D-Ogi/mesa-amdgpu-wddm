@@ -21,7 +21,7 @@
 void
 radv_cs_emit_write_event_eop(struct radv_cmd_stream *cs, enum amd_gfx_level gfx_level, unsigned event,
                              unsigned event_flags, unsigned dst_sel, unsigned int_sel, unsigned data_sel, uint64_t va,
-                             uint32_t new_fence, uint64_t gfx9_eop_bug_va)
+                             uint32_t new_fence, uint64_t eop_bug_va)
 {
    assert(cs->hw_ip == AMD_IP_GFX || cs->hw_ip == AMD_IP_COMPUTE);
 
@@ -29,17 +29,17 @@ radv_cs_emit_write_event_eop(struct radv_cmd_stream *cs, enum amd_gfx_level gfx_
     * shouldn't be necessary because it's using SURFACE_SYNC to flush L2. See
     * waEventWriteEopPrematureL2Inv in PAL.
     */
-   const uint64_t eop_bug_va = gfx_level >= GFX9 ? gfx9_eop_bug_va : va;
+   const uint64_t tmp_eop_bug_va = gfx_level >= GFX9 ? eop_bug_va : va;
 
    ac_emit_cp_release_mem(cs->b, gfx_level, cs->hw_ip, event, event_flags, dst_sel, int_sel, data_sel, va, new_fence,
-                          eop_bug_va);
+                          tmp_eop_bug_va);
 }
 
 void
 radv_cs_emit_cache_flush(struct radeon_winsys *ws, struct radv_cmd_stream *cs, enum amd_gfx_level gfx_level,
                          uint32_t *flush_cnt, uint64_t flush_va, enum ac_barrier_flags flush_bits,
                          enum ac_rgp_flush_bits *rgp_flush_bits, enum ac_pws_acquire_point pws_acquire_point,
-                         uint64_t gfx9_eop_bug_va)
+                         uint64_t eop_bug_va)
 {
    /* TODO: Stop setting this barrier flags. */
    if (gfx_level >= GFX10)
@@ -53,7 +53,7 @@ radv_cs_emit_cache_flush(struct radeon_winsys *ws, struct radv_cmd_stream *cs, e
       .pws_acquire_point = pws_acquire_point,
       .wait_mem_va = flush_va,
       .wait_mem_number = flush_cnt,
-      .eop_bug_va = gfx9_eop_bug_va,
+      .eop_bug_va = eop_bug_va,
    };
 
    radeon_check_space(ws, cs->b, 128);

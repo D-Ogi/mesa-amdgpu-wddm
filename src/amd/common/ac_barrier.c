@@ -16,17 +16,13 @@ static enum ac_barrier_flags
 ac_get_reduced_barrier_flags(enum amd_gfx_level gfx_level, enum amd_ip_type ip_type,
                              enum ac_barrier_flags flags)
 {
-   if (ip_type == AMD_IP_COMPUTE) {
-      /* Only process compute flags. */
-      flags &= AC_BARRIER_INV_ICACHE | AC_BARRIER_INV_SMEM | AC_BARRIER_INV_VMEM |
-               AC_BARRIER_INV_L2 | AC_BARRIER_WB_L2 | AC_BARRIER_INV_L2_METADATA |
-               AC_BARRIER_SYNC_CS | AC_BARRIER_PIPELINESTAT_START |
-               AC_BARRIER_PIPELINESTAT_STOP;
-   }
+   /* Only process compute flags on compute queues. */
+   if (ip_type == AMD_IP_COMPUTE)
+      flags &= AC_BARRIER_ALL_COMPUTE;
 
-   /* We use a TS event to flush CB/DB on GFX9+. */
    const bool uses_ts_event =
-      gfx_level >= GFX9 && flags & (AC_BARRIER_SYNC_AND_INV_CB | AC_BARRIER_SYNC_AND_INV_DB);
+      gfx_level >= GFX9 && flags & (AC_BARRIER_SYNC_AND_INV_CB | AC_BARRIER_SYNC_AND_INV_DB |
+                                    AC_BARRIER_SYNC_BOTTOM_OF_PIPE);
 
    /* TS events wait for everything. */
    if (uses_ts_event)
@@ -126,33 +122,38 @@ ac_gfx10_emit_barrier(struct ac_cmdbuf *cs, enum amd_gfx_level gfx_level,
       gcr_cntl |= S_587_GLM_INV(1) | S_587_GLM_WB(1);
 
    /* Flush CB/DB. Note that this also idles all shaders, including compute shaders. */
-   if (flags & (AC_BARRIER_SYNC_AND_INV_CB | AC_BARRIER_SYNC_AND_INV_DB)) {
-      unsigned cb_db_event = 0;
+   if (flags & (AC_BARRIER_SYNC_AND_INV_CB | AC_BARRIER_SYNC_AND_INV_DB |
+                AC_BARRIER_SYNC_BOTTOM_OF_PIPE)) {
+      unsigned eop_event = 0;
 
       /* Determine the TS event that we'll use to flush CB/DB. */
       if ((flags & AC_BARRIER_SYNC_AND_INV_CB && flags & AC_BARRIER_SYNC_AND_INV_DB) ||
           /* GFX11 can't use the DB_META event and must use a full flush to flush DB_META. */
           (gfx_level == GFX11 && flags & AC_BARRIER_SYNC_AND_INV_DB)) {
-         cb_db_event = V_028A90_CACHE_FLUSH_AND_INV_TS_EVENT;
+         eop_event = V_028A90_CACHE_FLUSH_AND_INV_TS_EVENT;
          *rgp_flush_bits |= AC_RGP_FLUSH_FLUSH_CB | AC_RGP_FLUSH_INVAL_CB |
                             AC_RGP_FLUSH_FLUSH_DB | AC_RGP_FLUSH_INVAL_DB;
       } else if (flags & AC_BARRIER_SYNC_AND_INV_CB) {
-         cb_db_event = V_028A90_FLUSH_AND_INV_CB_DATA_TS;
+         eop_event = V_028A90_FLUSH_AND_INV_CB_DATA_TS;
          *rgp_flush_bits |= AC_RGP_FLUSH_FLUSH_CB | AC_RGP_FLUSH_INVAL_CB;
-      } else {
-         assert(flags & AC_BARRIER_SYNC_AND_INV_DB);
-         cb_db_event = V_028A90_FLUSH_AND_INV_DB_DATA_TS;
+      } else if (flags & AC_BARRIER_SYNC_AND_INV_DB) {
+         eop_event = V_028A90_FLUSH_AND_INV_DB_DATA_TS;
          *rgp_flush_bits |= AC_RGP_FLUSH_FLUSH_DB | AC_RGP_FLUSH_INVAL_DB;
+      } else {
+         assert(flags & AC_BARRIER_SYNC_BOTTOM_OF_PIPE);
+         eop_event = V_028A90_BOTTOM_OF_PIPE_TS;
       }
+
+      *rgp_flush_bits |= AC_RGP_FLUSH_WAIT_ON_EOP_TS;
 
       ac_cmdbuf_begin(cs);
 
       /* We must flush CMASK/FMASK/DCC separately if the main event only flushes CB_DATA. */
-      if (gfx_level < GFX12 && cb_db_event == V_028A90_FLUSH_AND_INV_CB_DATA_TS)
+      if (gfx_level < GFX12 && eop_event == V_028A90_FLUSH_AND_INV_CB_DATA_TS)
          ac_cmdbuf_event_write(V_028A90_FLUSH_AND_INV_CB_META);
 
       /* We must flush HTILE separately if the main event only flushes DB_DATA. */
-      if (gfx_level < GFX12 && cb_db_event == V_028A90_FLUSH_AND_INV_DB_DATA_TS)
+      if (gfx_level < GFX12 && eop_event == V_028A90_FLUSH_AND_INV_DB_DATA_TS)
          ac_cmdbuf_event_write(V_028A90_FLUSH_AND_INV_DB_META);
 
       ac_cmdbuf_end();
@@ -160,9 +161,9 @@ ac_gfx10_emit_barrier(struct ac_cmdbuf *cs, enum amd_gfx_level gfx_level,
       /* First flush CB/DB, then L1/L2. */
       gcr_cntl |= S_587_SEQ(V_587_SEQ_FORWARD);
 
-      if (gfx_level >= GFX11) {
+      if (gfx_level >= GFX11 && ip_type == AMD_IP_GFX) {
          /* Send an event that flushes caches. */
-         ac_emit_cp_release_mem_pws(cs, gfx_level, ip_type, cb_db_event,
+         ac_emit_cp_release_mem_pws(cs, gfx_level, ip_type, eop_event,
                                     gcr_cntl & C_587_GLI_INV);
 
          /* The RELEASE_MEM above already flushed the data caches, so the
@@ -178,35 +179,33 @@ ac_gfx10_emit_barrier(struct ac_cmdbuf *cs, enum amd_gfx_level gfx_level,
           */
          uint32_t pws_stage = flags & AC_BARRIER_PFP_SYNC_ME ? V_581B_CP_PFP : V_581B_CP_ME;
 
-         if (ip_type == AMD_IP_GFX) {
-            enum ac_pws_acquire_point acquire_point = state->pws_acquire_point;
+         enum ac_pws_acquire_point acquire_point = state->pws_acquire_point;
 
-            /* HW limitation: GCR cache ops during an ACQUIRE can only be
-             * performed at the PFP/ME stage. If the ACQUIRE still needs to
-             * invalidate the I$ (GLI_INV), don't defer the wait past ME.
+         /* HW limitation: GCR cache ops during an ACQUIRE can only be
+          * performed at the PFP/ME stage. If the ACQUIRE still needs to
+          * invalidate the I$ (GLI_INV), don't defer the wait past ME.
+          */
+         if (acquire_point < AC_PWS_ACQUIRE_POINT_ME && G_587_GLI_INV(acquire_gcr_cntl) != 0)
+            acquire_point = AC_PWS_ACQUIRE_POINT_ME;
+
+         switch (acquire_point) {
+         case AC_PWS_ACQUIRE_POINT_PRE_DEPTH:
+            pws_stage = V_581B_PRE_DEPTH;
+            /* A PRE_DEPTH ACQUIRE can't carry GCR bits; GLI_INV is 0 here
+             * (see the clamp above), so drop the remaining bits to make
+             * the ACQUIRE a pure wait.
              */
-            if (acquire_point < AC_PWS_ACQUIRE_POINT_ME && G_587_GLI_INV(acquire_gcr_cntl) != 0)
-               acquire_point = AC_PWS_ACQUIRE_POINT_ME;
-
-            switch (acquire_point) {
-            case AC_PWS_ACQUIRE_POINT_PRE_DEPTH:
-               pws_stage = V_581B_PRE_DEPTH;
-               /* A PRE_DEPTH ACQUIRE can't carry GCR bits; GLI_INV is 0 here
-                * (see the clamp above), so drop the remaining bits to make
-                * the ACQUIRE a pure wait.
-                */
-               acquire_gcr_cntl = 0;
-               break;
-            case AC_PWS_ACQUIRE_POINT_ME:
-               pws_stage = V_581B_CP_ME;
-               break;
-            default:
-               break;
-            }
+            acquire_gcr_cntl = 0;
+            break;
+         case AC_PWS_ACQUIRE_POINT_ME:
+            pws_stage = V_581B_CP_ME;
+            break;
+         default:
+            break;
          }
 
          /* Wait for the event and invalidate remaining caches if needed. */
-         ac_emit_cp_acquire_mem_pws(cs, gfx_level, ip_type, cb_db_event,
+         ac_emit_cp_acquire_mem_pws(cs, gfx_level, ip_type, eop_event,
                                     pws_stage, 0,
                                     gcr_cntl & ~C_587_GLI_INV /* keep only GLI_INV */);
 
@@ -240,17 +239,18 @@ ac_gfx10_emit_barrier(struct ac_cmdbuf *cs, enum amd_gfx_level gfx_level,
          unsigned gl2_wb = G_587_GL2_WB(gcr_cntl);
          unsigned gcr_seq = G_587_SEQ(gcr_cntl);
 
-         gcr_cntl &=
-            C_587_GLM_WB & C_587_GLM_INV & C_587_GLV_INV & C_587_GL1_INV & C_587_GL2_INV & C_587_GL2_WB; /* keep SEQ */
+         gcr_cntl &= (gfx_level >= GFX12 ? ~0 : C_587_GLM_WB & C_587_GLM_INV & C_587_GL1_INV) &
+                     C_587_GLV_INV & C_587_GL2_INV & C_587_GL2_WB; /* keep SEQ */
 
          assert(state->wait_mem_number);
+         assert(state->wait_mem_va);
+
          (*state->wait_mem_number)++;
 
-         ac_emit_cp_release_mem(cs, gfx_level, ip_type, cb_db_event,
-                                S_491_GLM_WB(glm_wb) |
-                                S_491_GLM_INV(glm_inv) |
+         ac_emit_cp_release_mem(cs, gfx_level, ip_type, eop_event,
+                                (gfx_level >= GFX12 ? 0 : S_491_GLM_WB(glm_wb) | S_491_GLM_INV(glm_inv) |
+                                                          S_491_GL1_INV(gl1_inv)) |
                                 S_491_GLV_INV(glv_inv) |
-                                S_491_GL1_INV(gl1_inv) |
                                 S_491_GL2_INV(gl2_inv) |
                                 S_491_GL2_WB(gl2_wb) |
                                 S_491_SEQ(gcr_seq),
@@ -314,7 +314,8 @@ ac_gfx6_emit_barrier(struct ac_cmdbuf *cs, enum amd_gfx_level gfx_level,
 {
    enum ac_barrier_flags flags =
       ac_get_reduced_barrier_flags(gfx_level, ip_type, state->flags);
-   const uint32_t flush_cb_db = flags & (AC_BARRIER_SYNC_AND_INV_CB | AC_BARRIER_SYNC_AND_INV_DB);
+   const uint32_t eop_flush_flags = flags & (AC_BARRIER_SYNC_AND_INV_CB | AC_BARRIER_SYNC_AND_INV_DB |
+                                             AC_BARRIER_SYNC_BOTTOM_OF_PIPE);
    const bool is_mec = ip_type == AMD_IP_COMPUTE && gfx_level >= GFX7;
    uint32_t cp_coher_cntl = 0;
 
@@ -391,7 +392,7 @@ ac_gfx6_emit_barrier(struct ac_cmdbuf *cs, enum amd_gfx_level gfx_level,
     * GFX9: The TS event is always written after full pipeline completion
     * regardless of CB/DB bindings.
     */
-   if (gfx_level <= GFX8 || !flush_cb_db) {
+   if (gfx_level <= GFX8 || !eop_flush_flags) {
       if (flags & AC_BARRIER_SYNC_PS) {
          ac_cmdbuf_event_write(V_028A90_PS_PARTIAL_FLUSH);
          *rgp_flush_bits |= AC_RGP_FLUSH_PS_PARTIAL_FLUSH;
@@ -411,22 +412,28 @@ ac_gfx6_emit_barrier(struct ac_cmdbuf *cs, enum amd_gfx_level gfx_level,
    /* GFX9: Wait for idle if we're flushing CB or DB. ACQUIRE_MEM doesn't
     * wait for idle on GFX9. We have to use a TS event.
     */
-   if (gfx_level == GFX9 && flush_cb_db) {
-      uint64_t va;
-      unsigned tc_flags, cb_db_event;
+   if ((gfx_level == GFX9 && eop_flush_flags) || flags & AC_BARRIER_SYNC_BOTTOM_OF_PIPE) {
+      unsigned eop_event = V_028A90_BOTTOM_OF_PIPE_TS;
+      unsigned tc_flags;
 
-      /* Set the CB/DB flush event. */
-      switch (flush_cb_db) {
-      case AC_BARRIER_SYNC_AND_INV_CB:
-         cb_db_event = V_028A90_FLUSH_AND_INV_CB_DATA_TS;
-         break;
-      case AC_BARRIER_SYNC_AND_INV_DB:
-         cb_db_event = V_028A90_FLUSH_AND_INV_DB_DATA_TS;
-         break;
-      default:
-         /* both CB & DB */
-         cb_db_event = V_028A90_CACHE_FLUSH_AND_INV_TS_EVENT;
+      if (gfx_level == GFX9) {
+         if (eop_flush_flags & AC_BARRIER_SYNC_AND_INV_CB &&
+             eop_flush_flags & AC_BARRIER_SYNC_AND_INV_DB) {
+            eop_event = V_028A90_CACHE_FLUSH_AND_INV_TS_EVENT;
+            *rgp_flush_bits |= AC_RGP_FLUSH_FLUSH_CB | AC_RGP_FLUSH_INVAL_CB |
+                               AC_RGP_FLUSH_FLUSH_DB | AC_RGP_FLUSH_INVAL_DB;
+         } else if (eop_flush_flags & AC_BARRIER_SYNC_AND_INV_CB) {
+            eop_event = V_028A90_FLUSH_AND_INV_CB_DATA_TS;
+            *rgp_flush_bits |= AC_RGP_FLUSH_FLUSH_CB | AC_RGP_FLUSH_INVAL_CB;
+         } else if (eop_flush_flags & AC_BARRIER_SYNC_AND_INV_DB) {
+            eop_event = V_028A90_FLUSH_AND_INV_DB_DATA_TS;
+            *rgp_flush_bits |= AC_RGP_FLUSH_FLUSH_DB | AC_RGP_FLUSH_INVAL_DB;
+         }
       }
+
+      assert(eop_event != V_028A90_BOTTOM_OF_PIPE_TS || flags & AC_BARRIER_SYNC_BOTTOM_OF_PIPE);
+
+      *rgp_flush_bits |= AC_RGP_FLUSH_WAIT_ON_EOP_TS;
 
       /* These are the only allowed combinations. If you need to
        * do multiple operations at once, do them separately.
@@ -442,31 +449,42 @@ ac_gfx6_emit_barrier(struct ac_cmdbuf *cs, enum amd_gfx_level gfx_level,
        */
       tc_flags = 0;
 
-      if (flags & AC_BARRIER_INV_L2_METADATA) {
-         tc_flags = EVENT_TC_ACTION_ENA | EVENT_TC_MD_ACTION_ENA;
-      }
+      /* Flush L2 (=TC) together with the TS event.
+       * - GFX6 doesn't have the TC bits in EVENT_WRITE_EOP.
+       * - GFX7 has a FW bug where even multiple EOP events seem insufficient.
+       */
+      if (gfx_level >= GFX8) {
+         if (flags & AC_BARRIER_INV_L2_METADATA) {
+            tc_flags = EVENT_TC_ACTION_ENA;
 
-      *rgp_flush_bits |= AC_RGP_FLUSH_FLUSH_CB | AC_RGP_FLUSH_INVAL_CB |
-                         AC_RGP_FLUSH_FLUSH_DB | AC_RGP_FLUSH_INVAL_DB;
+            if (gfx_level == GFX9)
+               tc_flags |= EVENT_TC_MD_ACTION_ENA; /* Only the metadata cache in L2. */
+            else
+               tc_flags |= EVENT_TC_WB_ACTION_ENA; /* Everything in L2. (GFX8 only, which doesn't have the MD flag) */
 
-      /* Ideally flush L2 together with CB/DB. */
-      if (flags & AC_BARRIER_INV_L2) {
-         /* Writeback and invalidate everything in L2 & L1. */
-         tc_flags = EVENT_TC_ACTION_ENA | EVENT_TC_WB_ACTION_ENA;
+            flags &= ~AC_BARRIER_INV_L2_METADATA;
+         }
 
-         /* Clear the flags. */
-         flags &= ~(AC_BARRIER_INV_L2 | AC_BARRIER_WB_L2);
+         if (flags & AC_BARRIER_INV_L2) {
+            /* Writeback and invalidate everything in L2. */
+            tc_flags = EVENT_TC_ACTION_ENA | EVENT_TC_WB_ACTION_ENA;
 
-         *rgp_flush_bits |= AC_RGP_FLUSH_INVAL_L2;
+            /* Clear the flags. */
+            flags &= ~(AC_BARRIER_INV_L2 | AC_BARRIER_WB_L2);
+
+            *rgp_flush_bits |= AC_RGP_FLUSH_INVAL_L2;
+         }
       }
 
       /* Do the flush (enqueue the event and wait for it). */
       assert(state->wait_mem_number);
+      assert(state->wait_mem_va);
+
       (*state->wait_mem_number)++;
 
-      va = state->wait_mem_va;
+      uint64_t va = state->wait_mem_va;
 
-      ac_emit_cp_release_mem(cs, gfx_level, ip_type, cb_db_event, tc_flags,
+      ac_emit_cp_release_mem(cs, gfx_level, ip_type, eop_event, tc_flags,
                              EOP_DST_SEL_MEM, EOP_INT_SEL_SEND_DATA_AFTER_WR_CONFIRM,
                              EOP_DATA_SEL_VALUE_32BIT, va,
                              *(state->wait_mem_number),

@@ -424,7 +424,8 @@ virgl_init_screen_caps(struct virgl_screen *vscreen)
    caps->fbfetch =
       (vscreen->caps.caps.v2.capability_bits & VIRGL_CAP_TGSI_FBFETCH) ? 1 : 0;
    caps->blend_equation_advanced =
-      vscreen->caps.caps.v2.capability_bits_v2 & VIRGL_CAP_V2_BLEND_EQUATION;
+      (vscreen->caps.caps.v2.capability_bits_v2 & VIRGL_CAP_V2_BLEND_EQUATION) ?
+      PIPE_ADVANCED_BLEND_KHR_MODES_MASK : 0;
    caps->shader_clock = vscreen->caps.caps.v2.capability_bits & VIRGL_CAP_SHADER_CLOCK;
    caps->shader_array_components =
       vscreen->caps.caps.v2.capability_bits & VIRGL_CAP_TGSI_COMPONENTS;

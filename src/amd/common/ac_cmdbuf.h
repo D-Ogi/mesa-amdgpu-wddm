@@ -500,6 +500,29 @@ struct ac_tracked_regs {
       }                                                                    \
    } while (0)
 
+#define ac_cmdbuf_opt_set_ctx_reg_idx(tracked_regs, reg, idx, reg_enum, value)   \
+   do {                                                                          \
+      const uint32_t __value = (value);                                          \
+      if (!BITSET_TEST(tracked_regs->reg_saved_mask, (reg_enum)) ||              \
+          tracked_regs->reg_value[(reg_enum)] != __value) {                      \
+         ac_cmdbuf_set_ctx_reg_idx(reg, idx, __value);                           \
+         BITSET_SET(tracked_regs->reg_saved_mask, (reg_enum));                   \
+         tracked_regs->reg_value[(reg_enum)] = __value;                          \
+         __cs->context_roll = true;                                              \
+      }                                                                          \
+   } while (0)
+
+#define ac_cmdbuf_opt_set_ucfg_reg_idx(tracked_regs, info, reg, idx, reg_enum, value)   \
+   do {                                                                          \
+      const uint32_t __value = (value);                                          \
+      if (!BITSET_TEST(tracked_regs->reg_saved_mask, (reg_enum)) ||              \
+          tracked_regs->reg_value[(reg_enum)] != __value) {                      \
+         ac_cmdbuf_set_ucfg_reg_idx(info, reg, idx, __value);                    \
+         BITSET_SET(tracked_regs->reg_saved_mask, (reg_enum));                   \
+         tracked_regs->reg_value[(reg_enum)] = __value;                          \
+      }                                                                          \
+   } while (0)
+
 #define ac_cmdbuf_opt_set_ctx_reg2(tracked_regs, reg, reg_enum, v1, v2)                                     \
    do {                                                                                                     \
       static_assert(BITSET_BITWORD(reg_enum) == BITSET_BITWORD(reg_enum + 1),                               \

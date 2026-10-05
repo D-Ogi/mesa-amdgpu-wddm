@@ -37,6 +37,7 @@
 #include "hw/state_3d.xml.h"
 #include "hw/state_blt.xml.h"
 
+#include "util/blend.h"
 #include "util/format/u_format.h"
 #include "util/u_math.h"
 #include "util/u_pack_color.h"
@@ -157,6 +158,45 @@ translate_blend_factor(unsigned blend_factor)
    default:
       DBG("Unhandled blend factor: %i", blend_factor);
       return ETNA_NO_MATCH;
+   }
+}
+
+/* Advanced blend modes the PE blends natively, as a bitmask of
+ * BITFIELD_BIT(enum pipe_advanced_blend_mode). The remaining
+ * KHR_blend_equation_advanced modes need shader lowering.
+ */
+#define ETNA_ADVANCED_BLEND_MODES \
+   (BITFIELD_BIT(PIPE_ADVANCED_BLEND_MULTIPLY) | \
+    BITFIELD_BIT(PIPE_ADVANCED_BLEND_SCREEN) | \
+    BITFIELD_BIT(PIPE_ADVANCED_BLEND_OVERLAY) | \
+    BITFIELD_BIT(PIPE_ADVANCED_BLEND_DARKEN) | \
+    BITFIELD_BIT(PIPE_ADVANCED_BLEND_LIGHTEN) | \
+    BITFIELD_BIT(PIPE_ADVANCED_BLEND_HARDLIGHT) | \
+    BITFIELD_BIT(PIPE_ADVANCED_BLEND_DIFFERENCE) | \
+    BITFIELD_BIT(PIPE_ADVANCED_BLEND_EXCLUSION))
+
+static inline uint32_t
+translate_advanced_blend_mode(enum pipe_advanced_blend_mode mode)
+{
+   switch (mode) {
+   case PIPE_ADVANCED_BLEND_MULTIPLY:
+      return ADVANCED_BLEND_MODE_MULTIPLY;
+   case PIPE_ADVANCED_BLEND_SCREEN:
+      return ADVANCED_BLEND_MODE_SCREEN;
+   case PIPE_ADVANCED_BLEND_OVERLAY:
+      return ADVANCED_BLEND_MODE_OVERLAY;
+   case PIPE_ADVANCED_BLEND_DARKEN:
+      return ADVANCED_BLEND_MODE_DARKEN;
+   case PIPE_ADVANCED_BLEND_LIGHTEN:
+      return ADVANCED_BLEND_MODE_LIGHTEN;
+   case PIPE_ADVANCED_BLEND_HARDLIGHT:
+      return ADVANCED_BLEND_MODE_HARDLIGHT;
+   case PIPE_ADVANCED_BLEND_DIFFERENCE:
+      return ADVANCED_BLEND_MODE_DIFFERENCE;
+   case PIPE_ADVANCED_BLEND_EXCLUSION:
+      return ADVANCED_BLEND_MODE_EXCLUSION;
+   default:
+      UNREACHABLE("advanced blend mode without hardware support");
    }
 }
 

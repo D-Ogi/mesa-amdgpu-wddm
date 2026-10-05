@@ -227,6 +227,7 @@ etna_get_fs(struct etna_context *ctx, struct etna_shader_key* const key)
    struct etna_shader *fs = ctx->shader.bind_fs;
 
    key->use_xfb_emu = false;
+   key->rt_pack_rgba16 = ctx->framebuffer_s.rt_pack_rgba16;
 
    /* update the key if we need to run nir_lower_sample_tex_compare(..).
     * halti < 2 has no HW shadow compare. halti >= 2 has it, but depth32f is
@@ -303,9 +304,6 @@ etna_reset_gpu_state(struct etna_context *ctx)
    }
    if (screen->info->halti >= 3) { /* Only on HALTI3+ */
       etna_set_state(stream, VIVS_PS_HALTI3_UNK0103C, 0x76543210);
-   }
-   if (screen->info->halti >= 4) { /* Only on HALTI4+ */
-      etna_set_state(stream, VIVS_PE_ADVANCED_ALPHA_CONFIG, 0x00000000);
    }
    if (screen->info->halti >= 5) { /* Only on HALTI5+ */
       etna_set_state(stream, VIVS_NTE_DESCRIPTOR_CONTROL,
@@ -574,8 +572,14 @@ etna_draw_vbo(struct pipe_context *pctx, const struct pipe_draw_info *info,
 
    if (ctx->dirty & ETNA_DIRTY_SAMPLER_VIEWS) {
       /* Mark textures as being read */
-      u_foreach_bit(i, ctx->active_sampler_views)
-         resource_read(ctx, ctx->sampler_view[i]->texture);
+      u_foreach_bit(i, ctx->active_sampler_views) {
+         struct pipe_sampler_view *view = ctx->sampler_view[i];
+
+         resource_read(ctx, view->texture);
+
+         if (etna_sampler_view_uses_border_shadow(ctx, i))
+            resource_read(ctx, &etna_sampler_view_resource(ctx, view, i)->base);
+      }
    }
 
    /* Mark streamout buffers as being written. */
@@ -701,11 +705,13 @@ etna_flush(struct pipe_context *pctx, struct pipe_fence_handle **fence,
    ctx->stats.flushes++;
 
    if (VIV_FEATURE(ctx->screen, ETNA_FEATURE_HWTFB)) {
-      if (ctx->streamout.xfb_hw_state == ETNA_XFB_HW_ACTIVE)
+      if (ctx->streamout.xfb_hw_state == ETNA_XFB_HW_ACTIVE) {
          etna_set_state(ctx->stream, VIVS_TFB_COMMAND, TFB_COMMAND_DISABLE);
+         ctx->streamout.xfb_hw_state = ETNA_XFB_HW_PAUSED;
+      }
 
-      ctx->streamout.xfb_hw_state = ETNA_XFB_HW_IDLE;
-      ctx->streamout.xfb_should_be_active = false;
+      if (!ctx->streamout.xfb_should_be_active)
+         ctx->streamout.xfb_hw_state = ETNA_XFB_HW_IDLE;
    }
 
    list_for_each_entry(struct etna_acc_query, aq, &ctx->active_acc_queries, node)

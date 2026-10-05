@@ -99,7 +99,7 @@ enum radv_perfcounter_op {
 #define G_REG_OFFSET(x)    ((x) & 0xFFFF)
 #define S_REG_INSTANCES(x) ((x) << 16)
 #define G_REG_INSTANCES(x) (((x) >> 16) & 0x7FFF)
-#define S_REG_CONSTANT(x)  ((x) << 31)
+#define S_REG_CONSTANT(x)  ((unsigned)(x) << 31)
 #define G_REG_CONSTANT(x)  ((x) >> 31)
 
 struct radv_perfcounter_impl {
@@ -654,8 +654,8 @@ radv_pc_wait_idle(struct radv_cmd_buffer *cmd_buffer)
                                       AC_BARRIER_SYNC_AND_INV_CB | AC_BARRIER_SYNC_AND_INV_DB | AC_BARRIER_PFP_SYNC_ME;
    enum ac_rgp_flush_bits sqtt_flush_bits = 0;
 
-   radv_cs_emit_cache_flush(device->ws, cs, pdev->info.gfx_level, &cmd_buffer->gfx9_fence_idx,
-                            cmd_buffer->gfx9_fence_va, flush_bits, &sqtt_flush_bits, AC_PWS_ACQUIRE_POINT_PFP, 0);
+   radv_cs_emit_cache_flush(device->ws, cs, pdev->info.gfx_level, &cmd_buffer->eop_fence_idx, cmd_buffer->eop_fence_va,
+                            flush_bits, &sqtt_flush_bits, AC_PWS_ACQUIRE_POINT_PFP, 0);
 }
 
 /**
@@ -836,7 +836,7 @@ radv_pc_end_query(struct radv_cmd_buffer *cmd_buffer, struct radv_pc_query_pool 
    uint64_t perf_ctr_va = radv_buffer_get_va(device->perf_counter_bo) + PERF_CTR_BO_FENCE_OFFSET;
    radv_cs_emit_write_event_eop(cs, pdev->info.gfx_level, V_028A90_BOTTOM_OF_PIPE_TS, 0, EOP_DST_SEL_MEM,
                                 EOP_INT_SEL_SEND_DATA_AFTER_WR_CONFIRM, EOP_DATA_SEL_VALUE_32BIT, perf_ctr_va, 1,
-                                cmd_buffer->gfx9_fence_va);
+                                cmd_buffer->eop_fence_va);
    radv_cp_wait_mem(cs, WAIT_REG_MEM_EQUAL, perf_ctr_va, 1, 0xffffffff);
 
    radv_pc_wait_idle(cmd_buffer);

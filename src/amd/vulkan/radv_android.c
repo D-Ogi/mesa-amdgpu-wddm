@@ -366,7 +366,7 @@ radv_GetMemoryAndroidHardwareBufferANDROID(VkDevice device_h, const VkMemoryGetA
 
    /* This should always be set due to the export handle types being set on
     * allocation. */
-   assert(mem->android_hardware_buffer);
+   assert(mem->vk.ahardware_buffer);
 
    /* Some quotes from Vulkan spec:
     *
@@ -378,9 +378,9 @@ radv_GetMemoryAndroidHardwareBufferANDROID(VkDevice device_h, const VkMemoryGetA
     * have been included in VkExportMemoryAllocateInfo::handleTypes when
     * memory was created."
     */
-   *pBuffer = mem->android_hardware_buffer;
+   *pBuffer = mem->vk.ahardware_buffer;
    /* Increase refcount. */
-   AHardwareBuffer_acquire(mem->android_hardware_buffer);
+   AHardwareBuffer_acquire(mem->vk.ahardware_buffer);
    return VK_SUCCESS;
 }
 
@@ -401,18 +401,15 @@ radv_select_android_external_format(const void *next, VkFormat default_format)
 }
 
 VkResult
-radv_import_ahb_memory(struct radv_device *device, struct radv_device_memory *mem, unsigned priority,
-                       const VkImportAndroidHardwareBufferInfoANDROID *info)
+radv_import_ahb_memory(struct radv_device *device, struct radv_device_memory *mem, unsigned priority)
 {
 #if RADV_SUPPORT_ANDROID_HARDWARE_BUFFER
-   /* Import from AHardwareBuffer to radv_device_memory. */
-   const native_handle_t *handle = AHardwareBuffer_getNativeHandle(info->buffer);
+   /* vk_device_memory_create() already holds a reference in
+    * mem->vk.ahardware_buffer, whether it was imported or freshly
+    * allocated for us (export-without-import case). We just wrap it. */
+   struct AHardwareBuffer *buffer = mem->vk.ahardware_buffer;
 
-   /* NOTE - We support buffers with only one handle but do not error on
-    * multiple handle case. Reason is that we want to support YUV formats
-    * where we have many logical planes but they all point to the same
-    * buffer, like is the case with VK_FORMAT_G8_B8R8_2PLANE_420_UNORM.
-    */
+   const native_handle_t *handle = AHardwareBuffer_getNativeHandle(buffer);
    int dma_buf = (handle && handle->numFds) ? handle->data[0] : -1;
    if (dma_buf < 0)
       return VK_ERROR_INVALID_EXTERNAL_HANDLE;
@@ -431,11 +428,10 @@ radv_import_ahb_memory(struct radv_device *device, struct radv_device_memory *me
       VkImageDrmFormatModifierExplicitCreateInfoEXT *mod_info_p = NULL;
       VkImageDrmFormatModifierExplicitCreateInfoEXT mod_info;
       VkSubresourceLayout layouts[RADV_ANDROID_MAX_PLANES];
-      result = vk_android_get_ahb_layout(info->buffer, &mod_info, layouts, RADV_ANDROID_MAX_PLANES);
+      result = vk_android_get_ahb_layout(buffer, &mod_info, layouts, RADV_ANDROID_MAX_PLANES);
       if (result == VK_SUCCESS) {
-         for (unsigned plane = 0; plane < mem->image->plane_count; ++plane) {
+         for (unsigned plane = 0; plane < mem->image->plane_count; ++plane)
             mem->image->planes[plane].surface.modifier = mod_info.drmFormatModifier;
-         }
          mod_info_p = &mod_info;
       }
 
@@ -459,40 +455,10 @@ radv_import_ahb_memory(struct radv_device *device, struct radv_device_memory *me
       }
    }
 
-   /* "If the vkAllocateMemory command succeeds, the implementation must
-    * acquire a reference to the imported hardware buffer, which it must
-    * release when the device memory object is freed. If the command fails,
-    * the implementation must not retain a reference."
-    */
-   AHardwareBuffer_acquire(info->buffer);
-   mem->android_hardware_buffer = info->buffer;
-
+   /* No AHardwareBuffer_acquire()/store here — ownership lives in
+    * mem->vk.ahardware_buffer and is released by vk_device_memory_destroy(). */
    return VK_SUCCESS;
-#else /* RADV_SUPPORT_ANDROID_HARDWARE_BUFFER */
-   return VK_ERROR_EXTENSION_NOT_PRESENT;
-#endif
-}
-
-VkResult
-radv_create_ahb_memory(struct radv_device *device, struct radv_device_memory *mem, unsigned priority,
-                       const VkMemoryAllocateInfo *pAllocateInfo)
-{
-#if RADV_SUPPORT_ANDROID_HARDWARE_BUFFER
-   mem->android_hardware_buffer = vk_alloc_ahardware_buffer(pAllocateInfo);
-   if (mem->android_hardware_buffer == NULL)
-      return VK_ERROR_OUT_OF_HOST_MEMORY;
-
-   const struct VkImportAndroidHardwareBufferInfoANDROID import_info = {
-      .buffer = mem->android_hardware_buffer,
-   };
-
-   VkResult result = radv_import_ahb_memory(device, mem, priority, &import_info);
-
-   /* Release a reference to avoid leak for AHB allocation. */
-   AHardwareBuffer_release(mem->android_hardware_buffer);
-
-   return result;
-#else /* RADV_SUPPORT_ANDROID_HARDWARE_BUFFER */
+#else
    return VK_ERROR_EXTENSION_NOT_PRESENT;
 #endif
 }

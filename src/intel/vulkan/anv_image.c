@@ -384,7 +384,7 @@ choose_isl_tiling_flags(const struct intel_device_info *devinfo,
          /* Disable support for tilings that are not supported by ISL's
           * tiled-memcpy functions.
           */
-         flags = ~(ISL_TILING_STD_64_MASK | ISL_TILING_STD_Y_MASK);
+         flags = ~ISL_TILING_STANDARD_MASK;
       } else {
          flags = ISL_TILING_ANY_MASK;
       }
@@ -1934,13 +1934,16 @@ anv_image_init(struct anv_device *device, struct anv_image *image,
          VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_STORAGE_BIT;
    }
 
-   /* Disable aux if image supports export without modifiers. */
+   /* Disable aux and normalize tiling decisions if an image supports export
+    * without modifiers.
+    */
    if (image->vk.external_handle_types != 0 &&
        image->vk.tiling != VK_IMAGE_TILING_DRM_FORMAT_MODIFIER_EXT) {
       anv_perf_warn(VK_LOG_OBJS(&image->vk.base),
                     "Disabling aux: "
                     "external image without DRM modifier");
       isl_extra_usage_flags |= ISL_SURF_USAGE_DISABLE_AUX_BIT;
+      isl_extra_usage_flags |= ISL_SURF_USAGE_PREFER_4K_ALIGNMENT;
    }
 
    if (device->queue_count > 1) {
@@ -2343,9 +2346,9 @@ anv_image_finish(struct anv_image *image)
    struct anv_bo *private_bo = image->bindings[ANV_IMAGE_MEMORY_BINDING_PRIVATE].address.bo;
    if (private_bo) {
       if (image->device_registered) {
-         pthread_mutex_lock(&device->mutex);
+         simple_mtx_lock(&device->mutex);
          list_del(&image->link);
-         pthread_mutex_unlock(&device->mutex);
+         simple_mtx_unlock(&device->mutex);
       }
       ANV_DMR_BO_FREE(&image->vk.base, private_bo);
       anv_device_release_bo(device, private_bo);
@@ -3305,7 +3308,7 @@ anv_bind_image_memory(struct anv_device *device,
 
    if (image->bindings[ANV_IMAGE_MEMORY_BINDING_PRIVATE].address.bo != NULL &&
        !image->device_registered) {
-      pthread_mutex_lock(&device->mutex);
+      simple_mtx_lock(&device->mutex);
 
       /* For the purpose of enabling compression with
        * VK_IMAGE_CREATE_ALIAS_BIT, try to replace the image's private BO with
@@ -3344,7 +3347,7 @@ anv_bind_image_memory(struct anv_device *device,
       }
 
       list_addtail(&image->link, &device->image_private_objects);
-      pthread_mutex_unlock(&device->mutex);
+      simple_mtx_unlock(&device->mutex);
       image->device_registered = true;
    }
 

@@ -129,7 +129,7 @@ opt_divergent_atomic_single_message(nir_builder *b, nir_intrinsic_instr *intrin)
       nir_push_if(b, fusing_cond);
       {
          nir_def *first_lane_result = nir_read_invocation(b, atomic_result, first_lane_id);
-         fixed_result = nir_iadd(b, first_lane_result, nir_isub(b, fused_data_per_lane, data));
+         fixed_result = nir_iadd(b, first_lane_result, nir_iadd(b, fused_data_per_lane, nir_ineg(b, data)));
       }
       nir_pop_if(b, NULL);
 

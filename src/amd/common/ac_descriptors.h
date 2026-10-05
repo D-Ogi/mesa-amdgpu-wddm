@@ -15,8 +15,8 @@
 extern "C" {
 #endif
 
-#define DUPL_16BITS_IN_DWORD(x) (((x) << 16) | (x))
-#define DUPL_8BITS_IN_DWORD(x) (((x) << 24) | ((x) << 16) | ((x) << 8) | (x))
+#define DUPL_16BITS_IN_DWORD(x) (((uint32_t)(x) << 16) | (x))
+#define DUPL_8BITS_IN_DWORD(x) (((uint32_t)(x) << 24) | ((x) << 16) | ((x) << 8) | (x))
 #define DUPL_4BITS_IN_DWORD(x) DUPL_8BITS_IN_DWORD((x) | ((x) << 4))
 
 #define DCC_CODE                       DUPL_8BITS_IN_DWORD

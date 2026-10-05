@@ -58,19 +58,31 @@ libv3d_neon = static_library(
   dependencies : [dep_libdrm, dep_valgrind, idep_nir_headers, idep_mesautil],
 )
 
+v3d_common_files = files(
+  'common/v3d_debug.c',
+  'common/v3d_device_info.c',
+  'common/v3d_submit_util.c',
+  'clif/clif_dump.c',
+  'common/v3d_util.c',
+)
+
+libbroadcom_v3d_deps = [dep_valgrind, dep_thread, idep_mesautil, dep_libdrm]
+
+if with_perfetto
+  v3d_common_files += files('common/v3d_utrace_perfetto.cc')
+  libbroadcom_v3d_deps += dep_perfetto
+endif
+
 libbroadcom_v3d = static_library(
   'broadcom_v3d',
-  [
-    files('common/v3d_debug.c', 'common/v3d_device_info.c', 'common/v3d_submit_util.c', 'clif/clif_dump.c', 'common/v3d_util.c'),
-    v3d_xml_pack,
-  ],
+  [v3d_common_files, v3d_xml_pack],
   include_directories : [inc_include, inc_src, inc_broadcom],
   c_args : [no_override_init_args, v3d_simulator_arg],
   gnu_symbol_visibility : 'hidden',
   link_whole : v3d_libs + per_version_libs,
   link_with: [libv3d_neon],
   build_by_default : false,
-  dependencies: [dep_valgrind, dep_thread, idep_mesautil, dep_libdrm],
+  dependencies: libbroadcom_v3d_deps,
 )
 
 subdir('perfcntrs')

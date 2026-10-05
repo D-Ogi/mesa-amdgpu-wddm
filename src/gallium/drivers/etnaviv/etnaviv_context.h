@@ -37,7 +37,6 @@
 #include "pipe/p_context.h"
 #include "pipe/p_defines.h"
 #include "util/format/u_formats.h"
-#include "pipe/p_shader_tokens.h"
 #include "pipe/p_state.h"
 #include "util/macros.h"
 #include "util/slab.h"
@@ -153,6 +152,7 @@ struct etna_framebuffer_state {
    struct pipe_framebuffer_state base;
 
    unsigned rt_is_128bit : ETNA_MAX_128BIT_RTS;
+   unsigned rt_pack_rgba16 : PIPE_MAX_COLOR_BUFS;
    unsigned rt_companion[ETNA_MAX_128BIT_RTS];
    int8_t companion_src[PIPE_MAX_COLOR_BUFS];
    uint32_t rt_ts_mask;
@@ -229,6 +229,7 @@ struct etna_context {
    unsigned num_fragment_sampler_views;
    uint32_t active_sampler_views;
    uint32_t dirty_sampler_views;
+   uint32_t border_shadow_views;
    uint32_t dirty_samplers;
    struct pipe_sampler_view *sampler_view[PIPE_MAX_SAMPLERS];
    struct etna_constbuf_state constant_buffer[MESA_SHADER_STAGES];
@@ -305,6 +306,12 @@ static inline bool
 etna_framebuffer_rt_use_ts(const struct etna_context *ctx, unsigned i)
 {
    return ctx->framebuffer_s.rt_ts_mask & BITFIELD_BIT(i);
+}
+
+static inline bool
+etna_sampler_view_uses_border_shadow(const struct etna_context *ctx, unsigned num)
+{
+   return ctx->border_shadow_views & (1u << num);
 }
 
 struct pipe_context *

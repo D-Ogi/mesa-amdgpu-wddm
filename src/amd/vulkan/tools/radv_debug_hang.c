@@ -198,10 +198,9 @@ radv_init_trace(struct radv_device *device)
    struct radeon_winsys *ws = device->ws;
    VkResult result;
 
-   result = radv_bo_create(
-      device, NULL, sizeof(struct radv_trace_data), 8, RADEON_DOMAIN_VRAM,
-      RADEON_FLAG_CPU_ACCESS | RADEON_FLAG_NO_INTERPROCESS_SHARING | RADEON_FLAG_ZERO_VRAM | RADEON_FLAG_GL2_BYPASS,
-      RADV_BO_PRIORITY_UPLOAD_BUFFER, 0, true, &device->trace_bo);
+   result = radv_bo_create(device, NULL, sizeof(struct radv_trace_data), 8, RADEON_DOMAIN_VRAM,
+                           RADEON_FLAG_CPU_ACCESS | RADEON_FLAG_NO_INTERPROCESS_SHARING | RADEON_FLAG_GL2_BYPASS,
+                           RADV_BO_PRIORITY_UPLOAD_BUFFER, 0, true, &device->trace_bo);
    if (result != VK_SUCCESS)
       return false;
 
@@ -928,11 +927,6 @@ radv_gpu_hang_occurred(struct radv_queue *queue, enum amd_ip_type ring)
 bool
 radv_vm_fault_occurred(struct radv_device *device, struct radv_winsys_gpuvm_fault_info *fault_info)
 {
-   const struct radv_physical_device *pdev = radv_device_physical(device);
-
-   if (!pdev->info.has_gpuvm_fault_query)
-      return false;
-
    return device->ws->query_gpuvm_fault(device->ws, fault_info);
 }
 
@@ -1150,10 +1144,9 @@ radv_trap_handler_init(struct radv_device *device)
    /* Compute the TMA BO size. */
    size = sizeof(desc) + sizeof(struct aco_trap_handler_layout);
 
-   result = radv_bo_create(
-      device, NULL, size, 256, RADEON_DOMAIN_VRAM,
-      RADEON_FLAG_CPU_ACCESS | RADEON_FLAG_NO_INTERPROCESS_SHARING | RADEON_FLAG_ZERO_VRAM | RADEON_FLAG_32BIT,
-      RADV_BO_PRIORITY_SCRATCH, 0, true, &device->tma_bo);
+   result = radv_bo_create(device, NULL, size, 256, RADEON_DOMAIN_VRAM,
+                           RADEON_FLAG_CPU_ACCESS | RADEON_FLAG_NO_INTERPROCESS_SHARING | RADEON_FLAG_32BIT,
+                           RADV_BO_PRIORITY_SCRATCH, 0, true, &device->tma_bo);
    if (result != VK_SUCCESS)
       return false;
 

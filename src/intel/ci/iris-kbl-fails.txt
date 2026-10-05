@@ -51,11 +51,6 @@ spec@ext_framebuffer_blit@fbo-blit-check-limits,Fail
 # (Error at tests/egl/spec/egl_khr_gl_image/egl_khr_gl_renderbuffer_image-clear-shared-image.c:181)
 spec@egl_khr_gl_image@egl_khr_gl_renderbuffer_image-clear-shared-image gl_depth_component24,Fail
 
-# eglChooseConfig() failed
-spec@egl_mesa_configless_context@basic,Fail
-
-spec@ext_transform_feedback@tessellation triangle_fan flat_first,Fail
-
 # Testing GL_POINTS(1 vertices)
 #  Expected 0 GS invocations, got 1
 #  Expected vertex IDs:

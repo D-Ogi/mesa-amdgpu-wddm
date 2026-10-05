@@ -1643,7 +1643,7 @@ layout_qualifier_id:
                  { "blend_support_hsl_saturation", BITFIELD_BIT(PIPE_ADVANCED_BLEND_HSL_SATURATION) },
                  { "blend_support_hsl_color",      BITFIELD_BIT(PIPE_ADVANCED_BLEND_HSL_COLOR) },
                  { "blend_support_hsl_luminosity", BITFIELD_BIT(PIPE_ADVANCED_BLEND_HSL_LUMINOSITY) },
-                 { "blend_support_all_equations",  (1u << (PIPE_ADVANCED_BLEND_HSL_LUMINOSITY + 1)) - 2 },
+                 { "blend_support_all_equations",  PIPE_ADVANCED_BLEND_KHR_MODES_MASK },
          };
          for (unsigned i = 0; i < ARRAY_SIZE(map); i++) {
             if (match_layout_qualifier($1, map[i].s, state) == 0) {

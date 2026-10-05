@@ -144,13 +144,17 @@ query_features_from_kernel(struct etna_gpu *gpu)
 	ETNA_FEATURE(chipMinorFeatures6, V4_COMPRESSION);
 
 	ETNA_FEATURE(chipMinorFeatures7, BLT_64BPP_MASKED_CLEAR_FIX);
+	if (VIV_FEATURE(chipMinorFeatures7, BLT_8bpp_256TILE_FC_FIX))
+		etna_core_enable_feature(&gpu->info, ETNA_FEATURE_BLT_8BPP_256TILE_FC_FIX);
 	ETNA_FEATURE(chipMinorFeatures7, RS_NEW_BASEADDR);
 	ETNA_FEATURE(chipMinorFeatures7, PE_NO_ALPHA_TEST);
+	ETNA_FEATURE(chipMinorFeatures7, PE_RGBA16I_FIX);
 
 	ETNA_FEATURE(chipMinorFeatures8, SH_NO_ONECONST_LIMIT);
 	ETNA_FEATURE(chipMinorFeatures8, TX_INTEGER_COORDINATE_V2);
 
 	ETNA_FEATURE(chipMinorFeatures10, DEC400);
+	ETNA_FEATURE(chipMinorFeatures10, TX_BORDER_CLAMP_FIX);
 	ETNA_FEATURE(chipMinorFeatures10, WIDELINE_TRIANGLE_EMU);
 }
 

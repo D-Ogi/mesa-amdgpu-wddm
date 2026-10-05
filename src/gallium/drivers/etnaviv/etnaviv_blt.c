@@ -147,9 +147,19 @@ etna_compatible_blt_format(enum pipe_format fmt)
 }
 
 static inline uint32_t
+blt_tiling_bits(const struct blt_imginfo *img)
+{
+   switch (img->tiling) {
+   case ETNA_LAYOUT_LINEAR: return BLT_TILING_LINEAR;
+   case ETNA_LAYOUT_TILED: return BLT_TILING_TILED;
+   default: return BLT_TILING_SUPER_TILED;
+   }
+}
+
+static inline uint32_t
 blt_compute_stride_bits(const struct blt_imginfo *img)
 {
-   return VIVS_BLT_DEST_STRIDE_TILING(img->tiling == ETNA_LAYOUT_LINEAR ? 0 : 3) | /* 1/3? */
+   return VIVS_BLT_DEST_STRIDE_TILING(blt_tiling_bits(img)) |
           VIVS_BLT_DEST_STRIDE_FORMAT(img->format) |
           VIVS_BLT_DEST_STRIDE_STRIDE(img->stride) |
           COND(img->downsample_x, VIVS_BLT_SRC_STRIDE_DOWNSAMPLE_X) |
@@ -163,7 +173,6 @@ blt_compute_dest_img_config_bits(const struct blt_imginfo *img)
           COND(img->use_ts, BLT_DEST_IMAGE_CONFIG_TS) |
           COND(img->use_ts && img->ts_compress_fmt >= 0, BLT_DEST_IMAGE_CONFIG_COMPRESSION) |
           BLT_DEST_IMAGE_CONFIG_COMPRESSION_FORMAT(img->ts_compress_fmt) |
-          BLT_DEST_IMAGE_CONFIG_UNK22 |
           COND(img->srgb, BLT_DEST_IMAGE_CONFIG_SRGB) |
           BLT_DEST_IMAGE_CONFIG_SWIZ_R(img->swizzle[0]) |
           BLT_DEST_IMAGE_CONFIG_SWIZ_G(img->swizzle[1]) |
@@ -278,6 +287,7 @@ emit_blt_copyimage(struct etna_context *ctx, const struct blt_imgcopy_op *op)
    etna_set_state(stream, VIVS_BLT_DEST_STRIDE, blt_compute_stride_bits(&op->dest));
    etna_set_state(stream, VIVS_BLT_DEST_CONFIG,
          blt_compute_dest_img_config_bits(&op->dest) |
+         BLT_DEST_IMAGE_CONFIG_UNK22 |
          COND(op->flip_y, BLT_DEST_IMAGE_CONFIG_FLIP_Y));
    assert(!op->dest.use_ts); /* Dest TS path doesn't work for copies? */
    if (op->dest.use_ts) {
@@ -590,7 +600,7 @@ etna_blit_clear_zs_blt(struct pipe_context *pctx, struct pipe_surface *dst,
       new_clear_bits |= clear_bits_stencil;
 
    if (new_clear_bits == 0xffffffff && fast_clear)
-      dst_level->clear_value = new_clear_value;
+      dst_level->clear_value = (uint64_t)new_clear_value << 32 | new_clear_value;
 
    /* TODO unduplicate this */
    struct blt_clear_op clr = {};

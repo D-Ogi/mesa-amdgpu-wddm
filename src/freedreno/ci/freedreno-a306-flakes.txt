@@ -17,6 +17,7 @@ glx@glx_ext_no_config_context@no fbconfig
 
 spec@arb_map_buffer_alignment@arb_map_buffer_alignment-map-invalidate-range
 spec@arb_vertex_buffer_object@vbo-subdata-many drawelements
+spec@arb_vertex_buffer_object@vbo-subdata-many drawrangeelements
 spec@egl_chromium_sync_control@conformance
 spec@egl_chromium_sync_control@conformance@eglGetSyncValuesCHROMIUM_msc_and_sbc_test
 
@@ -51,6 +52,9 @@ dEQP-GLES3.functional.occlusion_query.stencil_clear
 dEQP-GLES3.functional.occlusion_query.stencil_write
 dEQP-GLES3.functional.occlusion_query.stencil_write_stencil_clear
 dEQP-GLES3.functional.vertex_arrays.single_attribute.normalize.int2_10_10_10.components4_quads256
+
+# Recent flakes, appearing around the end of September 2026
+dEQP-GLES3.functional.ubo.*
 
 # uprev Piglit in Mesa
 spec@!opengl 2.0@tex3d-npot

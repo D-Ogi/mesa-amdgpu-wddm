@@ -51,6 +51,7 @@ struct v3dv_pipeline_key {
    bool sample_alpha_to_one;
    bool software_blend;
    uint8_t cbufs;
+   uint8_t tlb_input_attachment_location[MAX_INPUT_ATTACHMENTS];
    struct {
       enum pipe_format format;
       uint8_t swizzle[4];

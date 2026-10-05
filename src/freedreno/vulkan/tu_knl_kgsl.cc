@@ -160,6 +160,11 @@ bo_init_new_ion_legacy(struct tu_device *dev, struct tu_bo **out_bo, uint64_t si
 
    ret = safe_ioctl(dev->physical_device->kgsl_dma_fd, ION_IOC_SHARE, &share);
    if (ret) {
+      struct ion_handle_data free = {
+         .handle = alloc.handle,
+      };
+      safe_ioctl(dev->physical_device->kgsl_dma_fd, ION_IOC_FREE, &free);
+
       return vk_errorf(dev, VK_ERROR_OUT_OF_DEVICE_MEMORY,
                        "ION_IOC_SHARE failed (%s)", strerror(errno));
    }
@@ -169,6 +174,7 @@ bo_init_new_ion_legacy(struct tu_device *dev, struct tu_bo **out_bo, uint64_t si
    };
    ret = safe_ioctl(dev->physical_device->kgsl_dma_fd, ION_IOC_FREE, &free);
    if (ret) {
+      close(share.fd);
       return vk_errorf(dev, VK_ERROR_OUT_OF_DEVICE_MEMORY,
                        "ION_IOC_FREE failed (%s)", strerror(errno));
    }
@@ -195,6 +201,7 @@ kgsl_bo_user_map(struct tu_device *dev, struct tu_bo *bo, uint64_t client_iova)
    }
 
    if (client_iova && (uint64_t)map != client_iova) {
+      munmap(map, bo->size);
       kgsl_bo_finish(dev, bo);
 
       return vk_errorf(dev, VK_ERROR_INVALID_OPAQUE_CAPTURE_ADDRESS,
@@ -404,9 +411,16 @@ kgsl_bo_init_dmabuf(struct tu_device *dev,
 
    ret = safe_ioctl(dev->physical_device->local_fd,
                     IOCTL_KGSL_GPUOBJ_INFO, &info_req);
-   if (ret)
+   if (ret) {
+      struct kgsl_gpumem_free_id free_req = {
+         .id = req.id,
+      };
+      safe_ioctl(dev->physical_device->local_fd, IOCTL_KGSL_GPUMEM_FREE_ID,
+                 &free_req);
+
       return vk_errorf(dev, VK_ERROR_OUT_OF_DEVICE_MEMORY,
                        "Failed to get dma-buf info (%s)\n", strerror(errno));
+   }
 
    struct tu_bo* bo = tu_device_lookup_bo(dev, req.id);
    assert(bo && bo->gem_handle == 0);

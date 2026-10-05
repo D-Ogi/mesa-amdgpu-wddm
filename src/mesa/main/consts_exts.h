@@ -912,6 +912,12 @@ struct gl_constants
 
    bool HasFBFetch;
 
+   /** Bitmask of enum pipe_advanced_blend_mode blended natively by the
+    * driver. Modes that aren't set in the mask are lowered into the
+    * fragment shader using framebuffer fetch.
+    */
+   GLbitfield NativeAdvancedBlendModes;
+
    bool PointSizeFixed;
 
    /** Wether or not glBitmap uses red textures rather than alpha */

@@ -112,6 +112,22 @@ lp_build_format_swizzle_soa(const struct util_format_description *format_desc,
 
 
 
+/**
+ * Index of the 'width'-bit lane of a wider pixel holding 'chan'.
+ */
+static unsigned
+lp_chan_lane(const struct util_format_description *format_desc,
+             const struct util_format_channel_description *chan,
+             unsigned width)
+{
+#if UTIL_ARCH_BIG_ENDIAN
+   return (format_desc->block.bits - (chan->shift + chan->size)) / width;
+#else
+   return chan->shift / width;
+#endif
+}
+
+
 static LLVMValueRef
 lp_build_extract_soa_chan(struct lp_build_context *bld,
                           unsigned blockbits,
@@ -664,13 +680,8 @@ lp_build_fetch_rgba_soa(struct gallivm_state *gallivm,
          for (i = 0; i < format_desc->nr_channels; i++) {
             struct util_format_channel_description chan_desc = format_desc->channel[i];
             unsigned blockbits = type.width;
-            unsigned vec_nr;
+            unsigned vec_nr = lp_chan_lane(format_desc, &chan_desc, type.width);
 
-#if UTIL_ARCH_BIG_ENDIAN
-            vec_nr = (format_desc->block.bits - (chan_desc.shift + chan_desc.size)) / type.width;
-#else
-            vec_nr = chan_desc.shift / type.width;
-#endif
             chan_desc.shift %= type.width;
 
             output[i] = lp_build_extract_soa_chan(&bld,
@@ -909,9 +920,12 @@ lp_build_insert_soa_chan(struct lp_build_context *bld,
 
        if (chan_desc.pure_integer) {
           chan = LLVMBuildBitCast(builder, rgba, bld->int_vec_type, "");
-          LLVMValueRef mask_val = lp_build_const_int_vec(gallivm, type, chan_mask);
-          LLVMValueRef mask = LLVMBuildICmp(builder, LLVMIntUGT, chan, mask_val, "");
-          chan = LLVMBuildSelect(builder, mask, mask_val, chan, "");
+          if (chan_desc.size < 32) {
+             struct lp_type uint_type = lp_uint_type(type);
+             LLVMValueRef mask_val = lp_build_const_int_vec(gallivm, uint_type, chan_mask);
+             LLVMValueRef mask = LLVMBuildICmp(builder, LLVMIntUGT, chan, mask_val, "");
+             chan = LLVMBuildSelect(builder, mask, mask_val, chan, "");
+          }
        }
        else if (type.floating) {
           if (chan_desc.normalized) {
@@ -1084,9 +1098,8 @@ lp_build_store_rgba_soa(struct gallivm_state *gallivm,
       for (unsigned i = 0; i < format_desc->nr_channels; i++) {
             struct util_format_channel_description chan_desc = format_desc->channel[i];
             unsigned blockbits = type.width;
-            unsigned vec_nr;
+            unsigned vec_nr = lp_chan_lane(format_desc, &chan_desc, type.width);
 
-            vec_nr = chan_desc.shift / type.width;
             chan_desc.shift %= type.width;
 
             lp_build_insert_soa_chan(&bld, blockbits,

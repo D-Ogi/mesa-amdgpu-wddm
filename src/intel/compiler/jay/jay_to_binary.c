@@ -109,7 +109,7 @@ to_gen_operand(
          offset_B = (reg % jay_ugpr_per_grf(f->shader)) * 4;
          R = gen_grf(grf, 0);
       } else {
-         R = gen_accumulator(reg / 2);
+         R = gen_accumulator(reg * jay_grf_per_gpr(f->shader) / 2);
       }
       R = gen_retype(gen_restride(R, 0, 1, 0), GEN_TYPE_UD);
 
@@ -119,10 +119,10 @@ to_gen_operand(
       }
 
       /* Handle SIMD split of vectorized uniform code. The mov case comes up
-       * from the SEL_ACTIVE lowering for 64-bit code.
+       * from the SEL_ACTIVE lowering for 64-bit code, CVT with lane IDs.
        */
       if (jay_num_values(d) > jay_type_vector_length(type) &&
-          (I->uniform || I->op == JAY_OPCODE_MOV)) {
+          (I->uniform || I->op == JAY_OPCODE_MOV || I->op == JAY_OPCODE_CVT)) {
          unsigned simd_width = jay_simd_width_physical(f->shader, I);
          uint32_t type_bits = jay_type_size_bits(type);
          unsigned stride_bits = type_bits;
@@ -328,7 +328,7 @@ static const struct {
    OP(SYNC, SYNC, 1),
    OP(WHILE, WHILE, 0),
    OP(XOR, XOR, 2),
-   OP(ZIP_UGPR16, MOV, 0),
+   OP(ZIP, MOV, 0),
    OP(SLICE_REPACK, MOV, 1),
    /* clang-format on */
 };
@@ -463,8 +463,11 @@ emit(struct jay_codegen *jc,
       /* Quad swizzle can get split down to SIMD4 even on Xe2 where we don't
        * have NibCtrl, but those cases use NoMask so it doesn't matter.
        */
-      assert(gen->chan_offset == 0 || gen->no_mask);
-      gen->chan_offset = 0;
+      if (gen->chan_offset % 8) {
+         assert(gen->no_mask);
+         gen->chan_offset = 0;
+      }
+
       gen->src[0] = quad_swizzle(jc->devinfo, gen->src[0], I);
       break;
 
@@ -538,7 +541,7 @@ emit(struct jay_codegen *jc,
                 jay_def_stride(f->shader, I->src[s]) <= JAY_STRIDE_4);
       }
 
-      gen->exec_size = 32;
+      gen->exec_size *= 2;
       gen->chan_offset = 0;
       gen->dst = gen_retype(gen->dst, GEN_TYPE_UW);
       gen->src[0] = gen_retype(gen->src[0], GEN_TYPE_UW);
@@ -560,7 +563,7 @@ emit(struct jay_codegen *jc,
       gen->src[0] = gen_imm_uv(0x76543210 + 0x11111111 * jay_lane_id_8_base(I));
       break;
 
-   case JAY_OPCODE_ZIP_UGPR16:
+   case JAY_OPCODE_ZIP:
       gen->src[0] = to_gen_operand(f, I, I->simd_offs, 0, false);
       break;
 
@@ -767,7 +770,7 @@ jay_to_binary(jay_shader *s,
 
    gen_encode_params enc_params = {
       .devinfo = jc.devinfo,
-      .compact_all = true,
+      .compact_all = !INTEL_DEBUG(DEBUG_NO_COMPACTION),
 #ifdef NDEBUG
       .skip_validation = true,
 #endif
@@ -827,10 +830,14 @@ jay_to_binary(jay_shader *s,
       }
 
       if (s->archiver) {
-         const char *filename =
-            ralloc_asprintf(s, "GEN%u/0", s->dispatch_width);
-         print_params.fp = debug_archiver_start_file(s->archiver, filename);
+         print_params.fp = debug_archiver_start_file(
+            s->archiver, ralloc_asprintf(s, "GEN%u/0", s->dispatch_width));
          gen_print(&print_params);
+         debug_archiver_finish_file(s->archiver);
+
+         FILE *bin_dump = debug_archiver_start_file(
+            s->archiver, ralloc_asprintf(s, "GEN%u/0.bin", s->dispatch_width));
+         fwrite(jc.output, 1, jc.output_size, bin_dump);
          debug_archiver_finish_file(s->archiver);
       }
    }

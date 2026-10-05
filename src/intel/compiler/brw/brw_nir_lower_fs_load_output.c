@@ -33,7 +33,11 @@ brw_nir_lower_fs_load_output_instr(nir_builder *b,
     * in the coordinates. RESINFO returns 0 in the 3rd component for 1D
     * images.
     */
-   nir_def *size = nir_txs(b, .dim = GLSL_SAMPLER_DIM_3D, .texture_index = target);
+   nir_def *size = nir_txs(b,
+      .dim = GLSL_SAMPLER_DIM_3D,
+      .texture_index = !key->base.use_efficient_64bit ? target : 0,
+      .texture_offset = !key->base.use_efficient_64bit ? intrin->src[0].ssa : NULL,
+      .texture_handle = key->base.use_efficient_64bit ? intrin->src[0].ssa : NULL);
    nir_def *pixel_coords = nir_load_pixel_coord(b);
 
    nir_def *coords[3] = {
@@ -50,11 +54,13 @@ brw_nir_lower_fs_load_output_instr(nir_builder *b,
 
    bool msaa = key->multisample_fbo != INTEL_NEVER;
    nir_def *tex = nir_txf(b, coord,
-                          .texture_index = target,
-                          .ms_index = msaa ? nir_load_sample_id(b) : NULL,
-                          .dim = msaa ? GLSL_SAMPLER_DIM_MS : GLSL_SAMPLER_DIM_2D,
-                          .is_array = true,
-                          .dest_type = nir_type_uint32);
+      .texture_index = !key->base.use_efficient_64bit ? target : 0,
+      .ms_index = msaa ? nir_load_sample_id(b) : NULL,
+      .dim = msaa ? GLSL_SAMPLER_DIM_MS : GLSL_SAMPLER_DIM_2D,
+      .is_array = true,
+      .dest_type = nir_type_uint32,
+      .texture_handle = key->base.use_efficient_64bit ? intrin->src[0].ssa : NULL,
+      .texture_offset = !key->base.use_efficient_64bit ? intrin->src[0].ssa : NULL);
 
    nir_def_replace(&intrin->def, tex);
    return true;

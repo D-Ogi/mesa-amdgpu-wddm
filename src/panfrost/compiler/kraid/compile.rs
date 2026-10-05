@@ -287,6 +287,7 @@ pub extern "C" fn kraid_compile_nir(
     if inputs.fau.promote_immediates {
         pass!(s.opt_promote_consts(&mut info.fau));
     }
+    pass!(s.opt_exec_units());
     pass!(s.legalize());
     pass!(s.schedule_for_pressure());
     // Shader::assign_registers() uses pass!() internally

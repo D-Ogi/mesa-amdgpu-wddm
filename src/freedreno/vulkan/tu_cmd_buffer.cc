@@ -6301,10 +6301,12 @@ tu_flush_for_stage(struct tu_cache_state *cache,
    }
 }
 
-void
-tu_render_pass_state_merge(struct tu_render_pass_state *dst,
-                           const struct tu_render_pass_state *src)
+static void
+tu_render_pass_state_merge(struct tu_cmd_buffer *cmd, const struct tu_render_pass_state *src, struct tu_cs *cs)
 {
+   tu_lrz_merge_stencil_tag_state_at_rp_boundary(cmd, *src, cs);
+
+   struct tu_render_pass_state *dst = &cmd->state.rp;
    dst->xfb_used |= src->xfb_used;
    dst->has_tess |= src->has_tess;
    dst->has_prim_generated_query_in_rp |= src->has_prim_generated_query_in_rp;
@@ -6313,6 +6315,7 @@ tu_render_pass_state_merge(struct tu_render_pass_state *dst,
    dst->disable_gmem |= src->disable_gmem;
    dst->sysmem_single_prim_mode |= src->sysmem_single_prim_mode;
    dst->lrz_disable_for_next_rp |= src->lrz_disable_for_next_rp;
+   dst->lrz_write_disabled |= src->lrz_write_disabled;
    dst->draw_cs_writes_to_cond_pred |= src->draw_cs_writes_to_cond_pred;
    dst->shared_viewport |= src->shared_viewport;
    dst->read_only_input_attachments |= src->read_only_input_attachments;
@@ -6359,6 +6362,7 @@ tu_restore_suspended_pass(struct tu_cmd_buffer *cmd,
    cmd->state.tiling = tu_framebuffer_get_tiling_config(cmd->state.framebuffer, cmd->device, cmd->state.pass,
                                                         cmd->state.gmem_layout, cmd->state.gmem_layout_divisor);
    cmd->state.lrz = suspended->state.suspended_pass.lrz;
+   cmd->state.rp.lrz_write_disabled |= suspended->state.suspended_pass.lrz_write_disabled;
 
 #ifdef HAVE_PERFETTO
    cmd->vk.dynamic_graphics_state.vp = suspended->vk.dynamic_graphics_state.vp;
@@ -6372,12 +6376,12 @@ void
 tu_append_pre_chain(struct tu_cmd_buffer *cmd,
                     struct tu_cmd_buffer *secondary)
 {
+   tu_render_pass_state_merge(cmd, &secondary->pre_chain.state, &cmd->draw_cs);
+
    tu_cs_add_entries(&cmd->draw_cs, &secondary->pre_chain.draw_cs);
    tu_cs_add_entries(&cmd->draw_epilogue_cs,
                      &secondary->pre_chain.draw_epilogue_cs);
 
-   tu_render_pass_state_merge(&cmd->state.rp,
-                              &secondary->pre_chain.state);
    TU_CALLX(cmd->device, tu_clone_trace)(cmd, &cmd->draw_cs, &cmd->rp_trace, &secondary->pre_chain.rp_trace);
    util_dynarray_append_dynarray(&cmd->fdm_bin_patchpoints,
                                  &secondary->pre_chain.fdm_bin_patchpoints);
@@ -6415,12 +6419,12 @@ void
 tu_append_pre_post_chain(struct tu_cmd_buffer *cmd,
                          struct tu_cmd_buffer *secondary)
 {
+   tu_render_pass_state_merge(cmd, &secondary->state.rp, &cmd->draw_cs);
+
    tu_cs_add_entries(&cmd->draw_cs, &secondary->draw_cs);
    tu_cs_add_entries(&cmd->draw_epilogue_cs, &secondary->draw_epilogue_cs);
 
    TU_CALLX(cmd->device, tu_clone_trace)(cmd, &cmd->draw_cs, &cmd->rp_trace, &secondary->rp_trace);
-   tu_render_pass_state_merge(&cmd->state.rp,
-                              &secondary->state.rp);
    util_dynarray_append_dynarray(&cmd->fdm_bin_patchpoints,
                                  &secondary->fdm_bin_patchpoints);
 }
@@ -6495,6 +6499,8 @@ tu_CmdExecuteCommands(VkCommandBuffer commandBuffer,
           VK_COMMAND_BUFFER_USAGE_RENDER_PASS_CONTINUE_BIT) {
          assert(tu_cs_is_empty(&secondary->cs));
 
+         tu_render_pass_state_merge(cmd, &secondary->state.rp, &cmd->draw_cs);
+
          TU_CALLX(cmd->device, tu_lrz_flush_valid_at_secondary_rp_boundary)(cmd, secondary->state.lrz, &cmd->draw_cs);
 
          result = tu_cs_add_entries(&cmd->draw_cs, &secondary->draw_cs);
@@ -6515,7 +6521,6 @@ tu_CmdExecuteCommands(VkCommandBuffer commandBuffer,
           */
          if (!secondary->state.lrz.valid)
             cmd->state.lrz.valid = false;
-         cmd->state.lrz.disable_write_for_rp |= secondary->state.lrz.disable_write_for_rp;
          if (secondary->state.lrz.gpu_dir_set)
             cmd->state.lrz.gpu_dir_set = true;
          if (cmd->state.lrz.prev_direction == TU_LRZ_UNKNOWN &&
@@ -6527,7 +6532,6 @@ tu_CmdExecuteCommands(VkCommandBuffer commandBuffer,
             secondary->state.lrz.color_written_with_z_test;
 
          TU_CALLX(cmd->device, tu_clone_trace)(cmd, &cmd->draw_cs, &cmd->rp_trace, &secondary->rp_trace);
-         tu_render_pass_state_merge(&cmd->state.rp, &secondary->state.rp);
          util_dynarray_append_dynarray(&cmd->fdm_bin_patchpoints,
                                        &secondary->fdm_bin_patchpoints);
       } else {
@@ -7265,7 +7269,7 @@ tu_emit_rendering_attachment_locations(struct tu_cmd_buffer *cmd)
    }
 
    /* Same case as a drawcall not writing to some color attachments. */
-   if (skips_att && cmd->state.lrz.valid && !cmd->state.lrz.disable_write_for_rp) {
+   if (skips_att && cmd->state.lrz.valid && !cmd->state.rp.lrz_write_disabled) {
       tu_lrz_disable_write_for_rp(cmd, "CmdSetRenderingAttachmentLocations with skipped color attachments");
       cmd->state.dirty |= TU_CMD_DIRTY_LRZ;
    }
@@ -7543,13 +7547,15 @@ tu_CmdSetRenderingInputAttachmentIndicesKHR(
 {
    VK_FROM_HANDLE(tu_cmd_buffer, cmd, commandBuffer);
    const uint8_t old_depth_att = cmd->vk.dynamic_graphics_state.ial.depth_att;
+   const uint8_t old_stencil_att = cmd->vk.dynamic_graphics_state.ial.stencil_att;
 
    vk_common_CmdSetRenderingInputAttachmentIndicesKHR(commandBuffer, pLocationInfo);
 
    const struct vk_input_attachment_location_state *ial =
       &cmd->vk.dynamic_graphics_state.ial;
 
-   if (old_depth_att != ial->depth_att)
+   if (old_depth_att != ial->depth_att ||
+       old_stencil_att != ial->stencil_att)
       cmd->state.dirty |= TU_CMD_DIRTY_LRZ;
 
    struct tu_subpass *subpass = &cmd->dynamic_subpasses[0];
@@ -9445,6 +9451,9 @@ tu_CmdDrawIndirectByteCountEXT(VkCommandBuffer commandBuffer,
 
    tu6_draw_common<CHIP>(cmd, cs, false, 0);
 
+   if (cmd->device->physical_device->info->props.draw_auto_stale_stride_quirk)
+      tu_cs_emit_regs(cs, A6XX_PC_AUTO_VERTEX_STRIDE(vertexStride));
+
    tu_cs_emit_pkt7(cs, CP_DRAW_AUTO, 6);
    tu_cs_emit(cs, tu_draw_initiator(cmd, DI_SRC_SEL_AUTO_XFB));
    if (CHIP >= A7XX) {
@@ -10146,6 +10155,7 @@ tu_CmdEndRendering2EXT(VkCommandBuffer commandBuffer,
 
    if (cmd_buffer->state.suspending) {
       cmd_buffer->state.suspended_pass.lrz = cmd_buffer->state.lrz;
+      cmd_buffer->state.suspended_pass.lrz_write_disabled = cmd_buffer->state.rp.lrz_write_disabled;
       /* Flush LRZ validity and sticky write-disable state across the
        * resuming renderpass, which cannot inherit our CPU-tracked LRZ state.
        */

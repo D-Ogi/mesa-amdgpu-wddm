@@ -1107,7 +1107,6 @@ void ac_fill_feature_info(struct radeon_info *info, const struct drm_amdgpu_info
    info->has_sparse_image_standard_3d = info->gfx_level >= GFX9;
    info->has_sparse_unaligned_mip_size = info->gfx_level >= GFX7;
 
-   info->has_gpuvm_fault_query = info->drm_minor >= 55;
    info->has_tmz_support = device_info->ids_flags & AMDGPU_IDS_FLAGS_TMZ;
 
    /* On GFX8, the TBA/TMA registers can be configured from the userspace.
@@ -1177,18 +1176,10 @@ void ac_fill_feature_info(struct radeon_info *info, const struct drm_amdgpu_info
    /* CDNA starting with GFX940 shouldn't use CP DMA. */
    info->has_cp_dma = info->has_graphics || info->family < CHIP_GFX940;
 
-   /* The kernel code translating tiling flags into a modifier was wrong
-    * until .58.
-    */
-   info->gfx12_supports_display_dcc = info->gfx_level >= GFX12 && info->drm_minor >= 58;
-
    /* AMDGPU always enables DCC compressed writes when a BO is moved back to
     * VRAM until .60.
     */
    info->gfx12_supports_dcc_write_compress_disable = info->gfx_level >= GFX12 && info->drm_minor >= 60;
-
-   /* AMDGPU 3.59+ clears VRAM on allocations by default. */
-   info->has_default_zerovram_support = info->drm_minor >= 59;
 
    info->has_image_opcodes = debug_get_bool_option("AMD_IMAGE_OPCODES",
                                                    info->has_graphics || info->family < CHIP_GFX940);
@@ -1490,13 +1481,14 @@ ac_query_gpu_info(int fd, void *dev_p, struct radeon_info *info,
       return AC_QUERY_GPU_INFO_FAIL;
    }
 
-   assert(info->drm_major == 3);
+   assert(info->drm_major == AC_AMDGPU_DRM_MAJOR);
    info->is_amdgpu = true;
 
-   if (info->drm_minor < 54) {
+   if (info->drm_minor < AC_AMDGPU_DRM_MINOR) {
       fprintf(stderr, "amdgpu: DRM version is %u.%u.%u, but this driver is "
-                      "only compatible with 3.54.0 (kernel 6.6+) or later.\n",
-              info->drm_major, info->drm_minor, info->drm_patchlevel);
+                      "only compatible with %u.%u.0 (kernel 6.11.2+) or later.\n",
+              info->drm_major, info->drm_minor, info->drm_patchlevel,
+              AC_AMDGPU_DRM_MAJOR, AC_AMDGPU_DRM_MINOR);
       return AC_QUERY_GPU_INFO_FAIL;
    }
 
@@ -2114,9 +2106,7 @@ void ac_print_gpu_info(FILE *f, const struct radeon_info *info, int fd)
    fprintf(f, "    has_vm_always_valid = %u\n", info->has_vm_always_valid);
    fprintf(f, "    has_eqaa_surface_allocator = %u\n", info->has_eqaa_surface_allocator);
    fprintf(f, "    has_sparse = %u\n", info->has_sparse);
-   fprintf(f, "    has_gpuvm_fault_query = %u\n", info->has_gpuvm_fault_query);
    fprintf(f, "    has_kernelq_reg_shadowing = %u\n", info->has_kernelq_reg_shadowing);
-   fprintf(f, "    has_default_zerovram_support = %u\n", info->has_default_zerovram_support);
    fprintf(f, "    has_tmz_support = %u\n", info->has_tmz_support);
    fprintf(f, "    has_trap_handler_support = %u\n", info->has_trap_handler_support);
    for (unsigned i = 0; i < AMD_NUM_IP_TYPES; i++) {

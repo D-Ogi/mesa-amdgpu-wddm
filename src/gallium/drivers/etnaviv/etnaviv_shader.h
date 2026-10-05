@@ -62,6 +62,7 @@ struct etna_shader_key
          unsigned flatshade : 1;
          unsigned has_128bit_rt : 1;
          unsigned use_xfb_emu : 1;
+         unsigned rt_pack_rgba16 : PIPE_MAX_COLOR_BUFS;
       };
       uint32_t global;
    };

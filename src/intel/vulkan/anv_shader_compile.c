@@ -288,6 +288,9 @@ anv_shader_init_uuid(struct anv_physical_device *device)
    const bool cbv_push_buffer = device->drirc.perf.promote_cbv_push_buffer;
    _mesa_blake3_update(&ctx, &cbv_push_buffer, sizeof(cbv_push_buffer));
 
+   const uint8_t code_motion = device->drirc.perf.code_motion;
+   _mesa_blake3_update(&ctx, &code_motion, sizeof(code_motion));
+
    const bool fs_sample_d_wa = device->drirc.debug.fs_sampler_undef_derivatives_workaround;
    _mesa_blake3_update(&ctx, &fs_sample_d_wa, sizeof(fs_sample_d_wa));
 
@@ -383,6 +386,8 @@ anv_shader_preprocess_nir(struct vk_physical_device *device,
    struct brw_nir_compiler_opts opts = {
       .robust_image_access = rs->images == VK_PIPELINE_ROBUSTNESS_IMAGE_BEHAVIOR_ROBUST_IMAGE_ACCESS ||
                              rs->images == VK_PIPELINE_ROBUSTNESS_IMAGE_BEHAVIOR_ROBUST_IMAGE_ACCESS_2_EXT,
+      /* Must match key->code_motion, see populate_base_prog_key(). */
+      .code_motion = pdevice->drirc.perf.code_motion,
    };
    brw_preprocess_nir(compiler, nir, &opts);
 
@@ -414,6 +419,7 @@ populate_base_prog_key(struct brw_base_prog_key *key,
    if (rs != NULL)
       key->robust_flags = anv_get_robust_flags(rs);
    key->divergent_atomics_flags = pdevice->drirc.perf.opt_divergent_atomics;
+   key->code_motion = pdevice->drirc.perf.code_motion;
    key->use_efficient_64bit = pdevice->uses_efficient_64bit;
 }
 

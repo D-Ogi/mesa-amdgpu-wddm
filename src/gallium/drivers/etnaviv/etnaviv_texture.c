@@ -161,6 +161,43 @@ etna_can_use_sampler_ts(struct pipe_sampler_view *view, int num)
    return true;
 }
 
+static struct etna_resource *
+etna_border_shadow(struct etna_context *ctx, struct etna_resource *rsc,
+                   unsigned num)
+{
+   const struct pipe_sampler_state *ss = ctx->sampler[num];
+
+   if (VIV_FEATURE(ctx->screen, ETNA_FEATURE_TX_BORDER_CLAMP_FIX) ||
+       !rsc->border_tail || !ss || !etna_sampler_uses_border(ss))
+      return NULL;
+
+   if (rsc->border)
+      return etna_resource(rsc->border);
+
+   struct etna_resource *shadow =
+      etna_resource_alloc_border_shadow(&ctx->base, &rsc->base);
+
+   if (shadow)
+      perf_debug_ctx(ctx, "Sampling %p through a border clamp shadow", rsc);
+
+   return shadow;
+}
+
+struct etna_resource *
+etna_sampler_view_resource(struct etna_context *ctx,
+                           struct pipe_sampler_view *view, unsigned num)
+{
+   struct etna_resource *rsc = etna_resource(view->texture);
+
+   if (rsc->texture)
+      rsc = etna_resource(rsc->texture);
+
+   if (etna_sampler_view_uses_border_shadow(ctx, num))
+      rsc = etna_resource(rsc->border);
+
+   return rsc;
+}
+
 void
 etna_update_sampler_source(struct pipe_sampler_view *view, int num)
 {
@@ -183,6 +220,10 @@ etna_update_sampler_source(struct pipe_sampler_view *view, int num)
    if (base->texture)
       to = etna_resource(base->texture);
 
+   struct etna_resource *shadow = etna_border_shadow(ctx, to, num);
+   if (shadow)
+      to = shadow;
+
    if ((to != from) && etna_resource_older(to, from)) {
       etna_copy_resource(view->context, &to->base, &from->base,
                          view->u.tex.first_level,
@@ -202,9 +243,23 @@ etna_update_sampler_source(struct pipe_sampler_view *view, int num)
       }
    }
 
+   const uint32_t bit = 1u << num;
+   const bool use_shadow = shadow != NULL;
+   const bool used_shadow = etna_sampler_view_uses_border_shadow(ctx, num);
+
+   if (use_shadow != used_shadow) {
+      if (use_shadow)
+         ctx->border_shadow_views |= bit;
+      else
+         ctx->border_shadow_views &= ~bit;
+
+      ctx->dirty |= ETNA_DIRTY_SAMPLER_VIEWS;
+      ctx->dirty_sampler_views |= bit;
+   }
+
    if (etna_configure_sampler_ts(ctx->ts_for_sampler_view(view), view, enable_sampler_ts)) {
       ctx->dirty |= ETNA_DIRTY_SAMPLER_VIEWS | ETNA_DIRTY_TEXTURE_CACHES;
-      ctx->dirty_sampler_views |= (1 << num);
+      ctx->dirty_sampler_views |= bit;
    }
 }
 

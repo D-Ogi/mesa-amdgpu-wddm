@@ -9,9 +9,8 @@ Toronto](https://indico.freedesktop.org/event/12/contributions/527/).
 It currently supports Xe2 (Lunar Lake and Battlemage) and Xe3 (Pantherlake).
 Additional hardware support is in progress.
 
-To use Jay on supported Intel hardware, set the environment variable
-`INTEL_JAY=all`. Specific stages may be used (such as `INTEL_JAY=fs`) for
-debugging.
+Jay is enabled by default on these platforms. For debugging, set
+`INTEL_DEBUG=no-jay` to get the old brw compiler.
 
 ## Contribution policy
 
@@ -43,7 +42,7 @@ you can follow this checklist to narrow the issue:
 Reposting the checklist earlier this summer:
 
 * does it reproduce locally on Xe2 or Xe3 with upstream Mesa?
-* does it go away if you disable Jay? (`INTEL_JAY` env var)
+* does it go away if you disable Jay? (`INTEL_DEBUG=no-jay` env var)
 * does it reproduce in a debug build of Mesa?
 * in a debug build, are there any assertion/validation failures)?
 * ...if so, can you capture a fossil?
