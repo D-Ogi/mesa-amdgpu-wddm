@@ -89,16 +89,16 @@ ac_create_clear_copy_buffer_cs(const ac_cs_clear_copy_buffer_options *const opti
 {
    if (options->print_key) {
       fprintf(stderr, "Internal shader: dma\n");
-      fprintf(stderr, "   key.is_clear = %u\n", key->is_clear);
-      fprintf(stderr, "   key.addr_user_data = %u\n", key->addr_user_data);
-      fprintf(stderr, "   key.dwords_per_thread = %u\n", key->dwords_per_thread);
-      fprintf(stderr, "   key.clear_value_size_is_12 = %u\n", key->clear_value_size_is_12);
-      fprintf(stderr, "   key.clear_value_size_is_4 = %u\n", key->clear_value_size_is_4);
-      fprintf(stderr, "   key.src_scalarize_for_sparse = %u\n", key->src_scalarize_for_sparse);
-      fprintf(stderr, "   key.src_align_offset = %u\n", key->src_align_offset);
-      fprintf(stderr, "   key.dst_align_offset = %u\n", key->dst_align_offset);
-      fprintf(stderr, "   key.dst_last_thread_bytes = %u\n", key->dst_last_thread_bytes);
-      fprintf(stderr, "   key.dst_single_thread_unaligned = %u\n", key->dst_single_thread_unaligned);
+      fprintf(stderr, "   key.is_clear = %u\n", (unsigned)key->is_clear);
+      fprintf(stderr, "   key.addr_user_data = %u\n", (unsigned)key->addr_user_data);
+      fprintf(stderr, "   key.dwords_per_thread = %u\n", (unsigned)key->dwords_per_thread);
+      fprintf(stderr, "   key.clear_value_size_is_12 = %u\n", (unsigned)key->clear_value_size_is_12);
+      fprintf(stderr, "   key.clear_value_size_is_4 = %u\n", (unsigned)key->clear_value_size_is_4);
+      fprintf(stderr, "   key.src_scalarize_for_sparse = %u\n", (unsigned)key->src_scalarize_for_sparse);
+      fprintf(stderr, "   key.src_align_offset = %u\n", (unsigned)key->src_align_offset);
+      fprintf(stderr, "   key.dst_align_offset = %u\n", (unsigned)key->dst_align_offset);
+      fprintf(stderr, "   key.dst_last_thread_bytes = %u\n", (unsigned)key->dst_last_thread_bytes);
+      fprintf(stderr, "   key.dst_single_thread_unaligned = %u\n", (unsigned)key->dst_single_thread_unaligned);
       fprintf(stderr, "\n");
    }
 
@@ -112,12 +112,12 @@ ac_create_clear_copy_buffer_cs(const ac_cs_clear_copy_buffer_options *const opti
          key->is_clear ? "clear" : "copy",
          key->clear_value_size_is_12 ? "12" : key->clear_value_size_is_4 ? "4" : "",
          key->src_scalarize_for_sparse ? "_sparse" : "",
-         key->dwords_per_thread,
-         key->src_align_offset,
-         key->dst_align_offset,
-         key->dst_last_thread_bytes,
-         key->dst_single_thread_unaligned,
-         key->has_start_thread);
+         (unsigned)key->dwords_per_thread,
+         (unsigned)key->src_align_offset,
+         (unsigned)key->dst_align_offset,
+         (unsigned)key->dst_last_thread_bytes,
+         (unsigned)key->dst_single_thread_unaligned,
+         (unsigned)key->has_start_thread);
 
    b.shader->info.workgroup_size[0] = 64;
    b.shader->info.workgroup_size[1] = 1;
