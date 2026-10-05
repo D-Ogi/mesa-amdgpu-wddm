@@ -14,6 +14,7 @@ issues:
         'ci': 'CI'
         'clc': 'OpenCL'
         'crocus': 'crocus'
+        'd3d10umd': 'd3d10umd'
         'd3d12': 'd3d12'
         'docs': 'docs'
         'dozen': 'dozen'
@@ -213,6 +214,7 @@ merge_requests:
         '^src/gallium/drivers/vc4/': ['vc4']
         '^src/gallium/drivers/virgl/': ['virgl']
         '^src/gallium/drivers/zink/': ['zink']
+        '^src/gallium/frontends/d3d10umd/': ['d3d10umd']
         '^src/gallium/frontends/dri/': ['gallium']
         '^src/gallium/frontends/glx/': ['GLX']
         '^src/gallium/frontends/hgl/': ['haiku']
@@ -225,6 +227,7 @@ merge_requests:
         # '^src/gallium/frontends/xa/': ['']
         '^src/gallium/include/': ['gallium']
         '^src/gallium/targets/': ['gallium']
+        '^src/gallium/targets/d3d10umd': ['d3d10umd']
         '^src/gallium/targets/rusticl/': ['Rusticl']
         '^src/gallium/targets/mediafoundation/': ['mediafoundation']
         '^src/gallium/tests/': ['gallium']
