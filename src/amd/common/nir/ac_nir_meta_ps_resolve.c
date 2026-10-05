@@ -30,14 +30,14 @@ ac_create_resolve_ps(const struct ac_ps_resolve_options *options,
 {
    if (options->print_key) {
       fprintf(stderr, "Internal shader: resolve_ps\n");
-      fprintf(stderr, "   key.use_aco = %u\n", key->use_aco);
-      fprintf(stderr, "   key.src_is_array = %u\n", key->src_is_array);
-      fprintf(stderr, "   key.log_samples = %u\n", key->log_samples);
-      fprintf(stderr, "   key.last_src_channel = %u\n", key->last_src_channel);
-      fprintf(stderr, "   key.x_clamp_to_edge = %u\n", key->x_clamp_to_edge);
-      fprintf(stderr, "   key.y_clamp_to_edge = %u\n", key->y_clamp_to_edge);
-      fprintf(stderr, "   key.d16 = %u\n", key->d16);
-      fprintf(stderr, "   key.a16 = %u\n", key->a16);
+      fprintf(stderr, "   key.use_aco = %u\n", (unsigned)key->use_aco);
+      fprintf(stderr, "   key.src_is_array = %u\n", (unsigned)key->src_is_array);
+      fprintf(stderr, "   key.log_samples = %u\n", (unsigned)key->log_samples);
+      fprintf(stderr, "   key.last_src_channel = %u\n", (unsigned)key->last_src_channel);
+      fprintf(stderr, "   key.x_clamp_to_edge = %u\n", (unsigned)key->x_clamp_to_edge);
+      fprintf(stderr, "   key.y_clamp_to_edge = %u\n", (unsigned)key->y_clamp_to_edge);
+      fprintf(stderr, "   key.d16 = %u\n", (unsigned)key->d16);
+      fprintf(stderr, "   key.a16 = %u\n", (unsigned)key->a16);
       fprintf(stderr, "\n");
    }
 

@@ -25,6 +25,12 @@ struct radv_fill_or_copy_memory_key {
    ac_cs_clear_copy_buffer_key ac;
 };
 
+/* The vk_meta key below is hashed and compared as sizeof(struct) bytes, so the shader key it holds
+ * must be whole, and memset must be able to zero everything the hash reads.
+ */
+static_assert(sizeof(((struct radv_fill_or_copy_memory_key *)NULL)->ac) == 8,
+              "the meta key must hold a whole ac_cs_clear_copy_buffer_key");
+
 static VkResult
 get_fill_or_copy_memory_pipeline(struct radv_device *device,
                                  const ac_cs_clear_copy_buffer_options *const options,
@@ -36,7 +42,10 @@ get_fill_or_copy_memory_pipeline(struct radv_device *device,
 
    memset(&key, 0, sizeof(key));
    key.type = RADV_META_OBJECT_KEY_FILL_OR_COPY_MEMORY;
-   key.ac.key = dispatch->shader_key.key;
+   /* Copy the whole shader key, not its "key" word: the shader is built from this copy, so every
+    * bit the dispatch chose has to arrive here.
+    */
+   key.ac = dispatch->shader_key;
 
    const VkPushConstantRange pc_range = {
       .stageFlags = VK_SHADER_STAGE_COMPUTE_BIT,
