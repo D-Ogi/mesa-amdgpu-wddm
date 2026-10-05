@@ -131,7 +131,7 @@ radv_compute_fill_memory(struct radv_cmd_buffer *cmd_buffer,
    VkResult result;
 
    /* bc250: the command buffer remembers the last fill pipeline of this recording by its shader key. */
-   if (radv_meta_buffer_cache_get(&cmd_buffer->meta_fill_memory, dispatch->shader_key.key, &pipeline, &layout)) {
+   if (radv_meta_buffer_cache_get(&cmd_buffer->meta_fill_memory, dispatch->shader_key, &pipeline, &layout)) {
       /* cached */
    } else {
       result = get_fill_or_copy_memory_pipeline(device, options, dispatch, &pipeline, &layout);
@@ -139,7 +139,7 @@ radv_compute_fill_memory(struct radv_cmd_buffer *cmd_buffer,
          vk_command_buffer_set_error(&cmd_buffer->vk, result);
          return;
       }
-      radv_meta_buffer_cache_put(&cmd_buffer->meta_fill_memory, dispatch->shader_key.key, pipeline, layout);
+      radv_meta_buffer_cache_put(&cmd_buffer->meta_fill_memory, dispatch->shader_key, pipeline, layout);
    }
 
    radv_meta_bind_compute_pipeline(cmd_buffer, pipeline);
@@ -161,7 +161,7 @@ radv_compute_copy_memory(struct radv_cmd_buffer *cmd_buffer,
    VkResult result;
 
    /* bc250: the command buffer remembers the last copy pipeline of this recording by its shader key. */
-   if (radv_meta_buffer_cache_get(&cmd_buffer->meta_copy_memory, dispatch->shader_key.key, &pipeline, &layout)) {
+   if (radv_meta_buffer_cache_get(&cmd_buffer->meta_copy_memory, dispatch->shader_key, &pipeline, &layout)) {
       /* cached */
    } else {
       result = get_fill_or_copy_memory_pipeline(device, options, dispatch, &pipeline, &layout);
@@ -169,7 +169,7 @@ radv_compute_copy_memory(struct radv_cmd_buffer *cmd_buffer,
          vk_command_buffer_set_error(&cmd_buffer->vk, result);
          return;
       }
-      radv_meta_buffer_cache_put(&cmd_buffer->meta_copy_memory, dispatch->shader_key.key, pipeline, layout);
+      radv_meta_buffer_cache_put(&cmd_buffer->meta_copy_memory, dispatch->shader_key, pipeline, layout);
    }
 
    radv_utrace_begin_compute_copy_memory(cmd_buffer, size);

@@ -14,6 +14,7 @@
 #include "ac_barrier.h"
 #include "ac_cmdbuf.h"
 #include "ac_vcn.h"
+#include "ac_nir_meta.h" /* bc250: ac_cs_clear_copy_buffer_key, the fill/copy cache key below */
 
 #include "vk_command_buffer.h"
 
@@ -606,7 +607,7 @@ struct radv_cmd_buffer {
     * keyed by it instead of by the old 16-byte variant index. */
    struct radv_meta_buffer_pipeline_cache {
       struct {
-         uint64_t key;
+         ac_cs_clear_copy_buffer_key key;
          bool valid;
          VkPipeline pipeline;
          VkPipelineLayout layout;
@@ -631,13 +632,27 @@ struct radv_cmd_buffer {
    } draw_stats;
 };
 
+/* bc250: the cache holds the dispatch's shader key itself, so a hit means the cached pipeline was built
+ * from exactly this key. The cached type is the shader key type, and the asserts keep it that way: the
+ * 8-byte compare below is the whole key only while ac_cs_clear_copy_buffer_key is 8 bytes and the
+ * dispatch's shader_key is that same type. A compiler that lays the union out larger (MSVC does this as
+ * soon as the bit-fields mix declared types) fails the build here instead of handing out a pipeline built
+ * for another alignment variant.
+ */
+static_assert(sizeof(ac_cs_clear_copy_buffer_key) == sizeof(uint64_t),
+              "the fill/copy cache compares the whole ac_cs_clear_copy_buffer_key as one uint64_t");
+static_assert(sizeof(((ac_cs_clear_copy_buffer_dispatch *)NULL)->shader_key) ==
+              sizeof(ac_cs_clear_copy_buffer_key),
+              "the fill/copy cache must be keyed by the dispatch's own shader key type");
+
 /* bc250: the recording's fill/copy pipeline cache. Returns true and the cached pair when key was seen before. */
 static inline bool
-radv_meta_buffer_cache_get(const struct radv_meta_buffer_pipeline_cache *cache, uint64_t key, VkPipeline *pipeline_out,
+radv_meta_buffer_cache_get(const struct radv_meta_buffer_pipeline_cache *cache,
+                           const ac_cs_clear_copy_buffer_key key, VkPipeline *pipeline_out,
                            VkPipelineLayout *layout_out)
 {
    for (unsigned i = 0; i < RADV_META_BUFFER_PIPELINE_CACHE_SIZE; i++) {
-      if (cache->entry[i].valid && cache->entry[i].key == key) {
+      if (cache->entry[i].valid && cache->entry[i].key.key == key.key) {
          *pipeline_out = cache->entry[i].pipeline;
          *layout_out = cache->entry[i].layout;
          return true;
@@ -647,7 +662,8 @@ radv_meta_buffer_cache_get(const struct radv_meta_buffer_pipeline_cache *cache, 
 }
 
 static inline void
-radv_meta_buffer_cache_put(struct radv_meta_buffer_pipeline_cache *cache, uint64_t key, VkPipeline pipeline,
+radv_meta_buffer_cache_put(struct radv_meta_buffer_pipeline_cache *cache,
+                           const ac_cs_clear_copy_buffer_key key, VkPipeline pipeline,
                            VkPipelineLayout layout)
 {
    unsigned slot = cache->next % RADV_META_BUFFER_PIPELINE_CACHE_SIZE;
