@@ -1,0 +1,28 @@
+# Unions that overlay a scalar integer on bit-fields and carry no size assert, with the reason
+# each one is safe anyway. bin/check_bitfield_overlay_unions.py reads this file; everything else
+# it finds either has a static_assert on the type's size or fits the overlay provably.
+#
+# A line is:   <path>:<type>:<overlay member>:<width of the first bit-field> <fingerprint>  # reason
+#
+# The fingerprint covers the declared type and width of every bit-field and the type of the
+# overlay. Add, remove or retype a member and it stops matching, so the gate asks again instead
+# of trusting a decision taken for a different union. Get the new line from
+#   python bin/check_bitfield_overlay_unions.py --emit-allow
+# and only then write the reason, after re-checking the layout.
+#
+# Nearly every line below is one shape: a union of SEVERAL alternative named structs (one per
+# chip generation, or one per endianness through #if), where each alternative is exactly as wide
+# as the overlay. The gate counts the bit-fields of all of them together, which is deliberate:
+# it would rather ask than model the preprocessor.
+
+src/amd/addrlib/src/chip/gfx10/gfx10_gb_reg.h:GB_ADDR_CONFIG_GFX10:u32All:3 b65090b98e69  # one struct per endianness through #if/#elif; each is 3+3+2+3+21 = 32 bits of one type, which u32All covers
+src/amd/addrlib/src/chip/gfx11/gfx11_gb_reg.h:GB_ADDR_CONFIG_GFX11:u32All:3 cbe5c030d57e  # as gfx10_gb_reg.h: one struct per endianness, each exactly 32 bits of one type
+src/amd/addrlib/src/chip/gfx12/gfx12_gb_reg.h:GB_ADDR_CONFIG_GFX12:u32All:3 1080493d02e3  # as gfx10_gb_reg.h: one struct per endianness, each exactly 32 bits of one type
+src/amd/addrlib/src/chip/gfx9/gfx9_gb_reg.h:GB_ADDR_CONFIG_GFX9:u32All:3 688583c16483  # as gfx10_gb_reg.h: one struct per endianness, each exactly 32 bits of one type
+src/amd/common/ac_descriptors.h:ac_htile_dword:dword:4 63be0aa1f6b7  # three named views of one HTILE dword (z, zs, zs_vrs), each 32 bits of unsigned; dword covers any one of them
+src/amd/common/ac_rgp.h:sqtt_queue_hardware_info:value:8 767cfabf27d4  # queue_type:8 and engine_type:8 are plain enums, which MSVC and the SysV ABI both lay out in a 4-byte unit, the same unit as reserved:16; 32 bits in all
+src/amd/common/ac_spm.h:ac_spm_muxsel:value:6 4cfb83304d90  # two named views, gfx10 (6+4+1+5) and gfx11 (5+5+1+5), each exactly 16 bits of uint16_t
+src/amd/common/ac_sqtt.h:rgp_sqtt_marker_cb_id:all:1 aa7958400476  # two named views, per_frame_cb_id (1+7+12+12) and global_cb_id (1+19+12), each exactly 32 bits of uint32_t
+src/amd/compiler/aco_ir.h:float_mode:val:2 0dc5a05556e1  # two anonymous views of the MODE register: fp_round and unsigned share a 4-byte unit and use 8 bits of it, the uint8_t view uses 8 bits, and the x64 PDB of our ICD puts all four bit-fields at +0x00, so val covers them on our little-endian ABIs. The bool bit-fields after the union are compared field by field in canReplace()
+src/amd/vpelib/src/core/inc/config_writer.h:vpep_direct_config_packet:u32all:1 c0538e024ca2  # one struct per endianness through #if/#elif, each 1+1+18+12 = 32 bits of uint32_t; vpelib is not built into the Vulkan ICD
+src/compiler/glsl/ast.h:flags:i:1 01dec846841a  # the overlay is DECLARE_BITSET_T(bitset_t, 96), 96 bits wide by construction, over one struct of unsigned bit-fields that the header's own comment keeps below that; the GLSL front end is not built into the Vulkan ICD

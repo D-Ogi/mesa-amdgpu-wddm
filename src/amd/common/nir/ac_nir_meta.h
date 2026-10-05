@@ -23,7 +23,14 @@
  * bits over several allocation units. ac_cs_clear_copy_buffer_key used to mix bool and unsigned and
  * was 24 bytes with MSVC, where "key" covered only the first two fields; a key copied through "key"
  * silently dropped the rest. Keep one type per union, keep the asserts, and the keys stay whole on
- * every compiler. The members still read and assign like booleans.
+ * every compiler. bin/check_bitfield_overlay_unions.py is the gate that keeps it that way for any
+ * union of this shape, including the ones a future upstream commit adds.
+ *
+ * One thing did change with the type: a 1-bit member no longer narrows an assignment to 0 or 1.
+ * "bool flag:1 = 2" stores 1, while "uint64_t flag:1 = 2" stores 0, because the value is truncated
+ * instead of converted to bool. The members still read and compare like booleans, but assign a
+ * 1-bit member from a boolean expression (a comparison, a "!", a bool variable) or write "!!value".
+ * Never assign a raw mask or a count to one.
  */
 
 typedef union {
