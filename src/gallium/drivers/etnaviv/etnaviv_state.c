@@ -843,6 +843,7 @@ etna_create_stream_output_target(struct pipe_context *pctx,
       unsigned buffer_offset,
       unsigned buffer_size)
 {
+   struct etna_buffer_resource *rsc = etna_buffer_resource(prsc);
    struct pipe_stream_output_target *target;
 
    target = CALLOC_STRUCT(pipe_stream_output_target);
@@ -855,6 +856,9 @@ etna_create_stream_output_target(struct pipe_context *pctx,
    target->context = pctx;
    target->buffer_offset = buffer_offset;
    target->buffer_size = buffer_size;
+
+   util_range_add(prsc, &rsc->valid_buffer_range, buffer_offset,
+                  buffer_offset + buffer_size);
 
    return target;
 }

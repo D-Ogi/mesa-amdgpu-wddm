@@ -37,6 +37,7 @@ issues:
         'intel/compiler': 'intel-compiler'
         'intel/brw': 'intel-brw'
         'intel/elk': 'intel-elk'
+        'intel/jay': 'intel-jay'
         'intel/tools': 'intel-tools'
         'intel/executor': 'intel-executor'
         'iris': 'iris'
@@ -260,6 +261,7 @@ merge_requests:
         '^src/intel/compiler/': ['intel-compiler']
         '^src/intel/compiler/brw': ['intel-brw']
         '^src/intel/compiler/elk': ['intel-elk']
+        '^src/intel/compiler/jay': ['intel-jay']
         '^src/intel/dev/': ['intel']
         '^src/intel/ds/': ['intel']
         '^src/intel/executor/': ['intel-executor']

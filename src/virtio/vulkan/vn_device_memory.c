@@ -339,31 +339,19 @@ vn_device_memory_emit_report(struct vn_device *dev,
 {
    struct vk_device *dev_vk = &dev->base.vk;
 
-   if (likely(!dev_vk->memory_reports))
-      return;
-
    const struct vk_device_memory *mem_vk = &mem->base.vk;
-   VkDeviceMemoryReportEventTypeEXT type;
-   if (result != VK_SUCCESS) {
-      type = VK_DEVICE_MEMORY_REPORT_EVENT_TYPE_ALLOCATION_FAILED_EXT;
-   } else if (is_alloc) {
-      type = mem_vk->import_handle_type
-                ? VK_DEVICE_MEMORY_REPORT_EVENT_TYPE_IMPORT_EXT
-                : VK_DEVICE_MEMORY_REPORT_EVENT_TYPE_ALLOCATE_EXT;
-   } else {
-      type = mem_vk->import_handle_type
-                ? VK_DEVICE_MEMORY_REPORT_EVENT_TYPE_UNIMPORT_EXT
-                : VK_DEVICE_MEMORY_REPORT_EVENT_TYPE_FREE_EXT;
-   }
    const uint64_t mem_obj_id =
       (mem_vk->import_handle_type | mem_vk->export_handle_types)
          ? mem->base_bo->res_id
          : mem->base.id;
    const VkMemoryType *mem_type = &dev->physical_device->memory_properties
                                       .memoryTypes[mem_vk->memory_type_index];
-   vk_emit_device_memory_report(dev_vk, type, mem_obj_id, mem_vk->size,
-                                VK_OBJECT_TYPE_DEVICE_MEMORY, (uintptr_t)mem,
-                                mem_type->heapIndex);
+
+   vk_device_memory_report_emit(dev_vk, result, is_alloc,
+                                mem_vk->import_handle_type != 0,
+                                mem_obj_id, mem_vk->size,
+                                VK_OBJECT_TYPE_DEVICE_MEMORY,
+                                (uintptr_t)mem, mem_type->heapIndex);
 }
 
 VKAPI_ATTR VkResult VKAPI_CALL

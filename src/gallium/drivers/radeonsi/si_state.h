@@ -332,6 +332,12 @@ enum
    BITFIELD_RANGE(SI_DESCS_FIRST_SHADER + MESA_SHADER_##name * SI_NUM_SHADER_DESCS,             \
                      SI_NUM_SHADER_DESCS)
 
+static inline bool si_descriptors_idx_is_compute(unsigned idx)
+{
+   return idx >= SI_DESCS_FIRST_COMPUTE &&
+          idx < SI_DESCS_FIRST_COMPUTE + SI_NUM_SHADER_DESCS;
+}
+
 static inline unsigned si_const_and_shader_buffer_descriptors_idx(unsigned shader)
 {
    return SI_DESCS_FIRST_SHADER + shader * SI_NUM_SHADER_DESCS +

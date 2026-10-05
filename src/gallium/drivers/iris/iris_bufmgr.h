@@ -19,6 +19,7 @@
 #include "util/u_dynarray.h"
 #include "util/list.h"
 #include "util/simple_mtx.h"
+#include "util/xmlconfig.h"
 #include "pipe/p_defines.h"
 #include "util/pb_slab.h"
 #include "intel/dev/intel_device_info.h"
@@ -565,7 +566,9 @@ void iris_bo_mark_exported(struct iris_bo *bo);
  */
 bool iris_bo_busy(struct iris_bo *bo);
 
-struct iris_bufmgr *iris_bufmgr_get_for_fd(int fd, bool bo_reuse);
+bool iris_bufmgr_is_eff_64bit_enabled(const struct iris_bufmgr *bufmgr);
+
+struct iris_bufmgr *iris_bufmgr_get_for_fd(int fd, bool bo_reuse, struct driOptionCache *options);
 int iris_bufmgr_get_fd(struct iris_bufmgr *bufmgr);
 
 struct iris_bo *iris_bo_gem_create_from_name(struct iris_bufmgr *bufmgr,
@@ -595,8 +598,6 @@ int iris_bo_export_gem_handle_for_device(struct iris_bo *bo, int drm_fd,
                                          uint32_t *out_handle);
 
 /**
- * Returns the BO's address relative to the appropriate base address.
- *
  * All of our base addresses are programmed to the start of a 4GB region,
  * so simply returning the bottom 32 bits of the BO address will give us
  * the offset from whatever base address corresponds to that memory region.
@@ -607,8 +608,9 @@ iris_bo_offset_from_base_address(struct iris_bo *bo)
    /* This only works for buffers in the memory zones corresponding to a
     * base address - the top, unbounded memory zone doesn't have a base.
     */
+   assert(!iris_bufmgr_is_eff_64bit_enabled(bo->bufmgr));
    assert(bo->address < IRIS_MEMZONE_OTHER_START);
-   return bo->address;
+   return bo->address & UINT32_MAX;
 }
 
 /**

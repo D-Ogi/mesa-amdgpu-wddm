@@ -32,7 +32,6 @@
 #include "etnaviv_internal.h"
 #include "etnaviv_shader.h"
 #include "util/compiler.h"
-#include "pipe/p_shader_tokens.h"
 #include "compiler/shader_enums.h"
 #include "util/disk_cache.h"
 #include "util/u_shader_variant_cache.h"

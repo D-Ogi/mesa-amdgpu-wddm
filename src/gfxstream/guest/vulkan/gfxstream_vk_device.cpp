@@ -68,6 +68,7 @@ static const char* const kGuestEmulatedInstanceExtensions[] = {
 #endif
 #if defined(GFXSTREAM_VK_X11)
     VK_KHR_XCB_SURFACE_EXTENSION_NAME,
+    VK_KHR_XLIB_SURFACE_EXTENSION_NAME,
 #endif
 #if defined(GFXSTREAM_VK_METAL)
     VK_EXT_METAL_SURFACE_EXTENSION_NAME,

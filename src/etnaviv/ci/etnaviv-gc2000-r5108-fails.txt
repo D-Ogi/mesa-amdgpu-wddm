@@ -576,6 +576,7 @@ spec@!opengl 1.1@polygon-mode-offset@config 4: Expected blue pixel in center,Fai
 spec@arb_fragment_program@sparse-samplers,Fail
 spec@ext_framebuffer_object@fbo-readpixels-depth-formats,Fail
 spec@glsl-1.10@execution@built-in-functions@vs-sign-vec4,Fail
+spec@glsl-1.10@execution@glsl-fs-texture2d-mipmap-const-bias-03,Fail
 
 # Nightly run expectations update
 hiz@hiz-stencil-read-fbo-d0-s8,Fail

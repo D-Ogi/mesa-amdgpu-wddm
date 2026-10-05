@@ -27,6 +27,8 @@
 #include <string.h>
 #include <errno.h>
 #include <assert.h>
+#include "util/os_file.h"
+#include "util/os_time.h"
 #include "util/u_printf.h"
 #include <sys/stat.h>
 
@@ -45,6 +47,7 @@ typedef int regex_t;
 #define REG_NOMATCH 1
 static inline int regcomp(regex_t *r, const char *s, int f) { return 0; }
 static inline int regexec(regex_t *r, const char *s, int n, void *p, int f) { return REG_NOMATCH; }
+static inline size_t regerror(int e, const regex_t *r, char *b, size_t s) { return 0; }
 static inline void regfree(regex_t* r) {}
 #else
 #include <regex.h>
@@ -263,12 +266,12 @@ create_directory(const char *dir, const char *sub_dir)
    char full_path[PATH_MAX];
    snprintf(full_path, sizeof(full_path), "%s/%s", dir, sub_dir);
 
-   if (mkdir(dir, 0777) == -1 && errno != EEXIST) {
+   if (os_mkdir(dir, 0777) == -1 && errno != EEXIST) {
       perror("Error creating directory");
       return;
    }
 
-   if (mkdir(full_path, 0777) == -1 && errno != EEXIST) {
+   if (os_mkdir(full_path, 0777) == -1 && errno != EEXIST) {
       perror("Error creating sub directory");
       return;
    }
@@ -381,7 +384,7 @@ void anv_wait_for_attach() {
       if (wait_for_attach) {
          fprintf(stderr, "Sleeping 30 seconds for debugger attach...\n");
          fprintf(stderr, "PID for debugger: %d\n", getpid());
-         sleep(30);
+         os_time_sleep(30 * 1000 * 1000);
       }
    }
 }

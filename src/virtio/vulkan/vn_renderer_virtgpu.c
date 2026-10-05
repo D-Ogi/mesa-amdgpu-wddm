@@ -1149,6 +1149,18 @@ virtgpu_open_device(struct virtgpu *gpu, const drmDevicePtr dev)
 
    gpu->fd = fd;
 
+   /* Skip virtio-gpu devices without 3D, such as a 2D-only display device
+    * next to the one Venus should use.
+    */
+   if (!virtgpu_ioctl_getparam(gpu, VIRTGPU_PARAM_3D_FEATURES)) {
+      if (VN_DEBUG(INIT))
+         vn_log(gpu->instance, "skipping %s without 3D features", node_path);
+      drmFreeVersion(version);
+      close(fd);
+      gpu->fd = -1;
+      return VK_ERROR_INITIALIZATION_FAILED;
+   }
+
    struct stat st;
    if (stat(primary_path, &st) == 0) {
       gpu->has_primary = true;

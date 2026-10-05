@@ -1133,7 +1133,7 @@ static void si_set_constant_buffer(struct si_context *sctx, struct si_buffer_res
    }
 
    sctx->descriptors_dirty |= 1u << descriptors_idx;
-   if (descriptors_idx < SI_DESCS_FIRST_COMPUTE)
+   if (!si_descriptors_idx_is_compute(descriptors_idx))
       si_mark_atom_dirty(sctx, &sctx->atoms.s.gfx_shader_pointers);
 }
 
@@ -1262,7 +1262,7 @@ static void si_set_shader_buffer(struct si_context *sctx, struct si_buffer_resou
       buffers->enabled_mask &= ~(1llu << slot);
       buffers->writable_mask &= ~(1llu << slot);
       sctx->descriptors_dirty |= 1u << descriptors_idx;
-      if (descriptors_idx < SI_DESCS_FIRST_COMPUTE)
+      if (!si_descriptors_idx_is_compute(descriptors_idx))
          si_mark_atom_dirty(sctx, &sctx->atoms.s.gfx_shader_pointers);
       return;
    }
@@ -1288,7 +1288,7 @@ static void si_set_shader_buffer(struct si_context *sctx, struct si_buffer_resou
 
    buffers->enabled_mask |= 1llu << slot;
    sctx->descriptors_dirty |= 1lu << descriptors_idx;
-   if (descriptors_idx < SI_DESCS_FIRST_COMPUTE)
+   if (!si_descriptors_idx_is_compute(descriptors_idx))
       si_mark_atom_dirty(sctx, &sctx->atoms.s.gfx_shader_pointers);
 
    util_range_add(&buf->b.b, &buf->valid_buffer_range, sbuffer->buffer_offset,
@@ -1560,7 +1560,7 @@ static bool si_reset_buffer_resources(struct si_context *sctx, struct si_buffer_
       if (buffer && (!buf || buffer == buf)) {
          si_set_buf_desc_address(si_resource(buffer), buffers->offsets[i], descs->list + i * 4);
          sctx->descriptors_dirty |= 1u << descriptors_idx;
-         if (descriptors_idx < SI_DESCS_FIRST_COMPUTE)
+         if (!si_descriptors_idx_is_compute(descriptors_idx))
             si_mark_atom_dirty(sctx, &sctx->atoms.s.gfx_shader_pointers);
 
          radeon_add_to_buffer_list(sctx, &sctx->gfx_cs, si_resource(buffer),
@@ -3169,7 +3169,7 @@ void si_set_active_descriptors(struct si_context *sctx, unsigned desc_idx, uint6
    if (first < desc->first_active_slot ||
        first + count > desc->first_active_slot + desc->num_active_slots) {
       sctx->descriptors_dirty |= 1u << desc_idx;
-      if (desc_idx < SI_DESCS_FIRST_COMPUTE)
+      if (!si_descriptors_idx_is_compute(desc_idx))
          si_mark_atom_dirty(sctx, &sctx->atoms.s.gfx_shader_pointers);
    }
 

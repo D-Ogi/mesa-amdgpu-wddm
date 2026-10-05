@@ -313,7 +313,7 @@ get_bvh_layout(const struct vk_acceleration_structure_build_state *state,
       layout->leaf_block_map_offset = offset;
       offset += leaf_block_offset_size;
 
-      uint64_t parent_child_count_map_size = internal_count * sizeof(uint8_t);
+      uint64_t parent_child_count_map_size = (leaf_count + internal_count) * sizeof(uint8_t);
       layout->parent_child_count_map_offset = offset;
       offset += parent_child_count_map_size;
    }

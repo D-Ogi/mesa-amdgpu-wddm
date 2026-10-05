@@ -600,7 +600,7 @@ nvk_push_draw_state_init(struct nvk_queue *queue, struct nv_push *p)
     * 32-bit pointer for this in 3D rather than a full 48 like we have for
     * compute.
     */
-   P_IMMD(p, NV9097, SET_SHADER_LOCAL_MEMORY_WINDOW, 0xff << 24);
+   P_IMMD(p, NV9097, SET_SHADER_LOCAL_MEMORY_WINDOW, 0xffu << 24);
 
    for (uint32_t group = 0; group < 5; group++) {
       for (uint32_t slot = 0; slot < 16; slot++) {

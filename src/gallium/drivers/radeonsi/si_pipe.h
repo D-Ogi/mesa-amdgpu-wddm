@@ -233,23 +233,23 @@ enum
 #define DBG(name)       (1ull << DBG_##name)
 
 #define SI_BIND_CONSTANT_BUFFER_SHIFT     0
-#define SI_BIND_SHADER_BUFFER_SHIFT       6
-#define SI_BIND_IMAGE_BUFFER_SHIFT        12
-#define SI_BIND_SAMPLER_BUFFER_SHIFT      18
-#define SI_BIND_OTHER_BUFFER_SHIFT        24
+#define SI_BIND_SHADER_BUFFER_SHIFT       SI_NUM_SHADERS
+#define SI_BIND_IMAGE_BUFFER_SHIFT        (SI_NUM_SHADERS * 2)
+#define SI_BIND_SAMPLER_BUFFER_SHIFT      (SI_NUM_SHADERS * 3)
+#define SI_BIND_OTHER_BUFFER_SHIFT        (SI_NUM_SHADERS * 4)
 
-/* Bind masks for all 6 shader stages. */
-#define SI_BIND_CONSTANT_BUFFER_ALL       (0x3f << SI_BIND_CONSTANT_BUFFER_SHIFT)
-#define SI_BIND_SHADER_BUFFER_ALL         (0x3f << SI_BIND_SHADER_BUFFER_SHIFT)
-#define SI_BIND_IMAGE_BUFFER_ALL          (0x3f << SI_BIND_IMAGE_BUFFER_SHIFT)
-#define SI_BIND_SAMPLER_BUFFER_ALL        (0x3f << SI_BIND_SAMPLER_BUFFER_SHIFT)
+/* Bind masks for all shader stages. */
+#define SI_BIND_CONSTANT_BUFFER_ALL       (BITFIELD64_MASK(SI_NUM_SHADERS) << SI_BIND_CONSTANT_BUFFER_SHIFT)
+#define SI_BIND_SHADER_BUFFER_ALL         (BITFIELD64_MASK(SI_NUM_SHADERS) << SI_BIND_SHADER_BUFFER_SHIFT)
+#define SI_BIND_IMAGE_BUFFER_ALL          (BITFIELD64_MASK(SI_NUM_SHADERS) << SI_BIND_IMAGE_BUFFER_SHIFT)
+#define SI_BIND_SAMPLER_BUFFER_ALL        (BITFIELD64_MASK(SI_NUM_SHADERS) << SI_BIND_SAMPLER_BUFFER_SHIFT)
 
-#define SI_BIND_CONSTANT_BUFFER(shader)   ((1 << (shader)) << SI_BIND_CONSTANT_BUFFER_SHIFT)
-#define SI_BIND_SHADER_BUFFER(shader)     ((1 << (shader)) << SI_BIND_SHADER_BUFFER_SHIFT)
-#define SI_BIND_IMAGE_BUFFER(shader)      ((1 << (shader)) << SI_BIND_IMAGE_BUFFER_SHIFT)
-#define SI_BIND_SAMPLER_BUFFER(shader)    ((1 << (shader)) << SI_BIND_SAMPLER_BUFFER_SHIFT)
-#define SI_BIND_VERTEX_BUFFER             (1 << (SI_BIND_OTHER_BUFFER_SHIFT + 0))
-#define SI_BIND_STREAMOUT_BUFFER          (1 << (SI_BIND_OTHER_BUFFER_SHIFT + 1))
+#define SI_BIND_CONSTANT_BUFFER(shader)   (BITFIELD64_BIT(shader) << SI_BIND_CONSTANT_BUFFER_SHIFT)
+#define SI_BIND_SHADER_BUFFER(shader)     (BITFIELD64_BIT(shader) << SI_BIND_SHADER_BUFFER_SHIFT)
+#define SI_BIND_IMAGE_BUFFER(shader)      (BITFIELD64_BIT(shader) << SI_BIND_IMAGE_BUFFER_SHIFT)
+#define SI_BIND_SAMPLER_BUFFER(shader)    (BITFIELD64_BIT(shader) << SI_BIND_SAMPLER_BUFFER_SHIFT)
+#define SI_BIND_VERTEX_BUFFER             BITFIELD64_BIT(SI_BIND_OTHER_BUFFER_SHIFT + 0)
+#define SI_BIND_STREAMOUT_BUFFER          BITFIELD64_BIT(SI_BIND_OTHER_BUFFER_SHIFT + 1)
 
 /* Only 32-bit buffer allocations are supported, gallium doesn't support more
  * at the moment.
@@ -271,7 +271,7 @@ struct si_resource {
    uint8_t bo_alignment_log2;
    enum radeon_bo_domain domains:8;
    enum radeon_bo_flag flags:16;
-   unsigned bind_history; /* bitmask of SI_BIND_xxx_BUFFER */
+   uint64_t bind_history; /* bitmask of SI_BIND_xxx_BUFFER */
 
    /* The buffer range which is initialized (with a write transfer,
     * streamout, DMA, or as a random access target). The rest of
@@ -1370,7 +1370,7 @@ struct pipe_resource *si_buffer_from_winsys_buffer(struct pipe_screen *screen,
                                                    bool take_ownership);
 void si_replace_buffer_storage(struct pipe_context *ctx, struct pipe_resource *dst,
                                struct pipe_resource *src, unsigned num_rebinds,
-                               uint32_t rebind_mask, uint32_t delete_buffer_id);
+                               uint64_t rebind_mask, uint32_t delete_buffer_id);
 bool si_reallocate_buffer_change_flags(struct si_context *sctx, struct pipe_resource *buf,
                                        unsigned usage, unsigned bind);
 void si_init_screen_buffer_functions(struct si_screen *sscreen);

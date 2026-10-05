@@ -8041,9 +8041,16 @@ genX(write_trtt_entries)(struct anv_async_submit *submit,
       i += extra_writes;
    }
 
-   genx_batch_emit_pipe_control(batch, devinfo, _3D,
-                                ANV_PIPE_CS_STALL_BIT |
-                                ANV_PIPE_TLB_INVALIDATE_BIT);
+   if (batch->engine_class == INTEL_ENGINE_CLASS_RENDER ||
+       batch->engine_class == INTEL_ENGINE_CLASS_COMPUTE) {
+      genx_batch_emit_pipe_control(batch, devinfo, _3D,
+                                   ANV_PIPE_CS_STALL_BIT |
+                                   ANV_PIPE_TLB_INVALIDATE_BIT);
+   } else {
+      anv_batch_emit(batch, GENX(MI_FLUSH_DW), mfd) {
+         mfd.TLBInvalidate = true;
+      }
+   }
 #else
    UNREACHABLE("Not implemented");
 #endif

@@ -281,12 +281,12 @@ lp_bld_llvm_sampler_soa_emit_fetch_texel(const struct lp_build_sampler_soa *base
       for (unsigned i = 0; i < ARRAY_SIZE(out_data); i++) {
          params->texel[i] = LLVMBuildExtractValue(builder, result, i, "");
 
+         if (params->type.length != lp_native_vector_width / 32)
+            params->texel[i] = truncate_to_type_width(gallivm, params->texel[i], params->type);
+
          /* Expand the residency code to the expected size. */
          if (i == 4)
             params->texel[i] = LLVMBuildZExt(builder, params->texel[i], out_residency_type, "");
-
-         if (params->type.length != lp_native_vector_width / 32)
-            params->texel[i] = truncate_to_type_width(gallivm, params->texel[i], params->type);
 
          if (!params->exec_mask_nz)
             LLVMBuildStore(builder, params->texel[i], out_data[i]);

@@ -29,7 +29,6 @@
 #include "compiler/nir/nir.h"
 #include "compiler/nir/nir_serialize.h"
 #include "main/uniforms.h"
-#include "pipe/p_shader_tokens.h"
 #include "util/u_memory.h"
 #include "util/perf/cpu_trace.h"
 

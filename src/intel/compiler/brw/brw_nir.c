@@ -2223,10 +2223,33 @@ brw_nir_lower_phis_to_scalar_cb(const nir_instr *instr, const void *_)
 #define LOOP_OPT BRW_NIR_LOOP_PASS
 #define LOOP_OPT_NOT_IDEMPOTENT BRW_NIR_LOOP_PASS_NOT_IDEMPOTENT
 
+static enum intel_code_motion
+brw_nir_code_motion(const brw_pass_tracker *pt)
+{
+   /* brw_compile_* passes the option in the key. brw_preprocess_nir() runs
+    * before there is a key, so it passes it in brw_nir_compiler_opts instead.
+    * Each one fills in only its own field, so take whichever is there.
+    */
+   assert(pt->key == NULL || pt->code_motion == INTEL_CODE_MOTION_DEFAULT);
+   const enum intel_code_motion driconf =
+      pt->key != NULL ? pt->key->code_motion : pt->code_motion;
+   if (driconf != INTEL_CODE_MOTION_DEFAULT)
+      return driconf;
+
+   return intel_use_jay(pt->compiler->devinfo, pt->nir) ?
+          INTEL_CODE_MOTION_LICM : INTEL_CODE_MOTION_GCM;
+}
+
 void
-brw_nir_optimize(brw_pass_tracker *pt)
+brw_nir_optimize(brw_pass_tracker *pt, bool run_code_motion)
 {
    nir_shader *nir = pt->nir;
+
+   /* brw_nir_code_motion() always picks a pass, so _DEFAULT here means the
+    * caller asked for no code motion at all.
+    */
+   const enum intel_code_motion code_motion =
+      run_code_motion ? brw_nir_code_motion(pt) : INTEL_CODE_MOTION_DEFAULT;
 
    pass_tracker_new_loop(pt);
 
@@ -2299,7 +2322,11 @@ brw_nir_optimize(brw_pass_tracker *pt)
          LOOP_OPT_NOT_IDEMPOTENT(nir_opt_loop_unroll);
       }
       LOOP_OPT(nir_opt_remove_phis);
-      LOOP_OPT(nir_opt_gcm, false);
+      if (code_motion == INTEL_CODE_MOTION_LICM) {
+         LOOP_OPT(nir_opt_licm, NULL);
+      } else if (code_motion == INTEL_CODE_MOTION_GCM) {
+         LOOP_OPT(nir_opt_gcm, false);
+      }
       LOOP_OPT(nir_opt_undef);
       LOOP_OPT(nir_lower_pack);
 
@@ -2507,6 +2534,7 @@ brw_preprocess_nir(const struct brw_compiler *compiler, nir_shader *nir,
    brw_pass_tracker pt_ = {
       .nir = nir,
       .compiler = compiler,
+      .code_motion = opts->code_motion,
    }, *pt = &pt_;
 
    nir_validate_ssa_dominance(nir, "before brw_preprocess_nir");
@@ -2556,7 +2584,7 @@ brw_preprocess_nir(const struct brw_compiler *compiler, nir_shader *nir,
    if (OPT(nir_opt_memcpy))
       OPT(nir_split_var_copies);
 
-   brw_nir_optimize(pt);
+   brw_nir_optimize(pt, true);
 
    if (nir->info.ray_queries) {
       OPT(nir_opt_ray_queries);
@@ -2685,7 +2713,7 @@ brw_preprocess_nir(const struct brw_compiler *compiler, nir_shader *nir,
       OPT(intel_nir_clamp_per_vertex_loads);
 
    /* Get rid of split copies */
-   brw_nir_optimize(pt);
+   brw_nir_optimize(pt, true);
 }
 
 static bool
@@ -2847,11 +2875,15 @@ brw_nir_link_shaders(const struct brw_compiler *compiler,
    brw_pass_tracker pt_producer = { .nir = producer, .compiler = compiler };
    brw_pass_tracker pt_consumer = { .nir = consumer, .compiler = compiler };
 
-   brw_nir_optimize(&pt_producer);
-   brw_nir_optimize(&pt_consumer);
+   /* Code motion is expensive and linking runs the optimization loop up to
+    * three more times per shader. brw_preprocess_nir() has already run it and
+    * brw_postprocess_nir_opts() runs it again, so skip it here.
+    */
+   brw_nir_optimize(&pt_producer, false);
+   brw_nir_optimize(&pt_consumer, false);
 
    if (nir_link_opt_varyings(producer, consumer))
-      brw_nir_optimize(&pt_consumer);
+      brw_nir_optimize(&pt_consumer, false);
 
    NIR_PASS(_, producer, nir_remove_dead_variables, nir_var_shader_out, NULL);
    NIR_PASS(_, consumer, nir_remove_dead_variables, nir_var_shader_in, NULL);
@@ -2869,8 +2901,8 @@ brw_nir_link_shaders(const struct brw_compiler *compiler,
       NIR_PASS(_, producer, nir_lower_global_vars_to_local);
       NIR_PASS(_, consumer, nir_lower_global_vars_to_local);
 
-      brw_nir_optimize(&pt_producer);
-      brw_nir_optimize(&pt_consumer);
+      brw_nir_optimize(&pt_producer, false);
+      brw_nir_optimize(&pt_consumer, false);
 
       if (producer->info.stage == MESA_SHADER_MESH &&
             consumer->info.stage == MESA_SHADER_FRAGMENT) {
@@ -3558,7 +3590,7 @@ brw_nir_lower_int64(brw_pass_tracker *pt)
       OPT(nir_opt_algebraic_before_lower_int64);
 
    if (OPT(nir_lower_int64))
-      brw_nir_optimize(pt);
+      brw_nir_optimize(pt, true);
 }
 
 /* Prepare the given shader for codegen
@@ -3656,14 +3688,14 @@ brw_postprocess_nir_opts(brw_pass_tracker *pt)
 
    OPT(brw_nir_tag_speculative_access);
 
-   brw_nir_optimize(pt);
+   brw_nir_optimize(pt, true);
 
    if (nir_shader_has_local_variables(nir)) {
       OPT(nir_lower_vars_to_explicit_types, nir_var_function_temp,
           glsl_get_natural_size_align_bytes);
       OPT(nir_lower_explicit_io, nir_var_function_temp,
           nir_address_format_32bit_offset);
-      brw_nir_optimize(pt);
+      brw_nir_optimize(pt, true);
    }
 
    brw_vectorize_lower_mem_access(pt);
@@ -3780,7 +3812,7 @@ brw_postprocess_nir_opts(brw_pass_tracker *pt)
        * allows the elimination of some loops over, say, a TXF instruction
        * with a non-uniform texture handle.
        */
-      brw_nir_optimize(pt);
+      brw_nir_optimize(pt, true);
 
       OPT(nir_lower_subgroups, &subgroups_options);
    }

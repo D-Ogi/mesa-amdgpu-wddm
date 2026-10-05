@@ -94,7 +94,8 @@ etna_blend_state_create(struct pipe_context *pctx,
                              rt->rgb_dst_factor == rt->alpha_dst_factor &&
                              rt->rgb_func == rt->alpha_func);
 
-      co->rt[i].fo_allowed = !co->rt[i].alpha_enable && !logicop_enable;
+      co->rt[i].fo_allowed = !co->rt[i].alpha_enable && !logicop_enable &&
+                             !so->advanced_blend_func;
    }
 
    co->PE_LOGIC_OP =
@@ -108,6 +109,10 @@ etna_blend_state_create(struct pipe_context *pctx,
       co->PS_MSAA_CONFIG |= VIVS_PS_MSAA_CONFIG_ALPHA_TO_COVERAGE;
 
    /* XXX alpha_to_one? */
+
+   if (so->advanced_blend_func)
+      co->PE_ADVANCED_ALPHA_CONFIG = VIVS_PE_ADVANCED_ALPHA_CONFIG_ADVANCED_BLEND_MODE(
+         translate_advanced_blend_mode(so->advanced_blend_func));
 
    return co;
 }
@@ -184,7 +189,20 @@ etna_update_blend(struct etna_context *ctx)
 
       all_overwrite &= full_overwrite;
 
-      if (blend->rt[i].alpha_enable) {
+      if (pblend->advanced_blend_func) {
+         /* The mode in PE_ADVANCED_ALPHA_CONFIG replaces the blend math, so the
+          * classic blender gets a neutral configuration.
+          */
+         blend->rt[current_rt].PE_ALPHA_CONFIG =
+            VIVS_PE_ALPHA_CONFIG_BLEND_ENABLE_COLOR |
+            VIVS_PE_ALPHA_CONFIG_BLEND_SEPARATE_ALPHA |
+            VIVS_PE_ALPHA_CONFIG_SRC_FUNC_COLOR(BLEND_FUNC_ONE) |
+            VIVS_PE_ALPHA_CONFIG_SRC_FUNC_ALPHA(BLEND_FUNC_ONE) |
+            VIVS_PE_ALPHA_CONFIG_DST_FUNC_COLOR(BLEND_FUNC_ZERO) |
+            VIVS_PE_ALPHA_CONFIG_DST_FUNC_ALPHA(BLEND_FUNC_ZERO) |
+            VIVS_PE_ALPHA_CONFIG_EQ_COLOR(BLEND_EQ_ADD) |
+            VIVS_PE_ALPHA_CONFIG_EQ_ALPHA(BLEND_EQ_ADD);
+      } else if (blend->rt[i].alpha_enable) {
          blend->rt[current_rt].PE_ALPHA_CONFIG =
             VIVS_PE_ALPHA_CONFIG_BLEND_ENABLE_COLOR |
             COND(blend->rt[i].separate_alpha, VIVS_PE_ALPHA_CONFIG_BLEND_SEPARATE_ALPHA) |

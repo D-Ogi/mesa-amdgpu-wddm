@@ -32,8 +32,8 @@
 #include <stdint.h>
 
 #define ETNA_NO_MATCH (~0)
-#define EXT_FORMAT (1 << 31)
-#define ASTC_FORMAT (1 << 30)
+#define EXT_FORMAT (1u << 31)
+#define ASTC_FORMAT (1u << 30)
 
 struct etna_screen;
 

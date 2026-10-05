@@ -133,6 +133,13 @@ anv_video_patch_encode_session_parameters(struct anv_device *device, struct vk_v
       }
       break;
    }
+   case VK_VIDEO_CODEC_OPERATION_ENCODE_AV1_BIT_KHR:
+      /* Derive the bit depth from the profile if pColorConfig is NULL */
+      if (params->av1_enc.seq_hdr.color_config.BitDepth == 0) {
+         params->av1_enc.seq_hdr.color_config.BitDepth =
+            params->luma_bit_depth == VK_VIDEO_COMPONENT_BIT_DEPTH_10_BIT_KHR ? 10 : 8;
+      }
+      break;
    default:
       break;
    }
@@ -144,6 +151,7 @@ anv_video_patch_session_parameters(struct anv_device *device, struct vk_video_se
    switch (params->op) {
    case VK_VIDEO_CODEC_OPERATION_ENCODE_H264_BIT_KHR:
    case VK_VIDEO_CODEC_OPERATION_ENCODE_H265_BIT_KHR:
+   case VK_VIDEO_CODEC_OPERATION_ENCODE_AV1_BIT_KHR:
       anv_video_patch_encode_session_parameters(device, params);
       break;
    default:

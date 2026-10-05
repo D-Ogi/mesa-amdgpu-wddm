@@ -50,6 +50,12 @@
 
 #define ETNA_PIPE_MAP_DISCARD_LEVEL   (PIPE_MAP_DRV_PRV << 0)
 
+static inline bool
+etna_buffer_busy(struct etna_context *ctx, struct etna_buffer_resource *rsc)
+{
+   return etna_resource_status(ctx, &rsc->base) || !etna_bo_is_idle(rsc->bo);
+}
+
 static void *
 etna_buffer_map(struct pipe_context *pctx, struct pipe_resource *prsc,
                 unsigned level, unsigned usage, const struct pipe_box *box,
@@ -67,6 +73,15 @@ etna_buffer_map(struct pipe_context *pctx, struct pipe_resource *prsc,
    if ((usage & PIPE_MAP_WRITE) &&
        !util_ranges_intersect(&rsc->valid_buffer_range,
                               box->x, box->x + box->width))
+      usage |= PIPE_MAP_UNSYNCHRONIZED;
+
+   /* Replace a busy buffer instead of stalling on it when its old content
+    * is no longer needed.
+    */
+   if ((usage & PIPE_MAP_DISCARD_WHOLE_RESOURCE) &&
+       !(usage & PIPE_MAP_UNSYNCHRONIZED) &&
+       etna_buffer_busy(ctx, rsc) &&
+       etna_buffer_resource_realloc(ctx, rsc))
       usage |= PIPE_MAP_UNSYNCHRONIZED;
 
    pipe_resource_reference(&trans->base.resource, prsc);
@@ -108,6 +123,26 @@ etna_buffer_map(struct pipe_context *pctx, struct pipe_resource *prsc,
 free_trans:
    slab_free(&ctx->transfer_pool, trans);
    return NULL;
+}
+
+static void
+etna_invalidate_resource(struct pipe_context *pctx, struct pipe_resource *prsc)
+{
+   struct etna_context *ctx = etna_context(pctx);
+   struct etna_buffer_resource *rsc;
+
+   if (prsc->target != PIPE_BUFFER)
+      return;
+
+   rsc = etna_buffer_resource(prsc);
+
+   if (rsc->valid_buffer_range.start > rsc->valid_buffer_range.end)
+      return;
+
+   if (etna_buffer_busy(ctx, rsc))
+      etna_buffer_resource_realloc(ctx, rsc);
+   else
+      util_range_set_empty(&rsc->valid_buffer_range);
 }
 
 static void
@@ -535,5 +570,6 @@ etna_transfer_init(struct pipe_context *pctx)
    pctx->buffer_unmap = etna_buffer_unmap;
    pctx->texture_unmap = u_transfer_helper_transfer_unmap;
    pctx->buffer_subdata = u_default_buffer_subdata;
+   pctx->invalidate_resource = etna_invalidate_resource;
    pctx->texture_subdata = u_default_texture_subdata;
 }

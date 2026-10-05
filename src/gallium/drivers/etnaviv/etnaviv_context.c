@@ -305,9 +305,6 @@ etna_reset_gpu_state(struct etna_context *ctx)
    if (screen->info->halti >= 3) { /* Only on HALTI3+ */
       etna_set_state(stream, VIVS_PS_HALTI3_UNK0103C, 0x76543210);
    }
-   if (screen->info->halti >= 4) { /* Only on HALTI4+ */
-      etna_set_state(stream, VIVS_PE_ADVANCED_ALPHA_CONFIG, 0x00000000);
-   }
    if (screen->info->halti >= 5) { /* Only on HALTI5+ */
       etna_set_state(stream, VIVS_NTE_DESCRIPTOR_CONTROL,
                      COND(!DBG_ENABLED(ETNA_DBG_NO_TEXDESC), VIVS_NTE_DESCRIPTOR_CONTROL_ENABLE));
@@ -575,8 +572,14 @@ etna_draw_vbo(struct pipe_context *pctx, const struct pipe_draw_info *info,
 
    if (ctx->dirty & ETNA_DIRTY_SAMPLER_VIEWS) {
       /* Mark textures as being read */
-      u_foreach_bit(i, ctx->active_sampler_views)
-         resource_read(ctx, ctx->sampler_view[i]->texture);
+      u_foreach_bit(i, ctx->active_sampler_views) {
+         struct pipe_sampler_view *view = ctx->sampler_view[i];
+
+         resource_read(ctx, view->texture);
+
+         if (etna_sampler_view_uses_border_shadow(ctx, i))
+            resource_read(ctx, &etna_sampler_view_resource(ctx, view, i)->base);
+      }
    }
 
    /* Mark streamout buffers as being written. */

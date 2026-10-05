@@ -492,6 +492,10 @@ struct radv_draw_stats_pass {
    uint32_t view_mask;
 };
 
+/* bc250: how many buffer fill/copy pipelines one recording remembers. Two was enough for the old 16-byte variant
+ * split; the merged upstream key has more variants, so keep a few slots. */
+#define RADV_META_BUFFER_PIPELINE_CACHE_SIZE 4
+
 struct radv_cmd_buffer {
    struct vk_command_buffer vk;
 
@@ -595,13 +599,20 @@ struct radv_cmd_buffer {
 
    struct list_head msrtss_transients;
 
-   /* bc250: the compute pipelines and layouts of buffer copies and fills (radv_meta_buffer.c), by 16-byte variant, as
-    * the device's vk_meta cache returned them. The cache keeps them until the device is destroyed, so a later copy or
-    * fill recorded here skips its key hashes and locked lookups. */
-   struct {
-      VkPipeline pipeline;
-      VkPipelineLayout layout;
-   } meta_copy_memory[2], meta_fill_memory[2];
+   /* bc250: the compute pipelines and layouts of buffer copies and fills (radv_meta_buffer.c), as the device's vk_meta
+    * cache returned them, kept by the ac_cs_clear_copy_buffer shader key of the dispatch. The device cache keeps them
+    * until the device is destroyed, so a later copy or fill recorded here skips its key hashes and locked lookups.
+    * Upstream 2026-10 merged the fill and copy pipeline getters and keys them by that shader key, so these slots are
+    * keyed by it instead of by the old 16-byte variant index. */
+   struct radv_meta_buffer_pipeline_cache {
+      struct {
+         uint64_t key;
+         bool valid;
+         VkPipeline pipeline;
+         VkPipelineLayout layout;
+      } entry[RADV_META_BUFFER_PIPELINE_CACHE_SIZE];
+      unsigned next; /* round-robin victim */
+   } meta_copy_memory, meta_fill_memory;
 
    /* bc250: the counters of BC250_DRAW_STATS for this recording, reset at vkBeginCommandBuffer when the
     * winsys counts and added to its totals at vkEndCommandBuffer. */
@@ -619,6 +630,41 @@ struct radv_cmd_buffer {
       uint32_t vb_desc[MAX_VERTEX_ATTRIBS * 4];
    } draw_stats;
 };
+
+/* bc250: the recording's fill/copy pipeline cache. Returns true and the cached pair when key was seen before. */
+static inline bool
+radv_meta_buffer_cache_get(const struct radv_meta_buffer_pipeline_cache *cache, uint64_t key, VkPipeline *pipeline_out,
+                           VkPipelineLayout *layout_out)
+{
+   for (unsigned i = 0; i < RADV_META_BUFFER_PIPELINE_CACHE_SIZE; i++) {
+      if (cache->entry[i].valid && cache->entry[i].key == key) {
+         *pipeline_out = cache->entry[i].pipeline;
+         *layout_out = cache->entry[i].layout;
+         return true;
+      }
+   }
+   return false;
+}
+
+static inline void
+radv_meta_buffer_cache_put(struct radv_meta_buffer_pipeline_cache *cache, uint64_t key, VkPipeline pipeline,
+                           VkPipelineLayout layout)
+{
+   unsigned slot = cache->next % RADV_META_BUFFER_PIPELINE_CACHE_SIZE;
+
+   for (unsigned i = 0; i < RADV_META_BUFFER_PIPELINE_CACHE_SIZE; i++) {
+      if (!cache->entry[i].valid) {
+         slot = i;
+         break;
+      }
+   }
+
+   cache->entry[slot].key = key;
+   cache->entry[slot].pipeline = pipeline;
+   cache->entry[slot].layout = layout;
+   cache->entry[slot].valid = true;
+   cache->next = slot + 1;
+}
 
 /* An application command counts; one that RADV records for its own meta operation does not. */
 static inline bool

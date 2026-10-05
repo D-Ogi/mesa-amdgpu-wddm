@@ -716,7 +716,12 @@ msm_bo_init(struct tu_device *dev,
    if (result == VK_SUCCESS &&
        (mem_property & VK_MEMORY_PROPERTY_HOST_CACHED_BIT) &&
        !(mem_property & VK_MEMORY_PROPERTY_HOST_COHERENT_BIT)) {
-      tu_bo_map(dev, bo, NULL);
+      result = tu_bo_map(dev, bo, NULL);
+      if (result != VK_SUCCESS) {
+         tu_bo_finish(dev, bo);
+         *out_bo = NULL;
+         return result;
+      }
 
       /* Cached non-coherent memory may already have dirty cache lines,
        * we should clean the cache lines before GPU got the chance to
@@ -1107,12 +1112,11 @@ msm_queue_submit(struct tu_queue *queue, void *_submit,
                                  DRM_MSM_VM_BIND,
                                  &req, sizeof(req));
       }
-      int errno_ = errno;
 
       u_rwlock_rdunlock(&queue->device->vm_bind_fence_lock);
 
       if (ret) {
-         assert(errno_ != EINVAL);
+         assert(errno != EINVAL);
          if (errno == ENOMEM) {
             MESA_TRACE_SCOPE("DRM_MSM_VM_BIND OOM path");
 

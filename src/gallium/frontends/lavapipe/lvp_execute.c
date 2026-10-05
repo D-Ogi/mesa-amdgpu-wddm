@@ -31,9 +31,6 @@
 #include "lvp_conv.h"
 #include "lp_state.h"
 
-#include "pipe/p_shader_tokens.h"
-#include "tgsi/tgsi_from_mesa.h"
-
 #include "util/blend.h"
 #include "util/format/u_format.h"
 #include "util/u_surface.h"
@@ -45,7 +42,6 @@
 #include "util/u_prim.h"
 #include "util/u_prim_restart.h"
 #include "util/ptralloc.h"
-#include "tgsi/tgsi_from_mesa.h"
 
 #include "vk_blend.h"
 #include "vk_cmd_enqueue_entrypoints.h"

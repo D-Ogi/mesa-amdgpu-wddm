@@ -662,3 +662,8 @@ dEQP-GLES2.functional.texture.specification.basic_teximage2d.a16f_2d,Fail
 dEQP-GLES2.functional.texture.specification.basic_texsubimage2d.a16f_cube,Fail
 dEQP-GLES2.functional.texture.specification.texsubimage2d_empty_tex.a16f_cube,Fail
 dEQP-GLES2.functional.texture.specification.basic_teximage2d.a16f_cube,Fail
+
+# Nightly run expectations update
+program@execute@builtin@builtin-short-hadd-1.0.generated,Crash
+program@execute@builtin@builtin-short-rhadd-1.0.generated,Crash
+

@@ -240,6 +240,8 @@ GL 4.6, GLSL 4.60 -- all DONE: radeonsi, virgl, zink, iris, crocus/gen7+, d3d12,
   GL_ARB_transform_feedback_overflow_query              DONE (freedreno/a6xx+, nvc0, softpipe, crocus/gen6+, r600/evergreen+)
   GL_KHR_no_error                                       DONE (all drivers)
 
+GLES3.0, GLSL ES 3.0 -- all DONE: freedreno, nv50, nvc0, r600, radeonsi, llvmpipe, softpipe, virgl, zink, d3d12, panfrost, asahi, iris, crocus/gen6+, v3d, etnaviv/HALTI5
+
 These are the extensions cherry-picked to make GLES 3.1
 GLES3.1, GLSL ES 3.1 -- all DONE: freedreno/a5xx+, nvc0, r600, radeonsi, virgl, v3d, softpipe, llvmpipe, zink, panfrost, d3d12, iris, crocus/gen7.5+, asahi
 
@@ -527,7 +529,7 @@ Vulkan 1.4 -- all DONE: anv, hk, lvp, nvk, panvk/v10+, radv/gfx8+, tu/a7xx+, vn
   VK_KHR_load_store_op_none                             DONE (anv, kk, lvp, nvk, panvk, radv, tu, v3dv, vn)
   VK_KHR_maintenance5                                   DONE (anv, hasvk, kk, lvp, nvk, panvk, pvr, radv, tu, v3dv, vn)
   VK_KHR_maintenance6                                   DONE (anv, hasvk, kk, lvp, nvk, panvk, radv, tu, vn)
-  VK_KHR_map_memory2                                    DONE (anv, kk, lvp, nvk, panvk, pvr, radv, tu, vn)
+  VK_KHR_map_memory2                                    DONE (anv, kk, lvp, nvk, panvk, pvr, radv, tu, v3dv, vn)
   VK_KHR_push_descriptor                                DONE (anv, hasvk, kk, lvp, nvk, panvk, pvr, radv, tu, vn)
   VK_KHR_shader_expect_assume                           DONE (anv, dzn, hasvk, kk, lvp, nvk, panvk, pvr, radv, tu, v3dv, vn)
   VK_KHR_shader_float_controls2                         DONE (anv, kk, lvp, nvk, panvk, pvr, radv, tu, vn)
@@ -566,7 +568,7 @@ Khronos extensions that are not part of any Vulkan version:
   VK_KHR_maintenance7                                   DONE (anv, hk, kk, lvp, nvk, panvk, pvr, radv, tu, vn)
   VK_KHR_maintenance8                                   DONE (anv, hk, kk, lvp, nvk, panvk, radv, tu, vn)
   VK_KHR_maintenance9                                   DONE (anv, hk, kk, lvp, nvk, panvk, radv, tu, vn)
-  VK_KHR_maintenance10                                  DONE (anv, hk, kk, lvp, nvk, radv, vn)
+  VK_KHR_maintenance10                                  DONE (anv, hk, kk, lvp, nvk, panvk, radv, vn)
   VK_KHR_maintenance11                                  DONE (anv, lvp, radv, vn)
   VK_KHR_performance_query                              DONE (anv, radv/gfx10.3+, tu, v3dv)
   VK_KHR_pipeline_binary                                DONE (anv, hk, nvk, panvk, radv)
@@ -752,6 +754,7 @@ Khronos extensions that are not part of any Vulkan version:
   VK_QCOM_multiview_per_view_render_areas               DONE (tu)
   VK_QCOM_multiview_per_view_viewports                  DONE (tu)
   VK_QCOM_render_pass_shader_resolve                    DONE (tu)
+  VK_QCOM_rotated_copy_commands                         DONE (tu)
   VK_VALVE_fragment_density_map_layered                 DONE (tu)
   VK_VALVE_mutable_descriptor_type                      DONE (anv, hasvk, hk, nvk, panvk/v9+, radv, tu, vn)
   VK_VALVE_shader_mixed_float_dot_product               DONE (radv/{vega20,navi14,gfx10.3+})

@@ -259,11 +259,12 @@ v3dv_bo_alloc(struct v3dv_device *device,
          bo->report_obj_type = obj_type;
          bo->report_obj_handle = obj_handle;
          bo->report_id = (report_id << 32) | bo->handle;
-         v3dv_emit_device_memory_report(&device->vk, VK_SUCCESS,
-                                       true, /* is_alloc */
-                                       false, /* is_import */
-                                       bo->report_id, bo->size,
-                                       obj_type, obj_handle);
+         vk_device_memory_report_emit(&device->vk, VK_SUCCESS,
+                                      true, /* is_alloc */
+                                      false, /* is_import */
+                                      bo->report_id, bo->size,
+                                      obj_type, obj_handle,
+                                      0 /* heap_index */);
          return bo;
       }
    }
@@ -283,11 +284,12 @@ retry:
       }
 
       mesa_loge("Failed to allocate device memory for BO\n");
-      v3dv_emit_device_memory_report(&device->vk, VK_ERROR_OUT_OF_DEVICE_MEMORY,
-                                     true, /* is_alloc */
-                                     false, /* is_import */
-                                     0, /* mem_obj_id */
-                                     size, obj_type, obj_handle);
+      vk_device_memory_report_emit(&device->vk, VK_ERROR_OUT_OF_DEVICE_MEMORY,
+                                   true, /* is_alloc */
+                                   false, /* is_import */
+                                   0, /* mem_obj_id */
+                                   size, obj_type, obj_handle,
+                                   0 /* heap_index */);
       return NULL;
    }
 
@@ -315,11 +317,12 @@ retry:
       bo_dump_stats(device);
    }
 
-   v3dv_emit_device_memory_report(&device->vk, VK_SUCCESS,
-                                  true, /* is_alloc */
-                                  false, /* is_import */
-                                  report_id, bo->size,
-                                  obj_type, obj_handle);
+   vk_device_memory_report_emit(&device->vk, VK_SUCCESS,
+                                true, /* is_alloc */
+                                false, /* is_import */
+                                report_id, bo->size,
+                                obj_type, obj_handle,
+                                0 /* heap_index */);
    return bo;
 }
 
@@ -533,10 +536,11 @@ v3dv_bo_free(struct v3dv_device *device,
     */
    mem_report_obj_handle = mem_report_obj_handle ?
                            mem_report_obj_handle : bo->report_obj_handle;
-   v3dv_emit_device_memory_report(&device->vk, VK_SUCCESS,
-                                  false, /* is_alloc */
-                                  bo->is_import, bo->report_id, bo->size,
-                                  bo->report_obj_type, mem_report_obj_handle);
+   vk_device_memory_report_emit(&device->vk, VK_SUCCESS,
+                                false, /* is_alloc */
+                                bo->is_import, bo->report_id, bo->size,
+                                bo->report_obj_type, mem_report_obj_handle,
+                                0 /* heap_index */);
 
    if (!p_atomic_dec_zero(&bo->refcnt))
       return true;

@@ -1446,6 +1446,7 @@ lower_lsc_memory_logical_send(const brw_builder &bld, brw_mem_inst *mem)
        *     elements) applied to all addresses in the message"
        */
       assert(base_offset % memory_data_size_B == 0);
+      const int32_t global_offset = base_offset / (int32_t)memory_data_size_B;
       unsigned num_channels_or_cmask = lsc_opcode_has_cmask(op) ?
                                        (1 << components) - 1 :
                                        components;
@@ -1461,7 +1462,7 @@ lower_lsc_memory_logical_send(const brw_builder &bld, brw_mem_inst *mem)
                                                transpose,
                                                cache_mode,
                                                0 /* scale_offset */,
-                                               base_offset / memory_data_size_B,
+                                               global_offset,
                                                surface_index);
       assert(binding_type == LSC_ADDR_SURFTYPE_FLAT || brw_type_size_bits(binding.type) == 64);
       send->src[SENDG_SRC_IND_0_DESC] = binding_type == LSC_ADDR_SURFTYPE_FLAT ?

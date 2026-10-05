@@ -212,7 +212,7 @@ vce_caps(struct radeon_info *info)
    /* AVC Encode */
    struct ac_video_enc_codec_caps *cap = &info->video_caps.enc[AC_VIDEO_CODEC_AVC];
    cap->ip_type = AMD_IP_VCE;
-   cap->supported = ((info->vce_fw_version & (0xff << 24)) >> 24) >= 40;
+   cap->supported = ((info->vce_fw_version & (0xffu << 24)) >> 24) >= 40;
    cap->min_width = 128;
    cap->min_height = 128;
    cap->max_width = info->family < CHIP_TONGA ? 2048 : 4096;

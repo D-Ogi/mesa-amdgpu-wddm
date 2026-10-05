@@ -3324,28 +3324,6 @@ tu_shader_init(struct tu_device *dev, const void *key_data, size_t key_size)
    return shader;
 }
 
-struct tu_blob_write : mesa::blob_write {
-   using mesa::blob_write::blob_write;
-
-   void variant(const struct ir3_shader_variant *&v)
-   {
-      ir3_store_variant(blob, v);
-   }
-};
-
-struct tu_blob_read : mesa::blob_read {
-   struct ir3_compiler *const compiler;
-
-   tu_blob_read(struct blob_reader *r, struct ir3_compiler *c): mesa::blob_read(r), compiler(c)
-   {
-   }
-
-   void variant(const struct ir3_shader_variant *&v)
-   {
-      v = ir3_retrieve_variant(reader, compiler, NULL);
-   }
-};
-
 template <typename IO>
 static void
 tu_shader_cache_process_blob(IO &io, struct tu_shader *shader)
@@ -3382,7 +3360,7 @@ tu_shader_serialize(struct vk_pipeline_cache_object *object, struct blob *blob)
 {
    struct tu_shader *shader = container_of(object, struct tu_shader, base);
 
-   tu_blob_write writer { blob };
+   ir3_blob_write writer { blob };
    tu_shader_cache_process_blob(writer, shader);
 
    return true;
@@ -3402,7 +3380,7 @@ tu_shader_deserialize(struct vk_pipeline_cache *cache,
    if (!shader)
       return NULL;
 
-   tu_blob_read reader { blob, dev->compiler };
+   ir3_blob_read reader { blob, dev->compiler };
    tu_shader_cache_process_blob(reader, shader);
 
    VkResult result = tu_upload_shader(dev, shader);

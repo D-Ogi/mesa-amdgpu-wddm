@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: MIT
  */
 
+#include "ac_descriptors.h"
 #include "ac_nir_meta.h"
 #include "ac_nir_helpers.h"
 #include "nir_builder.h"
@@ -14,6 +15,12 @@ store_buffer(nir_builder *b, const ac_cs_clear_copy_buffer_key *const key,
              nir_def *store_val, nir_def *buf, nir_def *offset,
              const enum gl_access_qualifier access)
 {
+   if (key->addr_user_data) {
+      nir_store_global_amd(b, store_val, buf, offset,
+                           .access = access);
+      return;
+   }
+
    nir_store_ssbo(b, store_val, buf, offset,
                   .access = access);
 }
@@ -24,6 +31,11 @@ load_buffer(nir_builder *b, const ac_cs_clear_copy_buffer_key *const key,
             nir_def *offset, const enum gl_access_qualifier access, const unsigned align_mul,
             const unsigned align_offset)
 {
+   if (key->addr_user_data) {
+      return nir_load_global_amd(b, num_components, bit_size, buf, offset,
+                                 .access = access);
+   }
+
    return nir_load_ssbo(b, num_components, bit_size, buf, offset,
                         .access = access,
                         .align_mul = align_mul,
@@ -61,6 +73,15 @@ load_buffer_sparse(nir_builder *b, const ac_cs_clear_copy_buffer_key *const key,
    return load_buffer(b, key, num_components, bit_size, buf, offset, access, align_mul, align_offset);
 }
 
+static nir_def *
+load_buffer_addr_from_user_data(nir_builder *b,
+                nir_def *user_data, const unsigned user_data_index)
+{
+   nir_def *addr_lo = nir_channel(b, user_data, user_data_index);
+   nir_def *addr_hi = nir_channel(b, user_data, user_data_index + 1);
+   return nir_pack_64_2x32_split(b, addr_lo, addr_hi);
+}
+
 /* Create a compute shader implementing clear_buffer or copy_buffer. */
 nir_shader *
 ac_create_clear_copy_buffer_cs(const ac_cs_clear_copy_buffer_options *const options,
@@ -69,8 +90,10 @@ ac_create_clear_copy_buffer_cs(const ac_cs_clear_copy_buffer_options *const opti
    if (options->print_key) {
       fprintf(stderr, "Internal shader: dma\n");
       fprintf(stderr, "   key.is_clear = %u\n", key->is_clear);
+      fprintf(stderr, "   key.addr_user_data = %u\n", key->addr_user_data);
       fprintf(stderr, "   key.dwords_per_thread = %u\n", key->dwords_per_thread);
       fprintf(stderr, "   key.clear_value_size_is_12 = %u\n", key->clear_value_size_is_12);
+      fprintf(stderr, "   key.clear_value_size_is_4 = %u\n", key->clear_value_size_is_4);
       fprintf(stderr, "   key.src_scalarize_for_sparse = %u\n", key->src_scalarize_for_sparse);
       fprintf(stderr, "   key.src_align_offset = %u\n", key->src_align_offset);
       fprintf(stderr, "   key.dst_align_offset = %u\n", key->dst_align_offset);
@@ -87,7 +110,7 @@ ac_create_clear_copy_buffer_cs(const ac_cs_clear_copy_buffer_options *const opti
          options->nir_options,
          "%s%s%s_buffer_cs_dw%u_srcao_%u_dstao_%u_dstltb_%u_dststua_%u_hst_%u",
          key->is_clear ? "clear" : "copy",
-         key->clear_value_size_is_12 ? "12" : "",
+         key->clear_value_size_is_12 ? "12" : key->clear_value_size_is_4 ? "4" : "",
          key->src_scalarize_for_sparse ? "_sparse" : "",
          key->dwords_per_thread,
          key->src_align_offset,
@@ -99,13 +122,24 @@ ac_create_clear_copy_buffer_cs(const ac_cs_clear_copy_buffer_options *const opti
    b.shader->info.workgroup_size[0] = 64;
    b.shader->info.workgroup_size[1] = 1;
    b.shader->info.workgroup_size[2] = 1;
-   b.shader->info.num_ssbos = key->is_clear ? 1 : 2;
+   if (!key->addr_user_data)
+      b.shader->info.num_ssbos = key->is_clear ? 1 : 2;
    b.shader->info.cs.user_data_components_amd = 0;
+
+   unsigned src_va_user_data_index = b.shader->info.cs.user_data_components_amd;
+   if (key->addr_user_data && !key->is_clear)
+      b.shader->info.cs.user_data_components_amd += 2;
+
+   unsigned dst_va_user_data_index = b.shader->info.cs.user_data_components_amd;
+   if (key->addr_user_data)
+      b.shader->info.cs.user_data_components_amd += 2;
 
    unsigned clear_value_user_data_index = b.shader->info.cs.user_data_components_amd;
    if (key->is_clear) {
       b.shader->info.cs.user_data_components_amd +=
-         key->clear_value_size_is_12 ? 3 : key->dwords_per_thread;
+         key->clear_value_size_is_12 ? 3 :
+         key->clear_value_size_is_4 ? 1 :
+         key->dwords_per_thread;
    }
 
    /* Add the last thread ID value. */
@@ -137,7 +171,8 @@ ac_create_clear_copy_buffer_cs(const ac_cs_clear_copy_buffer_options *const opti
    nir_def *value;
 
    if (key->is_clear) {
-      value = nir_extract_bits(&b, &user_data, 1, clear_value_user_data_index * 32, key->dwords_per_thread, 32);
+      const unsigned userdata_dwords = key->clear_value_size_is_4 ? 1 : key->dwords_per_thread;
+      value = nir_extract_bits(&b, &user_data, 1, clear_value_user_data_index * 32, userdata_dwords, 32);
 
       /* We store 4 dwords per thread, but the clear value has 3 dwords. Swizzle it to 4 dwords.
        * Storing 4 dwords per thread is faster even when the ALU cost is worse.
@@ -157,6 +192,9 @@ ac_create_clear_copy_buffer_cs(const ac_cs_clear_copy_buffer_options *const opti
                                         nir_umod_imm(&b, nir_iadd_imm(&b, dw_offset, i), 3));
          }
          value = nir_vec4(&b, vec[0], vec[1], vec[2], vec[0]);
+      } else if (key->clear_value_size_is_4 && key->dwords_per_thread > 1) {
+         nir_def *arr[] = {value, value, value, value};
+         value = nir_vec(&b, arr, key->dwords_per_thread);
       }
    } else {
       /* The hw doesn't support unaligned 32-bit loads, and only supports single-component
@@ -180,7 +218,12 @@ ac_create_clear_copy_buffer_cs(const ac_cs_clear_copy_buffer_options *const opti
       unsigned num_comps = key->dwords_per_thread * 4 / alignment;
       nir_if *if_first_thread = NULL;
       nir_def *value0 = NULL;
-      nir_def *src_buf = nir_imm_int(&b, 0);
+      nir_def *src_buf;
+
+      if (key->addr_user_data)
+         src_buf = load_buffer_addr_from_user_data(&b, user_data, src_va_user_data_index);
+      else
+         src_buf = nir_imm_int(&b, 0);
 
       if (realign_offset < 0) {
          /* if src_align_offset is less than dst_align_offset, realign_offset is
@@ -215,9 +258,9 @@ ac_create_clear_copy_buffer_cs(const ac_cs_clear_copy_buffer_options *const opti
          nir_push_else(&b, if_first_thread);
       }
 
-
       value = load_buffer_sparse(&b, key, num_comps, bit_size, src_buf, nir_iadd_imm(&b, offset, realign_offset),
                                  ACCESS_RESTRICT, 4, (unsigned)realign_offset % 4, key->src_scalarize_for_sparse);
+
       if (if_first_thread) {
          nir_pop_if(&b, if_first_thread);
          value = nir_if_phi(&b, value0, value);
@@ -228,7 +271,13 @@ ac_create_clear_copy_buffer_cs(const ac_cs_clear_copy_buffer_options *const opti
          value = nir_extract_bits(&b, &value, 1, 0, key->dwords_per_thread, 32);
    }
 
-   nir_def *dst_buf = nir_imm_int(&b, !key->is_clear);
+   nir_def *dst_buf;
+
+   if (key->addr_user_data)
+      dst_buf = load_buffer_addr_from_user_data(&b, user_data, dst_va_user_data_index);
+   else
+      dst_buf = nir_imm_int(&b, !key->is_clear);
+
    nir_if *if_first_thread = NULL, *if_last_thread = NULL;
 
    if (!key->dst_single_thread_unaligned) {
@@ -354,6 +403,272 @@ ac_create_clear_copy_buffer_cs(const ac_cs_clear_copy_buffer_options *const opti
    return b.shader;
 }
 
+static bool
+ac_clear_copy_can_use_cp_dma(const ac_cs_clear_copy_buffer_options *const options,
+                             const ac_cs_clear_copy_buffer_info *const info)
+{
+   bool can_use_cp_dma = options->info->has_cp_dma;
+
+   /* CP DMA doesn't support sparse on GFX6-9, so we must use compute for that. */
+   if (!options->info->cp_dma_supports_sparse)
+      can_use_cp_dma &= !info->src_is_sparse && !info->dst_is_sparse;
+
+   /* CP DMA only supports dword-aligned clears and small clear values. */
+   if (info->clear_value_size)
+      can_use_cp_dma &= info->clear_value_size <= 4 && info->dst_offset % 4 == 0 && info->size % 4 == 0;
+
+   /* CP DMA doesn't support the render condition (conditional rendering in Vulkan) */
+   if (info->render_condition_enabled)
+      can_use_cp_dma = false;
+
+   return can_use_cp_dma;
+}
+
+static bool
+ac_clear_copy_should_use_compute(const ac_cs_clear_copy_buffer_options *options,
+                                 const ac_cs_clear_copy_buffer_info *info)
+{
+   const bool is_copy = info->clear_value_size == 0;
+   const bool can_use_cp_dma = ac_clear_copy_can_use_cp_dma(options, info);
+
+   if (!can_use_cp_dma)
+      return true;
+
+   if (info->size < options->prefer_cp_dma_threshold)
+      return false;
+
+   if (!options->fail_if_slow)
+      return true;
+
+   switch (options->info->gfx_level) {
+   /* GFX6-8: CP DMA clears are so slow that we risk getting a GPU timeout.
+    * CP DMA copies are also slow but less.
+    */
+   case GFX6:
+      /* Optimal for Tahiti. */
+      if (is_copy) {
+         if (!info->dst_is_vram || !info->src_is_vram ||
+               info->size <= (info->dst_offset % 4 ||
+                              (info->dst_offset == 4 && info->src_offset % 4) ? 32 * 1024 : 16 * 1024))
+            return false;
+      } else {
+         if (info->dst_is_vram && info->size <= 1024)
+            return false;
+      }
+      break;
+
+   case GFX7:
+      /* Optimal for Hawaii. */
+      if (is_copy && info->dst_is_vram && info->src_is_vram && info->size <= 512)
+         return false;
+      break;
+
+   case GFX8:
+      /* Optimal for Tonga. */
+      break;
+
+   case GFX9:
+      /* Optimal for Vega10. */
+      if (is_copy) {
+         if (info->src_is_vram) {
+            if (info->dst_is_vram) {
+               if (info->size < 4096)
+                  return false;
+            } else {
+               if (info->size < (info->dst_offset % 64 ? 8192 : 2048))
+                  return false;
+            }
+         } else {
+            /* GTT->VRAM and GTT->GTT. */
+            return false;
+         }
+      } else {
+         if (!info->dst_is_vram && (info->size < 2048 || info->size >= 8 << 20 /* 8 MB */))
+            return false;
+      }
+      break;
+
+   case GFX10:
+   case GFX10_3:
+      /* Optimal for Navi21, Navi10. */
+      break;
+
+   case GFX11:
+   default:
+      /* Optimal for Navi31. */
+      if (is_copy && info->size < 1024 && info->dst_offset % 256 && info->dst_is_vram && info->src_is_vram)
+         return false;
+      break;
+
+   case GFX12:
+      /* Optimal for Navi 48. */
+      break;
+   }
+
+   return true;
+}
+
+static unsigned
+ac_clear_copy_calc_dwords_per_thread(const ac_cs_clear_copy_buffer_options *options,
+                                     const ac_cs_clear_copy_buffer_info *info,
+                                     const int clear_value_size)
+{
+   if (info->dwords_per_thread)
+      return info->dwords_per_thread;
+
+   const bool is_copy = clear_value_size == 0;
+
+   /* Determine optimal dwords_per_thread for performance.
+    * This is a good initial value to start with.
+    */
+   unsigned dwords_per_thread = info->size <= 64 * 1024 ? 2 : 4;
+
+   /* Clearing 4 dwords per thread with a 3-dword clear value is faster with big sizes. */
+   if (!is_copy && clear_value_size == 12)
+      dwords_per_thread = info->size <= 4096 ? 3 : 4;
+
+   switch (options->info->gfx_level) {
+   case GFX6:
+      /* Optimal for Tahiti. */
+      if (is_copy) {
+         if (info->dst_is_vram && info->src_is_vram)
+            dwords_per_thread = 2;
+      } else {
+         if (info->dst_is_vram && clear_value_size != 12)
+            dwords_per_thread = info->size <= 128 * 1024 || info->size >= 4 << 20 /* 4MB */ ? 2 : 4;
+
+         if (clear_value_size == 12)
+            dwords_per_thread = info->size <= (info->dst_is_vram ? 256 : 128) * 1024 ? 3 : 4;
+      }
+      break;
+
+   case GFX7:
+      /* Optimal for Hawaii. */
+      if (is_copy) {
+         if (info->dst_is_vram && info->src_is_vram && info->dst_offset % 4 == 0 &&
+               info->size >= 8 << 20 /* 8MB */)
+            dwords_per_thread = 2;
+      } else {
+         if (info->dst_is_vram && clear_value_size != 12)
+            dwords_per_thread = info->size <= 32 * 1024 ? 2 : 4;
+
+         if (clear_value_size == 12)
+            dwords_per_thread = info->size <= 256 * 1024 ? 3 : 4;
+      }
+      break;
+
+   case GFX8:
+      /* Optimal for Tonga. */
+      if (is_copy) {
+         dwords_per_thread = 2;
+      } else {
+         if (clear_value_size == 12 && info->size < (2 << 20) /* 2MB */)
+            dwords_per_thread = 3;
+      }
+      break;
+
+   case GFX9:
+      /* Optimal for Vega10. */
+      if (is_copy && info->src_is_vram && info->dst_is_vram && info->size >= 8 << 20 /* 8 MB */)
+         dwords_per_thread = 2;
+
+      if (!info->dst_is_vram)
+         dwords_per_thread = 2;
+      break;
+
+   case GFX10:
+   case GFX10_3:
+   case GFX11:
+      /* Optimal for Navi31, Navi21, Navi10. */
+      break;
+
+   case GFX11_5:
+   case GFX11_7:
+      /* Optimal for Strix Halo. */
+      dwords_per_thread = info->size <= 2 * 1024 ? 2 : 4;
+      break;
+
+   default:
+   case GFX12:
+      /* Optimal for Navi48. */
+      if (!is_copy && clear_value_size == 12 && info->size <= 512 * 1024)
+         dwords_per_thread = 3;
+      break;
+   }
+
+   /* dwords_per_thread must be at least the size of the clear value. */
+   if (!is_copy)
+      dwords_per_thread = MAX2(dwords_per_thread, clear_value_size / 4);
+
+   if (info->dst_is_sparse) {
+      /* If dst is sparse, stores mustn't straddle a page boundary, which means the store size must
+       * be 2^n. It can only be a non-power-of-two and 3 with GL buffer clears because VK doesn't
+       * have 12-byte clear values.
+       */
+      if (dwords_per_thread == 3)
+         dwords_per_thread = 4;
+
+      assert(util_is_power_of_two_nonzero(dwords_per_thread));
+   }
+
+   /* Validate dwords_per_thread. */
+   if (dwords_per_thread > 4) {
+      assert(!"dwords_per_thread must be <= 4");
+      return 0; /* invalid value */
+   }
+
+   if (clear_value_size > dwords_per_thread * 4) {
+      assert(!"clear_value_size must be <= dwords_per_thread");
+      return 0; /* invalid value */
+   }
+
+   if (clear_value_size == 12 && info->dst_offset % 4) {
+      assert(!"if clear_value_size == 12, dst_offset must be aligned to 4");
+      return 0; /* invalid value */
+   }
+
+   return dwords_per_thread;
+}
+
+static unsigned
+ac_prepare_clear_value_user_data(const int clear_value_size,
+                                 const unsigned dwords_per_thread,
+                                 const uint64_t dst_align_offset,
+                                 const uint32_t *const clear_value,
+                                 uint32_t *user_data_clear_value)
+{
+   if (clear_value_size == 4) {
+      user_data_clear_value[0] = *clear_value;
+      return 1;
+   }
+
+   assert(clear_value_size >= 4 && clear_value_size <= 16 &&
+          (clear_value_size == 12 || util_is_power_of_two_or_zero(clear_value_size)));
+
+   /* Since the clear value may start on an unaligned offset and we just pass user SGPRs
+    * to dword stores as-is, we need to byte-shift the clear value to that offset and
+    * replicate it because 1 invocation stores up to 4 dwords from user SGPRs regardless of
+    * the clear value size.
+    */
+   const unsigned num_clear_user_data_terms = clear_value_size == 12 ? 3 : dwords_per_thread;
+   const unsigned clear_user_data_size = num_clear_user_data_terms * 4;
+
+   memcpy((uint8_t *)user_data_clear_value,
+            (uint8_t*)clear_value + clear_value_size - dst_align_offset % clear_value_size,
+            dst_align_offset % clear_value_size);
+   unsigned offset = dst_align_offset % clear_value_size;
+
+   while (offset + clear_value_size <= clear_user_data_size) {
+      memcpy((uint8_t*)user_data_clear_value + offset, clear_value, clear_value_size);
+      offset += clear_value_size;
+   }
+
+   if (offset < clear_user_data_size)
+      memcpy((uint8_t*)user_data_clear_value + offset, clear_value, clear_user_data_size - offset);
+
+   return num_clear_user_data_terms;
+}
+
 bool
 ac_prepare_cs_clear_copy_buffer(const ac_cs_clear_copy_buffer_options *options,
                                 const ac_cs_clear_copy_buffer_info *info,
@@ -375,234 +690,37 @@ ac_prepare_cs_clear_copy_buffer(const ac_cs_clear_copy_buffer_options *options,
       assert(clear_value_size % 4 == 0);
    }
 
-   /* This doesn't fail very often because the only possible fallback is CP DMA, which doesn't
-    * support the render condition.
-    *
-    * CP DMA doesn't support sparse on GFX6-9, so we must use compute for that.
-    */
-   if (options->fail_if_slow && !info->render_condition_enabled && options->info->has_cp_dma &&
-       ((!info->src_is_sparse && !info->dst_is_sparse) || options->info->cp_dma_supports_sparse) &&
-       !options->info->cp_sdma_ge_use_system_memory_scope) {
-      switch (options->info->gfx_level) {
-      /* GFX6-8: CP DMA clears are so slow that we risk getting a GPU timeout. CP DMA copies
-       * are also slow but less.
-       */
-      case GFX6:
-         /* Optimal for Tahiti. */
-         if (is_copy) {
-            if (!info->dst_is_vram || !info->src_is_vram ||
-                info->size <= (info->dst_offset % 4 ||
-                               (info->dst_offset == 4 && info->src_offset % 4) ? 32 * 1024 : 16 * 1024))
-               return false;
-         } else {
-            /* CP DMA only supports dword-aligned clears and small clear values. */
-            if (clear_value_size <= 4 && info->dst_offset % 4 == 0 && info->size % 4 == 0 &&
-                info->dst_is_vram && info->size <= 1024)
-               return false;
-         }
-         break;
+   if (!ac_clear_copy_should_use_compute(options, info))
+      return false;
 
-      case GFX7:
-         /* Optimal for Hawaii. */
-         if (is_copy && info->dst_is_vram && info->src_is_vram && info->size <= 512)
-            return false;
-         break;
-
-      case GFX8:
-         /* Optimal for Tonga. */
-         break;
-
-      case GFX9:
-         /* Optimal for Vega10. */
-         if (is_copy) {
-            if (info->src_is_vram) {
-               if (info->dst_is_vram) {
-                  if (info->size < 4096)
-                     return false;
-               } else {
-                  if (info->size < (info->dst_offset % 64 ? 8192 : 2048))
-                     return false;
-               }
-            } else {
-               /* GTT->VRAM and GTT->GTT. */
-               return false;
-            }
-         } else {
-            /* CP DMA only supports dword-aligned clears and small clear values. */
-            if (clear_value_size <= 4 && info->dst_offset % 4 == 0 && info->size % 4 == 0 &&
-                !info->dst_is_vram && (info->size < 2048 || info->size >= 8 << 20 /* 8 MB */))
-               return false;
-         }
-         break;
-
-      case GFX10:
-      case GFX10_3:
-         /* Optimal for Navi21, Navi10. */
-         break;
-
-      case GFX11:
-      default:
-         /* Optimal for Navi31. */
-         if (is_copy && info->size < 1024 && info->dst_offset % 256 && info->dst_is_vram && info->src_is_vram)
-            return false;
-         break;
-
-      case GFX12:
-         UNREACHABLE("cp_sdma_ge_use_system_memory_scope should be true, so we should never get here");
-      }
-   }
-
-   unsigned dwords_per_thread = info->dwords_per_thread;
-
-   /* Determine optimal dwords_per_thread for performance. */
-   if (!info->dwords_per_thread) {
-      /* This is a good initial value to start with. */
-      dwords_per_thread = info->size <= 64 * 1024 ? 2 : 4;
-
-      /* Clearing 4 dwords per thread with a 3-dword clear value is faster with big sizes. */
-      if (!is_copy && clear_value_size == 12)
-         dwords_per_thread = info->size <= 4096 ? 3 : 4;
-
-      switch (options->info->gfx_level) {
-      case GFX6:
-         /* Optimal for Tahiti. */
-         if (is_copy) {
-            if (info->dst_is_vram && info->src_is_vram)
-               dwords_per_thread = 2;
-         } else {
-            if (info->dst_is_vram && clear_value_size != 12)
-               dwords_per_thread = info->size <= 128 * 1024 || info->size >= 4 << 20 /* 4MB */ ? 2 : 4;
-
-            if (clear_value_size == 12)
-               dwords_per_thread = info->size <= (info->dst_is_vram ? 256 : 128) * 1024 ? 3 : 4;
-         }
-         break;
-
-      case GFX7:
-         /* Optimal for Hawaii. */
-         if (is_copy) {
-            if (info->dst_is_vram && info->src_is_vram && info->dst_offset % 4 == 0 &&
-                info->size >= 8 << 20 /* 8MB */)
-               dwords_per_thread = 2;
-         } else {
-            if (info->dst_is_vram && clear_value_size != 12)
-               dwords_per_thread = info->size <= 32 * 1024 ? 2 : 4;
-
-            if (clear_value_size == 12)
-               dwords_per_thread = info->size <= 256 * 1024 ? 3 : 4;
-         }
-         break;
-
-      case GFX8:
-         /* Optimal for Tonga. */
-         if (is_copy) {
-            dwords_per_thread = 2;
-         } else {
-            if (clear_value_size == 12 && info->size < (2 << 20) /* 2MB */)
-               dwords_per_thread = 3;
-         }
-         break;
-
-      case GFX9:
-         /* Optimal for Vega10. */
-         if (is_copy && info->src_is_vram && info->dst_is_vram && info->size >= 8 << 20 /* 8 MB */)
-            dwords_per_thread = 2;
-
-         if (!info->dst_is_vram)
-            dwords_per_thread = 2;
-         break;
-
-      case GFX10:
-      case GFX10_3:
-      case GFX11:
-      case GFX11_5:
-      case GFX11_7:
-         /* Optimal for Navi31, Navi21, Navi10. */
-         break;
-
-      default:
-      case GFX12:
-         /* Optimal for Navi48. */
-         if (!is_copy && clear_value_size == 12 && info->size <= 512 * 1024)
-            dwords_per_thread = 3;
-         break;
-      }
-   }
-
-   /* dwords_per_thread must be at least the size of the clear value. */
-   if (!is_copy)
-      dwords_per_thread = MAX2(dwords_per_thread, clear_value_size / 4);
-
-   if (info->dst_is_sparse) {
-      /* If dst is sparse, stores mustn't straddle a page boundary, which means the store size must
-       * be 2^n. It can only be a non-power-of-two and 3 with GL buffer clears because VK doesn't
-       * have 12-byte clear values.
-       */
-      if (dwords_per_thread == 3)
-         dwords_per_thread = 4;
-
-      assert(util_is_power_of_two_nonzero(dwords_per_thread));
-   }
-
-   /* Validate dwords_per_thread. */
-   if (dwords_per_thread > 4) {
-      assert(!"dwords_per_thread must be <= 4");
-      return false; /* invalid value */
-   }
-
-   if (clear_value_size > dwords_per_thread * 4) {
-      assert(!"clear_value_size must be <= dwords_per_thread");
-      return false; /* invalid value */
-   }
-
-   if (clear_value_size == 12 && info->dst_offset % 4) {
-      assert(!"if clear_value_size == 12, dst_offset must be aligned to 4");
-      return false; /* invalid value */
-   }
+   const unsigned dwords_per_thread = ac_clear_copy_calc_dwords_per_thread(options, info, clear_value_size);
+   if (!dwords_per_thread)
+      return false;
 
    uint64_t dst_align_offset = info->dst_offset % (dwords_per_thread * 4);
    uint64_t dst_offset_bound = info->dst_offset - dst_align_offset;
    uint64_t src_align_offset = is_copy ? info->src_offset % 4 : 0;
    unsigned num_user_data_terms = 0;
+   unsigned addr_user_data_offset = 0;
+
+   if (options->addr_user_data)
+      num_user_data_terms += is_copy ? 4 : 2;
 
    /* Set the clear value in user data SGPRs. */
    if (!is_copy) {
-      assert(clear_value_size >= 4 && clear_value_size <= 16 &&
-             (clear_value_size == 12 || util_is_power_of_two_or_zero(clear_value_size)));
-
-      /* Put clear data after previous user_data contents. */
-      const unsigned clear_user_data_offset = num_user_data_terms * 4;
-
-      /* Since the clear value may start on an unaligned offset and we just pass user SGPRs
-       * to dword stores as-is, we need to byte-shift the clear value to that offset and
-       * replicate it because 1 invocation stores up to 4 dwords from user SGPRs regardless of
-       * the clear value size.
-       */
-      const unsigned num_clear_user_data_terms = clear_value_size == 12 ? 3 : dwords_per_thread;
-      const unsigned clear_user_data_size = num_clear_user_data_terms * 4;
-
-      memcpy((uint8_t *)out->user_data + clear_user_data_offset,
-             (uint8_t*)clear_value + clear_value_size - dst_align_offset % clear_value_size,
-             dst_align_offset % clear_value_size);
-      unsigned offset = dst_align_offset % clear_value_size;
-
-      while (offset + clear_value_size <= clear_user_data_size) {
-         memcpy((uint8_t*)out->user_data + clear_user_data_offset + offset, clear_value, clear_value_size);
-         offset += clear_value_size;
-      }
-
-      if (offset < clear_user_data_size)
-         memcpy((uint8_t*)out->user_data + clear_user_data_offset + offset, clear_value, clear_user_data_size - offset);
-
-      num_user_data_terms += num_clear_user_data_terms;
+      num_user_data_terms +=
+         ac_prepare_clear_value_user_data(clear_value_size, dwords_per_thread, dst_align_offset,
+                                          clear_value, &out->user_data[num_user_data_terms]);
    }
 
    out->shader_key.key = 0;
 
+   out->shader_key.addr_user_data = options->addr_user_data;
    out->shader_key.is_clear = !is_copy;
    assert(dwords_per_thread && dwords_per_thread <= 4);
    out->shader_key.dwords_per_thread = dwords_per_thread;
    out->shader_key.clear_value_size_is_12 = !is_copy && clear_value_size == 12;
+   out->shader_key.clear_value_size_is_4 = !is_copy && clear_value_size == 4;
    /* If the src load size is aligned to 2^n and the src load address in every invocation is aligned
     * to the load size, loads are guaranteed to never be partially non-resident, so we don't have to
     * scalarize them. Every sparse buffer is aligned to a page, so we don't need to check whether the
@@ -647,21 +765,39 @@ ac_prepare_cs_clear_copy_buffer(const ac_cs_clear_copy_buffer_options *options,
    /* We need to bind whole dwords because of how we compute voffset. The bytes that shouldn't
     * be written are not written by the shader.
     */
-   out->ssbo[is_copy].offset = dst_offset_bound;
-   out->ssbo[is_copy].size = align(dst_align_offset + info->size, 4);
+   const uint64_t dst_buf_offset = dst_offset_bound;
+   const uint64_t dst_buf_size = align(dst_align_offset + info->size, 4);
+
+   if (!options->addr_user_data) {
+      out->ssbo[is_copy].offset = dst_buf_offset;
+      out->ssbo[is_copy].size = dst_buf_size;
+   } else {
+      out->user_data[addr_user_data_offset + 0 + !!is_copy * 2] = dst_buf_offset;
+      out->user_data[addr_user_data_offset + 1 + !!is_copy * 2] = dst_buf_offset >> 32ull;
+   }
 
    if (is_copy) {
       /* Since unaligned copies use 32-bit loads, any dword that's partially covered by the copy
        * range must be fully covered, so that the 32-bit loads succeed.
        */
-      out->ssbo[0].offset = info->src_offset - src_align_offset;
-      out->ssbo[0].size = align(src_align_offset + info->size, 4);
-      assert(out->ssbo[0].offset % 4 == 0 && out->ssbo[0].size % 4 == 0);
+      const uint64_t src_buf_offset = info->src_offset - src_align_offset;
+      const uint64_t src_buf_size = align(src_align_offset + info->size, 4);
+      assert(src_buf_offset % 4 == 0 && src_buf_size % 4 == 0);
+
+      if (!options->addr_user_data) {
+         out->ssbo[0].offset = src_buf_offset;
+         out->ssbo[0].size = src_buf_size;
+      } else {
+         out->user_data[addr_user_data_offset + 0] = src_buf_offset;
+         out->user_data[addr_user_data_offset + 1] = src_buf_offset >> 32ull;
+      }
    }
 
-   out->num_ssbos = is_copy ? 2 : 1;
+   out->num_user_data = num_user_data_terms;
    out->workgroup_size = 64;
    out->num_threads = start_thread + num_threads;
+   if (!options->addr_user_data)
+      out->num_ssbos = is_copy ? 2 : 1;
 
    /* Determine optimal COMPUTE_DISPATCH_INTERLEAVE.INTERLEAVE/INTERLEAVE_1D.
     * Verified on Navi48.

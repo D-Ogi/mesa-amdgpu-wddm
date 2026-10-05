@@ -268,10 +268,14 @@ etna_init_screen_caps(struct etna_screen *screen)
    caps->clear_scissored = screen->specs.use_blt;
    caps->clear_masked = screen->specs.use_blt &&
                         VIV_FEATURE(screen, ETNA_FEATURE_BLT_64BPP_MASKED_CLEAR_FIX);
+   caps->blend_equation_advanced =
+      VIV_FEATURE(screen, ETNA_FEATURE_PE_ADVANCE_BLEND_PART0) ?
+      ETNA_ADVANCED_BLEND_MODES : 0;
 
    /* Memory */
    caps->constant_buffer_offset_alignment = 256;
    caps->min_map_buffer_alignment = 4096;
+   caps->invalidate_buffer = true;
 
    caps->npot_textures = true; /* VIV_FEATURE(priv->dev, chipMinorFeatures1, NON_POWER_OF_TWO); */
 

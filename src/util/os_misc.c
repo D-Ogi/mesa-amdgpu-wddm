@@ -194,7 +194,15 @@ os_get_android_option(const char *name)
    }
 
    /* prefixes to search sorted by preference */
-   const char *prefices[] = { "debug.", "vendor.", "" };
+   const char *prefices[] =
+   {
+      "debug.",
+      "vendor.",
+#if ANDROID_API_LEVEL < 33
+      /* Before Android T, non-prefixed sysprops were allowed */
+      "",
+#endif
+   };
    char full_key[PROP_NAME_MAX];
    int len = 0;
    for (int i = 0; i < ARRAY_SIZE(prefices); i++) {

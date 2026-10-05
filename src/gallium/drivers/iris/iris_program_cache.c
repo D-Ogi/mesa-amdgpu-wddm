@@ -119,6 +119,7 @@ void
 iris_delete_shader_variant(struct iris_compiled_shader *shader)
 {
    pipe_resource_reference(&shader->assembly.res, NULL);
+   iris_scratch_buffer_reference(&shader->scratch_buffer, NULL);
    util_queue_fence_destroy(&shader->ready);
    ralloc_free(shader);
 }
@@ -176,9 +177,8 @@ iris_upload_shader(struct iris_screen *screen,
                    const void *key,
                    const void *assembly)
 {
-   u_upload_alloc_ref(uploader, 0, shader->program_size, 64,
-                  &shader->assembly.offset, &shader->assembly.res,
-                  &shader->map);
+   iris_u_upload_alloc_ref_to_iris_state_ref(uploader, 0, shader->program_size,
+                                             64, &shader->assembly, &shader->map);
    memcpy(shader->map, assembly, shader->program_size);
 
    struct iris_resource *res = (void *) shader->assembly.res;
@@ -186,25 +186,45 @@ iris_upload_shader(struct iris_screen *screen,
                                shader->assembly.offset +
                                shader->const_data_offset;
 
-   struct intel_shader_reloc_value reloc_values[] = {
-      {
-         .id = INTEL_SHADER_RELOC_CONST_DATA_ADDR_LOW,
-         .value = shader_data_addr,
-      },
-      {
-         .id = INTEL_SHADER_RELOC_CONST_DATA_ADDR_HIGH,
-         .value = shader_data_addr >> 32,
-      },
+   struct intel_shader_reloc_value reloc_values[4] = {};
+   int rv_count = 0;
+
+   reloc_values[rv_count++] = (struct intel_shader_reloc_value){
+      .id = INTEL_SHADER_RELOC_CONST_DATA_ADDR_LOW,
+      .value = shader_data_addr,
    };
+   reloc_values[rv_count++] = (struct intel_shader_reloc_value){
+      .id = INTEL_SHADER_RELOC_CONST_DATA_ADDR_HIGH,
+      .value = shader_data_addr >> 32,
+   };
+
+   if (iris_bufmgr_is_eff_64bit_enabled(screen->bufmgr) && shader->total_scratch) {
+
+      assert(shader->scratch_buffer == NULL);
+      shader->scratch_buffer = iris_get_shared_scratch_buffer(screen, shader->total_scratch);
+      uint64_t scratch_addr = shader->scratch_buffer->surf_bo->address;
+
+      reloc_values[rv_count++] = (struct intel_shader_reloc_value){
+         .id = BRW_SHADER_RELOC_SCRATCH64_SURFACE_LOW,
+         .value = scratch_addr,
+      };
+      reloc_values[rv_count++] = (struct intel_shader_reloc_value){
+         .id = BRW_SHADER_RELOC_SCRATCH64_SURFACE_HIGH,
+         .value = scratch_addr >> 32,
+      };
+   }
+
+   assert(rv_count <= ARRAY_SIZE(reloc_values));
+
    if (screen->brw) {
       brw_write_shader_relocs(&screen->brw->isa, shader->map,
                               shader->brw_prog_data, reloc_values,
-                              ARRAY_SIZE(reloc_values));
+                              rv_count);
    } else {
 #ifdef INTEL_USE_ELK
       elk_write_shader_relocs(&screen->elk->isa, shader->map,
                               shader->elk_prog_data, reloc_values,
-                              ARRAY_SIZE(reloc_values));
+                              rv_count);
 #else
       UNREACHABLE("no elk support");
 #endif
@@ -255,8 +275,10 @@ iris_blorp_lookup_shader(struct blorp_batch *blorp_batch,
       return false;
 
    struct iris_bo *bo = iris_resource_bo(shader->assembly.res);
-   *kernel_out =
-      iris_bo_offset_from_base_address(bo) + shader->assembly.offset;
+
+   *kernel_out = iris_bufmgr_is_eff_64bit_enabled(bo->bufmgr) ?
+                    bo->address : iris_bo_offset_from_base_address(bo);
+   *kernel_out = *kernel_out + shader->assembly.offset;
    *((void **) prog_data_out) =
 #ifdef INTEL_USE_ELK
       batch->screen->elk ? (void *)shader->elk_prog_data :
@@ -309,8 +331,9 @@ iris_blorp_upload_shader(struct blorp_batch *blorp_batch, uint32_t stage,
                       IRIS_CACHE_BLORP, key_size, key, kernel);
 
    struct iris_bo *bo = iris_resource_bo(shader->assembly.res);
-   *kernel_out =
-      iris_bo_offset_from_base_address(bo) + shader->assembly.offset;
+   *kernel_out = iris_bufmgr_is_eff_64bit_enabled(bo->bufmgr) ?
+                    bo->address : iris_bo_offset_from_base_address(bo);
+   *kernel_out = *kernel_out + shader->assembly.offset;
    *((void **) prog_data_out) =
 #ifdef INTEL_USE_ELK
       screen->elk ? (void *)shader->elk_prog_data :

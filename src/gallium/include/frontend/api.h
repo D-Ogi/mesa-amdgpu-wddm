@@ -211,6 +211,7 @@ struct st_config_options
    bool allow_draw_out_of_order;
    bool glthread_nop_check_framebuffer_status;
    bool ignore_map_unsynchronized;
+   bool ignore_map_invalidate_buffer;
    bool zero_invalidated_buffers;
    bool ignore_discard_framebuffer;
    bool force_integer_tex_nearest;

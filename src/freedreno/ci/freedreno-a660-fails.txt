@@ -73,3 +73,8 @@ Subgroups@subgroup_functions_ballot,Fail
 # https://github.com/KhronosGroup/OpenCL-CTS/issues/2765
 Basic,Fail
 Basic@bufferreadwriterect,Fail
+
+# Nightly run expectations update
+dEQP-VK.info.device_extension_dependencies,Fail
+dEQP-VK.subgroups.shader_quad_control.terminated_invocation,Fail
+

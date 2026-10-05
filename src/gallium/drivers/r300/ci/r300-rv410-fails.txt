@@ -673,13 +673,7 @@ spec@glsl-1.20@execution@uniform-initializer@fs-mat4-array,Fail
 spec@intel_performance_query@intel_performance_query-issue_2235,Fail
 
 spec@khr_texture_compression_astc@basic-gles,Fail
-spec@khr_texture_compression_astc@miptree-gl srgb-fp,Fail
 spec@khr_texture_compression_astc@miptree-gl srgb-fp@sRGB decode full precision,Fail
-# piglit issue, needs OES_texture_npot check
-spec@khr_texture_compression_astc@miptree-gles hdr,Fail
-spec@khr_texture_compression_astc@miptree-gles ldr,Fail
-spec@khr_texture_compression_astc@miptree-gles srgb,Fail
-spec@khr_texture_compression_astc@miptree-gles srgb-fp,Fail
 
 # uprev Piglit in Mesa
 spec@glsl-1.10@execution@glsl-fs-texture2d-mipmap-const-bias-01,Fail
@@ -699,7 +693,6 @@ glx@glx-visuals-depth,Fail
 glx@glx-visuals-stencil,Fail
 glx@glx_arb_sync_control@waitformsc,Fail
 spec@egl 1.4@largest possible eglcreatepbuffersurface and then glclear,Fail
-spec@egl_mesa_configless_context@basic,Fail
 
 # dEQP-EGL x11
 dEQP-EGL.functional.color_clears.multi_context.gles2.rgba8888_pbuffer,Fail

@@ -613,13 +613,7 @@ spec@glsl-1.20@execution@uniform-initializer@fs-mat4-array,Fail
 spec@intel_performance_query@intel_performance_query-issue_2235,Fail
 
 spec@khr_texture_compression_astc@basic-gles,Fail
-spec@khr_texture_compression_astc@miptree-gl srgb-fp,Fail
 spec@khr_texture_compression_astc@miptree-gl srgb-fp@sRGB decode full precision,Fail
-# piglit issue, needs OES_texture_npot check
-spec@khr_texture_compression_astc@miptree-gles hdr,Fail
-spec@khr_texture_compression_astc@miptree-gles ldr,Fail
-spec@khr_texture_compression_astc@miptree-gles srgb,Fail
-spec@khr_texture_compression_astc@miptree-gles srgb-fp,Fail
 
 spec@nv_primitive_restart@primitive-restart-draw-mode-lines,Fail
 spec@nv_primitive_restart@primitive-restart-draw-mode-quad_strip,Fail
@@ -641,4 +635,3 @@ glx@glx-multi-window-single-context,Fail
 glx@glx-swap-pixmap-bad,Fail
 glx@glx_arb_sync_control@waitformsc,Fail
 spec@egl 1.4@largest possible eglcreatepbuffersurface and then glclear,Fail
-spec@egl_mesa_configless_context@basic,Fail

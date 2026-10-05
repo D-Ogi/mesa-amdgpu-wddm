@@ -2346,9 +2346,9 @@ anv_image_finish(struct anv_image *image)
    struct anv_bo *private_bo = image->bindings[ANV_IMAGE_MEMORY_BINDING_PRIVATE].address.bo;
    if (private_bo) {
       if (image->device_registered) {
-         pthread_mutex_lock(&device->mutex);
+         simple_mtx_lock(&device->mutex);
          list_del(&image->link);
-         pthread_mutex_unlock(&device->mutex);
+         simple_mtx_unlock(&device->mutex);
       }
       ANV_DMR_BO_FREE(&image->vk.base, private_bo);
       anv_device_release_bo(device, private_bo);
@@ -3308,7 +3308,7 @@ anv_bind_image_memory(struct anv_device *device,
 
    if (image->bindings[ANV_IMAGE_MEMORY_BINDING_PRIVATE].address.bo != NULL &&
        !image->device_registered) {
-      pthread_mutex_lock(&device->mutex);
+      simple_mtx_lock(&device->mutex);
 
       /* For the purpose of enabling compression with
        * VK_IMAGE_CREATE_ALIAS_BIT, try to replace the image's private BO with
@@ -3347,7 +3347,7 @@ anv_bind_image_memory(struct anv_device *device,
       }
 
       list_addtail(&image->link, &device->image_private_objects);
-      pthread_mutex_unlock(&device->mutex);
+      simple_mtx_unlock(&device->mutex);
       image->device_registered = true;
    }
 

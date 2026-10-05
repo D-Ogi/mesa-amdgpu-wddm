@@ -17,34 +17,30 @@
 
 #include "radv_cs.h"
 
+#include "ac_nir_meta.h"
 #include "vk_command_pool.h"
 
-struct fill_constants {
-   uint64_t addr;
-   uint32_t max_offset;
-   uint32_t data;
-};
-
-struct radv_fill_memory_key {
+struct radv_fill_or_copy_memory_key {
    enum radv_meta_object_key_type type;
-   bool use_16B_copy;
+   ac_cs_clear_copy_buffer_key ac;
 };
 
 static VkResult
-get_fill_memory_pipeline(struct radv_device *device, uint64_t size, VkPipeline *pipeline_out,
-                         VkPipelineLayout *layout_out)
+get_fill_or_copy_memory_pipeline(struct radv_device *device,
+                                 const ac_cs_clear_copy_buffer_options *const options,
+                                 const ac_cs_clear_copy_buffer_dispatch *const dispatch,
+                                 VkPipeline *pipeline_out, VkPipelineLayout *layout_out)
 {
-   const bool use_16B_copy = size >= 16;
-   struct radv_fill_memory_key key;
+   struct radv_fill_or_copy_memory_key key;
    VkResult result;
 
    memset(&key, 0, sizeof(key));
-   key.type = RADV_META_OBJECT_KEY_FILL_MEMORY;
-   key.use_16B_copy = use_16B_copy;
+   key.type = RADV_META_OBJECT_KEY_FILL_OR_COPY_MEMORY;
+   key.ac.key = dispatch->shader_key.key;
 
    const VkPushConstantRange pc_range = {
       .stageFlags = VK_SHADER_STAGE_COMPUTE_BIT,
-      .size = sizeof(struct fill_constants),
+      .size = dispatch->num_user_data * sizeof(uint32_t),
    };
 
    result = vk_meta_get_pipeline_layout(&device->vk, &device->meta_state.device, NULL, &pc_range, &key, sizeof(key),
@@ -58,7 +54,7 @@ get_fill_memory_pipeline(struct radv_device *device, uint64_t size, VkPipeline *
       return VK_SUCCESS;
    }
 
-   nir_shader *cs = radv_meta_nir_build_fill_memory_shader(use_16B_copy ? 16 : 4);
+   nir_shader *cs = ac_create_clear_copy_buffer_cs(options, &key.ac);
 
    const VkPipelineShaderStageCreateInfo stage_info = {
       .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
@@ -82,193 +78,101 @@ get_fill_memory_pipeline(struct radv_device *device, uint64_t size, VkPipeline *
    return result;
 }
 
-struct copy_constants {
-   uint64_t src_addr;
-   uint64_t dst_addr;
-   uint32_t max_offset;
-};
-
-struct radv_copy_memory_key {
-   enum radv_meta_object_key_type type;
-   bool use_16B_copy;
-};
-
-static bool
-radv_is_copy_memory_4B_aligned(uint64_t src_va, uint64_t dst_va, uint64_t size)
+static ac_cs_clear_copy_buffer_options
+radv_clear_copy_buffer_options(const struct radv_cmd_buffer *const cmd_buffer)
 {
-   return !(size & 3) && !(src_va & 3) && !(dst_va & 3);
+   const struct radv_device *const device = radv_cmd_buffer_device(cmd_buffer);
+   const struct radv_physical_device *const pdev = radv_device_physical(device);
+   const ac_cs_clear_copy_buffer_options options = {
+      .info = &pdev->info,
+      .nir_options = &device->compiler_info.nir_options[MESA_SHADER_COMPUTE],
+      .addr_user_data = true,
+      .fail_if_slow = true,
+   };
+
+   return options;
 }
 
-static VkResult
-get_copy_memory_pipeline(struct radv_device *device, uint64_t src_va, uint64_t dst_va, uint64_t size,
-                         VkPipeline *pipeline_out, VkPipelineLayout *layout_out)
+static ac_cs_clear_copy_buffer_info
+radv_clear_copy_buffer_info(const struct radv_cmd_buffer *const cmd_buffer, const uint64_t src_va,
+                            const uint64_t dst_va, const uint64_t size, const VkAddressCopyFlagsKHR src_copy_flags,
+                            const VkAddressCopyFlagsKHR dst_copy_flags)
 {
-   const bool use_16B_copy = size >= 16 && radv_is_copy_memory_4B_aligned(src_va, dst_va, size);
-   struct radv_copy_memory_key key;
-   VkResult result;
-
-   memset(&key, 0, sizeof(key));
-   key.type = RADV_META_OBJECT_KEY_COPY_MEMORY;
-   key.use_16B_copy = use_16B_copy;
-
-   const VkPushConstantRange pc_range = {
-      .stageFlags = VK_SHADER_STAGE_COMPUTE_BIT,
-      .size = sizeof(struct copy_constants),
+   const ac_cs_clear_copy_buffer_info info = {
+      .dst_offset = dst_va,
+      .src_offset = src_va,
+      .size = size,
+      .dst_is_vram = dst_copy_flags & VK_ADDRESS_COPY_DEVICE_LOCAL_BIT_KHR,
+      .src_is_vram = src_copy_flags & VK_ADDRESS_COPY_DEVICE_LOCAL_BIT_KHR,
+      .dst_is_sparse = dst_copy_flags & VK_ADDRESS_COPY_SPARSE_BIT_KHR,
+      .src_is_sparse = src_copy_flags & VK_ADDRESS_COPY_SPARSE_BIT_KHR,
    };
 
-   result = vk_meta_get_pipeline_layout(&device->vk, &device->meta_state.device, NULL, &pc_range, &key, sizeof(key),
-                                        layout_out);
-   if (result != VK_SUCCESS)
-      return result;
-
-   VkPipeline pipeline_from_cache = vk_meta_lookup_pipeline(&device->meta_state.device, &key, sizeof(key));
-   if (pipeline_from_cache != VK_NULL_HANDLE) {
-      *pipeline_out = pipeline_from_cache;
-      return VK_SUCCESS;
-   }
-
-   nir_shader *cs = radv_meta_nir_build_copy_memory_shader(use_16B_copy ? 16 : 1);
-
-   const VkPipelineShaderStageCreateInfo stage_info = {
-      .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
-      .stage = VK_SHADER_STAGE_COMPUTE_BIT,
-      .module = vk_shader_module_handle_from_nir(cs),
-      .pName = "main",
-      .pSpecializationInfo = NULL,
-   };
-
-   const VkComputePipelineCreateInfo pipeline_info = {
-      .sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO,
-      .stage = stage_info,
-      .flags = 0,
-      .layout = *layout_out,
-   };
-
-   result = vk_meta_create_compute_pipeline(&device->vk, &device->meta_state.device, &pipeline_info, &key, sizeof(key),
-                                            pipeline_out);
-
-   ralloc_free(cs);
-   return result;
+   return info;
 }
 
 static void
-radv_compute_fill_memory(struct radv_cmd_buffer *cmd_buffer, uint64_t va, uint64_t size, uint32_t data)
+radv_compute_fill_memory(struct radv_cmd_buffer *cmd_buffer,
+                         const ac_cs_clear_copy_buffer_options *const options,
+                         const ac_cs_clear_copy_buffer_dispatch *const dispatch)
 {
    struct radv_device *device = radv_cmd_buffer_device(cmd_buffer);
-   VkPipelineLayout layout = cmd_buffer->meta_fill_memory[size >= 16].layout;
-   VkPipeline pipeline = cmd_buffer->meta_fill_memory[size >= 16].pipeline;
+   VkPipelineLayout layout = VK_NULL_HANDLE;
+   VkPipeline pipeline = VK_NULL_HANDLE;
    VkResult result;
 
-   if (pipeline == VK_NULL_HANDLE) {
-      result = get_fill_memory_pipeline(device, size, &pipeline, &layout);
+   /* bc250: the command buffer remembers the last fill pipeline of this recording by its shader key. */
+   if (radv_meta_buffer_cache_get(&cmd_buffer->meta_fill_memory, dispatch->shader_key.key, &pipeline, &layout)) {
+      /* cached */
+   } else {
+      result = get_fill_or_copy_memory_pipeline(device, options, dispatch, &pipeline, &layout);
       if (result != VK_SUCCESS) {
          vk_command_buffer_set_error(&cmd_buffer->vk, result);
          return;
       }
-      cmd_buffer->meta_fill_memory[size >= 16].layout = layout;
-      cmd_buffer->meta_fill_memory[size >= 16].pipeline = pipeline;
+      radv_meta_buffer_cache_put(&cmd_buffer->meta_fill_memory, dispatch->shader_key.key, pipeline, layout);
    }
 
    radv_meta_bind_compute_pipeline(cmd_buffer, pipeline);
 
-   assert(size <= UINT32_MAX);
+   radv_meta_push_constants(cmd_buffer, layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, dispatch->num_user_data * 4,
+                            dispatch->user_data);
 
-   struct fill_constants fill_consts = {
-      .addr = va,
-      .data = data,
-   };
-   uint32_t dim_x;
-
-   if (size >= 16) {
-      fill_consts.max_offset = size - 16;
-      dim_x = DIV_ROUND_UP(size, 16);
-   } else {
-      fill_consts.max_offset = size - 4;
-      dim_x = DIV_ROUND_UP(size, 4);
-   }
-
-   radv_meta_push_constants(cmd_buffer, layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(fill_consts), &fill_consts);
-
-   radv_unaligned_dispatch(cmd_buffer, dim_x, 1, 1);
+   radv_unaligned_dispatch(cmd_buffer, dispatch->num_threads, 1, 1);
 }
 
 static void
-radv_compute_copy_memory(struct radv_cmd_buffer *cmd_buffer, uint64_t src_va, uint64_t dst_va, uint64_t size)
+radv_compute_copy_memory(struct radv_cmd_buffer *cmd_buffer,
+                         const ac_cs_clear_copy_buffer_options *const options,
+                         const ac_cs_clear_copy_buffer_dispatch *const dispatch, const uint64_t size)
 {
    struct radv_device *device = radv_cmd_buffer_device(cmd_buffer);
-   const bool use_16B_copy = size >= 16 && radv_is_copy_memory_4B_aligned(src_va, dst_va, size);
-   VkPipelineLayout layout = cmd_buffer->meta_copy_memory[use_16B_copy].layout;
-   VkPipeline pipeline = cmd_buffer->meta_copy_memory[use_16B_copy].pipeline;
+   VkPipelineLayout layout = VK_NULL_HANDLE;
+   VkPipeline pipeline = VK_NULL_HANDLE;
    VkResult result;
 
-   if (pipeline == VK_NULL_HANDLE) {
-      result = get_copy_memory_pipeline(device, src_va, dst_va, size, &pipeline, &layout);
+   /* bc250: the command buffer remembers the last copy pipeline of this recording by its shader key. */
+   if (radv_meta_buffer_cache_get(&cmd_buffer->meta_copy_memory, dispatch->shader_key.key, &pipeline, &layout)) {
+      /* cached */
+   } else {
+      result = get_fill_or_copy_memory_pipeline(device, options, dispatch, &pipeline, &layout);
       if (result != VK_SUCCESS) {
          vk_command_buffer_set_error(&cmd_buffer->vk, result);
          return;
       }
-      cmd_buffer->meta_copy_memory[use_16B_copy].layout = layout;
-      cmd_buffer->meta_copy_memory[use_16B_copy].pipeline = pipeline;
+      radv_meta_buffer_cache_put(&cmd_buffer->meta_copy_memory, dispatch->shader_key.key, pipeline, layout);
    }
 
    radv_utrace_begin_compute_copy_memory(cmd_buffer, size);
 
    radv_meta_bind_compute_pipeline(cmd_buffer, pipeline);
 
-   assert(size <= UINT32_MAX);
+   radv_meta_push_constants(cmd_buffer, layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, dispatch->num_user_data * 4,
+                            dispatch->user_data);
 
-   struct copy_constants copy_consts = {
-      .src_addr = src_va,
-      .dst_addr = dst_va,
-   };
-   uint32_t dim_x;
-
-   if (use_16B_copy) {
-      copy_consts.max_offset = size - 16;
-      dim_x = DIV_ROUND_UP(size, 16);
-   } else {
-      copy_consts.max_offset = size;
-      dim_x = size;
-   }
-
-   radv_meta_push_constants(cmd_buffer, layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(copy_consts), &copy_consts);
-
-   radv_unaligned_dispatch(cmd_buffer, dim_x, 1, 1);
+   radv_unaligned_dispatch(cmd_buffer, dispatch->num_threads, 1, 1);
 
    radv_utrace_end_compute_copy_memory(cmd_buffer);
-}
-
-static bool
-radv_prefer_compute_or_cp_dma(const struct radv_device *device, uint64_t size, VkAddressCopyFlagsKHR src_copy_flags,
-                              VkAddressCopyFlagsKHR dst_copy_flags)
-{
-   const struct radv_physical_device *pdev = radv_device_physical(device);
-   bool use_compute = size >= RADV_BUFFER_OPS_CS_THRESHOLD;
-
-   if (pdev->info.gfx_level >= GFX10 && pdev->info.has_dedicated_vram) {
-      if (!(src_copy_flags & VK_ADDRESS_COPY_DEVICE_LOCAL_BIT_KHR) ||
-          !(dst_copy_flags & VK_ADDRESS_COPY_DEVICE_LOCAL_BIT_KHR)) {
-         /* For GTT/host memory on dGPUs, CP DMA avoids occupying the compute
-          * units. But CP DMA is a serial engine that badly underperforms a
-          * compute copy for large transfers, even over PCIe: keep CP DMA only
-          * for small GTT copies and use a compute copy for large ones. */
-         if (size <= RADV_BUFFER_OPS_GTT_CP_DMA_MAX_BYTES)
-            use_compute = false;
-      }
-   }
-
-   return use_compute;
-}
-
-static bool
-radv_is_compute_required(const struct radv_device *device, VkAddressCopyFlagsKHR src_copy_flags,
-                         VkAddressCopyFlagsKHR dst_copy_flags)
-{
-   const struct radv_physical_device *pdev = radv_device_physical(device);
-
-   /* Use compute when CP DMA doesn't support sparse. */
-   return !pdev->info.cp_dma_supports_sparse &&
-          ((src_copy_flags & VK_ADDRESS_COPY_SPARSE_BIT_KHR) || (dst_copy_flags & VK_ADDRESS_COPY_SPARSE_BIT_KHR));
 }
 
 static uint32_t
@@ -278,19 +182,26 @@ radv_fill_memory_internal(struct radv_cmd_buffer *cmd_buffer, const struct radv_
    assert(!(dst_va & 3));
    assert(!(size & 3));
 
-   struct radv_device *device = radv_cmd_buffer_device(cmd_buffer);
+   const struct radv_device *const device = radv_cmd_buffer_device(cmd_buffer);
 
    if (cmd_buffer->qf == RADV_QUEUE_TRANSFER) {
       radv_sdma_fill_memory(device, cmd_buffer->cs, dst_va, size, value);
       return 0;
    }
 
-   const bool use_compute = radv_is_compute_required(device, dst_copy_flags, dst_copy_flags) ||
-                            radv_prefer_compute_or_cp_dma(device, size, dst_copy_flags, dst_copy_flags);
+   const ac_cs_clear_copy_buffer_options options = radv_clear_copy_buffer_options(cmd_buffer);
+   ac_cs_clear_copy_buffer_dispatch dispatch = {0};
+   ac_cs_clear_copy_buffer_info info =
+      radv_clear_copy_buffer_info(cmd_buffer, 0, dst_va, size, 0, dst_copy_flags);
+
+   info.clear_value[0] = value;
+   info.clear_value_size = sizeof(uint32_t);
+
+   const bool use_compute = ac_prepare_cs_clear_copy_buffer(&options, &info, &dispatch);
    uint32_t flush_bits = 0;
 
    if (use_compute) {
-      radv_compute_fill_memory(cmd_buffer, dst_va, size, value);
+      radv_compute_fill_memory(cmd_buffer, &options, &dispatch);
 
       flush_bits = AC_BARRIER_SYNC_CS | AC_BARRIER_INV_VMEM |
                    radv_src_access_flush(cmd_buffer, VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
@@ -383,7 +294,7 @@ void
 radv_copy_memory(struct radv_cmd_buffer *cmd_buffer, uint64_t src_va, uint64_t dst_va, uint64_t size,
                  VkAddressCopyFlagsKHR src_copy_flags, VkAddressCopyFlagsKHR dst_copy_flags)
 {
-   struct radv_device *device = radv_cmd_buffer_device(cmd_buffer);
+   const struct radv_device *const device = radv_cmd_buffer_device(cmd_buffer);
 
    if (cmd_buffer->qf == RADV_QUEUE_TRANSFER) {
       radv_sdma_copy_memory(device, cmd_buffer->cs, src_va, dst_va, size,
@@ -391,12 +302,15 @@ radv_copy_memory(struct radv_cmd_buffer *cmd_buffer, uint64_t src_va, uint64_t d
       return;
    }
 
-   const bool use_compute = radv_is_compute_required(device, src_copy_flags, dst_copy_flags) ||
-                            (radv_is_copy_memory_4B_aligned(src_va, dst_va, size) &&
-                             radv_prefer_compute_or_cp_dma(device, size, src_copy_flags, dst_copy_flags));
+   const ac_cs_clear_copy_buffer_options options = radv_clear_copy_buffer_options(cmd_buffer);
+   ac_cs_clear_copy_buffer_dispatch dispatch = {0};
+   ac_cs_clear_copy_buffer_info info =
+      radv_clear_copy_buffer_info(cmd_buffer, src_va, dst_va, size, src_copy_flags, dst_copy_flags);
+
+   const bool use_compute = ac_prepare_cs_clear_copy_buffer(&options, &info, &dispatch);
 
    if (use_compute) {
-      radv_compute_copy_memory(cmd_buffer, src_va, dst_va, size);
+      radv_compute_copy_memory(cmd_buffer, &options, &dispatch, size);
    } else if (size) {
       radv_cp_dma_copy_memory(cmd_buffer, src_va, dst_va, size);
    }

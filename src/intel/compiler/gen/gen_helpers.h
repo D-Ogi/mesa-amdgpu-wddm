@@ -9,6 +9,7 @@
 
 #include "gen_enums.h"
 #include "gen_types.h"
+#include "util/bitpack_helpers.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -522,7 +523,7 @@ lsc_64bit_msg_desc(const struct intel_device_info *devinfo,
                    bool transpose,
                    unsigned cache_ctrl,
                    unsigned scale_offset,
-                   unsigned global_offset,
+                   int32_t global_offset,
                    unsigned surface_state_index)
 {
    /*
@@ -619,10 +620,10 @@ lsc_64bit_msg_desc(const struct intel_device_info *devinfo,
 
    if (is_stateless) {
       assert(surface_state_index == 0);
-      msg_desc |= SET_BITS_64(global_offset, 43, 22);
+      msg_desc |= util_bitpack_sint(global_offset, 22, 43);
    } else {
       msg_desc |= SET_BITS_64(surface_state_index, 26, 22);
-      msg_desc |= SET_BITS_64(global_offset, 43, 27);
+      msg_desc |= util_bitpack_sint(global_offset, 27, 43);
    }
 
    return msg_desc;

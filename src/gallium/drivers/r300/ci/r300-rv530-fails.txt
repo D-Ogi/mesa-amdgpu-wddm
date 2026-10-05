@@ -278,13 +278,7 @@ spec@glsl-1.20@execution@tex-miplevel-selection gl2:texture(bias) cube,Fail
 spec@intel_performance_query@intel_performance_query-issue_2235,Fail
 
 spec@khr_texture_compression_astc@basic-gles,Fail
-spec@khr_texture_compression_astc@miptree-gl srgb-fp,Fail
 spec@khr_texture_compression_astc@miptree-gl srgb-fp@sRGB decode full precision,Fail
-# piglit issue, needs OES_texture_npot check
-spec@khr_texture_compression_astc@miptree-gles hdr,Fail
-spec@khr_texture_compression_astc@miptree-gles ldr,Fail
-spec@khr_texture_compression_astc@miptree-gles srgb,Fail
-spec@khr_texture_compression_astc@miptree-gles srgb-fp,Fail
 
 # uprev Piglit in Mesa
 spec@ext_framebuffer_multisample@accuracy all_samples color depthstencil linear,Fail
@@ -310,10 +304,8 @@ spec@glsl-1.10@execution@glsl-fs-texture2d-mipmap-const-bias-05,Fail
 glx@glx-make-current,Fail
 glx@glx-multi-window-single-context,Fail
 glx@glx-swap-pixmap-bad,Fail
-glx@glx-visuals-depth,Fail
 glx@glx-visuals-stencil,Fail
 glx@glx_arb_sync_control@waitformsc,Fail
-spec@egl_mesa_configless_context@basic,Fail
 
 # Nightly run expectations update
 spec@arb_texture_cube_map@copyteximage cube samples=2,Fail

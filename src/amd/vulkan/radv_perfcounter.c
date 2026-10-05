@@ -99,7 +99,7 @@ enum radv_perfcounter_op {
 #define G_REG_OFFSET(x)    ((x) & 0xFFFF)
 #define S_REG_INSTANCES(x) ((x) << 16)
 #define G_REG_INSTANCES(x) (((x) >> 16) & 0x7FFF)
-#define S_REG_CONSTANT(x)  ((x) << 31)
+#define S_REG_CONSTANT(x)  ((unsigned)(x) << 31)
 #define G_REG_CONSTANT(x)  ((x) >> 31)
 
 struct radv_perfcounter_impl {

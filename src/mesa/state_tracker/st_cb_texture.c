@@ -75,9 +75,9 @@
 #include "util/log.h"
 #include "util/u_inlines.h"
 #include "util/u_upload_mgr.h"
-#include "pipe/p_shader_tokens.h"
 #include "util/u_tile.h"
 #include "util/format/u_format.h"
+#include "util/format/u_formats.h"
 #include "util/u_surface.h"
 #include "util/u_sampler.h"
 #include "util/u_math.h"
@@ -1577,10 +1577,10 @@ format_is_swizzled_rgba(enum pipe_format format)
 {
     const struct util_format_description *desc = util_format_description(format);
 
-    if ((desc->swizzle[0] == TGSI_SWIZZLE_X || desc->swizzle[0] == PIPE_SWIZZLE_0) &&
-        (desc->swizzle[1] == TGSI_SWIZZLE_Y || desc->swizzle[1] == PIPE_SWIZZLE_0) &&
-        (desc->swizzle[2] == TGSI_SWIZZLE_Z || desc->swizzle[2] == PIPE_SWIZZLE_0) &&
-        (desc->swizzle[3] == TGSI_SWIZZLE_W || desc->swizzle[3] == PIPE_SWIZZLE_1))
+    if ((desc->swizzle[0] == PIPE_SWIZZLE_X || desc->swizzle[0] == PIPE_SWIZZLE_0) &&
+        (desc->swizzle[1] == PIPE_SWIZZLE_Y || desc->swizzle[1] == PIPE_SWIZZLE_0) &&
+        (desc->swizzle[2] == PIPE_SWIZZLE_Z || desc->swizzle[2] == PIPE_SWIZZLE_0) &&
+        (desc->swizzle[3] == PIPE_SWIZZLE_W || desc->swizzle[3] == PIPE_SWIZZLE_1))
        return false;
 
     return true;

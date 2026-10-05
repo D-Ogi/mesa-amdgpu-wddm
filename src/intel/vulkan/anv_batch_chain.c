@@ -1663,10 +1663,10 @@ anv_queue_submit(struct vk_queue *vk_queue,
        submit->image_bind_count) {
       result = anv_queue_submit_sparse_bind(queue, submit);
    } else {
-      pthread_mutex_lock(&device->mutex);
+      simple_mtx_lock(&device->mutex);
       result = anv_queue_submit_cmd_buffers_locked(queue, submit,
                                                    utrace_submit);
-      pthread_mutex_unlock(&device->mutex);
+      simple_mtx_unlock(&device->mutex);
    }
 
    intel_ds_end_submit(&queue->ds, start_ts);

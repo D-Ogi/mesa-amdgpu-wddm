@@ -339,6 +339,10 @@
    DRI_CONF_OPT_B(zero_invalidated_buffers, def, \
                   "Zero memory returned by glMapBufferRange with GL_MAP_INVALIDATE_*_BIT, workaround for games that rely on the undefined contents being zero")
 
+#define DRI_CONF_IGNORE_MAP_INVALIDATE_BUFFER(def) \
+   DRI_CONF_OPT_B(ignore_map_invalidate_buffer, def, \
+                  "Ignore GL_MAP_INVALIDATE_*_BIT when the range is the whole buffer, workaround for games that map a whole buffer as invalidated but only rewrite a part of it")
+
 #define DRI_CONF_LIMIT_TRIG_INPUT_RANGE(def) \
    DRI_CONF_OPT_B(limit_trig_input_range, def, \
                   "Limit trig input range to [-2p : 2p] to improve sin/cos calculation precision on Intel")
@@ -388,6 +392,9 @@
 
 #define DRI_CONF_INTEL_DISABLE_THREADED_CONTEXT(def) \
    DRI_CONF_OPT_B(intel_disable_threaded_context, def, "Disable threaded context")
+
+#define DRI_CONF_INTEL_ENABLE_EFFICIENT_64BIT(def) \
+   DRI_CONF_OPT_B(intel_enable_efficient_64bit, def, "Enable efficient 64bit")
 
 /**
  * \brief Image quality-related options

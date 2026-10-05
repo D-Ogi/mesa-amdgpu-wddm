@@ -373,6 +373,18 @@ etna_emit_ts_state(struct etna_context *ctx)
    etna_coalesce_end(stream, &coalesce);
 }
 
+static struct etna_reloc
+etna_sampler_view_lod_addr(struct etna_context *ctx, struct etna_sampler_view *sv,
+                           unsigned num, const struct etna_reloc *reloc)
+{
+   struct etna_reloc addr = *reloc;
+
+   if (addr.bo)
+      addr.bo = etna_sampler_view_resource(ctx, &sv->base, num)->bo;
+
+   return addr;
+}
+
 static void
 etna_emit_new_texture_state(struct etna_context *ctx)
 {
@@ -507,7 +519,8 @@ etna_emit_new_texture_state(struct etna_context *ctx)
          if ((1 << x) & active_samplers) {
             for (int y = 0; y < VIVS_NTE_SAMPLER_ADDR_LOD__LEN; ++y) {
                struct etna_sampler_view *sv = etna_sampler_view(ctx->sampler_view[x]);
-               /*10800*/ EMIT_STATE_RELOC(NTE_SAMPLER_ADDR_LOD(x, y), &sv->lod_addr[y]);
+               struct etna_reloc addr = etna_sampler_view_lod_addr(ctx, sv, x, &sv->lod_addr[y]);
+               /*10800*/ EMIT_STATE_RELOC(NTE_SAMPLER_ADDR_LOD(x, y), &addr);
             }
          }
       }
@@ -551,8 +564,10 @@ etna_emit_new_texture_state(struct etna_context *ctx)
          EMIT_STATE(NTE_SAMPLER_CONFIG1(y), ss->config1 | sv->config1);
          EMIT_STATE(NTE_SAMPLER_BASELOD(y), ss->baselod);
 
-         for (int lod = 0; lod < VIVS_NTE_SAMPLER_ADDR_LOD__LEN; ++lod)
-            EMIT_STATE_RELOC(NTE_SAMPLER_ADDR_LOD(y, lod), &sv->lod_addr_128bit[lod]);
+         for (int lod = 0; lod < VIVS_NTE_SAMPLER_ADDR_LOD__LEN; ++lod) {
+            struct etna_reloc addr = etna_sampler_view_lod_addr(ctx, sv, x, &sv->lod_addr_128bit[lod]);
+            EMIT_STATE_RELOC(NTE_SAMPLER_ADDR_LOD(y, lod), &addr);
+         }
       }
    }
 
@@ -663,7 +678,8 @@ etna_emit_texture_state(struct etna_context *ctx)
          for (int x = 0; x < VIVS_TE_SAMPLER__LEN; ++x) {
             if ((1 << x) & active_samplers) {
                struct etna_sampler_view *sv = etna_sampler_view(ctx->sampler_view[x]);
-               /*02400*/ EMIT_STATE_RELOC(TE_SAMPLER_LOD_ADDR(x, y), &sv->lod_addr[y]);
+               struct etna_reloc addr = etna_sampler_view_lod_addr(ctx, sv, x, &sv->lod_addr[y]);
+               /*02400*/ EMIT_STATE_RELOC(TE_SAMPLER_LOD_ADDR(x, y), &addr);
             }
          }
       }

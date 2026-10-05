@@ -220,6 +220,12 @@ def declare_options(android_version):
         B("intel_force_sampler_prefetch", False,
           "Enable binding table sampler prefteching",
           c_name="sampler_prefetch"),
+        E("intel_code_motion", 0, 0, 2,
+          [EV(0, "compiler default"),
+           EV(1, "nir_opt_licm, hoist out of loops only"),
+           EV(2, "nir_opt_gcm, global code motion")],
+          "Which code motion pass runs in the NIR optimization loop",
+          c_name="code_motion"),
 
         B("force_guc_low_latency", False,
           "Enable low latency GuC strategy.",

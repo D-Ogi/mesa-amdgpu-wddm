@@ -7964,9 +7964,11 @@ radv_stage_flush(struct radv_cmd_buffer *cmd_buffer, VkPipelineStageFlags2 src_s
    assert(!(src_stage_mask &= ~(radv_post_me_stage_mask | vs_stage_mask | ps_stage_mask | cs_stage_mask)));
 #endif
 
-   if (dst_stage_mask & (VK_PIPELINE_STAGE_2_DRAW_INDIRECT_BIT | VK_PIPELINE_STAGE_2_INDEX_INPUT_BIT |
-                         VK_PIPELINE_STAGE_2_COPY_INDIRECT_BIT_KHR | VK_PIPELINE_STAGE_2_CONDITIONAL_RENDERING_BIT_EXT |
-                         VK_PIPELINE_STAGE_2_COMMAND_PREPROCESS_BIT_EXT))
+   if (dst_stage_mask &
+       (VK_PIPELINE_STAGE_2_DRAW_INDIRECT_BIT | VK_PIPELINE_STAGE_2_INDEX_INPUT_BIT |
+        VK_PIPELINE_STAGE_2_COPY_INDIRECT_BIT_KHR | VK_PIPELINE_STAGE_2_CONDITIONAL_RENDERING_BIT_EXT |
+        VK_PIPELINE_STAGE_2_COMMAND_PREPROCESS_BIT_EXT | VK_PIPELINE_STAGE_2_ACCELERATION_STRUCTURE_BUILD_BIT_KHR |
+        VK_PIPELINE_STAGE_2_ACCELERATION_STRUCTURE_COPY_BIT_KHR))
       cmd_buffer->state.flush_bits |= AC_BARRIER_PFP_SYNC_ME;
 }
 
