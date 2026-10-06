@@ -216,11 +216,33 @@ parse_operand(const unsigned **curr,
    (*curr)++;
 }
 
+/* The D3D11 runtime passes shaders through an 11.1 DDI device with a minimum-precision hint on
+ * destination, declaration and relative-index operands: an extended operand token of type MODIFIER
+ * whose min-precision field is set and whose modifier is NONE. Our devices publish no
+ * min-precision support (D3D11_1DDICAPS_SHADER_MIN_PRECISION_SUPPORT is zero), which tells the
+ * runtime that every operand runs at full precision, so the hint is read past and dropped. A
+ * destination or relative operand has no other use for the token. The D3D10 DDI never sent one,
+ * which is why the parser asserted that it did not exist (b20 lab, 2026-10-06: the assertion's
+ * message box stopped DWM's compositor thread behind the logon screen).
+ */
+static void
+skip_extended_operand(const unsigned **curr)
+{
+   while (true) {
+      unsigned token = **curr;
+
+      (*curr)++;
+      if (!((token & D3D10_SB_OPERAND_DOUBLE_EXTENDED_MASK) >> D3D10_SB_OPERAND_DOUBLE_EXTENDED_SHIFT))
+         break;
+   }
+}
+
 static void
 parse_relative_operand(const unsigned **curr,
                        struct Shader_relative_operand *operand)
 {
-   assert(!DECODE_IS_D3D10_SB_OPERAND_EXTENDED(**curr));
+   bool extended = DECODE_IS_D3D10_SB_OPERAND_EXTENDED(**curr);
+
    assert(DECODE_D3D10_SB_OPERAND_NUM_COMPONENTS(**curr) == D3D10_SB_OPERAND_4_COMPONENT);
    assert(DECODE_D3D10_SB_OPERAND_4_COMPONENT_SELECTION_MODE(**curr) == D3D10_SB_OPERAND_4_COMPONENT_SELECT_1_MODE);
 
@@ -234,10 +256,14 @@ parse_relative_operand(const unsigned **curr,
 
    if (DECODE_D3D10_SB_OPERAND_INDEX_DIMENSION(**curr) == D3D10_SB_OPERAND_INDEX_1D) {
       (*curr)++;
+      if (extended)
+         skip_extended_operand(curr);
       operand->index[0].imm = **curr;
    } else {
       assert(DECODE_D3D10_SB_OPERAND_INDEX_DIMENSION(**curr) == D3D10_SB_OPERAND_INDEX_2D);
       (*curr)++;
+      if (extended)
+         skip_extended_operand(curr);
       operand->index[0].imm = **curr;
       (*curr)++;
       operand->index[1].imm = **curr;
@@ -426,8 +452,7 @@ Shader_parse_opcode(struct Shader_parser *parser,
    /* Destination operands. */
    for (i = 0; i < info->num_dst; i++) {
       D3D10_SB_OPERAND_NUM_COMPONENTS num_components;
-
-      assert(!DECODE_IS_D3D10_SB_OPERAND_EXTENDED(*curr));
+      bool extended = DECODE_IS_D3D10_SB_OPERAND_EXTENDED(*curr);
 
       num_components = DECODE_D3D10_SB_OPERAND_NUM_COMPONENTS(*curr);
       if (num_components == D3D10_SB_OPERAND_4_COMPONENT) {
@@ -445,6 +470,8 @@ Shader_parse_opcode(struct Shader_parser *parser,
       }
 
       parse_operand(&curr, &opcode->dst[i].base);
+      if (extended)
+         skip_extended_operand(&curr);
       parse_operand_index(&curr, &opcode->dst[i].base);
    }
 

@@ -40,6 +40,8 @@
 
 #include "util/u_memory.h"
 
+#include <stdlib.h>   /* _set_error_mode */
+
 
 EXTERN_C struct pipe_screen *
 d3d10_create_screen(void);
@@ -72,6 +74,13 @@ OpenAdapterCommon(__inout D3D10DDIARG_OPENADAPTER *pOpenData)   // IN
    }
 #endif
    ++numAdapters;
+
+   /* This frontend runs inside dwm.exe, whose compositor thread has no visible desktop for a
+    * message box: a failed assert() there waited on an invisible "Retry/Ignore" dialog and froze
+    * the desktop behind the logon screen (b20 lab, 2026-10-06). Report to stderr and abort instead,
+    * so that the failure ends the process, Windows restarts the compositor and WER keeps a dump.
+    */
+   _set_error_mode(_OUT_TO_STDERR);
 
    const struct Bc250Config *config = Bc250GetConfig();
    Adapter *pAdaptor = (Adapter *)calloc(sizeof *pAdaptor, 1);
