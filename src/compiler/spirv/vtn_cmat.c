@@ -711,7 +711,7 @@ init_clip_scalars(struct vtn_builder *b,
       uint32_t this_index = index_base + f;
       struct vtn_ssa_value *field = vtn_composite_extract(b, src, &this_index, 1);
       struct vtn_ssa_value *new_field = vtn_create_ssa_value(b, field->type);
-      int nc = glsl_get_vector_elements(field->type);
+      ASSERTED int nc = glsl_get_vector_elements(field->type);
       assert(nc <= 1);
       new_field->def = vtn_get_nir_ssa(b, w[4 + f]);
 
