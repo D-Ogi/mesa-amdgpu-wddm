@@ -137,7 +137,9 @@ static void TestEnsureRetry(Device *device, bool hosted)
    device->hosted_state = hosted ? (void *)&screen : NULL;
    enum Fault { IMPORT, RESIDENT, PAGING, LOCK };
    const struct Case { Fault fault; const char *step; HRESULT want; } cases[] = {
-      {IMPORT, "resource_from_handle", E_OUTOFMEMORY},
+      // A refused import is D3DDDIERR_APPLICATIONERROR, not E_OUTOFMEMORY: E_OUTOFMEMORY from here ends DWM
+      // (BD-058, d4f23cb7adf7c3d8994aa41d4435d96bb13e95c1).
+      {IMPORT, "resource_from_handle", D3DDDIERR_APPLICATIONERROR},
       {RESIDENT, "MakeResident", E_OUTOFMEMORY},
       {PAGING, "paging fence wait (5 s)", HRESULT_FROM_WIN32(WAIT_TIMEOUT)},
       {LOCK, "Lock2", E_FAIL},
