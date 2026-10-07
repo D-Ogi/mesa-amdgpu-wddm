@@ -206,8 +206,14 @@ struct radv_wddm2_winsys {
    struct vk_sync_binary_type sync_binary_type;
    const struct vk_sync_type *sync_types[3];
    struct {
-      void *d3d12_device; 
+      void *d3d12_device;
       void *d3d12_queue;
+      /* BC-250 present route (radv_wddm2_wsi_route.h). The lock serialises the lazy creation of
+       * the D3D12 device and queue; a zeroed SRWLOCK is a valid unlocked lock. */
+      void *lock; /* SRWLOCK, kept as a pointer-sized field to stay free of windows.h here */
+      int route;
+      bool d3d12_tried;
+      const char *d3d12_failure; /* why the D3D12 device or queue could not be made, or NULL */
    } wsi;
 };
 
