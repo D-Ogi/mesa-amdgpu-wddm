@@ -21,6 +21,7 @@
  * USE OR OTHER DEALINGS IN THE SOFTWARE.
  */
 
+#include "zink_bc250_batch_list.h"
 #include "zink_clear.h"
 #include "zink_context.h"
 #include "zink_descriptors.h"
@@ -216,39 +217,19 @@ zink_context_destroy(struct pipe_context *pctx)
       bs->next = bs_next;
       bs = bs_next;
    }
-   simple_mtx_lock(&screen->free_batch_states_lock);
-   if (ctx->batch_states) {
-      if (screen->free_batch_states)
-         screen->last_free_batch_state->next = ctx->batch_states;
-      else {
-         screen->free_batch_states = ctx->batch_states;
-         screen->last_free_batch_state = screen->free_batch_states;
-      }
-   }
-   while (screen->last_free_batch_state && screen->last_free_batch_state->next)
-      screen->last_free_batch_state = screen->last_free_batch_state->next;
-   if (ctx->free_batch_states) {
-      if (screen->free_batch_states)
-         screen->last_free_batch_state->next = ctx->free_batch_states;
-      else {
-         screen->free_batch_states = ctx->free_batch_states;
-         screen->last_free_batch_state = ctx->last_free_batch_state;
-      }
-   }
-   while (screen->last_free_batch_state && screen->last_free_batch_state->next)
-      screen->last_free_batch_state = screen->last_free_batch_state->next;
-   if (ctx->bs) {
+   /* BC250: after a lost submit ctx->bs can already be on ctx->batch_states (or a reclaim moved it to
+    * ctx->free_batch_states); the loops above cleared it then, and it must not be appended twice, or
+    * bs->next == bs and the walk to the end of the screen's list never ends (zink_bc250_batch_list.h). */
+   const size_t link = offsetof(struct zink_batch_state, next);
+   const bool bs_listed = ctx->bs && (bc250_batch_listed(ctx->batch_states, link, ctx->bs) ||
+                                      bc250_batch_listed(ctx->free_batch_states, link, ctx->bs));
+   if (ctx->bs && !bs_listed) {
       zink_clear_batch_state(ctx, ctx->bs);
       ctx->bs->ctx = NULL;
-      if (screen->free_batch_states)
-         screen->last_free_batch_state->next = ctx->bs;
-      else {
-         screen->free_batch_states = ctx->bs;
-         screen->last_free_batch_state = screen->free_batch_states;
-      }
    }
-   while (screen->last_free_batch_state && screen->last_free_batch_state->next)
-      screen->last_free_batch_state = screen->last_free_batch_state->next;
+   simple_mtx_lock(&screen->free_batch_states_lock);
+   bc250_batch_return_states((void **)&screen->free_batch_states, (void **)&screen->last_free_batch_state,
+                             ctx->batch_states, ctx->free_batch_states, ctx->bs, link);
    simple_mtx_unlock(&screen->free_batch_states_lock);
 
    for (unsigned i = 0; i < 2; i++) {

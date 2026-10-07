@@ -108,14 +108,40 @@ struct Bc250HostProbeState {
    const UINT64 *present_cpu;
    D3DKMT_HANDLE present_sync;
    UINT64 present_value, present_waited[16];
+   /* The first cause of the device loss, kept for a dump and for the error line (lab trial D1 of KMD
+    * 0.7.216.17: the dump of the spinning DWM could not tell which path had declared its device lost).
+    * lost_reason is a Bc250LostReason, lost_op the host operation (or ~0u), lost_hr its result. */
+   UINT lost_reason, lost_op;
+   HRESULT lost_hr;
+   ULONGLONG lost_tick;
 };
 
-static HRESULT Bc250HostLost(Bc250HostProbeState *s)
+enum Bc250LostReason : UINT {
+   BC250_LOST_NONE,
+   BC250_LOST_PROGRESS_FENCE_MAX,       /* a published progress fence reads UINT64_MAX */
+   BC250_LOST_PRESENT_OR_PAGING_MAX,    /* the Present or the paging fence reads UINT64_MAX */
+   BC250_LOST_ICD_REPORT,               /* the ICD read UINT64_MAX from a fence (BC250_HOST_REPORT_LOST) */
+   BC250_LOST_CALLBACK_RESULT,          /* a runtime callback returned a device-lost result */
+   BC250_LOST_STOP,                     /* a frontend error path stopped the hosted submission */
+   BC250_LOST_PRESENT_IDLE_TIMEOUT,     /* the Present-idle CPU wait did not end within its bound */
+   BC250_LOST_PRESENT_IDLE_RESULT,      /* the Present-idle CPU wait callback returned a device-lost result */
+};
+
+static const char *Bc250LostReasonName(UINT reason)
+{
+   static const char *const names[] = {"none", "progress-fence-max", "present-or-paging-max", "icd-report",
+                                       "callback-result", "stop", "present-idle-timeout", "present-idle-result"};
+   return reason < sizeof(names) / sizeof(names[0]) ? names[reason] : "?";
+}
+
+static HRESULT Bc250HostLost(Bc250HostProbeState *s, UINT reason, UINT op, HRESULT hr)
 {
    if (!s->device_lost) {
       s->device_lost=true;
       s->submission_failed=true;
-      BC250_ERROR("BC250 hosted device lost: SetErrorCb\n");
+      s->lost_reason=reason; s->lost_op=op; s->lost_hr=hr; s->lost_tick=GetTickCount64();
+      BC250_ERROR("BC250 hosted device lost: reason=%u (%s) op=%u hr=%08lx tick=%llu, SetErrorCb\n",
+                  reason, Bc250LostReasonName(reason), op, (unsigned long)hr, (unsigned long long)s->lost_tick);
       s->device->UMCallbacks.pfnSetErrorCb(s->device->hRTCoreLayer,D3DDDIERR_DEVICEREMOVED);
    }
    return D3DDDIERR_DEVICEREMOVED;
@@ -138,11 +164,11 @@ static HRESULT Bc250HostStatus(Bc250HostProbeState *s)
          BC250_ERROR("BC250 injected fence observation UINT64_MAX; mapped memory unchanged\n");
          observed=UINT64_MAX;
       }
-      if (observed==UINT64_MAX) return Bc250HostLost(s);
+      if (observed==UINT64_MAX) return Bc250HostLost(s,BC250_LOST_PROGRESS_FENCE_MAX,p.context,S_OK);
    }
    if ((s->present_cpu && *(const volatile UINT64 *)s->present_cpu==UINT64_MAX) ||
        (s->device->pagingFence && *s->device->pagingFence==UINT64_MAX))
-      return Bc250HostLost(s);
+      return Bc250HostLost(s,BC250_LOST_PRESENT_OR_PAGING_MAX,~0u,S_OK);
    return S_OK;
 }
 
@@ -156,7 +182,7 @@ static HRESULT Bc250HostOperation(Bc250HostProbeState *s, uint32_t op, void *arg
    auto &cb = s->device->KTCallbacks;
    HANDLE rt = s->device->hDevice;
    if (op==BC250_HOST_CHECK_STATUS) return Bc250HostStatus(s);
-   if (op==BC250_HOST_REPORT_LOST) return Bc250HostLost(s);
+   if (op==BC250_HOST_REPORT_LOST) return Bc250HostLost(s,BC250_LOST_ICD_REPORT,op,S_OK);
    if (!argument) return E_INVALIDARG;
 #define HOST_CALL(name, arg) (cb.pfn##name##Cb ? cb.pfn##name##Cb(rt, arg) : E_NOTIMPL)
    switch (op) {
@@ -351,7 +377,7 @@ static int32_t Bc250HostDispatch(void *userdata, uint32_t operation, void *argum
    if (operation<64 && s->calls[operation]<2 && bc250_diag_enabled && GetEnvironmentVariableA("BC250_HOST_TRACE_DDI",NULL,0)) BC250_DIAG("BC250 callback begin op=%u tid=%lu\n",operation,GetCurrentThreadId());
    HRESULT hr=Bc250HostOperation(s,operation,argument);
    if (Bc250DeviceLostResult(hr)) {
-      Bc250HostLost(s);
+      Bc250HostLost(s,BC250_LOST_CALLBACK_RESULT,operation,hr);
       return (int32_t)0xc00002b6;
    }
    if (FAILED(hr) && (operation==BC250_HOST_SubmitCommand || operation==BC250_HOST_SignalSynchronizationObjectFromGpu2 || operation==BC250_HOST_PUBLISH_PROGRESS))
@@ -448,7 +474,7 @@ HRESULT Bc250SignalPresent(Device *device)
 void Bc250StopHostedSubmission(Device *device)
 {
    auto *state=(Bc250HostProbeState *)device->hosted_state;
-   if (state) Bc250HostLost(state);
+   if (state) Bc250HostLost(state,BC250_LOST_STOP,~0u,S_OK);
 }
 
 HRESULT Bc250WaitPresentIdle(Device *device)
@@ -463,9 +489,12 @@ HRESULT Bc250WaitPresentIdle(Device *device)
    wait.ObjectCount=1; wait.ObjectHandleArray=&s->present_sync; wait.FenceValueArray=&s->present_value;
    wait.hAsyncEvent=event;
    HRESULT hr=device->KTCallbacks.pfnWaitForSynchronizationObjectFromCpuCb(device->hDevice,&wait);
-   if (SUCCEEDED(hr) && WaitForSingleObject(event,10000)!=WAIT_OBJECT_0) hr=DXGI_ERROR_DEVICE_HUNG;
+   bool timeout=false;
+   if (SUCCEEDED(hr) && WaitForSingleObject(event,10000)!=WAIT_OBJECT_0) { hr=DXGI_ERROR_DEVICE_HUNG; timeout=true; }
    CloseHandle(event);
-   if (Bc250DeviceLostResult(hr)) return Bc250HostLost(s);
+   if (Bc250DeviceLostResult(hr))
+      return Bc250HostLost(s,timeout ? BC250_LOST_PRESENT_IDLE_TIMEOUT : BC250_LOST_PRESENT_IDLE_RESULT,
+                           BC250_HOST_WaitForSynchronizationObjectFromCpu,hr);
    return SUCCEEDED(hr) ? Bc250HostStatus(s) : hr;
 }
 
