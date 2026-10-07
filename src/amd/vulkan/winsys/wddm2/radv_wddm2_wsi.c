@@ -149,7 +149,7 @@ radv_wddm2_wsi_ensure_d3d12(struct radv_wddm2_winsys *ws)
          }
       }
       if (adapter)
-         IUnknown_Release(adapter);
+         adapter->lpVtbl->Release(adapter);
 
       if (device) {
          impl = radv_wddm2_wsi_d3d12_impl_now(device, impl_path);
