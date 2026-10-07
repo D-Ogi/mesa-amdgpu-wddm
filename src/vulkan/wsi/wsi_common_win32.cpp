@@ -475,7 +475,14 @@ static unsigned
 wsi_win32_list_surface_formats(VkIcdSurfaceBase *icd_surface, struct wsi_device *wsi_device,
                                struct wsi_win32_surface_format *out)
 {
-   const bool dxgi = wsi_win32_device_uses_dxgi(wsi_device);
+   /* The formats without a CPU path are offered only when this device can take the DXGI route
+    * now. A driver that cannot make its D3D12 presenter says so here, before the application
+    * picks a format, so that the swapchain can still fall back to CPU images.
+    */
+   const char *reason = NULL;
+   const bool dxgi = wsi_win32_device_uses_dxgi(wsi_device) &&
+                     (!wsi_device->win32.route_allowed ||
+                      wsi_device->win32.route_allowed(wsi_device->pdevice, &reason));
    unsigned count = 0;
 
    for (unsigned i = 0; i < ARRAY_SIZE(available_surface_formats); i++) {
@@ -1921,7 +1928,7 @@ wsi_win32_surface_create_swapchain(
    else if (!use_dxgi)
       reason = "no-dcomp";
    if (use_dxgi && wsi_device->win32.route_allowed &&
-       !wsi_device->win32.route_allowed(device, &reason))
+       !wsi_device->win32.route_allowed(wsi_device->pdevice, &reason))
       use_dxgi = false;
    if (use_dxgi && !format) {
       use_dxgi = false;
@@ -1955,10 +1962,12 @@ wsi_win32_surface_create_swapchain(
 }
 
 static IDXGIFactory4 *
-dxgi_get_factory(bool debug)
+dxgi_get_factory(bool debug, const char **failure, HRESULT *failure_hr)
 {
    HMODULE dxgi_mod = util_load_system_library(L"DXGI.DLL");
+   *failure = "dxgi-load";
    if (!dxgi_mod) {
+      *failure_hr = HRESULT_FROM_WIN32(GetLastError());
       return NULL;
    }
 
@@ -1967,6 +1976,7 @@ dxgi_get_factory(bool debug)
 
    CreateDXGIFactory2 = (PFN_CREATE_DXGI_FACTORY2)GetProcAddress(dxgi_mod, "CreateDXGIFactory2");
    if (!CreateDXGIFactory2) {
+      *failure_hr = HRESULT_FROM_WIN32(GetLastError());
       return NULL;
    }
 
@@ -1977,6 +1987,8 @@ dxgi_get_factory(bool debug)
    IDXGIFactory4 *factory;
    HRESULT hr = CreateDXGIFactory2(flags, IID_PPV_ARGS(&factory));
    if (FAILED(hr)) {
+      *failure = "dxgi-factory";
+      *failure_hr = hr;
       return NULL;
    }
 
@@ -1984,10 +1996,12 @@ dxgi_get_factory(bool debug)
 }
 
 static IDCompositionDevice *
-dcomp_get_device()
+dcomp_get_device(const char **failure, HRESULT *failure_hr)
 {
    HMODULE dcomp_mod = util_load_system_library(L"DComp.DLL");
+   *failure = "dcomp-load";
    if (!dcomp_mod) {
+      *failure_hr = HRESULT_FROM_WIN32(GetLastError());
       return NULL;
    }
 
@@ -1996,12 +2010,15 @@ dcomp_get_device()
 
    DCompositionCreateDevice = (PFN_DCOMP_CREATE_DEVICE)GetProcAddress(dcomp_mod, "DCompositionCreateDevice");
    if (!DCompositionCreateDevice) {
+      *failure_hr = HRESULT_FROM_WIN32(GetLastError());
       return NULL;
    }
 
    IDCompositionDevice *device;
    HRESULT hr = DCompositionCreateDevice(NULL, IID_PPV_ARGS(&device));
    if (FAILED(hr)) {
+      *failure = "dcomp-device";
+      *failure_hr = hr;
       return NULL;
    }
 
@@ -2028,13 +2045,19 @@ wsi_win32_init_wsi(struct wsi_device *wsi_device,
    wsi->wsi = wsi_device;
 
    if (!wsi_device->sw) {
-      wsi->dxgi.factory = dxgi_get_factory(WSI_DEBUG & WSI_DEBUG_DXGI);
+      const char *failure = NULL;
+      HRESULT failure_hr = S_OK;
+      wsi->dxgi.factory = dxgi_get_factory(WSI_DEBUG & WSI_DEBUG_DXGI, &failure, &failure_hr);
       if (!wsi->dxgi.factory) {
+         wsi_device->win32.init_failure = failure;
+         wsi_device->win32.init_hr = (long)failure_hr;
          wsi_device->sw = true;
          goto sw_fallback;
       }
-      wsi->dxgi.dcomp = dcomp_get_device();
+      wsi->dxgi.dcomp = dcomp_get_device(&failure, &failure_hr);
       if (!wsi->dxgi.dcomp) {
+         wsi_device->win32.init_failure = failure;
+         wsi_device->win32.init_hr = (long)failure_hr;
          wsi->dxgi.factory->Release();
          wsi->dxgi.factory = NULL;
          wsi_device->sw = true;
