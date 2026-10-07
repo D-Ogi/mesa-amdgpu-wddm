@@ -226,4 +226,15 @@ radv_wddm2_winsys(struct radeon_winsys *base)
    return (struct radv_wddm2_winsys *)base;
 }
 
+/* One per-process Vulkan setting from the registry (radv_wddm2_read_vk_setting): app is the value under
+ * HKLM\SOFTWARE\amdgpu-wddm\Vulkan\Applications\<exe>, global the one under HKLM\SOFTWARE\amdgpu-wddm\Vulkan.
+ * NULL = absent, "invalid" = present but not a short REG_SZ. */
+struct radv_wddm2_vk_setting {
+   char exe[260];
+   char app_buf[64], global_buf[64];
+   const char *app, *global;
+};
+
+void radv_wddm2_read_vk_setting(const char *value, struct radv_wddm2_vk_setting *out);
+
 #endif /* RADV_WDDM2_WINSYS_H */

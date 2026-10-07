@@ -84,6 +84,19 @@ test_choose(void)
    CHECK(c.route == RADV_WDDM2_WSI_ROUTE_GDI && c.invalid && c.source == RADV_WDDM2_WSI_SOURCE_ENV);
    c = radv_wddm2_wsi_route_choose(NULL, "invalid");
    CHECK(c.route == RADV_WDDM2_WSI_ROUTE_GDI && c.invalid);
+
+   /* The per-application WsiRoute (Applications\<exe>) sits between the environment and the global value. */
+   c = radv_wddm2_wsi_route_choose_app(NULL, "gdi", "dxgi");
+   CHECK(c.route == RADV_WDDM2_WSI_ROUTE_GDI && c.source == RADV_WDDM2_WSI_SOURCE_APP_REGISTRY && !c.invalid);
+   c = radv_wddm2_wsi_route_choose_app("dxgi", "gdi", "gdi");
+   CHECK(c.route == RADV_WDDM2_WSI_ROUTE_DXGI && c.source == RADV_WDDM2_WSI_SOURCE_ENV);
+   c = radv_wddm2_wsi_route_choose_app(NULL, "", "gdi");
+   CHECK(c.route == RADV_WDDM2_WSI_ROUTE_GDI && c.source == RADV_WDDM2_WSI_SOURCE_REGISTRY);
+   c = radv_wddm2_wsi_route_choose_app(NULL, NULL, NULL);
+   CHECK(c.route == RADV_WDDM2_WSI_ROUTE_DXGI && c.source == RADV_WDDM2_WSI_SOURCE_DEFAULT);
+   c = radv_wddm2_wsi_route_choose_app(NULL, "invalid", "dxgi");
+   CHECK(c.route == RADV_WDDM2_WSI_ROUTE_GDI && c.invalid && c.source == RADV_WDDM2_WSI_SOURCE_APP_REGISTRY);
+   CHECK(!strcmp(radv_wddm2_wsi_route_source_name(RADV_WDDM2_WSI_SOURCE_APP_REGISTRY), "registry-app"));
 }
 
 static void

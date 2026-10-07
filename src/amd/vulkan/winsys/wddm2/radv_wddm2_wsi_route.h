@@ -15,8 +15,11 @@
  *                     through a DirectComposition visual (upstream Mesa's shape).
  *
  * The switch: AMDGPU_WDDM_VK_WSI in the environment, else the REG_SZ value WsiRoute under
- * HKLM\SOFTWARE\amdgpu-wddm\Vulkan, else the default below. Values: "gdi", "dxgi", "dxgi-composition"
- * (case does not matter). A value that is not one of them selects GDI and is reported as invalid.
+ * HKLM\SOFTWARE\amdgpu-wddm\Vulkan\Applications\<exe> (exe = file name of the process image, for example
+ * "witcher3.exe"; case does not matter), else the REG_SZ value WsiRoute under HKLM\SOFTWARE\amdgpu-wddm\Vulkan,
+ * else the default below. Values: "gdi", "dxgi", "dxgi-composition" (case does not matter). A value that is
+ * not one of them selects GDI and is reported as invalid. The per-application key is the same one that holds
+ * MemoryOverflow (radv_wddm2_mem_overflow.h).
  */
 #ifndef RADV_WDDM2_WSI_ROUTE_H
 #define RADV_WDDM2_WSI_ROUTE_H
@@ -48,6 +51,7 @@ enum radv_wddm2_wsi_route_source {
    RADV_WDDM2_WSI_SOURCE_DEFAULT = 0,
    RADV_WDDM2_WSI_SOURCE_ENV = 1,
    RADV_WDDM2_WSI_SOURCE_REGISTRY = 2,
+   RADV_WDDM2_WSI_SOURCE_APP_REGISTRY = 3,
 };
 
 struct radv_wddm2_wsi_route_choice {
@@ -74,6 +78,7 @@ radv_wddm2_wsi_route_source_name(enum radv_wddm2_wsi_route_source source)
    case RADV_WDDM2_WSI_SOURCE_DEFAULT: return "default";
    case RADV_WDDM2_WSI_SOURCE_ENV: return "env";
    case RADV_WDDM2_WSI_SOURCE_REGISTRY: return "registry";
+   case RADV_WDDM2_WSI_SOURCE_APP_REGISTRY: return "registry-app";
    default: return "unknown";
    }
 }
@@ -115,11 +120,12 @@ radv_wddm2_wsi_route_parse(const char *text, enum radv_wddm2_wsi_route *out)
    return false;
 }
 
-/* env and reg are the raw values, NULL when absent. An empty string counts as absent, so that
- * "set AMDGPU_WDDM_VK_WSI=" in a shell clears the override.
+/* env, app_reg (the per-application value) and reg (the global value) are the raw values, NULL when
+ * absent. An empty string counts as absent, so that "set AMDGPU_WDDM_VK_WSI=" in a shell clears the
+ * override.
  */
 static inline struct radv_wddm2_wsi_route_choice
-radv_wddm2_wsi_route_choose(const char *env, const char *reg)
+radv_wddm2_wsi_route_choose_app(const char *env, const char *app_reg, const char *reg)
 {
    struct radv_wddm2_wsi_route_choice choice = {
       RADV_WDDM2_WSI_ROUTE_DEFAULT, RADV_WDDM2_WSI_SOURCE_DEFAULT, false,
@@ -129,6 +135,9 @@ radv_wddm2_wsi_route_choose(const char *env, const char *reg)
    if (env && env[0]) {
       text = env;
       choice.source = RADV_WDDM2_WSI_SOURCE_ENV;
+   } else if (app_reg && app_reg[0]) {
+      text = app_reg;
+      choice.source = RADV_WDDM2_WSI_SOURCE_APP_REGISTRY;
    } else if (reg && reg[0]) {
       text = reg;
       choice.source = RADV_WDDM2_WSI_SOURCE_REGISTRY;
@@ -140,6 +149,13 @@ radv_wddm2_wsi_route_choose(const char *env, const char *reg)
       choice.invalid = true;
    }
    return choice;
+}
+
+/* The same without a per-application value. */
+static inline struct radv_wddm2_wsi_route_choice
+radv_wddm2_wsi_route_choose(const char *env, const char *reg)
+{
+   return radv_wddm2_wsi_route_choose_app(env, NULL, reg);
 }
 
 static inline wchar_t

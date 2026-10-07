@@ -372,21 +372,11 @@ radv_wddm2_wsi_route_log(VkDevice _device, const char *line)
 static struct radv_wddm2_wsi_route_choice
 radv_wddm2_wsi_read_route(void)
 {
-   const char *env = getenv("AMDGPU_WDDM_VK_WSI");
-   char reg[64];
-   DWORD size = sizeof(reg);
-   const char *reg_value = NULL;
-
-   const LSTATUS status = RegGetValueA(HKEY_LOCAL_MACHINE, "SOFTWARE\\amdgpu-wddm\\Vulkan", "WsiRoute",
-                                       RRF_RT_REG_SZ, NULL, reg, &size);
-   if (status == ERROR_SUCCESS) {
-      reg[sizeof(reg) - 1] = 0;
-      reg_value = reg;
-   } else if (status != ERROR_FILE_NOT_FOUND) {
-      /* Present but not a short REG_SZ: never guess a route from it. */
-      reg_value = "invalid";
-   }
-   return radv_wddm2_wsi_route_choose(env, reg_value);
+   /* The per-application WsiRoute, then the global one (radv_wddm2_read_vk_setting). A value that is
+    * present but not a short REG_SZ reads as "invalid": never guess a route from it. */
+   struct radv_wddm2_vk_setting setting;
+   radv_wddm2_read_vk_setting("WsiRoute", &setting);
+   return radv_wddm2_wsi_route_choose_app(getenv("AMDGPU_WDDM_VK_WSI"), setting.app, setting.global);
 }
 
 void

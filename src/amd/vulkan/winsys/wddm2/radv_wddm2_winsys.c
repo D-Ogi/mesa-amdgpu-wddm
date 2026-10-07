@@ -55,6 +55,8 @@
 #include "common/amd_family.h"
 
 #include <locale.h>
+#include <stdio.h>
+#include <string.h>
 
 /* Xlib headers conflict with DXGI headers */
 #ifdef Status
@@ -90,27 +92,40 @@ radv_wddm2_read_hklm_sz(const char *subkey, const char *value, char *buf, DWORD 
    return "invalid";
 }
 
+/* One Vulkan setting of this process: the REG_SZ value under
+ * HKLM\SOFTWARE\amdgpu-wddm\Vulkan\Applications\<exe> (exe = file name of the process image) and the one under
+ * HKLM\SOFTWARE\amdgpu-wddm\Vulkan. Each pointer is NULL when its value is absent and "invalid" when the
+ * value is not a short REG_SZ. The caller applies the environment first. Shared by MemoryOverflow (BD-096)
+ * and WsiRoute (radv_wddm2_wsi.c). */
+void
+radv_wddm2_read_vk_setting(const char *value, struct radv_wddm2_vk_setting *out)
+{
+   char exe_path[MAX_PATH], app_key[MAX_PATH + 64];
+   memset(out, 0, sizeof(*out));
+   const DWORD len = GetModuleFileNameA(NULL, exe_path, sizeof(exe_path));
+   if (len && len < sizeof(exe_path)) {
+      const char *exe = exe_path;
+      for (const char *p = exe_path; *p; p++) {
+         if (*p == '\\' || *p == '/')
+            exe = p + 1;
+      }
+      snprintf(out->exe, sizeof(out->exe), "%s", exe);
+      if (radv_wddm2_mem_overflow_app_key(exe, app_key, sizeof(app_key)))
+         out->app = radv_wddm2_read_hklm_sz(app_key, value, out->app_buf, sizeof(out->app_buf));
+   }
+   out->global = radv_wddm2_read_hklm_sz(RADV_WDDM2_VK_KEY, value, out->global_buf, sizeof(out->global_buf));
+}
+
 /* BD-096: the memory overflow policy of this process (radv_wddm2_mem_overflow.h), as MakeResident flags,
  * with one log line that names the value and where it came from. */
 static unsigned
 radv_wddm2_read_mem_overflow(void)
 {
-   char exe_path[MAX_PATH], app_key[MAX_PATH + 64], app_buf[64], reg_buf[64];
-   const char *exe = NULL, *app = NULL;
-   const DWORD len = GetModuleFileNameA(NULL, exe_path, sizeof(exe_path));
-   if (len && len < sizeof(exe_path)) {
-      exe = exe_path;
-      for (const char *p = exe_path; *p; p++) {
-         if (*p == '\\' || *p == '/')
-            exe = p + 1;
-      }
-      if (radv_wddm2_mem_overflow_app_key(exe, app_key, sizeof(app_key)))
-         app = radv_wddm2_read_hklm_sz(app_key, RADV_WDDM2_MEM_OVERFLOW_VALUE, app_buf, sizeof(app_buf));
-   }
-   const char *reg = radv_wddm2_read_hklm_sz(RADV_WDDM2_VK_KEY, RADV_WDDM2_MEM_OVERFLOW_VALUE, reg_buf,
-                                             sizeof(reg_buf));
+   struct radv_wddm2_vk_setting setting;
+   radv_wddm2_read_vk_setting(RADV_WDDM2_MEM_OVERFLOW_VALUE, &setting);
+   const char *exe = setting.exe[0] ? setting.exe : NULL;
    const struct radv_wddm2_mem_overflow_choice choice = radv_wddm2_mem_overflow_choose(
-      getenv("BC250_MAKERESIDENT_LEGACY"), getenv("AMDGPU_WDDM_VK_MEM_OVERFLOW"), app, reg);
+      getenv("BC250_MAKERESIDENT_LEGACY"), getenv("AMDGPU_WDDM_VK_MEM_OVERFLOW"), setting.app, setting.global);
    const struct radv_wddm2_make_resident_bits bits = radv_wddm2_mem_overflow_bits(choice.policy);
    D3DDDI_MAKERESIDENT_FLAGS flags = {0};
    flags.CantTrimFurther = bits.cant_trim_further;
