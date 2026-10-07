@@ -146,6 +146,22 @@ struct wsi_device {
       VkResult (*create_image_memory)(VkDevice device, void *resource,
                                       const VkAllocationCallbacks *alloc,
                                       VkDeviceMemory *out);
+
+      /* The hooks below serve a driver whose D3D12 shared resources are linear surfaces (the
+       * amdgpu-wddm BC-250 port). All are optional; NULL or false keeps upstream behaviour.
+       *
+       * route_allowed: asked once per swapchain before the DXGI path is used. False makes that
+       * swapchain take the CPU-image path; *reason names why, for the log.
+       */
+      bool (*route_allowed)(VkDevice device, const char **reason);
+      /* The application image aliases the D3D12 shared resource and must have its linear layout. */
+      bool linear_blit_image;
+      /* Checks that the memory bound to a linear blit image has the image's own layout. */
+      VkResult (*check_blit_image)(VkDevice device, VkImage image, VkDeviceMemory memory);
+      /* true: CreateSwapChainForHwnd. false: CreateSwapChainForComposition with a DComp target. */
+      bool hwnd_target;
+      /* One line per swapchain: the route it took and why. */
+      void (*route_log)(VkDevice device, const char *line);
    } win32;
 
    struct {
