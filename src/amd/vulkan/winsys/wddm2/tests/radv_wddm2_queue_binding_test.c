@@ -162,6 +162,13 @@ static struct {
    unsigned rm_packets;  /* RELEASE_MEM packets in the watched IB1s */
    unsigned rm_not_last; /* of them, not the IB1's last packet */
    unsigned rm_bad;      /* not the KMD fence's packet, a malformed IB1, or a write to no fence */
+
+   /* A held CPU wait (the innocent-wait tests): the kernel wait is accepted
+    * but not completed, and the test's GPU thread acts on it later. */
+   bool hold_cpu_wait;
+   struct obj *held_sync;
+   uint64_t held_value;
+   HANDLE held_event, held_armed;
 } h;
 
 static unsigned checks, failures;
@@ -419,6 +426,17 @@ fake_dispatch(void *userdata, uint32_t op, void *arg)
    }
    case BC250_HOST_WaitForSynchronizationObjectFromCpu: {
       const D3DKMT_WAITFORSYNCHRONIZATIONOBJECTFROMCPU *w = arg;
+      /* Held: the work waits behind another device's hang. The GPU thread
+       * of the test decides what happens to it (gpu_thread). */
+      if (h.hold_cpu_wait && w->ObjectCount == 1 && w->hAsyncEvent) {
+         use_sync(w->ObjectHandleArray[0]);
+         h.held_sync = find(h.syncs, h.n_syncs, w->ObjectHandleArray[0]);
+         h.held_value = w->FenceValueArray[0];
+         h.held_event = w->hAsyncEvent;
+         record(op, 0, w->ObjectHandleArray[0], w->FenceValueArray[0], NULL);
+         SetEvent(h.held_armed);
+         return 0;
+      }
       /* The GPU completes what the CPU waits for, and nothing earlier: a fence the GPU writes through
        * the IB1s the fake GPU took gets its writes run in order up to the value. */
       for (unsigned i = 0; i < w->ObjectCount; i++) {
@@ -4445,10 +4463,193 @@ test_hosted_nt_import(void)
    contract();
 }
 
+/* The innocent-wait tests (K225, lab trial D1 of KMD 0.7.216.17). Another
+ * device hangs the engine; this queue's work waits behind it, and the
+ * engine reset resubmits it. The queue's slot reuse waits on the CPU for
+ * that work, longer than one wait slice.
+ *
+ * A GPU thread of the test plays the scheduler. It waits until the winsys
+ * has made its kernel wait, sleeps, and then completes the work, loses the
+ * device, writes UINT64_MAX into the fence, or does nothing. It never calls
+ * the host dispatch, so the one-thread rule of contract() still holds.
+ *
+ * BC250_TEST_OLD_BOUND=1 is the negative control: it sets the total bound
+ * to one slice, the behaviour before K225 (one bounded wait, then a loss).
+ * innocent_wait must FAIL under it. */
+extern uint64_t radv_wddm2_fence_wait_slice_ns;
+extern uint64_t radv_wddm2_fence_wait_total_ns;
+
+enum gpu_action { GPU_COMPLETE, GPU_LOSE, GPU_FENCE_MAX, GPU_NOTHING };
+
+static struct {
+   enum gpu_action action;
+   DWORD delay_ms;
+} gpu;
+
+static DWORD WINAPI
+gpu_thread(void *arg)
+{
+   (void)arg;
+   if (WaitForSingleObject(h.held_armed, 10000) != WAIT_OBJECT_0)
+      return 1;
+   Sleep(gpu.delay_ms);
+   switch (gpu.action) {
+   case GPU_COMPLETE:
+      InterlockedExchange64((volatile LONG64 *)&h.held_sync->value, (LONG64)h.held_value);
+      SetEvent(h.held_event);
+      break;
+   case GPU_LOSE:
+      InterlockedExchange((volatile LONG *)&h.status, -1);
+      break;
+   case GPU_FENCE_MAX:
+      InterlockedExchange64((volatile LONG64 *)&h.held_sync->value, (LONG64)-1);
+      break;
+   case GPU_NOTHING:
+      break;
+   }
+   return 0;
+}
+
+/* Fills the queue's gather slots so that the next submission reuses slot 0
+ * and waits on the CPU for progress value 1, with that wait held. Returns
+ * the submission's result and its time in ms. */
+static VkResult
+held_reuse(struct radv_wddm2_winsys *ws, struct radeon_winsys_ctx *c, enum gpu_action action, DWORD delay_ms,
+           uint64_t slice_ms, uint64_t total_ms, unsigned *mark, double *elapsed_ms)
+{
+   for (unsigned i = 0; i < ws->bc250_gather_slots; i++)
+      submit_one(ws, c);
+   radv_wddm2_fence_wait_slice_ns = slice_ms * 1000000ull;
+   radv_wddm2_fence_wait_total_ns = total_ms * 1000000ull;
+   const char *old = getenv("BC250_TEST_OLD_BOUND");
+   if (old && *old == '1') {
+      radv_wddm2_fence_wait_total_ns = radv_wddm2_fence_wait_slice_ns;
+      printf("NOTE %-16s negative control: total bound = one slice (%llu ms)\n", current,
+             (unsigned long long)slice_ms);
+   }
+   gpu.action = action;
+   gpu.delay_ms = delay_ms;
+   h.held_armed = CreateEventA(NULL, TRUE, FALSE, NULL);
+   h.hold_cpu_wait = true;
+   HANDLE t = CreateThread(NULL, 0, gpu_thread, NULL, 0, NULL);
+   LARGE_INTEGER f, t0, t1;
+   QueryPerformanceFrequency(&f);
+   *mark = h.n_ev;
+   QueryPerformanceCounter(&t0);
+   VkResult result = submit_one(ws, c);
+   QueryPerformanceCounter(&t1);
+   h.hold_cpu_wait = false;
+   if (gpu.action == GPU_NOTHING || result != VK_SUCCESS)
+      SetEvent(h.held_armed); /* a GPU thread that never saw the wait ends too */
+   WaitForSingleObject(t, INFINITE);
+   CloseHandle(t);
+   CloseHandle(h.held_armed);
+   h.held_armed = NULL;
+   *elapsed_ms = (double)(t1.QuadPart - t0.QuadPart) * 1000.0 / (double)f.QuadPart;
+   return result;
+}
+
+static void
+restore_bounds(void)
+{
+   radv_wddm2_fence_wait_slice_ns = 1000000000ull;
+   radv_wddm2_fence_wait_total_ns = 120000000000ull;
+}
+
+static void
+test_innocent_wait(void)
+{
+   clear_deferred_env();
+   void *const cookie = (void *)(uintptr_t)0xD0;
+   struct radv_wddm2_winsys *ws = make_ws();
+   struct radeon_winsys_ctx *c = new_ctx(ws);
+   bind(ws, c, cookie);
+   unsigned mark;
+   double ms;
+   /* The work completes after about 15 slices, as DWM's did after 14.6 s
+    * behind a 10 s wait in trial D1. */
+   VkResult result = held_reuse(ws, c, GPU_COMPLETE, 300, 20, 5000, &mark, &ms);
+   check(result == VK_SUCCESS, "the slot reuse outlives about 15 wait slices and submits (result %d, %.0f ms)",
+         result, ms);
+   check(ms >= 280.0, "it waited for the work (%.0f ms, completes at 300)", ms);
+   check(count_op(mark, BC250_HOST_WaitForSynchronizationObjectFromCpu) == 1,
+         "one kernel wait, waited on again per slice and not issued again (%u)",
+         count_op(mark, BC250_HOST_WaitForSynchronizationObjectFromCpu));
+   check(count_op(mark, BC250_HOST_CHECK_STATUS) >= 5, "the device state is checked between slices (%u checks)",
+         count_op(mark, BC250_HOST_CHECK_STATUS));
+   check(!count_op(mark, BC250_HOST_REPORT_LOST) && !count_op(mark, BC250_HOST_GetDeviceState),
+         "no loss is reported and the hosted device is not asked for GetDeviceState");
+   check(gfx(c)->bc250_progress.wait_value == ws->bc250_gather_slots + 1, "the submission took progress value %u",
+         ws->bc250_gather_slots + 1);
+   restore_bounds();
+   check(unbind(ws, c, cookie) == VK_SUCCESS, "the queue unbinds: its work retired");
+   ws->base.ctx_destroy(c);
+   check(!live(h.contexts, h.n_contexts, false) && !live(h.syncs, h.n_syncs, false), "nothing left");
+   contract();
+}
+
+static void
+test_lost_during_wait(void)
+{
+   static const struct {
+      enum gpu_action action;
+      const char *what;
+   } cases[] = {
+      {GPU_LOSE, "the host reports the loss"},
+      {GPU_FENCE_MAX, "the fence reads UINT64_MAX"},
+   };
+   clear_deferred_env();
+   for (unsigned i = 0; i < ARRAY_SIZE(cases); i++) {
+      void *const cookie = (void *)(uintptr_t)0xE0;
+      struct radv_wddm2_winsys *ws = make_ws();
+      struct radeon_winsys_ctx *c = new_ctx(ws);
+      bind(ws, c, cookie);
+      unsigned mark;
+      double ms;
+      VkResult result = held_reuse(ws, c, cases[i].action, 100, 20, 5000, &mark, &ms);
+      check(result == VK_ERROR_DEVICE_LOST, "%s during the wait: the submission reports the loss (%d)",
+            cases[i].what, result);
+      check(ms < 1000.0, "at the next slice, not at the total bound (%.0f ms, bound 5000)", ms);
+      check(cases[i].action != GPU_FENCE_MAX || count_op(mark, BC250_HOST_REPORT_LOST) >= 1,
+            "a UINT64_MAX fence is reported to the host");
+      check(!count_op(mark, BC250_HOST_SubmitCommand), "nothing is submitted");
+      restore_bounds();
+      check(unbind(ws, c, cookie) == VK_ERROR_DEVICE_LOST, "unbind reports the unretired work");
+      InterlockedExchange((volatile LONG *)&h.status, 0);
+      ws->base.ctx_destroy(c);
+      contract();
+   }
+}
+
+static void
+test_wait_bound(void)
+{
+   clear_deferred_env();
+   void *const cookie = (void *)(uintptr_t)0xF0;
+   struct radv_wddm2_winsys *ws = make_ws();
+   struct radeon_winsys_ctx *c = new_ctx(ws);
+   bind(ws, c, cookie);
+   unsigned mark;
+   double ms;
+   VkResult result = held_reuse(ws, c, GPU_NOTHING, 0, 20, 300, &mark, &ms);
+   check(result == VK_ERROR_DEVICE_LOST, "work that never completes on a live device ends at the total bound (%d)",
+         result);
+   check(ms >= 280.0 && ms < 2000.0, "after the total bound (%.0f ms, bound 300)", ms);
+   check(!count_op(mark, BC250_HOST_SubmitCommand), "nothing is submitted");
+   restore_bounds();
+   /* The held wait is gone; the fake GPU completes the unbind's wait. */
+   check(unbind(ws, c, cookie) == VK_SUCCESS, "the queue still unbinds once its work retires");
+   ws->base.ctx_destroy(c);
+   contract();
+}
+
 static const struct {
    const char *name;
    void (*run)(void);
 } tests[] = {
+   {"innocent_wait", test_innocent_wait},
+   {"lost_during_wait", test_lost_during_wait},
+   {"wait_bound", test_wait_bound},
    {"bind_failure", test_bind_failure},
    {"second_queue", test_second_queue},
    {"signal_wait", test_signal_wait},
