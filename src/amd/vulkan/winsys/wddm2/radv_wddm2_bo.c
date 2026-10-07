@@ -847,13 +847,16 @@ radv_wddm2_bo_create_internal(struct radeon_winsys *_ws, uint64_t size, unsigned
          .hPagingQueue = ws->paging_queue_h,
          .NumAllocations = 1,
          .AllocationList = &bo->base.handle,
+         /* BD-096: the memory overflow policy, never MustSucceed by default (radv_wddm2_mem_overflow.h). */
          .Flags = {
-            .MustSucceed = 1,
+            .Value = ws->make_resident_flags,
          },
       };
       status = BC250_WDDM_CALL(&ws->host, MakeResident, &make_resident);
       if (!NT_SUCCESS(status)) {
-         amdgpu_wddm_log("MakeResident failed\n");
+         amdgpu_wddm_log("MakeResident failed 0x%X, %" PRIu64 " bytes, %" PRIu64 " bytes over budget, flags 0x%X\n",
+                         (unsigned)status, phys_size, (uint64_t)make_resident.NumBytesToTrim,
+                         ws->make_resident_flags);
          result = VK_ERROR_OUT_OF_DEVICE_MEMORY;
          goto error_va_alloc;
       }
@@ -1116,11 +1119,13 @@ radv_wddm2_bo_from_handle(struct radeon_winsys *_ws, void *handle, unsigned prio
       .NumAllocations = 1,
       .AllocationList = &bo->base.handle,
       .Flags = {
-         .MustSucceed = 1,
+         .Value = ws->make_resident_flags,
       },
    };
    status = BC250_WDDM_CALL(&ws->host, MakeResident, &make_resident);
    if (!NT_SUCCESS(status)) {
+      amdgpu_wddm_log("MakeResident of an opened allocation failed 0x%X, %" PRIu64 " bytes over budget\n",
+                      (unsigned)status, (uint64_t)make_resident.NumBytesToTrim);
       result = VK_ERROR_OUT_OF_DEVICE_MEMORY;
       goto error_map;
    }
@@ -1266,12 +1271,15 @@ radv_wddm2_bo_make_resident(struct radeon_winsys *_ws, struct radeon_winsys_bo *
          .NumAllocations = 1,
          .AllocationList = &bo->base.handle,
          .Flags = {
-            .MustSucceed = 1,
+            .Value = ws->make_resident_flags,
          },
       };
       status = BC250_WDDM_CALL(&ws->host, MakeResident, &make_resident);
-      if (!NT_SUCCESS(status))
+      if (!NT_SUCCESS(status)) {
+         amdgpu_wddm_log("MakeResident failed 0x%X, %" PRIu64 " bytes over budget\n", (unsigned)status,
+                         (uint64_t)make_resident.NumBytesToTrim);
          return VK_ERROR_OUT_OF_DEVICE_MEMORY;
+      }
 
       const D3DKMT_WAITFORSYNCHRONIZATIONOBJECTFROMCPU wait = {
          .hDevice = ws->device_h,
