@@ -23,6 +23,7 @@
 
 #include <assert.h>
 #include <stdlib.h>
+#include <stdarg.h>
 #include <stdio.h>
 #include <string.h>
 
@@ -38,7 +39,7 @@
 #include "wsi_common_entrypoints.h"
 #include "wsi_common_private.h"
 
-#include <dxgi1_4.h>
+#include <dxgi1_6.h>
 #include "util/u_win32_library.h"
 #include <directx/d3d12.h>
 #include <dxguids/dxguids.h>
@@ -118,6 +119,20 @@ struct wsi_win32_swapchain {
    HWND wnd;
    VkFormat format;
    bool retired;
+   /* The route of this chain. is_dxgi: the chain presents through a DXGI swap chain. dxgi holds that
+    * swap chain until a newer chain on the same window takes it (detached). hwnd_target: the swap
+    * chain belongs to the window (CreateSwapChainForHwnd); otherwise it is a composition swap chain
+    * shown through the surface's DirectComposition visual.
+    */
+   bool is_dxgi;
+   bool hwnd_target;
+   bool detached;
+   UINT swap_chain_flags;           /* DXGI_SWAP_CHAIN_FLAG_*, for ResizeBuffers on a steal */
+   DXGI_FORMAT buffer_format;       /* the DXGI swap chain's buffer format */
+   DXGI_COLOR_SPACE_TYPE color_space;
+   /* The last present id handed to Present1. DXGI chains complete it in wait_for_present. */
+   uint64_t                     submitted_present_id;
+   const char                *route_reason;
    ID3D12Fence              **d3d12_blit_fences;
    /* BC250_WSI_PRESENT_LOG=<file>: one CSV line per queued present with the
     * time spent in the CPU copy, BitBlt/Present1 and DwmFlush. Diagnostics
@@ -243,7 +258,11 @@ wsi_win32_surface_get_capabilities(VkIcdSurfaceBase *surf,
 
    caps->surfaceCapabilities.supportedCompositeAlpha =
       VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR;
-   if (!wsi_device->sw && wsi_device->win32.get_d3d12_command_queue)
+   /* A swap chain created for a window takes no alpha mode but IGNORE: only composition swap
+    * chains blend with the desktop.
+    */
+   if (!wsi_device->sw && wsi_device->win32.get_d3d12_command_queue &&
+       !wsi_device->win32.hwnd_target)
       caps->surfaceCapabilities.supportedCompositeAlpha |=
          VK_COMPOSITE_ALPHA_PRE_MULTIPLIED_BIT_KHR |
          VK_COMPOSITE_ALPHA_POST_MULTIPLIED_BIT_KHR;
@@ -373,30 +392,119 @@ wsi_win32_surface_get_capabilities2(VkIcdSurfaceBase *surface,
 }
 
 
-static const struct {
+/* Surface formats. resource is the format of the D3D12 resource the Vulkan image aliases, buffer is
+ * the format of the DXGI swap chain's buffers; CopyResource needs both in one cast family. A flip
+ * model swap chain takes no sRGB buffer format, so the sRGB formats use the UNORM layout on both
+ * sides: the bytes are the same, and the Vulkan view does the encoding. dxgi_only formats have no CPU
+ * path (the GDI copy handles 8-bit BGRA and RGBA only) and are listed only on the DXGI route.
+ */
+struct wsi_win32_format {
    VkFormat     format;
-} available_surface_formats[] = {
-   { VK_FORMAT_B8G8R8A8_UNORM },
-   { VK_FORMAT_R8G8B8A8_UNORM },
-   { VK_FORMAT_B8G8R8A8_SRGB },
+   DXGI_FORMAT  resource;
+   DXGI_FORMAT  buffer;
+   bool         dxgi_only;
 };
 
+static const struct wsi_win32_format available_surface_formats[] = {
+   { VK_FORMAT_B8G8R8A8_UNORM, DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_FORMAT_B8G8R8A8_UNORM, false },
+   { VK_FORMAT_R8G8B8A8_UNORM, DXGI_FORMAT_R8G8B8A8_UNORM, DXGI_FORMAT_R8G8B8A8_UNORM, false },
+   { VK_FORMAT_B8G8R8A8_SRGB, DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_FORMAT_B8G8R8A8_UNORM, false },
+   { VK_FORMAT_R8G8B8A8_SRGB, DXGI_FORMAT_R8G8B8A8_UNORM, DXGI_FORMAT_R8G8B8A8_UNORM, true },
+   { VK_FORMAT_A2B10G10R10_UNORM_PACK32, DXGI_FORMAT_R10G10B10A2_UNORM,
+     DXGI_FORMAT_R10G10B10A2_UNORM, true },
+   { VK_FORMAT_R16G16B16A16_SFLOAT, DXGI_FORMAT_R16G16B16A16_FLOAT,
+     DXGI_FORMAT_R16G16B16A16_FLOAT, true },
+};
 
-static void
-get_sorted_vk_formats(struct wsi_device *wsi_device, VkFormat *sorted_formats)
+static const struct wsi_win32_format *
+wsi_win32_find_format(VkFormat format)
 {
-   for (unsigned i = 0; i < ARRAY_SIZE(available_surface_formats); i++)
-      sorted_formats[i] = available_surface_formats[i].format;
+   for (unsigned i = 0; i < ARRAY_SIZE(available_surface_formats); i++) {
+      if (available_surface_formats[i].format == format)
+         return &available_surface_formats[i];
+   }
+   return NULL;
+}
+
+static bool
+wsi_win32_device_uses_dxgi(const struct wsi_device *wsi_device)
+{
+   return !wsi_device->sw && wsi_device->win32.get_d3d12_command_queue;
+}
+
+/* True when the output that shows most of the window runs in HDR (ST.2084, BT.2020). The HDR10
+ * color space is only offered then, as other Windows drivers do; an application that asks for it
+ * on an SDR output would get a swap chain that DXGI refuses to tag.
+ */
+static bool
+wsi_win32_output_is_hdr(IDXGIFactory4 *factory, HWND hwnd)
+{
+   if (!factory)
+      return false;
+   HMONITOR monitor = MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST);
+   bool hdr = false;
+   IDXGIAdapter1 *adapter = NULL;
+   for (UINT a = 0; !hdr && SUCCEEDED(factory->EnumAdapters1(a, &adapter)); a++) {
+      IDXGIOutput *output = NULL;
+      for (UINT o = 0; !hdr && SUCCEEDED(adapter->EnumOutputs(o, &output)); o++) {
+         DXGI_OUTPUT_DESC desc;
+         IDXGIOutput6 *output6 = NULL;
+         if (SUCCEEDED(output->GetDesc(&desc)) && desc.Monitor == monitor &&
+             SUCCEEDED(output->QueryInterface(IID_PPV_ARGS(&output6)))) {
+            DXGI_OUTPUT_DESC1 desc1;
+            if (SUCCEEDED(output6->GetDesc1(&desc1)))
+               hdr = desc1.ColorSpace == DXGI_COLOR_SPACE_RGB_FULL_G2084_NONE_P2020;
+            output6->Release();
+         }
+         output->Release();
+      }
+      adapter->Release();
+   }
+   return hdr;
+}
+
+struct wsi_win32_surface_format {
+   VkFormat format;
+   VkColorSpaceKHR color_space;
+};
+
+/* The (format, color space) pairs of a surface, in the order they are reported. Returns the count;
+ * out holds room for ARRAY_SIZE(available_surface_formats) + 2.
+ */
+static unsigned
+wsi_win32_list_surface_formats(VkIcdSurfaceBase *icd_surface, struct wsi_device *wsi_device,
+                               struct wsi_win32_surface_format *out)
+{
+   const bool dxgi = wsi_win32_device_uses_dxgi(wsi_device);
+   unsigned count = 0;
+
+   for (unsigned i = 0; i < ARRAY_SIZE(available_surface_formats); i++) {
+      if (available_surface_formats[i].dxgi_only && !dxgi)
+         continue;
+      /* FP16 is scRGB (linear) in DXGI; it is only offered with the extended linear color space. */
+      if (available_surface_formats[i].format == VK_FORMAT_R16G16B16A16_SFLOAT)
+         continue;
+      out[count++] = { available_surface_formats[i].format, VK_COLOR_SPACE_SRGB_NONLINEAR_KHR };
+   }
 
    if (wsi_device->force_bgra8_unorm_first) {
-      for (unsigned i = 0; i < ARRAY_SIZE(available_surface_formats); i++) {
-         if (sorted_formats[i] == VK_FORMAT_B8G8R8A8_UNORM) {
-            sorted_formats[i] = sorted_formats[0];
-            sorted_formats[0] = VK_FORMAT_B8G8R8A8_UNORM;
+      for (unsigned i = 0; i < count; i++) {
+         if (out[i].format == VK_FORMAT_B8G8R8A8_UNORM) {
+            out[i] = out[0];
+            out[0] = { VK_FORMAT_B8G8R8A8_UNORM, VK_COLOR_SPACE_SRGB_NONLINEAR_KHR };
             break;
          }
       }
    }
+
+   VK_FROM_HANDLE(vk_physical_device, pdevice, wsi_device->pdevice);
+   if (dxgi && pdevice->instance->enabled_extensions.EXT_swapchain_colorspace) {
+      struct wsi_win32 *wsi = (struct wsi_win32 *)wsi_device->wsi[VK_ICD_WSI_PLATFORM_WIN32];
+      out[count++] = { VK_FORMAT_R16G16B16A16_SFLOAT, VK_COLOR_SPACE_EXTENDED_SRGB_LINEAR_EXT };
+      if (wsi_win32_output_is_hdr(wsi->dxgi.factory, ((VkIcdSurfaceWin32 *)icd_surface)->hwnd))
+         out[count++] = { VK_FORMAT_A2B10G10R10_UNORM_PACK32, VK_COLOR_SPACE_HDR10_ST2084_EXT };
+   }
+   return count;
 }
 
 static VkResult
@@ -407,13 +515,13 @@ wsi_win32_surface_get_formats(VkIcdSurfaceBase *icd_surface,
 {
    VK_OUTARRAY_MAKE_TYPED(VkSurfaceFormatKHR, out, pSurfaceFormats, pSurfaceFormatCount);
 
-   VkFormat sorted_formats[ARRAY_SIZE(available_surface_formats)];
-   get_sorted_vk_formats(wsi_device, sorted_formats);
+   struct wsi_win32_surface_format formats[ARRAY_SIZE(available_surface_formats) + 2];
+   const unsigned count = wsi_win32_list_surface_formats(icd_surface, wsi_device, formats);
 
-   for (unsigned i = 0; i < ARRAY_SIZE(sorted_formats); i++) {
+   for (unsigned i = 0; i < count; i++) {
       vk_outarray_append_typed(VkSurfaceFormatKHR, &out, f) {
-         f->format = sorted_formats[i];
-         f->colorSpace = VK_COLOR_SPACE_SRGB_NONLINEAR_KHR;
+         f->format = formats[i].format;
+         f->colorSpace = formats[i].color_space;
       }
    }
 
@@ -429,18 +537,31 @@ wsi_win32_surface_get_formats2(VkIcdSurfaceBase *icd_surface,
 {
    VK_OUTARRAY_MAKE_TYPED(VkSurfaceFormat2KHR, out, pSurfaceFormats, pSurfaceFormatCount);
 
-   VkFormat sorted_formats[ARRAY_SIZE(available_surface_formats)];
-   get_sorted_vk_formats(wsi_device, sorted_formats);
+   struct wsi_win32_surface_format formats[ARRAY_SIZE(available_surface_formats) + 2];
+   const unsigned count = wsi_win32_list_surface_formats(icd_surface, wsi_device, formats);
 
-   for (unsigned i = 0; i < ARRAY_SIZE(sorted_formats); i++) {
+   for (unsigned i = 0; i < count; i++) {
       vk_outarray_append_typed(VkSurfaceFormat2KHR, &out, f) {
          assert(f->sType == VK_STRUCTURE_TYPE_SURFACE_FORMAT_2_KHR);
-         f->surfaceFormat.format = sorted_formats[i];
-         f->surfaceFormat.colorSpace = VK_COLOR_SPACE_SRGB_NONLINEAR_KHR;
+         f->surfaceFormat.format = formats[i].format;
+         f->surfaceFormat.colorSpace = formats[i].color_space;
       }
    }
 
    return vk_outarray_status(&out);
+}
+
+static DXGI_COLOR_SPACE_TYPE
+wsi_win32_dxgi_color_space(VkColorSpaceKHR color_space)
+{
+   switch (color_space) {
+   case VK_COLOR_SPACE_HDR10_ST2084_EXT:
+      return DXGI_COLOR_SPACE_RGB_FULL_G2084_NONE_P2020;
+   case VK_COLOR_SPACE_EXTENDED_SRGB_LINEAR_EXT:
+      return DXGI_COLOR_SPACE_RGB_FULL_G10_NONE_P709;
+   default:
+      return DXGI_COLOR_SPACE_RGB_FULL_G22_NONE_P709;
+   }
 }
 
 /* The GDI path composes through DWM. FIFO waits for the next composition
@@ -511,15 +632,22 @@ wsi_win32_surface_get_present_rectangles(VkIcdSurfaceBase *surface,
 static DXGI_FORMAT
 convert_to_dxgi_format(VkFormat vk_format)
 {
-   /* Only two formats available in wsi_common_win32 */
-   switch (vk_format) {
-   case VK_FORMAT_B8G8R8A8_SRGB:
-      return DXGI_FORMAT_B8G8R8A8_UNORM_SRGB;
-   case VK_FORMAT_B8G8R8A8_UNORM:
-      return DXGI_FORMAT_B8G8R8A8_UNORM;
-   default:
-      return DXGI_FORMAT_UNKNOWN;
-   }
+   const struct wsi_win32_format *format = wsi_win32_find_format(vk_format);
+   return format ? format->resource : DXGI_FORMAT_UNKNOWN;
+}
+
+static void
+wsi_win32_route_log(struct wsi_win32_swapchain *chain, const char *fmt, ...)
+{
+   const struct wsi_device *wsi = chain->base.wsi;
+   if (!wsi->win32.route_log)
+      return;
+   char line[256];
+   va_list args;
+   va_start(args, fmt);
+   vsnprintf(line, sizeof(line), fmt, args);
+   va_end(args);
+   wsi->win32.route_log(chain->base.device, line);
 }
 
 static VkResult
@@ -652,6 +780,16 @@ wsi_dxgi_finish_create_image(const struct wsi_swapchain *chain,
       container_of(chain, struct wsi_win32_swapchain, base);
    struct wsi_win32_image *win32_image =
       container_of(image, struct wsi_win32_image, base);
+   const struct wsi_device *wsi = chain->wsi;
+
+   /* The Vulkan image aliases the D3D12 resource; the driver confirms that both describe the
+    * memory the same way (for a linear image: the same row pitch) before the chain uses it.
+    */
+   if (wsi->win32.check_blit_image) {
+      VkResult result = wsi->win32.check_blit_image(chain->device, image->image, image->memory);
+      if (result != VK_SUCCESS)
+         return result;
+   }
 
    return wsi_dxgi_create_blit_context(win32_chain, win32_image);
 }
@@ -671,8 +809,11 @@ wsi_dxgi_blit(struct wsi_swapchain *drv_chain, uint32_t image_index)
    uint64_t wait_value = chain->base.blit.timeline_values[image_index];
    queue->Wait(chain->d3d12_blit_fences[image_index], wait_value);
 
-   ID3D12CommandList *cmd_lists[] = {(ID3D12CommandList *)win32_image->dxgi.cmd_list};
-   queue->ExecuteCommandLists(1, cmd_lists);
+   /* A detached chain gave its DXGI buffers to a newer chain: keep the fence order, skip the copy. */
+   if (!chain->detached && win32_image->dxgi.cmd_list) {
+      ID3D12CommandList *cmd_lists[] = {(ID3D12CommandList *)win32_image->dxgi.cmd_list};
+      queue->ExecuteCommandLists(1, cmd_lists);
+   }
 
    uint64_t signal_value = ++chain->base.blit.timeline_values[image_index];
    queue->Signal(chain->d3d12_blit_fences[image_index], signal_value);
@@ -799,6 +940,12 @@ wsi_dxgi_configure_image(const struct wsi_swapchain *chain,
          info->finish_create = wsi_dxgi_finish_create_image;
    }
 
+   /* The application renders straight into the D3D12 shared resource. A driver whose D3D12 side
+    * shares such a resource as a linear surface asks for a linear Vulkan image over it.
+    */
+   if (wsi->win32.linear_blit_image && !wsi->win32.create_image_memory)
+      info->create.tiling = VK_IMAGE_TILING_LINEAR;
+
    return VK_SUCCESS;
 }
 
@@ -818,7 +965,7 @@ wsi_win32_image_init(VkDevice device_h,
    chain->wnd = win32_surface->hwnd;
    image->chain = chain;
 
-   if (chain->dxgi)
+   if (chain->is_dxgi)
       return VK_SUCCESS;
 
    BITMAPINFO info = { 0 };
@@ -841,17 +988,64 @@ wsi_win32_image_init(VkDevice device_h,
    return VK_SUCCESS;
 }
 
+/* Blocks until the D3D12 present queue has finished everything submitted so far: the copies of this
+ * chain and of any chain that shares the queue. Needed before a back buffer or a command list that
+ * the queue may still use is released.
+ */
+static void
+wsi_win32_flush_d3d12_queue(struct wsi_win32_swapchain *chain)
+{
+   const struct wsi_device *wsi = chain->base.wsi;
+   if (!wsi->win32.get_d3d12_command_queue || !wsi->win32.get_d3d12_device)
+      return;
+   ID3D12CommandQueue *queue =
+      (ID3D12CommandQueue *)wsi->win32.get_d3d12_command_queue(chain->base.device);
+   ID3D12Device *device = (ID3D12Device *)wsi->win32.get_d3d12_device(chain->base.device);
+   ID3D12Fence *fence = NULL;
+   if (!queue || !device ||
+       FAILED(device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&fence))))
+      return;
+   if (SUCCEEDED(queue->Signal(fence, 1)))
+      fence->SetEventOnCompletion(1, NULL); /* a NULL event waits here */
+   fence->Release();
+}
+
+/* Releases what ties an image to the DXGI swap chain's buffers: the back buffer and the command
+ * list that copies into it. The D3D12 queue must be idle.
+ */
+static void
+wsi_win32_image_release_dxgi_buffers(struct wsi_win32_image *image)
+{
+   if (image->dxgi.cmd_list) {
+      image->dxgi.cmd_list->Release();
+      image->dxgi.cmd_list = NULL;
+   }
+   if (image->dxgi.cmd_alloc) {
+      image->dxgi.cmd_alloc->Release();
+      image->dxgi.cmd_alloc = NULL;
+   }
+   if (image->dxgi.swapchain_res) {
+      image->dxgi.swapchain_res->Release();
+      image->dxgi.swapchain_res = NULL;
+   }
+}
+
 static void
 wsi_win32_image_finish(struct wsi_win32_swapchain *chain,
                        const VkAllocationCallbacks *allocator,
                        struct wsi_win32_image *image)
 {
-   if (image->dxgi.swapchain_res)
-      image->dxgi.swapchain_res->Release();
+   wsi_win32_image_release_dxgi_buffers(image);
 
    if(image->sw.bmp)
       DeleteObject(image->sw.bmp);
    wsi_destroy_image(&chain->base, &image->base);
+
+   /* The Vulkan memory that aliased it is gone; the D3D12 resource can go too. */
+   if (image->dxgi.blit_res) {
+      image->dxgi.blit_res->Release();
+      image->dxgi.blit_res = NULL;
+   }
 }
 
 static VkResult
@@ -860,6 +1054,9 @@ wsi_win32_swapchain_destroy(struct wsi_swapchain *drv_chain,
 {
    struct wsi_win32_swapchain *chain =
       (struct wsi_win32_swapchain *) drv_chain;
+
+   if (chain->is_dxgi)
+      wsi_win32_flush_d3d12_queue(chain);
 
    for (uint32_t i = 0; i < chain->base.image_count; i++)
       wsi_win32_image_finish(chain, allocator, &chain->images[i]);
@@ -907,12 +1104,12 @@ static void
 wsi_win32_set_image_idle(struct wsi_win32_swapchain *chain,
                          struct wsi_win32_image *image)
 {
-   if (!chain->dxgi)
+   if (!chain->is_dxgi)
       mtx_lock(&chain->acquire_mutex);
 
    image->state = WSI_IMAGE_IDLE;
 
-   if (!chain->dxgi) {
+   if (!chain->is_dxgi) {
       u_cnd_monotonic_broadcast(&chain->acquire_cond);
       mtx_unlock(&chain->acquire_mutex);
    }
@@ -945,13 +1142,13 @@ wsi_win32_find_idle_image(struct wsi_win32_swapchain *chain,
    /* CPU presentation releases images immediately. Always starting at zero
     * can starve other idle images while Zink cycles presents for readback.
     * Rotate this path under acquire_mutex; preserve DXGI's selection order. */
-   const uint32_t first = chain->dxgi ? 0 : chain->next_cpu_image;
+   const uint32_t first = chain->is_dxgi ? 0 : chain->next_cpu_image;
    for (uint32_t n = 0; n < chain->base.image_count; n++) {
       const uint32_t i = (first + n) % chain->base.image_count;
       if (chain->images[i].state == WSI_IMAGE_IDLE) {
          *out_image_index = i;
          chain->images[i].state = WSI_IMAGE_DRAWING;
-         if (!chain->dxgi)
+         if (!chain->is_dxgi)
             chain->next_cpu_image = (i + 1) % chain->base.image_count;
          return true;
       }
@@ -1014,12 +1211,14 @@ wsi_win32_acquire_next_image(struct wsi_swapchain *drv_chain,
       (struct wsi_win32_swapchain *)drv_chain;
 
    /* acquire timeout has to be explicitly handled for sw wsi */
-   if (!chain->dxgi)
+   if (!chain->is_dxgi)
       return wsi_win32_acquire_idle_cpu_image(chain, info, image_index);
 
    /* Bail early if the swapchain is broken */
    if (chain->status != VK_SUCCESS)
       return chain->status;
+   if (chain->detached)
+      return VK_ERROR_OUT_OF_DATE_KHR;
 
    if (wsi_win32_find_idle_image(chain, image_index))
       return VK_SUCCESS;
@@ -1045,37 +1244,44 @@ wsi_win32_queue_present_dxgi(struct wsi_win32_swapchain *chain,
                              struct wsi_win32_image *image,
                              const VkPresentRegionKHR *damage)
 {
-   uint32_t rect_count = damage ? damage->rectangleCount : 0;
-   STACK_ARRAY(RECT, rects, rect_count);
+   /* FLIP_DISCARD takes no dirty rectangles, and the copy writes the whole buffer: damage is
+    * accepted and not passed on.
+    */
+   (void)damage;
+   DXGI_PRESENT_PARAMETERS params = {};
 
-   for (uint32_t r = 0; r < rect_count; r++) {
-      rects[r].left = damage->pRectangles[r].offset.x;
-      rects[r].top = damage->pRectangles[r].offset.y;
-      rects[r].right = damage->pRectangles[r].offset.x + damage->pRectangles[r].extent.width;
-      rects[r].bottom = damage->pRectangles[r].offset.y + damage->pRectangles[r].extent.height;
+   if (chain->detached) {
+      /* A newer chain owns the window's swap chain (oldSwapchain); this image cannot be shown. */
+      wsi_win32_set_image_idle(chain, image);
+      return VK_ERROR_OUT_OF_DATE_KHR;
    }
 
-   DXGI_PRESENT_PARAMETERS params = {
-      rect_count,
-      rects,
-   };
-
    image->state = WSI_IMAGE_QUEUED;
+   /* FIFO: one present per vertical blank. MAILBOX: interval 0, and the newest frame replaces a
+    * queued one at composition or flip. IMMEDIATE: interval 0 and tearing when the system allows it
+    * (the swap chain was then created with ALLOW_TEARING); without it, IMMEDIATE acts as MAILBOX.
+    */
    UINT sync_interval = chain->base.present_mode == VK_PRESENT_MODE_FIFO_KHR ? 1 : 0;
-   UINT present_flags = chain->base.present_mode == VK_PRESENT_MODE_IMMEDIATE_KHR ?
-      DXGI_PRESENT_ALLOW_TEARING : 0;
+   UINT present_flags = 0;
+   if (chain->base.present_mode == VK_PRESENT_MODE_IMMEDIATE_KHR &&
+       (chain->swap_chain_flags & DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING))
+      present_flags |= DXGI_PRESENT_ALLOW_TEARING;
 
    HRESULT hres = chain->dxgi->Present1(sync_interval, present_flags, &params);
    switch (hres) {
    case DXGI_ERROR_DEVICE_REMOVED: return VK_ERROR_DEVICE_LOST;
+   case DXGI_ERROR_DEVICE_RESET: return VK_ERROR_DEVICE_LOST;
    case E_OUTOFMEMORY: return VK_ERROR_OUT_OF_DEVICE_MEMORY;
    default:
-      if (FAILED(hres))
+      if (FAILED(hres)) {
+         wsi_win32_route_log(chain, "Present1 failed hr=0x%08lx interval=%u flags=0x%x",
+                             (unsigned long)hres, sync_interval, present_flags);
          return VK_ERROR_OUT_OF_HOST_MEMORY;
+      }
       break;
    }
 
-   if (chain->surface->current_swapchain != chain) {
+   if (!chain->hwnd_target && chain->surface->current_swapchain != chain) {
       chain->surface->visual->SetContent(chain->dxgi);
       chain->wsi->dxgi.dcomp->Commit();
       chain->surface->current_swapchain = chain;
@@ -1083,6 +1289,20 @@ wsi_win32_queue_present_dxgi(struct wsi_win32_swapchain *chain,
 
    /* The common completion path publishes status under acquire_mutex. */
    return VK_SUCCESS;
+}
+
+/* A DXGI present is queued, not complete: record its id for wait_for_present. */
+static VkResult
+wsi_win32_submit_present(struct wsi_win32_swapchain *chain,
+                         uint64_t present_id, VkResult result)
+{
+   mtx_lock(&chain->acquire_mutex);
+   chain->status = result;
+   if (result == VK_SUCCESS && present_id > chain->submitted_present_id)
+      chain->submitted_present_id = present_id;
+   u_cnd_monotonic_broadcast(&chain->acquire_cond);
+   mtx_unlock(&chain->acquire_mutex);
+   return result;
 }
 
 /* DwmFlush is the completion boundary for this composed Win32 path, not
@@ -1131,6 +1351,22 @@ wsi_win32_wait_for_present(struct wsi_swapchain *base,
          result = VK_TIMEOUT;
          break;
       }
+      /* DXGI: the present is queued. Wait here, not in queue_present, for the next composition
+       * (DwmFlush), so that MAILBOX and IMMEDIATE never block in vkQueuePresentKHR. In
+       * independent flip DwmFlush still returns once per vertical blank, so this stays a bound of
+       * one refresh, not a measure of the flip. Present ids are monotonic: this completes them all.
+       */
+      if (chain->is_dxgi && chain->submitted_present_id >= present_id) {
+         const uint64_t submitted = chain->submitted_present_id;
+         mtx_unlock(&chain->acquire_mutex);
+         const HRESULT hr = DwmFlush();
+         mtx_lock(&chain->acquire_mutex);
+         (void)hr; /* DWM off (a failure) leaves nothing to wait for */
+         if (submitted > chain->completed_present_id)
+            chain->completed_present_id = submitted;
+         u_cnd_monotonic_broadcast(&chain->acquire_cond);
+         continue;
+      }
       int ret = u_cnd_monotonic_timedwait(&chain->acquire_cond,
                                          &chain->acquire_mutex, &abs_time);
       if (ret == thrd_timedout) {
@@ -1160,15 +1396,16 @@ wsi_win32_queue_present(struct wsi_swapchain *drv_chain,
 
    const uint64_t t_enter = chain->present_log ? os_time_get_nano() : 0;
 
-   if (chain->dxgi) {
+   if (chain->is_dxgi) {
       VkResult result = wsi_win32_queue_present_dxgi(chain, image, damage);
       const uint64_t t_blit = chain->present_log ? os_time_get_nano() : 0;
-      if (result == VK_SUCCESS && present_id && FAILED(DwmFlush()))
-         result = VK_ERROR_SURFACE_LOST_KHR;
+      /* copy_us is 0 on this path: the copy runs on the GPU (the D3D12 queue). dwmflush_us is 0
+       * as well: completion waits in wait_for_present.
+       */
       if (chain->present_log)
-         wsi_win32_present_log(chain, "dxgi", present_id, t_enter, t_enter, t_blit,
-                               os_time_get_nano(), result);
-      return wsi_win32_complete_present(chain, present_id, result);
+         wsi_win32_present_log(chain, chain->hwnd_target ? "dxgi" : "dxgi-composition",
+                               present_id, t_enter, t_enter, t_blit, t_blit, result);
+      return wsi_win32_submit_present(chain, present_id, result);
    }
 
    RECT rect;
@@ -1234,23 +1471,99 @@ wsi_win32_queue_present(struct wsi_swapchain *drv_chain,
    return wsi_win32_complete_present(chain, present_id, result);
 }
 
+static void
+wsi_win32_set_present_mode(struct wsi_swapchain *drv_chain, VkPresentModeKHR mode)
+{
+   /* Every DXGI chain is created with ALLOW_TEARING when the system has it, so a switch between
+    * FIFO, MAILBOX and IMMEDIATE only changes the arguments of the next Present1.
+    */
+   drv_chain->present_mode = mode;
+}
+
+static void
+wsi_win32_set_hdr_metadata(struct wsi_swapchain *drv_chain, const VkHdrMetadataEXT *metadata)
+{
+   struct wsi_win32_swapchain *chain = (struct wsi_win32_swapchain *)drv_chain;
+   if (!chain->is_dxgi || chain->detached || !chain->dxgi || !metadata)
+      return;
+
+   IDXGISwapChain4 *swapchain4 = NULL;
+   if (FAILED(chain->dxgi->QueryInterface(IID_PPV_ARGS(&swapchain4))))
+      return;
+
+   /* DXGI_HDR_METADATA_HDR10: chromaticities in units of 0.00002, luminance in nits (max) and in
+    * units of 0.0001 nits (min), content and frame-average light levels in nits.
+    */
+   DXGI_HDR_METADATA_HDR10 hdr10 = {};
+   hdr10.RedPrimary[0] = (UINT16)(metadata->displayPrimaryRed.x * 50000.0f);
+   hdr10.RedPrimary[1] = (UINT16)(metadata->displayPrimaryRed.y * 50000.0f);
+   hdr10.GreenPrimary[0] = (UINT16)(metadata->displayPrimaryGreen.x * 50000.0f);
+   hdr10.GreenPrimary[1] = (UINT16)(metadata->displayPrimaryGreen.y * 50000.0f);
+   hdr10.BluePrimary[0] = (UINT16)(metadata->displayPrimaryBlue.x * 50000.0f);
+   hdr10.BluePrimary[1] = (UINT16)(metadata->displayPrimaryBlue.y * 50000.0f);
+   hdr10.WhitePoint[0] = (UINT16)(metadata->whitePoint.x * 50000.0f);
+   hdr10.WhitePoint[1] = (UINT16)(metadata->whitePoint.y * 50000.0f);
+   hdr10.MaxMasteringLuminance = (UINT)metadata->maxLuminance;
+   hdr10.MinMasteringLuminance = (UINT)(metadata->minLuminance * 10000.0f);
+   hdr10.MaxContentLightLevel = (UINT16)metadata->maxContentLightLevel;
+   hdr10.MaxFrameAverageLightLevel = (UINT16)metadata->maxFrameAverageLightLevel;
+
+   HRESULT hr = swapchain4->SetHDRMetaData(DXGI_HDR_METADATA_TYPE_HDR10, sizeof(hdr10), &hdr10);
+   if (FAILED(hr))
+      wsi_win32_route_log(chain, "SetHDRMetaData failed hr=0x%08lx", (unsigned long)hr);
+   swapchain4->Release();
+}
+
+/* Takes the window's DXGI swap chain from the chain this one replaces. Only one flip-model swap
+ * chain may belong to a window, so a new swap chain for the same window can only be made after
+ * the old one is gone. The old chain is detached: its back buffers and their copy command lists
+ * are released (after the D3D12 queue is idle), it keeps its Vulkan images, fences and D3D12
+ * resources until the application destroys it, and its presents return VK_ERROR_OUT_OF_DATE_KHR.
+ */
+static IDXGISwapChain3 *
+wsi_win32_take_old_dxgi(struct wsi_win32_swapchain *old_chain, HWND hwnd)
+{
+   if (!old_chain || !old_chain->is_dxgi || !old_chain->hwnd_target || old_chain->detached ||
+       !old_chain->dxgi || old_chain->wnd != hwnd)
+      return NULL;
+
+   wsi_win32_flush_d3d12_queue(old_chain);
+   for (uint32_t i = 0; i < old_chain->base.image_count; i++)
+      wsi_win32_image_release_dxgi_buffers(&old_chain->images[i]);
+
+   mtx_lock(&old_chain->acquire_mutex);
+   IDXGISwapChain3 *dxgi = old_chain->dxgi;
+   old_chain->dxgi = NULL;
+   old_chain->detached = true;
+   u_cnd_monotonic_broadcast(&old_chain->acquire_cond);
+   mtx_unlock(&old_chain->acquire_mutex);
+   return dxgi;
+}
+
 static VkResult
 wsi_win32_surface_create_swapchain_dxgi(
    wsi_win32_surface *surface,
    VkDevice device,
    struct wsi_win32 *wsi,
    const VkSwapchainCreateInfoKHR *create_info,
-   struct wsi_win32_swapchain *chain)
+   struct wsi_win32_swapchain *chain,
+   struct wsi_win32_swapchain *old_chain)
 {
    IDXGIFactory4 *factory = wsi->dxgi.factory;
    ID3D12CommandQueue *queue =
       (ID3D12CommandQueue *)wsi->wsi->win32.get_d3d12_command_queue(device);
+   const struct wsi_win32_format *format = wsi_win32_find_format(create_info->imageFormat);
+   HWND hwnd = surface->base.hwnd;
+   HRESULT hr;
+
+   if (!factory || !queue || !format)
+      return VK_ERROR_INITIALIZATION_FAILED;
+
+   chain->buffer_format = format->buffer;
+   chain->color_space = wsi_win32_dxgi_color_space(create_info->imageColorSpace);
 
    DXGI_ALPHA_MODE alpha_mode;
    switch (create_info->compositeAlpha) {
-   case VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR:
-      alpha_mode = DXGI_ALPHA_MODE_IGNORE;
-      break;
    case VK_COMPOSITE_ALPHA_PRE_MULTIPLIED_BIT_KHR:
       alpha_mode = DXGI_ALPHA_MODE_PREMULTIPLIED;
       break;
@@ -1258,60 +1571,131 @@ wsi_win32_surface_create_swapchain_dxgi(
       alpha_mode = DXGI_ALPHA_MODE_STRAIGHT;
       break;
    default:
-      alpha_mode = DXGI_ALPHA_MODE_UNSPECIFIED;
+      alpha_mode = DXGI_ALPHA_MODE_IGNORE;
       break;
    }
+   if (chain->hwnd_target)
+      alpha_mode = DXGI_ALPHA_MODE_IGNORE;
 
-   DXGI_SWAP_CHAIN_DESC1 desc = {
-      create_info->imageExtent.width,
-      create_info->imageExtent.height,
-      DXGI_FORMAT_B8G8R8A8_UNORM,
-      create_info->imageArrayLayers > 1,  // Stereo
-      { 1 },                              // SampleDesc
-      0,                                  // Usage (filled in below)
-      create_info->minImageCount,
-      DXGI_SCALING_STRETCH,
-      DXGI_SWAP_EFFECT_FLIP_SEQUENTIAL,
-      alpha_mode,
-      chain->base.present_mode == VK_PRESENT_MODE_IMMEDIATE_KHR ?
-         DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING : 0u
-   };
+   /* ALLOW_TEARING goes on every chain the system allows it on, whatever the present mode: the
+    * mode can change per present (VK_KHR_swapchain_maintenance1), and a chain that takes over the
+    * window's swap chain must keep its flags for ResizeBuffers.
+    */
+   UINT flags = 0;
+   IDXGIFactory5 *factory5 = NULL;
+   if (SUCCEEDED(factory->QueryInterface(IID_PPV_ARGS(&factory5)))) {
+      BOOL tearing = FALSE;
+      if (SUCCEEDED(factory5->CheckFeatureSupport(DXGI_FEATURE_PRESENT_ALLOW_TEARING,
+                                                  &tearing, sizeof(tearing))) && tearing)
+         flags |= DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING;
+      factory5->Release();
+   }
+   chain->swap_chain_flags = flags;
 
-   const VkImageUsageFlags2KHR image_usage = vk_swapchain_usage_flags(create_info);
-
-   if (image_usage & (VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_INPUT_ATTACHMENT_BIT))
+   /* The buffers receive a GPU copy and are shown; RENDER_TARGET_OUTPUT is the usage the native
+    * D3D12 games create theirs with, and the one the scan-out path of our D3D12 shell sees.
+    */
+   DXGI_SWAP_CHAIN_DESC1 desc = {};
+   desc.Width = create_info->imageExtent.width;
+   desc.Height = create_info->imageExtent.height;
+   desc.Format = chain->buffer_format;
+   desc.Stereo = FALSE;
+   desc.SampleDesc.Count = 1;
+   desc.BufferUsage = DXGI_USAGE_RENDER_TARGET_OUTPUT;
+   /* A driver that renders straight into the buffers (win32.create_image_memory) needs them
+    * readable by shaders when the application samples the swapchain images.
+    */
+   if (vk_swapchain_usage_flags(create_info) &
+       (VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_INPUT_ATTACHMENT_BIT))
       desc.BufferUsage |= DXGI_USAGE_SHADER_INPUT;
+   desc.BufferCount = create_info->minImageCount;
+   desc.Scaling = DXGI_SCALING_STRETCH;
+   desc.SwapEffect = DXGI_SWAP_EFFECT_FLIP_DISCARD;
+   desc.AlphaMode = alpha_mode;
+   desc.Flags = flags;
 
-   if (image_usage & VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT)
-      desc.BufferUsage |= DXGI_USAGE_RENDER_TARGET_OUTPUT;
+   bool reused = false;
+   IDXGISwapChain3 *stolen = chain->hwnd_target ? wsi_win32_take_old_dxgi(old_chain, hwnd) : NULL;
+   if (stolen) {
+      DXGI_SWAP_CHAIN_DESC1 old_desc = {};
+      if (SUCCEEDED(stolen->GetDesc1(&old_desc)) && old_desc.Flags == desc.Flags &&
+          old_desc.BufferCount == desc.BufferCount && old_desc.AlphaMode == desc.AlphaMode &&
+          old_desc.BufferUsage == desc.BufferUsage && old_desc.SwapEffect == desc.SwapEffect &&
+          SUCCEEDED(hr = stolen->ResizeBuffers(desc.BufferCount, desc.Width, desc.Height,
+                                               desc.Format, desc.Flags))) {
+         chain->dxgi = stolen;
+         reused = true;
+      } else {
+         /* Releasing the last reference frees the window for a new swap chain. */
+         stolen->Release();
+      }
+   }
 
-   IDXGISwapChain1 *swapchain1;
-   if (FAILED(factory->CreateSwapChainForComposition(queue, &desc, NULL, &swapchain1)) ||
-       FAILED(swapchain1->QueryInterface(&chain->dxgi)))
-      return VK_ERROR_INITIALIZATION_FAILED;
+   if (!chain->dxgi) {
+      IDXGISwapChain1 *swapchain1 = NULL;
+      if (chain->hwnd_target)
+         hr = factory->CreateSwapChainForHwnd(queue, hwnd, &desc, NULL, NULL, &swapchain1);
+      else
+         hr = factory->CreateSwapChainForComposition(queue, &desc, NULL, &swapchain1);
+      if (FAILED(hr)) {
+         wsi_win32_route_log(chain, "%s failed hr=0x%08lx %ux%u format %u flags 0x%x",
+                             chain->hwnd_target ? "CreateSwapChainForHwnd" :
+                                                  "CreateSwapChainForComposition",
+                             (unsigned long)hr, desc.Width, desc.Height, (unsigned)desc.Format,
+                             desc.Flags);
+         return VK_ERROR_INITIALIZATION_FAILED;
+      }
+      hr = swapchain1->QueryInterface(IID_PPV_ARGS(&chain->dxgi));
+      swapchain1->Release();
+      if (FAILED(hr))
+         return VK_ERROR_INITIALIZATION_FAILED;
+   }
 
-   swapchain1->Release();
+   if (chain->hwnd_target) {
+      /* Vulkan owns the window mode: DXGI must not answer Alt+Enter or watch the message queue. */
+      factory->MakeWindowAssociation(hwnd, DXGI_MWA_NO_ALT_ENTER | DXGI_MWA_NO_WINDOW_CHANGES);
+   }
 
-   if (!surface->target &&
-       FAILED(wsi->dxgi.dcomp->CreateTargetForHwnd(surface->base.hwnd, false, &surface->target)))
-      return VK_ERROR_INITIALIZATION_FAILED;
+   /* The color space is set on every chain, also to sRGB, so that a chain that takes over the
+    * swap chain of an HDR chain does not keep its tag.
+    */
+   UINT support = 0;
+   if (SUCCEEDED(chain->dxgi->CheckColorSpaceSupport(chain->color_space, &support)) &&
+       (support & DXGI_SWAP_CHAIN_COLOR_SPACE_SUPPORT_FLAG_PRESENT)) {
+      hr = chain->dxgi->SetColorSpace1(chain->color_space);
+      if (FAILED(hr))
+         wsi_win32_route_log(chain, "SetColorSpace1(%u) failed hr=0x%08lx",
+                             (unsigned)chain->color_space, (unsigned long)hr);
+   } else if (chain->color_space != DXGI_COLOR_SPACE_RGB_FULL_G22_NONE_P709) {
+      wsi_win32_route_log(chain, "color space %u not supported for presentation",
+                          (unsigned)chain->color_space);
+   }
 
-   if (!surface->visual) {
-      if (FAILED(wsi->dxgi.dcomp->CreateVisual(&surface->visual)) ||
-          FAILED(surface->target->SetRoot(surface->visual)) ||
-          FAILED(surface->visual->SetContent(chain->dxgi)) ||
-          FAILED(wsi->dxgi.dcomp->Commit()))
+   if (!chain->hwnd_target) {
+      if (!surface->target &&
+          FAILED(wsi->dxgi.dcomp->CreateTargetForHwnd(hwnd, false, &surface->target)))
          return VK_ERROR_INITIALIZATION_FAILED;
 
-      surface->current_swapchain = chain;
+      if (!surface->visual) {
+         if (FAILED(wsi->dxgi.dcomp->CreateVisual(&surface->visual)) ||
+             FAILED(surface->target->SetRoot(surface->visual)) ||
+             FAILED(surface->visual->SetContent(chain->dxgi)) ||
+             FAILED(wsi->dxgi.dcomp->Commit()))
+            return VK_ERROR_INITIALIZATION_FAILED;
+
+         surface->current_swapchain = chain;
+      }
    }
 
    ID3D12Device *d3d12_device = (ID3D12Device *)wsi->wsi->win32.get_d3d12_device(device);
-   HRESULT hr;
+   if (!d3d12_device)
+      return VK_ERROR_INITIALIZATION_FAILED;
 
    chain->d3d12_blit_fences = (ID3D12Fence**)vk_zalloc(&chain->base.alloc,
          create_info->minImageCount * sizeof(ID3D12Fence *),
          8, VK_SYSTEM_ALLOCATION_SCOPE_OBJECT);
+   if (!chain->d3d12_blit_fences)
+      return VK_ERROR_OUT_OF_HOST_MEMORY;
    for (unsigned i = 0; i < create_info->minImageCount; i++) {
       const VkSemaphoreTypeCreateInfo type_info = {
          VK_STRUCTURE_TYPE_SEMAPHORE_TYPE_CREATE_INFO,
@@ -1341,40 +1725,43 @@ wsi_win32_surface_create_swapchain_dxgi(
          chain->base.blit.semaphores[i],
          VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_D3D12_FENCE_BIT,
       };
-      wsi->wsi->GetSemaphoreWin32HandleKHR(device, &get_info, &handle);
+      result = wsi->wsi->GetSemaphoreWin32HandleKHR(device, &get_info, &handle);
+      if (result != VK_SUCCESS || !handle) {
+         wsi_win32_route_log(chain, "blit fence %u: no D3D12 fence handle (%d)", i, (int)result);
+         return VK_ERROR_INITIALIZATION_FAILED;
+      }
       hr = d3d12_device->OpenSharedHandle(handle,
                                           IID_PPV_ARGS(&chain->d3d12_blit_fences[i]));
       CloseHandle(handle);
-      if (FAILED(hr))
-         return VK_ERROR_OUT_OF_DEVICE_MEMORY;
+      if (FAILED(hr)) {
+         wsi_win32_route_log(chain, "blit fence %u: OpenSharedHandle failed hr=0x%08lx", i,
+                             (unsigned long)hr);
+         return VK_ERROR_INITIALIZATION_FAILED;
+      }
    }
 
+   wsi_win32_route_log(chain, "chain %p: %s swap chain %ux%u format %u images %u flags 0x%x "
+                       "color space %u%s", (void *)chain,
+                       chain->hwnd_target ? "window" : "composition", desc.Width, desc.Height,
+                       (unsigned)desc.Format, desc.BufferCount, desc.Flags,
+                       (unsigned)chain->color_space, reused ? " (taken over from oldSwapchain)" : "");
    return VK_SUCCESS;
 }
 
+/* Creates one chain on the route given. On failure the chain is gone and *swapchain_out is unset. */
 static VkResult
-wsi_win32_surface_create_swapchain(
-   VkIcdSurfaceBase *icd_surface,
-   VkDevice device,
-   struct wsi_device *wsi_device,
-   const VkSwapchainCreateInfoKHR *create_info,
-   const VkAllocationCallbacks *allocator,
-   struct wsi_swapchain **swapchain_out)
+wsi_win32_create_chain(wsi_win32_surface *surface,
+                       VkDevice device,
+                       struct wsi_device *wsi_device,
+                       const VkSwapchainCreateInfoKHR *create_info,
+                       const VkAllocationCallbacks *allocator,
+                       struct wsi_win32_swapchain *old_chain,
+                       bool use_dxgi,
+                       const char *route_reason,
+                       struct wsi_swapchain **swapchain_out)
 {
-   wsi_win32_surface *surface = (wsi_win32_surface *)icd_surface;
    struct wsi_win32 *wsi =
       (struct wsi_win32 *) wsi_device->wsi[VK_ICD_WSI_PLATFORM_WIN32];
-
-   assert(create_info->sType == VK_STRUCTURE_TYPE_SWAPCHAIN_CREATE_INFO_KHR);
-
-   if (create_info->oldSwapchain) {
-      struct wsi_win32_swapchain *old_chain =
-         (struct wsi_win32_swapchain *)create_info->oldSwapchain;
-      mtx_lock(&old_chain->acquire_mutex);
-      old_chain->retired = true;
-      u_cnd_monotonic_broadcast(&old_chain->acquire_cond);
-      mtx_unlock(&old_chain->acquire_mutex);
-   }
 
    const unsigned num_images = create_info->minImageCount;
    struct wsi_win32_swapchain *chain;
@@ -1410,11 +1797,15 @@ wsi_win32_surface_create_swapchain(
       { WSI_IMAGE_TYPE_CPU },
    };
 
-   bool supports_dxgi = wsi->dxgi.factory &&
-                        wsi->dxgi.dcomp &&
-                        wsi->wsi->win32.get_d3d12_command_queue;
-   struct wsi_base_image_params *image_params = supports_dxgi ?
+   struct wsi_base_image_params *image_params = use_dxgi ?
       &dxgi_image_params.base : &cpu_image_params.base;
+
+   /* Set before wsi_swapchain_init: the image configuration reads them through the chain. */
+   chain->is_dxgi = use_dxgi;
+   chain->hwnd_target = use_dxgi && wsi_device->win32.hwnd_target;
+   chain->route_reason = route_reason;
+   chain->wsi = wsi;
+   chain->surface = surface;
 
    VkResult result = wsi_swapchain_init(wsi_device, &chain->base, device, create_info,
                                         num_images, image_params, allocator);
@@ -1434,12 +1825,14 @@ wsi_win32_surface_create_swapchain(
       chain->present_log = fopen(present_log_path, "a");
       if (chain->present_log) {
          fprintf(chain->present_log,
-                 "# chain %p %ux%u format %u images %u path %s mode %u\n"
+                 "# chain %p %ux%u format %u images %u path %s mode %u target %s reason %s\n"
                  "chain,path,present_id,enter_us,copy_us,blit_us,dwmflush_us,result\n",
                  (void *)chain, create_info->imageExtent.width,
                  create_info->imageExtent.height, (unsigned)create_info->imageFormat,
-                 num_images, supports_dxgi ? "dxgi" : "gdi",
-                 (unsigned)chain->base.present_mode);
+                 num_images, use_dxgi ? "dxgi" : "gdi",
+                 (unsigned)chain->base.present_mode,
+                 !use_dxgi ? "gdi" : chain->hwnd_target ? "window" : "composition",
+                 route_reason ? route_reason : "-");
          fflush(chain->present_log);
       }
    }
@@ -1451,16 +1844,17 @@ wsi_win32_surface_create_swapchain(
    chain->base.queue_present = wsi_win32_queue_present;
    chain->base.wait_for_present = wsi_win32_wait_for_present;
    chain->base.wait_for_present2 = wsi_win32_wait_for_present;
+   chain->base.set_present_mode = wsi_win32_set_present_mode;
+   if (use_dxgi)
+      chain->base.set_hdr_metadata = wsi_win32_set_hdr_metadata;
    chain->extent = create_info->imageExtent;
    chain->format = create_info->imageFormat;
-
-   chain->wsi = wsi;
    chain->status = VK_SUCCESS;
+   chain->wnd = surface->base.hwnd;
 
-   chain->surface = surface;
-
-   if (image_params->image_type == WSI_IMAGE_TYPE_DXGI) {
-      result = wsi_win32_surface_create_swapchain_dxgi(surface, device, wsi, create_info, chain);
+   if (use_dxgi) {
+      result = wsi_win32_surface_create_swapchain_dxgi(surface, device, wsi, create_info, chain,
+                                                       old_chain);
       if (result != VK_SUCCESS)
          goto fail;
    }
@@ -1478,13 +1872,86 @@ wsi_win32_surface_create_swapchain(
    return VK_SUCCESS;
 
 fail:
-   if (surface->visual) {
+   if (!chain->hwnd_target && surface->visual && surface->current_swapchain == chain) {
       surface->visual->SetContent(NULL);
       surface->current_swapchain = NULL;
       wsi->dxgi.dcomp->Commit();
    }
    wsi_win32_swapchain_destroy(&chain->base, allocator);
    return result;
+}
+
+static VkResult
+wsi_win32_surface_create_swapchain(
+   VkIcdSurfaceBase *icd_surface,
+   VkDevice device,
+   struct wsi_device *wsi_device,
+   const VkSwapchainCreateInfoKHR *create_info,
+   const VkAllocationCallbacks *allocator,
+   struct wsi_swapchain **swapchain_out)
+{
+   wsi_win32_surface *surface = (wsi_win32_surface *)icd_surface;
+   struct wsi_win32 *wsi =
+      (struct wsi_win32 *) wsi_device->wsi[VK_ICD_WSI_PLATFORM_WIN32];
+
+   assert(create_info->sType == VK_STRUCTURE_TYPE_SWAPCHAIN_CREATE_INFO_KHR);
+
+   struct wsi_win32_swapchain *old_chain = NULL;
+   if (create_info->oldSwapchain) {
+      old_chain = (struct wsi_win32_swapchain *)create_info->oldSwapchain;
+      mtx_lock(&old_chain->acquire_mutex);
+      old_chain->retired = true;
+      u_cnd_monotonic_broadcast(&old_chain->acquire_cond);
+      mtx_unlock(&old_chain->acquire_mutex);
+   }
+
+   /* The route of this chain. The device offers DXGI when it gave the hooks; the driver may still
+    * refuse it for this chain (route_allowed), and a DXGI chain that cannot be made falls back to
+    * CPU images, unless its format has no CPU path.
+    */
+   const struct wsi_win32_format *format = wsi_win32_find_format(create_info->imageFormat);
+   const bool dxgi_only = format && format->dxgi_only;
+   const char *reason = "device";
+   bool use_dxgi = wsi->dxgi.factory && wsi_win32_device_uses_dxgi(wsi_device) &&
+                   (wsi_device->win32.hwnd_target || wsi->dxgi.dcomp);
+   if (!wsi_win32_device_uses_dxgi(wsi_device))
+      reason = "gdi-device";
+   else if (!wsi->dxgi.factory)
+      reason = "no-dxgi-factory";
+   else if (!use_dxgi)
+      reason = "no-dcomp";
+   if (use_dxgi && wsi_device->win32.route_allowed &&
+       !wsi_device->win32.route_allowed(device, &reason))
+      use_dxgi = false;
+   if (use_dxgi && !format) {
+      use_dxgi = false;
+      reason = "format";
+   }
+
+   VkResult result = VK_ERROR_INITIALIZATION_FAILED;
+   if (use_dxgi) {
+      result = wsi_win32_create_chain(surface, device, wsi_device, create_info, allocator,
+                                      old_chain, true, "ok", swapchain_out);
+      if (result == VK_SUCCESS)
+         return result;
+      if (result == VK_ERROR_OUT_OF_HOST_MEMORY || result == VK_ERROR_DEVICE_LOST)
+         return result;
+      reason = "dxgi-create-failed";
+   }
+
+   if (wsi_win32_device_uses_dxgi(wsi_device) && wsi_device->win32.route_log) {
+      char line[160];
+      snprintf(line, sizeof(line), "swapchain %ux%u format %u: CPU images (GDI), reason %s%s",
+               create_info->imageExtent.width, create_info->imageExtent.height,
+               (unsigned)create_info->imageFormat, reason,
+               dxgi_only ? ", format has no CPU path: refused" : "");
+      wsi_device->win32.route_log(device, line);
+   }
+   if (dxgi_only || !format)
+      return use_dxgi ? result : VK_ERROR_INITIALIZATION_FAILED;
+
+   return wsi_win32_create_chain(surface, device, wsi_device, create_info, allocator,
+                                 old_chain, false, reason, swapchain_out);
 }
 
 static IDXGIFactory4 *
