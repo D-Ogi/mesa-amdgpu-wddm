@@ -3290,7 +3290,25 @@ radv_query_heap_info(struct radv_physical_device *pdev, struct radeon_winsys_hea
    heap_info->vram_vis_usage = ws->query_value(ws, RADEON_VRAM_VIS_USAGE);
    heap_info->gtt_usage = ws->query_value(ws, RADEON_GTT_USAGE);
 }
+
+/* BD-096: on WDDM the memory a process can keep resident is the budget the OS gives it
+ * (QueryVideoMemoryInfo.Budget of the local and non-local segment groups), not the sum of the heap
+ * sizes, which come from the adapter's capability blob. Cap the total the budget is computed from. */
+static uint64_t
+radv_os_budget_cap(struct radv_physical_device *pdev, uint64_t total_heap_size)
+{
+   uint64_t budget;
+   if (radv_wddm2_query_budget(pdev->ws, &budget))
+      return MIN2(total_heap_size, budget);
+   return total_heap_size;
+}
 #else
+static uint64_t
+radv_os_budget_cap(UNUSED struct radv_physical_device *pdev, uint64_t total_heap_size)
+{
+   return total_heap_size;
+}
+
 static void
 radv_create_drm_device_locked(struct radv_physical_device *pdev)
 {
@@ -3377,7 +3395,8 @@ radv_get_memory_budget_properties(VkPhysicalDevice physicalDevice,
          const uint8_t vram_vis_heap_idx = 0;
 
          /* Get the total heap size which is the visible VRAM heap size. */
-         uint64_t total_heap_size = pdev->memory_properties.memoryHeaps[vram_vis_heap_idx].size;
+         uint64_t total_heap_size =
+            radv_os_budget_cap(pdev, pdev->memory_properties.memoryHeaps[vram_vis_heap_idx].size);
 
          /* Get the different memory usages. */
          uint64_t vram_vis_internal_usage = heap_info.allocated_vram_vis + heap_info.allocated_vram;
@@ -3408,7 +3427,7 @@ radv_get_memory_budget_properties(VkPhysicalDevice physicalDevice,
          uint64_t gtt_internal_usage = heap_info.allocated_gtt;
 
          /* Compute the total heap size, internal and system usage. */
-         uint64_t total_heap_size = vram_vis_heap_size + gtt_heap_size;
+         uint64_t total_heap_size = radv_os_budget_cap(pdev, vram_vis_heap_size + gtt_heap_size);
          uint64_t total_internal_usage = vram_vis_internal_usage + gtt_internal_usage;
          uint64_t total_system_usage = heap_info.vram_vis_usage + heap_info.gtt_usage;
 

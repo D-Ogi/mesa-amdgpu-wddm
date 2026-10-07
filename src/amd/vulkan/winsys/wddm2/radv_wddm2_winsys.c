@@ -72,6 +72,57 @@
 #undef Status
 #endif
 
+#include "radv_wddm2_mem_overflow.h"
+
+/* One REG_SZ value of HKLM\subkey into buf. NULL when the value is absent, "invalid" when it is there but
+ * not a short string (never guess a policy from it), as radv_wddm2_wsi_read_route does for WsiRoute. */
+static const char *
+radv_wddm2_read_hklm_sz(const char *subkey, const char *value, char *buf, DWORD size)
+{
+   const DWORD capacity = size;
+   const LSTATUS status = RegGetValueA(HKEY_LOCAL_MACHINE, subkey, value, RRF_RT_REG_SZ, NULL, buf, &size);
+   if (status == ERROR_SUCCESS) {
+      buf[capacity - 1] = 0;
+      return buf;
+   }
+   if (status == ERROR_FILE_NOT_FOUND || status == ERROR_PATH_NOT_FOUND)
+      return NULL;
+   return "invalid";
+}
+
+/* BD-096: the memory overflow policy of this process (radv_wddm2_mem_overflow.h), as MakeResident flags,
+ * with one log line that names the value and where it came from. */
+static unsigned
+radv_wddm2_read_mem_overflow(void)
+{
+   char exe_path[MAX_PATH], app_key[MAX_PATH + 64], app_buf[64], reg_buf[64];
+   const char *exe = NULL, *app = NULL;
+   const DWORD len = GetModuleFileNameA(NULL, exe_path, sizeof(exe_path));
+   if (len && len < sizeof(exe_path)) {
+      exe = exe_path;
+      for (const char *p = exe_path; *p; p++) {
+         if (*p == '\\' || *p == '/')
+            exe = p + 1;
+      }
+      if (radv_wddm2_mem_overflow_app_key(exe, app_key, sizeof(app_key)))
+         app = radv_wddm2_read_hklm_sz(app_key, RADV_WDDM2_MEM_OVERFLOW_VALUE, app_buf, sizeof(app_buf));
+   }
+   const char *reg = radv_wddm2_read_hklm_sz(RADV_WDDM2_VK_KEY, RADV_WDDM2_MEM_OVERFLOW_VALUE, reg_buf,
+                                             sizeof(reg_buf));
+   const struct radv_wddm2_mem_overflow_choice choice = radv_wddm2_mem_overflow_choose(
+      getenv("BC250_MAKERESIDENT_LEGACY"), getenv("AMDGPU_WDDM_VK_MEM_OVERFLOW"), app, reg);
+   const struct radv_wddm2_make_resident_bits bits = radv_wddm2_mem_overflow_bits(choice.policy);
+   D3DDDI_MAKERESIDENT_FLAGS flags = {0};
+   flags.CantTrimFurther = bits.cant_trim_further;
+   flags.MustSucceed = bits.must_succeed;
+   amdgpu_wddm_log("BC250 memory: overflow=%s source=%s%s exe=%s MakeResident CantTrimFurther=%u MustSucceed=%u\n",
+                   radv_wddm2_mem_overflow_name(choice.policy),
+                   radv_wddm2_mem_overflow_source_name(choice.source),
+                   choice.invalid ? " (invalid value, default used)" : "", exe ? exe : "?",
+                   bits.cant_trim_further, bits.must_succeed);
+   return flags.Value;
+}
+
 static simple_mtx_t winsys_creation_mutex = SIMPLE_MTX_INITIALIZER;
 static struct hash_table *winsyses = NULL;
 
@@ -655,6 +706,31 @@ radv_wddm2_query_allocated(struct radeon_winsys *base, uint64_t *vram,
    simple_mtx_unlock(&winsys_creation_mutex);
 }
 
+/* BD-096: the video memory budget the OS gives this process, local plus non-local segment groups
+ * (D3DKMT_QUERYVIDEOMEMORYINFO.Budget, d3dkmthk.h). With the default memory overflow policy an allocation
+ * fails only above the maximum budget, and the current budget is the share the OS asks the process to keep
+ * to; VK_EXT_memory_budget reports it so that an application can size itself to it. False when either
+ * query fails; the caller then keeps the heap-size arithmetic. */
+bool
+radv_wddm2_query_budget(struct radeon_winsys *base, uint64_t *budget)
+{
+   struct radv_wddm2_winsys *ws = radv_wddm2_winsys(base);
+   static const D3DKMT_MEMORY_SEGMENT_GROUP groups[2] = {
+      D3DKMT_MEMORY_SEGMENT_GROUP_LOCAL, D3DKMT_MEMORY_SEGMENT_GROUP_NON_LOCAL,
+   };
+   *budget = 0;
+   for (unsigned i = 0; i < 2; i++) {
+      D3DKMT_QUERYVIDEOMEMORYINFO mem_info = {
+         .hAdapter = ws->adapter_h,
+         .MemorySegmentGroup = groups[i],
+      };
+      if (!NT_SUCCESS(WDDM2_DISPATCH(QueryVideoMemoryInfo(&mem_info))))
+         return false;
+      *budget += mem_info.Budget;
+   }
+   return *budget != 0;
+}
+
 static void
 radv_wddm2_winsys_destroy(struct radeon_winsys *_ws)
 {
@@ -834,6 +910,7 @@ radv_wddm2_winsys_create(const struct vk_dx_adapter_info *adapter_info,
    ws->dump_ibs = !!(BITSET_TEST(debug_flags, RADV_DEBUG_DUMP_IBS));
    const char *trace_submits = getenv("BC250_TRACE_SUBMITS");
    ws->bc250_trace_submits = trace_submits && strcmp(trace_submits, "1") == 0;
+   ws->make_resident_flags = radv_wddm2_read_mem_overflow();
    radv_winsys_bo_list_init(&ws->global_bo_list);
    radv_winsys_bo_log_init(&ws->bo_log, debug_flags);
 
