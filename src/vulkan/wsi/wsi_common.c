@@ -508,6 +508,16 @@ wsi_swapchain_init(const struct wsi_device *wsi,
    chain->alloc = *pAllocator;
    chain->image_count = num_images;
    chain->blit.type = get_blit_type(wsi, image_params, _device);
+   /* wsi_device::blit belongs to the DXGI image path (wsi_common_win32.cpp). A swapchain of another
+    * image type on the same device, such as a CPU-image swapchain that a DXGI-capable device falls
+    * back to, runs the common blit and signals its own fences.
+    */
+   chain->blit.use_device_hook =
+      wsi->blit != NULL && image_params->image_type == WSI_IMAGE_TYPE_DXGI;
+   /* The CPU reads a CPU image at present, so the present waits for the GPU first. A software
+    * device always does; a GPU device does when one of its swapchains falls back to CPU images.
+    */
+   chain->cpu_present = wsi->sw || image_params->image_type == WSI_IMAGE_TYPE_CPU;
    chain->present_wait_enabled =
       device->enabled_features.presentWait ||
       (pCreateInfo->flags & VK_SWAPCHAIN_CREATE_PRESENT_WAIT_2_BIT_KHR);
@@ -2716,12 +2726,12 @@ wsi_common_queue_present(const struct wsi_device *wsi,
             swapchain->get_wsi_image(swapchain, image_index);
 
          bool separate_queue_blit = swapchain->blit.type != WSI_SWAPCHAIN_NO_BLIT &&
-                                    (swapchain->blit.queue != NULL || wsi->blit != NULL);
+                                    (swapchain->blit.queue != NULL || swapchain->blit.use_device_hook);
 
          /* For TIMING_QUEUE_FULL_EXT, ensure sync objects are signaled,
           * but don't do any real work. */
          if (results[i] == VK_ERROR_PRESENT_TIMING_QUEUE_FULL_EXT ||
-               (!separate_queue_blit && wsi->blit == NULL && results[i] == VK_SUCCESS)) {
+               (!separate_queue_blit && !swapchain->blit.use_device_hook && results[i] == VK_SUCCESS)) {
             for (uint32_t j = 0; j < image_signal_infos[i].semaphore_count; j++) {
                signal_semaphore_infos[signal_semaphore_count++] =
                      image_signal_infos[i].semaphore_infos[j];
@@ -2812,12 +2822,12 @@ wsi_common_queue_present(const struct wsi_device *wsi,
          continue;
 
       bool separate_queue_blit = swapchain->blit.type != WSI_SWAPCHAIN_NO_BLIT &&
-                                 (swapchain->blit.queue != NULL || wsi->blit != NULL);
+                                 (swapchain->blit.queue != NULL || swapchain->blit.use_device_hook);
 
       if (!separate_queue_blit)
          continue;
 
-      if (wsi->blit) {
+      if (swapchain->blit.use_device_hook) {
          results[i] = wsi->blit(swapchain, image_index);
          if (results[i] != VK_SUCCESS)
             continue;
@@ -2833,7 +2843,7 @@ wsi_common_queue_present(const struct wsi_device *wsi,
       VkCommandBufferSubmitInfo command_buffer_infos[2];
       uint32_t command_buffer_count = 0;
 
-      if (wsi->blit == NULL) {
+      if (!swapchain->blit.use_device_hook) {
          command_buffer_infos[command_buffer_count++] = (VkCommandBufferSubmitInfo) {
             .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_SUBMIT_INFO,
             .commandBuffer = image->blit.cmd_buffers[0],
@@ -2907,7 +2917,7 @@ wsi_common_queue_present(const struct wsi_device *wsi,
 #endif
       }
 
-      if (wsi->sw) {
+      if (swapchain->cpu_present) {
          results[i] = wsi->WaitForFences(vk_device_to_handle(dev),
                             1, &swapchain->fences[image_index], true, ~0ull);
          if (results[i] != VK_SUCCESS)
@@ -3106,8 +3116,10 @@ wsi_select_host_memory_type(const struct wsi_device *wsi,
 {
    VkMemoryPropertyFlags req_props = VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
 
-   if (wsi->sw)
-      req_props |= VK_MEMORY_PROPERTY_HOST_CACHED_BIT;
+   /* Only CPU images take this path, and the CPU reads them at present: prefer cached memory (with
+    * a coherent fallback) on a GPU device that falls back to CPU images as well.
+    */
+   req_props |= VK_MEMORY_PROPERTY_HOST_CACHED_BIT;
 
    return wsi_select_memory_type(wsi, req_props, 0 /* deny_props */, type_bits);
 }

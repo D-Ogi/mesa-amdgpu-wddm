@@ -267,7 +267,13 @@ struct wsi_swapchain {
        * buffer blit instead of using the present queue.
        */
       struct vk_queue *queue;
+
+      /* This swapchain's blit runs through wsi_device::blit (set by wsi_swapchain_init). */
+      bool use_device_hook;
    } blit;
+
+   /* The present reads the image on the CPU: wait for its fence before queue_present. */
+   bool cpu_present;
 
    struct {
       mtx_t lock;
