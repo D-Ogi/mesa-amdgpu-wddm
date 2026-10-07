@@ -2,8 +2,9 @@
 /*
  * Copyright 2026 amdgpu-wddm contributors
  *
- * Host test of radv_wddm2_wsi_route.h: the present route switch, the module gate and the LB7A
- * checks of the shared-resource import. No GPU, no Vulkan, no Windows header. Run through
+ * Host test of radv_wddm2_wsi_route.h: the present route switch, the report of application-local
+ * runtime modules, the D3D12 implementation check and the LB7A checks of the shared-resource
+ * import. No GPU, no Vulkan, no Windows header. Run through
  * bc250-win tools/build/build-radv-wsi-route-test.ps1.
  *
  * Usage: radv_wddm2_wsi_route_test [--negative-control]
@@ -50,11 +51,22 @@ test_choose(void)
 {
    struct radv_wddm2_wsi_route_choice c;
 
-   /* Nothing set: the default, which stays GDI until the lab passes the DXGI route. */
+   /* Nothing set: the default is the DXGI route (owner decision 2026-10-07). */
    c = radv_wddm2_wsi_route_choose(NULL, NULL);
-   CHECK(c.route == RADV_WDDM2_WSI_ROUTE_DEFAULT && c.source == RADV_WDDM2_WSI_SOURCE_DEFAULT &&
+   CHECK(c.route == RADV_WDDM2_WSI_ROUTE_DXGI && c.source == RADV_WDDM2_WSI_SOURCE_DEFAULT &&
          !c.invalid);
-   CHECK(RADV_WDDM2_WSI_ROUTE_DEFAULT == RADV_WDDM2_WSI_ROUTE_GDI);
+   CHECK(RADV_WDDM2_WSI_ROUTE_DEFAULT == RADV_WDDM2_WSI_ROUTE_DXGI);
+   c = radv_wddm2_wsi_route_choose("", "");
+   CHECK(c.route == RADV_WDDM2_WSI_ROUTE_DXGI && c.source == RADV_WDDM2_WSI_SOURCE_DEFAULT);
+
+   /* "gdi" is the rollback, from either source, and the environment overrides the registry. */
+   c = radv_wddm2_wsi_route_choose("gdi", NULL);
+   CHECK(c.route == RADV_WDDM2_WSI_ROUTE_GDI && c.source == RADV_WDDM2_WSI_SOURCE_ENV && !c.invalid);
+   c = radv_wddm2_wsi_route_choose(NULL, "GDI");
+   CHECK(c.route == RADV_WDDM2_WSI_ROUTE_GDI && c.source == RADV_WDDM2_WSI_SOURCE_REGISTRY &&
+         !c.invalid);
+   c = radv_wddm2_wsi_route_choose("gdi", "dxgi");
+   CHECK(c.route == RADV_WDDM2_WSI_ROUTE_GDI && c.source == RADV_WDDM2_WSI_SOURCE_ENV);
 
    /* The environment wins over the registry. */
    c = radv_wddm2_wsi_route_choose("dxgi", "gdi");
@@ -89,27 +101,80 @@ test_path_in_dir(void)
    CHECK(!radv_wddm2_wsi_path_in_dir(L"C:\\Windows\\System32\\dxgi.dll", L""));
 }
 
+/* Application-local copies are reported, and the route stays DXGI: the old module gate cases
+ * (DXVK dxgi.dll, vkd3d-proton d3d12.dll and d3d12core.dll next to the game) now only give a mask
+ * and a log text. There is no route input in these functions, by design.
+ */
 static void
-test_module_gate(void)
+test_app_local(void)
 {
    const wchar_t *sys = L"C:\\Windows\\System32";
-   CHECK(radv_wddm2_wsi_module_gate(sys, NULL, NULL, NULL) == RADV_WDDM2_WSI_GATE_OK);
-   CHECK(radv_wddm2_wsi_module_gate(sys, L"C:\\Windows\\System32\\dxgi.dll",
-                                    L"C:\\Windows\\System32\\d3d12.dll",
-                                    L"C:\\Windows\\System32\\D3D12Core.dll") ==
-         RADV_WDDM2_WSI_GATE_OK);
-   /* DXVK next to the game (facts M792). */
-   CHECK(radv_wddm2_wsi_module_gate(sys, L"D:\\Games\\Foo\\dxgi.dll", NULL, NULL) ==
-         RADV_WDDM2_WSI_GATE_FOREIGN_DXGI);
-   /* vkd3d-proton next to the game (facts M794). */
-   CHECK(radv_wddm2_wsi_module_gate(sys, L"C:\\Windows\\System32\\dxgi.dll",
-                                    L"D:\\Games\\Foo\\d3d12.dll", NULL) ==
-         RADV_WDDM2_WSI_GATE_FOREIGN_D3D12);
-   CHECK(radv_wddm2_wsi_module_gate(sys, NULL, NULL, L"D:\\Games\\Foo\\d3d12core.dll") ==
-         RADV_WDDM2_WSI_GATE_FOREIGN_D3D12CORE);
-   CHECK(radv_wddm2_wsi_module_gate(L"", NULL, NULL, NULL) == RADV_WDDM2_WSI_GATE_NO_SYSTEM_DIR);
-   CHECK(radv_wddm2_wsi_module_gate(NULL, NULL, NULL, NULL) == RADV_WDDM2_WSI_GATE_NO_SYSTEM_DIR);
-   CHECK(!strcmp(radv_wddm2_wsi_gate_name(RADV_WDDM2_WSI_GATE_FOREIGN_DXGI), "foreign-dxgi"));
+   char text[96];
+
+   CHECK(radv_wddm2_wsi_app_local(sys, NULL, NULL, NULL) == 0);
+   CHECK(radv_wddm2_wsi_app_local(sys, L"C:\\Windows\\System32\\dxgi.dll",
+                                  L"C:\\Windows\\System32\\d3d12.dll",
+                                  L"C:\\Windows\\System32\\D3D12Core.dll") == 0);
+   /* DXVK next to the game (facts M792, M793). */
+   CHECK(radv_wddm2_wsi_app_local(sys, L"D:\\Games\\Foo\\dxgi.dll", NULL, NULL) ==
+         RADV_WDDM2_WSI_LOCAL_DXGI);
+   /* vkd3d-proton next to the game (facts M793, M794). */
+   CHECK(radv_wddm2_wsi_app_local(sys, L"C:\\Windows\\System32\\dxgi.dll",
+                                  L"D:\\Games\\Foo\\d3d12.dll",
+                                  L"D:\\Games\\Foo\\d3d12core.dll") ==
+         (RADV_WDDM2_WSI_LOCAL_D3D12 | RADV_WDDM2_WSI_LOCAL_D3D12CORE));
+
+   CHECK(!strcmp(radv_wddm2_wsi_app_local_text(0, 0, text, sizeof(text)), "none"));
+   CHECK(!strcmp(radv_wddm2_wsi_app_local_text(RADV_WDDM2_WSI_LOCAL_DXGI, 0, text, sizeof(text)),
+                 "dxgi.dll(loaded)"));
+   CHECK(!strcmp(radv_wddm2_wsi_app_local_text(RADV_WDDM2_WSI_LOCAL_DXGI,
+                                               RADV_WDDM2_WSI_LOCAL_DXGI |
+                                                  RADV_WDDM2_WSI_LOCAL_D3D12CORE,
+                                               text, sizeof(text)),
+                 "dxgi.dll(loaded),d3d12core.dll(file)"));
+   /* A short buffer is cut, never overrun. */
+   char small[8];
+   radv_wddm2_wsi_app_local_text(RADV_WDDM2_WSI_LOCAL_D3D12CORE, 0, small, sizeof(small));
+   CHECK(strlen(small) < sizeof(small));
+}
+
+static void
+test_d3d12_impl(void)
+{
+   const wchar_t *sys = L"C:\\Windows\\System32";
+   const wchar_t *agility = L"D:\\Games\\Foo\\D3D12";
+
+   CHECK(radv_wddm2_wsi_d3d12_impl_class(sys, NULL, L"C:\\Windows\\System32\\d3d12core.dll") ==
+         RADV_WDDM2_WSI_D3D12_IMPL_SYSTEM);
+   CHECK(radv_wddm2_wsi_d3d12_impl_class(sys, NULL, L"C:\\Windows\\System32\\D3D12.dll") ==
+         RADV_WDDM2_WSI_D3D12_IMPL_SYSTEM);
+   /* The Agility SDK core in the directory the game's D3D12SDKPath names. */
+   CHECK(radv_wddm2_wsi_d3d12_impl_class(sys, agility, L"D:\\Games\\Foo\\D3D12\\D3D12Core.dll") ==
+         RADV_WDDM2_WSI_D3D12_IMPL_AGILITY);
+   /* The debug layer or a capture tool wraps the device: accepted. */
+   CHECK(radv_wddm2_wsi_d3d12_impl_class(sys, agility,
+                                         L"C:\\Windows\\System32\\d3d12SDKLayers.dll") ==
+         RADV_WDDM2_WSI_D3D12_IMPL_WRAPPED);
+   CHECK(radv_wddm2_wsi_d3d12_impl_class(sys, NULL, L"C:\\Tools\\renderdoc.dll") ==
+         RADV_WDDM2_WSI_D3D12_IMPL_WRAPPED);
+   /* vkd3d-proton next to the game: the only case that leaves the route. */
+   CHECK(radv_wddm2_wsi_d3d12_impl_class(sys, NULL, L"D:\\Games\\Foo\\d3d12core.dll") ==
+         RADV_WDDM2_WSI_D3D12_IMPL_FOREIGN);
+   CHECK(radv_wddm2_wsi_d3d12_impl_class(sys, agility, L"D:\\Games\\Foo\\d3d12core.dll") ==
+         RADV_WDDM2_WSI_D3D12_IMPL_FOREIGN);
+   CHECK(radv_wddm2_wsi_d3d12_impl_class(sys, agility, L"D:\\Games\\Foo\\D3D12\\d3d12.dll") ==
+         RADV_WDDM2_WSI_D3D12_IMPL_FOREIGN);
+   CHECK(radv_wddm2_wsi_d3d12_impl_class(sys, NULL, NULL) == RADV_WDDM2_WSI_D3D12_IMPL_UNKNOWN);
+
+   CHECK(!radv_wddm2_wsi_d3d12_impl_usable(RADV_WDDM2_WSI_D3D12_IMPL_FOREIGN));
+   CHECK(radv_wddm2_wsi_d3d12_impl_usable(RADV_WDDM2_WSI_D3D12_IMPL_SYSTEM));
+   CHECK(radv_wddm2_wsi_d3d12_impl_usable(RADV_WDDM2_WSI_D3D12_IMPL_AGILITY));
+   CHECK(radv_wddm2_wsi_d3d12_impl_usable(RADV_WDDM2_WSI_D3D12_IMPL_WRAPPED));
+   CHECK(radv_wddm2_wsi_d3d12_impl_usable(RADV_WDDM2_WSI_D3D12_IMPL_UNKNOWN));
+   CHECK(!strcmp(radv_wddm2_wsi_d3d12_impl_name(RADV_WDDM2_WSI_D3D12_IMPL_FOREIGN), "foreign"));
+
+   CHECK(radv_wddm2_wsi_base_name_is(L"D:/Games/Foo/D3D12Core.DLL", L"d3d12core.dll"));
+   CHECK(!radv_wddm2_wsi_base_name_is(L"D:\\Games\\d3d12core.dll.bak", L"d3d12core.dll"));
 }
 
 static struct radv_wddm2_lb7a
@@ -177,7 +242,8 @@ static const struct {
    {"parse", test_parse},
    {"choose", test_choose},
    {"path_in_dir", test_path_in_dir},
-   {"module_gate", test_module_gate},
+   {"app_local", test_app_local},
+   {"d3d12_impl", test_d3d12_impl},
    {"lb7a", test_lb7a},
 };
 

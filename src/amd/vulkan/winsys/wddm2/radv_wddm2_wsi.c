@@ -36,7 +36,9 @@
 #include "radv_device.h"
 #include "radv_device_memory.h"
 #include "radv_image.h"
+#include "radv_physical_device.h"
 #include "util/amdgpu_wddm_stdio.h"
+#include "util/u_win32_library.h"
 #include "vk_dxgi.h"
 #include "wsi_common.h"
 
@@ -48,36 +50,139 @@ radv_wddm2_wsi_lock(struct radv_wddm2_winsys *ws)
    return (PSRWLOCK)&ws->wsi.lock;
 }
 
+/* The directory the executable names by its D3D12SDKPath export (an Agility SDK game), without a
+ * trailing separator. False when the executable exports none.
+ */
+static bool
+radv_wddm2_wsi_agility_dir(wchar_t *out, DWORD size)
+{
+   const char *const *sdk_path = (const char *const *)GetProcAddress(GetModuleHandleW(NULL), "D3D12SDKPath");
+   wchar_t exe[MAX_PATH], rel[MAX_PATH], joined[2 * MAX_PATH];
+
+   if (!sdk_path || !*sdk_path || !**sdk_path)
+      return false;
+   DWORD n = GetModuleFileNameW(NULL, exe, MAX_PATH);
+   if (!n || n >= MAX_PATH)
+      return false;
+   wchar_t *slash = NULL;
+   for (wchar_t *c = exe; *c; c++) {
+      if (*c == L'\\' || *c == L'/')
+         slash = c;
+   }
+   if (!slash)
+      return false;
+   *slash = 0;
+   if (!MultiByteToWideChar(CP_UTF8, 0, *sdk_path, -1, rel, MAX_PATH))
+      return false;
+   if (_snwprintf(joined, ARRAY_SIZE(joined), L"%ls\\%ls", exe, rel) < 0)
+      return false;
+   joined[ARRAY_SIZE(joined) - 1] = 0;
+   n = GetFullPathNameW(joined, size, out, NULL);
+   if (!n || n >= size)
+      return false;
+   while (n > 3 && (out[n - 1] == L'\\' || out[n - 1] == L'/'))
+      out[--n] = 0;
+   return true;
+}
+
+/* Which module implements the device: the module of its vtable. */
+static enum radv_wddm2_wsi_d3d12_impl
+radv_wddm2_wsi_d3d12_impl_now(ID3D12Device *device, wchar_t *impl_path)
+{
+   wchar_t system_dir[MAX_PATH], agility[MAX_PATH];
+   HMODULE module = NULL;
+
+   impl_path[0] = 0;
+   UINT len = GetSystemDirectoryW(system_dir, MAX_PATH);
+   if (!len || len >= MAX_PATH)
+      return RADV_WDDM2_WSI_D3D12_IMPL_UNKNOWN;
+   if (GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
+                             GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                          (LPCWSTR)device->lpVtbl, &module)) {
+      DWORD n = GetModuleFileNameW(module, impl_path, MAX_PATH);
+      if (!n || n >= MAX_PATH)
+         impl_path[0] = 0;
+   }
+   const bool has_agility = radv_wddm2_wsi_agility_dir(agility, MAX_PATH);
+   return radv_wddm2_wsi_d3d12_impl_class(system_dir, has_agility ? agility : NULL,
+                                          impl_path[0] ? impl_path : NULL);
+}
+
 /* Creates the D3D12 device and its direct queue once per winsys, under the lock, and remembers a
  * failure so that a game that re-creates its swapchain does not create the device again and again.
- * The device lives on the System32 runtime and our D3D12 shell; the shell loads its own hosted ICD
- * (amdgpu_wddm_radv.dll) by full path, never this module and never through the Vulkan loader, so
- * the call does not re-enter this ICD.
+ * The adapter comes from a System32 DXGI factory (vk_dxgi_find_adapter), and D3D12CreateDevice from
+ * System32 d3d12.dll loaded by full path: no entry point is looked up by module name, so a copy of
+ * dxgi.dll or d3d12.dll next to the application is never called. The device lives on the System32
+ * runtime and our D3D12 shell; the shell loads its own hosted ICD (amdgpu_wddm_radv.dll) by full
+ * path, never this module and never through the Vulkan loader, so the call does not re-enter this
+ * ICD. The one case this cannot rule out in advance, a replacement d3d12core.dll under the System32
+ * runtime, is caught after the fact by the implementation check (radv_wddm2_wsi_route.h).
  */
 static void
 radv_wddm2_wsi_ensure_d3d12(struct radv_wddm2_winsys *ws)
 {
+   typedef HRESULT(WINAPI * PFN_D3D12_CREATE_DEVICE)(IUnknown *, D3D_FEATURE_LEVEL, REFIID, void **);
+
    AcquireSRWLockExclusive(radv_wddm2_wsi_lock(ws));
    if (!ws->wsi.d3d12_tried) {
+      HRESULT hr = S_OK;
+      wchar_t impl_path[MAX_PATH] = {0};
+      enum radv_wddm2_wsi_d3d12_impl impl = RADV_WDDM2_WSI_D3D12_IMPL_UNKNOWN;
+      ID3D12Device *device = NULL;
+      IUnknown *adapter = (IUnknown *)vk_dxgi_find_adapter(ws->adapter_luid);
+      HMODULE d3d12 = adapter ? util_load_system_library(L"D3D12.DLL") : NULL;
+      PFN_D3D12_CREATE_DEVICE create =
+         d3d12 ? (PFN_D3D12_CREATE_DEVICE)GetProcAddress(d3d12, "D3D12CreateDevice") : NULL;
+
       ws->wsi.d3d12_tried = true;
-      ws->wsi.d3d12_device = vk_dxgi_create_d3d12_device(ws->adapter_luid);
-      if (!ws->wsi.d3d12_device) {
-         ws->wsi.d3d12_failure = "d3d12-device";
+      if (!adapter) {
+         ws->wsi.d3d12_failure = "dxgi-adapter";
+         hr = E_FAIL;
+      } else if (!create) {
+         ws->wsi.d3d12_failure = "d3d12-load";
+         hr = HRESULT_FROM_WIN32(GetLastError());
       } else {
+         hr = create(adapter, D3D_FEATURE_LEVEL_12_0, &IID_ID3D12Device, (void **)&device);
+         if (FAILED(hr) || !device) {
+            device = NULL;
+            ws->wsi.d3d12_failure = "d3d12-device";
+         }
+      }
+      if (adapter)
+         IUnknown_Release(adapter);
+
+      if (device) {
+         impl = radv_wddm2_wsi_d3d12_impl_now(device, impl_path);
+         if (!radv_wddm2_wsi_d3d12_impl_usable(impl)) {
+            ID3D12Device_Release(device);
+            device = NULL;
+            ws->wsi.d3d12_failure = "d3d12-replaced";
+         }
+      }
+      if (device) {
          D3D12_COMMAND_QUEUE_DESC desc = {0};
          desc.Type = D3D12_COMMAND_LIST_TYPE_DIRECT;
-         HRESULT hr = ID3D12Device_CreateCommandQueue((ID3D12Device *)ws->wsi.d3d12_device, &desc,
-                                                      &IID_ID3D12CommandQueue,
-                                                      (void **)&ws->wsi.d3d12_queue);
+         hr = ID3D12Device_CreateCommandQueue(device, &desc, &IID_ID3D12CommandQueue,
+                                              (void **)&ws->wsi.d3d12_queue);
          if (FAILED(hr) || !ws->wsi.d3d12_queue) {
             ws->wsi.d3d12_queue = NULL;
             ws->wsi.d3d12_failure = "d3d12-queue";
          }
       }
-      amdgpu_wddm_log("BC250 WSI: D3D12 presenter device %s (adapter %08lx:%08lx)\n",
-                      ws->wsi.d3d12_failure ? ws->wsi.d3d12_failure : "created",
+      ws->wsi.d3d12_device = device;
+
+      const wchar_t *base = impl_path;
+      for (const wchar_t *c = impl_path; *c; c++) {
+         if (*c == L'\\' || *c == L'/')
+            base = c + 1;
+      }
+      amdgpu_wddm_log("BC250 WSI: D3D12 presenter device %s hr=0x%08lx impl=%s:%ls "
+                      "(adapter %08lx:%08lx)%s\n",
+                      ws->wsi.d3d12_failure ? ws->wsi.d3d12_failure : "created", (unsigned long)hr,
+                      radv_wddm2_wsi_d3d12_impl_name(impl), base[0] ? base : L"-",
                       (unsigned long)ws->adapter_luid.HighPart,
-                      (unsigned long)ws->adapter_luid.LowPart);
+                      (unsigned long)ws->adapter_luid.LowPart,
+                      ws->wsi.d3d12_failure ? ", swapchains take CPU images (GDI)" : "");
    }
    ReleaseSRWLockExclusive(radv_wddm2_wsi_lock(ws));
 }
@@ -129,30 +234,14 @@ radv_wddm2_wsi_needs_blits(VkDevice _device)
    return true;
 }
 
-/* True when the last path component of path equals name, ASCII case-insensitive. */
-static bool
-radv_wddm2_wsi_base_name_is(const wchar_t *path, const wchar_t *name)
-{
-   const wchar_t *base = path;
-   for (const wchar_t *p = path; *p; p++) {
-      if (*p == L'\\' || *p == L'/')
-         base = p + 1;
-   }
-   for (;; base++, name++) {
-      if (radv_wddm2_wsi_wlower(*base) != radv_wddm2_wsi_wlower(*name))
-         return false;
-      if (!*base)
-         return true;
-   }
-}
-
-/* The module gate of radv_wddm2_wsi_route.h, read from the live process. Two modules with the same
- * base name can be loaded at once (DXVK's dxgi.dll next to the game and System32 dxgi.dll, which
- * wsi_win32_init_wsi loads by full path), and GetModuleHandleW does not say which one it returns. So
- * every loaded module is checked, and a module outside System32 under one of the three names wins.
+/* The application-local copies of dxgi.dll, d3d12.dll and d3d12core.dll: loaded modules outside
+ * System32 (every module is checked, because two modules with one base name can be loaded at once
+ * and GetModuleHandleW does not say which one it returns), and DLL files in the executable's
+ * directory that nothing has loaded yet. They are reported on the init line and never change the
+ * route (radv_wddm2_wsi_route.h).
  */
-static enum radv_wddm2_wsi_gate
-radv_wddm2_wsi_gate_now(void)
+static void
+radv_wddm2_wsi_app_local_now(unsigned *loaded, unsigned *files)
 {
    static const wchar_t *const names[3] = {L"dxgi.dll", L"d3d12.dll", L"d3d12core.dll"};
    wchar_t system_dir[MAX_PATH];
@@ -161,46 +250,65 @@ radv_wddm2_wsi_gate_now(void)
    HMODULE modules[512];
    DWORD needed = 0;
 
+   *loaded = 0;
+   *files = 0;
    UINT len = GetSystemDirectoryW(system_dir, MAX_PATH);
    if (!len || len >= MAX_PATH)
-      return RADV_WDDM2_WSI_GATE_NO_SYSTEM_DIR;
+      return;
 
-   if (!K32EnumProcessModules(GetCurrentProcess(), modules, sizeof(modules), &needed))
-      return RADV_WDDM2_WSI_GATE_NO_SYSTEM_DIR;
-   unsigned count = needed / sizeof(HMODULE);
-   if (count > ARRAY_SIZE(modules))
-      count = ARRAY_SIZE(modules);
-
-   for (unsigned m = 0; m < count; m++) {
-      wchar_t path[MAX_PATH];
-      DWORD n = GetModuleFileNameW(modules[m], path, MAX_PATH);
-      if (!n || n >= MAX_PATH)
-         continue;
-      for (unsigned i = 0; i < 3; i++) {
-         if (!radv_wddm2_wsi_base_name_is(path, names[i]))
+   if (K32EnumProcessModules(GetCurrentProcess(), modules, sizeof(modules), &needed)) {
+      unsigned count = needed / sizeof(HMODULE);
+      if (count > ARRAY_SIZE(modules))
+         count = ARRAY_SIZE(modules);
+      for (unsigned m = 0; m < count; m++) {
+         wchar_t path[MAX_PATH];
+         DWORD n = GetModuleFileNameW(modules[m], path, MAX_PATH);
+         if (!n || n >= MAX_PATH)
             continue;
-         /* Keep the first module outside System32; a System32 copy only fills an empty slot. */
-         if (found[i] && !radv_wddm2_wsi_path_in_dir(found[i], system_dir))
+         for (unsigned i = 0; i < 3; i++) {
+            if (!radv_wddm2_wsi_base_name_is(path, names[i]))
+               continue;
+            if (!radv_wddm2_wsi_path_in_dir(path, system_dir)) {
+               wcscpy(paths[i], path);
+               found[i] = paths[i];
+            }
             break;
-         wcscpy(paths[i], path);
-         found[i] = paths[i];
-         break;
+         }
       }
+      *loaded = radv_wddm2_wsi_app_local(system_dir, found[0], found[1], found[2]);
    }
-   return radv_wddm2_wsi_module_gate(system_dir, found[0], found[1], found[2]);
+
+   wchar_t exe[MAX_PATH];
+   DWORD n = GetModuleFileNameW(NULL, exe, MAX_PATH);
+   if (!n || n >= MAX_PATH)
+      return;
+   wchar_t *slash = NULL;
+   for (wchar_t *c = exe; *c; c++) {
+      if (*c == L'\\' || *c == L'/')
+         slash = c;
+   }
+   if (!slash || radv_wddm2_wsi_path_in_dir(exe, system_dir))
+      return;
+   for (unsigned i = 0; i < 3; i++) {
+      const size_t room = MAX_PATH - (size_t)(slash + 1 - exe);
+      if (wcslen(names[i]) + 1 > room)
+         continue;
+      wcscpy(slash + 1, names[i]);
+      const DWORD attr = GetFileAttributesW(exe);
+      if (attr != INVALID_FILE_ATTRIBUTES && !(attr & FILE_ATTRIBUTE_DIRECTORY))
+         *files |= 1u << i;
+   }
 }
 
+/* Asked when the surface formats are listed and once per swapchain. The only refusal is a real
+ * failure of the presenter device; its HRESULT is on the "D3D12 presenter device" line.
+ */
 static bool
-radv_wddm2_wsi_route_allowed(VkDevice _device, const char **reason)
+radv_wddm2_wsi_route_allowed(VkPhysicalDevice _pdevice, const char **reason)
 {
-   VK_FROM_HANDLE(radv_device, device, _device);
-   struct radv_wddm2_winsys *ws = radv_wddm2_winsys(device->ws);
+   VK_FROM_HANDLE(radv_physical_device, pdev, _pdevice);
+   struct radv_wddm2_winsys *ws = radv_wddm2_winsys(pdev->ws);
 
-   const enum radv_wddm2_wsi_gate gate = radv_wddm2_wsi_gate_now();
-   if (gate != RADV_WDDM2_WSI_GATE_OK) {
-      *reason = radv_wddm2_wsi_gate_name(gate);
-      return false;
-   }
    radv_wddm2_wsi_ensure_d3d12(ws);
    if (!ws->wsi.d3d12_queue) {
       *reason = ws->wsi.d3d12_failure ? ws->wsi.d3d12_failure : "d3d12-queue";
@@ -288,20 +396,29 @@ radv_wddm2_wsi_init(struct radeon_winsys *_ws, struct wsi_device *wsi)
 
    if (ws->bc250) {
       const struct radv_wddm2_wsi_route_choice choice = radv_wddm2_wsi_read_route();
-      const enum radv_wddm2_wsi_gate gate = radv_wddm2_wsi_gate_now();
       const bool hosted = ws->host.dispatch != NULL;
       const bool dxgi_ready = !wsi->sw; /* wsi_win32_init_wsi made the DXGI factory and DComp device */
-      const bool dxgi = !hosted && dxgi_ready && gate == RADV_WDDM2_WSI_GATE_OK &&
-                        choice.route != RADV_WDDM2_WSI_ROUTE_GDI;
+      const bool dxgi = !hosted && dxgi_ready && choice.route != RADV_WDDM2_WSI_ROUTE_GDI;
 
       ws->wsi.route = dxgi ? (int)choice.route : (int)RADV_WDDM2_WSI_ROUTE_GDI;
       if (!hosted) {
-         amdgpu_wddm_log("BC250 WSI: route=%s asked=%s source=%s%s gate=%s dxgi-runtime=%s\n",
+         unsigned loaded = 0, files = 0;
+         char local[96];
+         radv_wddm2_wsi_app_local_now(&loaded, &files);
+         const char *reason = dxgi                       ? "ok"
+                              : choice.invalid           ? "invalid-value"
+                              : choice.route == RADV_WDDM2_WSI_ROUTE_GDI ? "asked"
+                              : wsi->win32.init_failure  ? wsi->win32.init_failure
+                                                         : "dxgi-runtime";
+         amdgpu_wddm_log("BC250 WSI: route=%s asked=%s source=%s%s reason=%s hr=0x%08lx "
+                         "app-local=%s%s\n",
                          radv_wddm2_wsi_route_name((enum radv_wddm2_wsi_route)ws->wsi.route),
                          radv_wddm2_wsi_route_name(choice.route),
                          radv_wddm2_wsi_route_source_name(choice.source),
-                         choice.invalid ? " (invalid value)" : "",
-                         radv_wddm2_wsi_gate_name(gate), dxgi_ready ? "ok" : "missing");
+                         choice.invalid ? " (invalid value)" : "", reason,
+                         dxgi_ready ? 0ul : (unsigned long)wsi->win32.init_hr,
+                         radv_wddm2_wsi_app_local_text(loaded, files, local, sizeof(local)),
+                         (loaded | files) ? " bound=System32" : "");
       }
 
       if (!dxgi) {
