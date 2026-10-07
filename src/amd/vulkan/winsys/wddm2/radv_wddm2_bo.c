@@ -35,6 +35,7 @@
 #include "radv_wddm2_bc250.h"
 #include "util/amdgpu_wddm_stdio.h"
 #include "radv_wddm2_cs.h"
+#include "radv_wddm2_wsi_route.h"
 #include "util/os_time.h"
 #include "util/u_memory.h"
 
@@ -1046,25 +1047,30 @@ radv_wddm2_bo_from_handle(struct radeon_winsys *_ws, void *handle, unsigned prio
    bo->base.obj_id = bo->base.handle = alloc_info[0].hAllocation;
 
    if (ws->bc250) {
-      /* KMD's LB7A v1 surface ABI, not the proprietary AMD allocation ABI. */
-      struct bc250_linear_surface {
-         uint32_t magic, version, width, height, pitch, format;
-         uint64_t size;
-      } surface;
+      /* KMD's LB7A v1 surface ABI, not the proprietary AMD allocation ABI. The formats are the
+       * contract table's composed rows (8-bit BGRA/RGBA, RGB10A2, RGBA16F), and the pixel size
+       * comes from the format (radv_wddm2_wsi_route.h), so a 10-bit or FP16 swapchain image of
+       * the DXGI present route imports as well as an 8-bit one.
+       */
+      struct radv_wddm2_lb7a surface;
       _Static_assert(sizeof(surface) == 32, "LB7A v1 ABI");
+      _Static_assert(RADV_WDDM2_D3DDDIFMT_A8R8G8B8 == D3DDDIFMT_A8R8G8B8 &&
+                     RADV_WDDM2_D3DDDIFMT_X8R8G8B8 == D3DDDIFMT_X8R8G8B8 &&
+                     RADV_WDDM2_D3DDDIFMT_A2B10G10R10 == D3DDDIFMT_A2B10G10R10 &&
+                     RADV_WDDM2_D3DDDIFMT_A8B8G8R8 == D3DDDIFMT_A8B8G8R8 &&
+                     RADV_WDDM2_D3DDDIFMT_A16B16G16R16F == D3DDDIFMT_A16B16G16R16F,
+                     "LB7A format numbers match d3dukmdt.h");
       if (!alloc_info[0].pPrivateDriverData ||
           alloc_info[0].PrivateDriverDataSize < sizeof(surface)) {
          result = VK_ERROR_INVALID_EXTERNAL_HANDLE;
          goto error_import;
       }
       memcpy(&surface, alloc_info[0].pPrivateDriverData, sizeof(surface));
-      if (surface.magic != 0x4137424c || surface.version != 1 ||
-          !surface.width || !surface.height || surface.width > 8192 || surface.height > 8192 ||
-          surface.pitch < (uint64_t)surface.width * 4 || (surface.pitch & 15) ||
-          surface.size < (uint64_t)surface.pitch * surface.height ||
-          surface.size > UINT64_MAX - 4095 ||
-          (surface.format != D3DDDIFMT_A8R8G8B8 && surface.format != D3DDDIFMT_X8R8G8B8 &&
-           surface.format != D3DDDIFMT_A8B8G8R8)) {
+      if (!radv_wddm2_lb7a_valid(&surface)) {
+         amdgpu_wddm_log("BC250 NT-handle import: LB7A refused (magic 0x%x version %u %ux%u pitch %u "
+                         "format %u size %" PRIu64 ")\n",
+                         surface.magic, surface.version, surface.width, surface.height,
+                         surface.pitch, surface.format, surface.size);
          result = VK_ERROR_INVALID_EXTERNAL_HANDLE;
          goto error_import;
       }
