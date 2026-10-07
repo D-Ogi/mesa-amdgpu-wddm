@@ -44,6 +44,7 @@
 
 #include "Debug.h"
 #include "Bc250Config.h"
+#include "bc250_slice_wait.h"
 
 #include "util/bc250_diag.h"
 #include "util/bc250_host_bootstrap.h"
@@ -383,7 +384,10 @@ static int32_t Bc250HostDispatch(void *userdata, uint32_t operation, void *argum
    if (FAILED(hr) && (operation==BC250_HOST_SubmitCommand || operation==BC250_HOST_SignalSynchronizationObjectFromGpu2 || operation==BC250_HOST_PUBLISH_PROGRESS))
       s->submission_failed=true;
    unsigned count=operation<64 ? ++s->calls[operation] : 0;
-   if (count<=2 || (FAILED(hr) && hr!=E_PENDING)) BC250_REPORT(FAILED(hr) && hr!=E_PENDING,"BC250 hosted op=%u count=%u hr=%08lx\n",operation,count,hr);
+   /* The ICD asks GetDeviceState only for a fault report on its way to a loss. The hosted device has no kernel
+    * device of its own and answers STATUS_NOT_SUPPORTED, which is the answer and not an error (K225). */
+   bool expected=hr==E_PENDING || (operation==BC250_HOST_GetDeviceState && hr==E_NOTIMPL);
+   if (count<=2 || (FAILED(hr) && !expected)) BC250_REPORT(FAILED(hr) && !expected,"BC250 hosted op=%u count=%u hr=%08lx\n",operation,count,hr);
    if (hr==E_PENDING && (operation==BC250_HOST_MapGpuVirtualAddress || operation==BC250_HOST_MakeResident)) return 0x103;
    return SUCCEEDED(hr) ? 0 : hr==E_NOTIMPL ? (int32_t)0xc00000bb :
           hr==E_OUTOFMEMORY ? (int32_t)0xc0000017 :
@@ -477,6 +481,18 @@ void Bc250StopHostedSubmission(Device *device)
    if (state) Bc250HostLost(state,BC250_LOST_STOP,~0u,S_OK);
 }
 
+#define BC250_PRESENT_IDLE_SLICE_MS 1000u
+#define BC250_PRESENT_IDLE_TOTAL_MS 120000u
+
+/* Between the slices of the Present-idle wait: a loss that Bc250HostStatus sees
+ * (it records its reason), or the Present fence already at the value. */
+static int Bc250PresentIdlePoll(void *ctx)
+{
+   auto *s=(Bc250HostProbeState *)ctx;
+   if (FAILED(Bc250HostStatus(s))) return -1;
+   return s->present_cpu && *(const volatile UINT64 *)s->present_cpu>=s->present_value ? 1 : 0;
+}
+
 HRESULT Bc250WaitPresentIdle(Device *device)
 {
    auto *s=(Bc250HostProbeState *)device->hosted_state;
@@ -490,7 +506,19 @@ HRESULT Bc250WaitPresentIdle(Device *device)
    wait.hAsyncEvent=event;
    HRESULT hr=device->KTCallbacks.pfnWaitForSynchronizationObjectFromCpuCb(device->hDevice,&wait);
    bool timeout=false;
-   if (SUCCEEDED(hr) && WaitForSingleObject(event,10000)!=WAIT_OBJECT_0) { hr=DXGI_ERROR_DEVICE_HUNG; timeout=true; }
+   if (SUCCEEDED(hr)) {
+      /* In 1 s slices up to 120 s: the Present can wait behind another device's hang (bc250_slice_wait.h). */
+      DWORD waited=0;
+      bc250_slice_wait_result w=bc250_slice_wait(event,BC250_PRESENT_IDLE_SLICE_MS,BC250_PRESENT_IDLE_TOTAL_MS,
+                                                 Bc250PresentIdlePoll,s,&waited);
+      if (waited>=BC250_PRESENT_IDLE_SLICE_MS || w!=BC250_SLICE_WAIT_DONE)
+         BC250_ERROR("BC250 Present-idle wait for value %llu ended after %lu ms: %s\n",
+                     (unsigned long long)s->present_value,(unsigned long)waited,
+                     w==BC250_SLICE_WAIT_DONE ? "completed" : w==BC250_SLICE_WAIT_LOST ? "device lost" :
+                     w==BC250_SLICE_WAIT_BOUND ? "bound" : "wait failed");
+      if (w==BC250_SLICE_WAIT_LOST) { CloseHandle(event); return D3DDDIERR_DEVICEREMOVED; }
+      if (w!=BC250_SLICE_WAIT_DONE) { hr=DXGI_ERROR_DEVICE_HUNG; timeout=true; }
+   }
    CloseHandle(event);
    if (Bc250DeviceLostResult(hr))
       return Bc250HostLost(s,timeout ? BC250_LOST_PRESENT_IDLE_TIMEOUT : BC250_LOST_PRESENT_IDLE_RESULT,
