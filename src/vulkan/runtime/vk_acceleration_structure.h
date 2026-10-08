@@ -223,6 +223,11 @@ void vk_get_as_build_sizes(VkDevice _device, VkAccelerationStructureBuildTypeKHR
 
 bool vk_acceleration_struct_vtx_format_supported(VkFormat format);
 
+/* BD-102 diagnostic switch: true when BC250_BVH_BUILD=lbvh asks every build to
+ * use the LBVH internal builder. The variable is read once, on the first call.
+ */
+bool vk_acceleration_structure_force_lbvh(void);
+
 static inline VkGeometryTypeKHR
 vk_get_as_geometry_type(const VkAccelerationStructureBuildGeometryInfoKHR *build_info)
 {

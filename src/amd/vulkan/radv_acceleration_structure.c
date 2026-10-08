@@ -280,7 +280,13 @@ radv_get_build_config(VkDevice _device, struct vk_acceleration_structure_build_s
    VkGeometryTypeKHR geometry_type = vk_get_as_geometry_type(state->build_info);
 
    if (state->build_info->type == VK_ACCELERATION_STRUCTURE_TYPE_TOP_LEVEL_KHR) {
-      state->config.internal_type = VK_INTERNAL_BUILD_TYPE_HPLOC;
+      /* BD-102 diagnostic switch: BC250_BVH_BUILD=lbvh keeps the LBVH builder
+       * the common runtime selected, so that a top-level build does not reach
+       * HPLOC's device-wide spin barrier either. The 64-bit morton keys are
+       * independent of the internal builder and stay as they are.
+       */
+      if (!vk_acceleration_structure_force_lbvh())
+         state->config.internal_type = VK_INTERNAL_BUILD_TYPE_HPLOC;
       state->config.u64_keys = true;
    }
 

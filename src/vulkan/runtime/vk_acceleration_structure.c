@@ -35,7 +35,50 @@
 
 #include "bvh/vk_bvh_defines.h"
 
+#include "util/os_misc.h"
+#include "util/u_call_once.h"
 #include "util/u_string.h"
+
+/* BD-102 diagnostic switch.
+ *
+ * BC250_BVH_BUILD=lbvh makes every acceleration-structure build use the LBVH
+ * internal builder, in place of PLOC for a bottom-level build and of whatever
+ * the driver's get_build_config picks for a top-level one. PLOC and HPLOC run
+ * all of their phases inside one dispatch, separated by the device-wide spin
+ * barrier of fetch_task() (bvh/vk_bvh_helpers.h), which deadlocks unless every
+ * workgroup of the dispatch is co-resident. lbvh_main and lbvh_generate_ir are
+ * plain bounded dispatches, so the switch tells that barrier apart from the
+ * rest of the build on the lab.
+ *
+ * It does not remove every device-wide spin barrier from a build: the morton
+ * sort (bvh/morton_sort.comp:608-613) carries one of its own and runs in the
+ * LBVH path too. A build that still hangs with the switch on therefore points
+ * at the sort, not away from the mechanism.
+ *
+ * Any other value, and an unset variable, keep upstream behaviour. A build in
+ * VK_BUILD_ACCELERATION_STRUCTURE_MODE_UPDATE_KHR keeps the UPDATE builder,
+ * because the application sized its scratch for an update, not for a build.
+ */
+static bool bc250_bvh_force_lbvh;
+
+static void
+bc250_bvh_build_option_read(void)
+{
+   const char *opt = os_get_option("BC250_BVH_BUILD");
+
+   bc250_bvh_force_lbvh = opt && !strcmp(opt, "lbvh");
+   if (bc250_bvh_force_lbvh)
+      fprintf(stderr, "bc250: BVH build forced to LBVH\n");
+}
+
+bool
+vk_acceleration_structure_force_lbvh(void)
+{
+   static util_once_flag once = UTIL_ONCE_FLAG_INIT;
+
+   util_call_once(&once, bc250_bvh_build_option_read);
+   return bc250_bvh_force_lbvh;
+}
 
 static const uint32_t leaf_spv[] = {
 #include "bvh/leaf.spv.h"
@@ -232,6 +275,10 @@ vk_acceleration_structure_build_state_init(struct vk_acceleration_structure_buil
             !(build_info->flags & VK_BUILD_ACCELERATION_STRUCTURE_ALLOW_UPDATE_BIT_KHR))
       state->config.internal_type = VK_INTERNAL_BUILD_TYPE_PLOC;
    else
+      state->config.internal_type = VK_INTERNAL_BUILD_TYPE_LBVH;
+
+   /* BD-102 diagnostic switch; see vk_acceleration_structure_force_lbvh(). */
+   if (vk_acceleration_structure_force_lbvh())
       state->config.internal_type = VK_INTERNAL_BUILD_TYPE_LBVH;
 
    if (build_info->mode == VK_BUILD_ACCELERATION_STRUCTURE_MODE_UPDATE_KHR &&
