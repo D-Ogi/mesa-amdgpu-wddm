@@ -625,6 +625,15 @@ radv_wddm2_bo_create_internal(struct radeon_winsys *_ws, uint64_t size, unsigned
       virt_alignment = MAX2(virt_alignment, ws->gpu_info.pte_fragment_size);
    const uint64_t phys_size = align64(size, phys_alignment);
 
+   /* C70 (BD-096): a device-local allocation that no eviction can fit is refused here. The
+    * MakeResident below would otherwise evict the whole process for about 80 s and fail all the
+    * same (K245). The allocation's heap is the one the private blob asks for below. */
+   const bool mem_local = !!(initial_domain & RADEON_DOMAIN_VRAM);
+   if (!radv_wddm2_mem_admit(ws, phys_size, mem_local)) {
+      FREE(bo);
+      return VK_ERROR_OUT_OF_DEVICE_MEMORY;
+   }
+
    uint8_t alloc_pdata[824] = {0};
    uint32_t pdata_size;
    if (ws->bc250) {
@@ -789,6 +798,10 @@ radv_wddm2_bo_create_internal(struct radeon_winsys *_ws, uint64_t size, unsigned
       radv_winsys_bo_list_add(&ws->global_bo_list, &bo->base);
    if (ws->debug_log_bos)
       radv_winsys_log_bo(&ws->bo_log, &bo->base, false);
+
+   /* C70: count it only once it is whole, so no error path leaves bytes behind. */
+   radv_wddm2_mem_account(ws, bo->base.size, mem_local, true);
+   bo->counted = true;
 
    *out_bo = (struct radeon_winsys_bo *)bo;
    return VK_SUCCESS;
@@ -1150,6 +1163,13 @@ radv_wddm2_bo_destroy(struct radeon_winsys *_ws, struct radeon_winsys_bo *_bo)
    struct radv_wddm2_winsys *ws = radv_wddm2_winsys(_ws);
    struct radv_wddm2_bo *bo = radv_wddm2_bo(_bo);
    ASSERTED NTSTATUS status;
+
+   /* C70: take the bytes out of the count first. Every exit of this function gives the BO up. */
+   if (bo->counted) {
+      bo->counted = false;
+      radv_wddm2_mem_account(ws, bo->base.size, !!(bo->base.initial_domain & RADEON_DOMAIN_VRAM),
+                             false);
+   }
 
    if (all_resident && !bo->base.is_virtual && !bo->borrowed) {
       D3DKMT_EVICT evict = {
