@@ -35,6 +35,8 @@
 #include "radv_wddm2_bc250.h"
 #include "radv_wddm2_cs.h"
 #include "radv_wddm2_wsi_route.h"
+/* The D3D ICD line gets this header through /FI; this line includes it where it is used. */
+#include "util/amdgpu_wddm_stdio.h"
 #include "util/os_time.h"
 #include "util/u_memory.h"
 
