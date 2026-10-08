@@ -28,6 +28,7 @@
 #ifndef RADV_WDDM2_WINSYS_H
 #define RADV_WDDM2_WINSYS_H
 
+#include "radv_wddm2_mem_precheck.h"
 #include "util/list.h"
 #include "util/u_atomic.h"
 #include "util/bc250_host_bootstrap.h"
@@ -205,6 +206,15 @@ struct radv_wddm2_winsys {
       uint64_t totals[RADV_DRAW_STAT_COUNT];
       uint64_t snapshot[RADV_DRAW_STAT_COUNT];
    } draw_stats;
+   /* C70 (BD-096): the limits that say when one more device-local allocation cannot be made
+    * resident by any eviction. radv_wddm2_mem_precheck.h holds the rule. */
+   struct {
+      simple_mtx_t lock;
+      struct radv_wddm2_mem_limits limits;
+      uint64_t refusals;
+      bool enabled;
+      bool logged;             /* the first refusal is logged, the rest are counted */
+   } mem;
 
    struct vk_sync_binary_type sync_binary_type;
    const struct vk_sync_type *sync_types[3];
@@ -219,5 +229,9 @@ radv_wddm2_winsys(struct radeon_winsys *base)
 {
    return (struct radv_wddm2_winsys *)base;
 }
+
+/* C70 (BD-096), radv_wddm2_winsys.c: the gate before a kernel allocation. Only a device-local
+ * allocation can be refused. The bytes it weighs are the ones radv_wddm2_bo_account counts. */
+bool radv_wddm2_mem_admit(struct radv_wddm2_winsys *ws, uint64_t size, bool device_local);
 
 #endif /* RADV_WDDM2_WINSYS_H */

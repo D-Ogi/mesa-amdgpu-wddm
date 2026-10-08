@@ -241,6 +241,7 @@ if with_vulkan_dx
     'winsys/wddm2/radv_wddm2_bo.h',
     'winsys/wddm2/radv_wddm2_cs.c',
     'winsys/wddm2/radv_wddm2_cs.h',
+    'winsys/wddm2/radv_wddm2_mem_precheck.h',
     'winsys/wddm2/radv_wddm2_winsys.c',
     'winsys/wddm2/radv_wddm2_winsys_public.h',
     'winsys/wddm2/radv_wddm2_wsi.c',

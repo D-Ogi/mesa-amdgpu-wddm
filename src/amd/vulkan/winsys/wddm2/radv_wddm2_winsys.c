@@ -32,6 +32,7 @@
 #undef VK_USE_PLATFORM_XLIB_KHR
 #undef VK_USE_PLATFORM_XLIB_XRANDR_EXT
 
+#include <inttypes.h>
 #include <stdint.h>
 
 #include "radv_wddm2_winsys.h"
@@ -731,6 +732,84 @@ radv_wddm2_query_budget(struct radeon_winsys *base, uint64_t *budget)
    return *budget != 0;
 }
 
+/* The two segments of the adapter together. Zero when the query fails. */
+static uint64_t
+radv_wddm2_query_segment_total(struct radv_wddm2_winsys *ws)
+{
+   D3DKMT_SEGMENTSIZEINFO segment = {};
+   if (!NT_SUCCESS(query_adapter_info(ws, KMTQAITYPE_GETSEGMENTSIZE, &segment, sizeof(segment))))
+      return 0;
+   return segment.DedicatedVideoMemorySize + segment.SharedSystemMemorySize;
+}
+
+/* C70 (BD-096): read the limits once and say whether the rule is on. Without a budget there is no
+ * threshold, so the rule stays off and no allocation is refused by it. */
+static void
+radv_wddm2_mem_init(struct radv_wddm2_winsys *ws)
+{
+   const struct radv_wddm2_mem_precheck_switch choice =
+      radv_wddm2_mem_precheck_parse(getenv(RADV_WDDM2_MEM_PRECHECK_ENV));
+
+   simple_mtx_init(&ws->mem.lock, mtx_plain);
+   ws->mem.limits.segment_total = radv_wddm2_query_segment_total(ws);
+   if (!radv_wddm2_query_budget(&ws->base, &ws->mem.limits.budget_total))
+      ws->mem.limits.budget_total = 0;
+   ws->mem.enabled = choice.enabled && ws->mem.limits.budget_total != 0;
+
+   amdgpu_wddm_log(
+      "BC250 memory precheck: %s%s budget %.1f MiB segments %.1f MiB threshold %.1f MiB\n",
+      ws->mem.enabled ? "on" : "off", choice.invalid ? " (invalid value, default used)" : "",
+      ws->mem.limits.budget_total / (1024.0 * 1024.0),
+      ws->mem.limits.segment_total / (1024.0 * 1024.0),
+      radv_wddm2_mem_threshold(ws->mem.limits) / (1024.0 * 1024.0));
+}
+
+static void
+radv_wddm2_mem_fini(struct radv_wddm2_winsys *ws)
+{
+   if (ws->mem.refusals)
+      amdgpu_wddm_log("BC250 memory precheck: refused %" PRIu64 " device-local allocations\n",
+                      ws->mem.refusals);
+   simple_mtx_destroy(&ws->mem.lock);
+}
+
+/* C70: true when the allocation may go to the kernel. A device-local allocation that would put this
+ * process over the maximum budget is refused here, because the MakeResident that would take it
+ * evicts the whole process first and fails all the same (K245: 86 s, then STATUS_NO_MEMORY). The
+ * budget is read again before a refusal: the OS raises it when another process frees memory. The
+ * weight of the process is what radv_wddm2_bo_account counts, both domains together. */
+bool
+radv_wddm2_mem_admit(struct radv_wddm2_winsys *ws, uint64_t size, bool device_local)
+{
+   if (!ws->mem.enabled || !device_local)
+      return true;
+
+   const uint64_t held = p_atomic_read(&ws->allocated_vram) +
+                         p_atomic_read(&ws->allocated_vram_vis) + p_atomic_read(&ws->allocated_gtt);
+   simple_mtx_lock(&ws->mem.lock);
+   enum radv_wddm2_mem_verdict verdict = radv_wddm2_mem_check(ws->mem.limits, true, held, size);
+   if (verdict != RADV_WDDM2_MEM_ADMIT) {
+      uint64_t budget;
+      if (radv_wddm2_query_budget(&ws->base, &budget))
+         ws->mem.limits.budget_total = budget;
+      verdict = radv_wddm2_mem_check(ws->mem.limits, true, held, size);
+   }
+   if (verdict != RADV_WDDM2_MEM_ADMIT) {
+      ws->mem.refusals++;
+      if (!ws->mem.logged) {
+         ws->mem.logged = true;
+         amdgpu_wddm_log(
+            "BC250 memory precheck: %s, %" PRIu64 " bytes device-local, held %.1f MiB, "
+            "threshold %.1f MiB (C70; %s=off turns this off)\n",
+            radv_wddm2_mem_verdict_name(verdict), size, held / (1024.0 * 1024.0),
+            radv_wddm2_mem_threshold(ws->mem.limits) / (1024.0 * 1024.0),
+            RADV_WDDM2_MEM_PRECHECK_ENV);
+      }
+   }
+   simple_mtx_unlock(&ws->mem.lock);
+   return verdict == RADV_WDDM2_MEM_ADMIT;
+}
+
 static void
 radv_wddm2_winsys_destroy(struct radeon_winsys *_ws)
 {
@@ -761,6 +840,7 @@ radv_wddm2_winsys_destroy(struct radeon_winsys *_ws)
 
    /* Held BOs go before the paging queue and the device: a CPU wait for their work, then the release. */
    radv_wddm2_deferred_finish(ws);
+   radv_wddm2_mem_fini(ws);
    radv_wddm2_bo_pool_finish(ws);
    simple_mtx_destroy(&ws->deferred.lock);
    simple_mtx_destroy(&ws->summary.lock);
@@ -1000,6 +1080,7 @@ radv_wddm2_winsys_create(const struct vk_dx_adapter_info *adapter_info,
    ws->paging_fence_h = create_paging_queue.hSyncObject;
 
    /* Initialize the heaps */
+   radv_wddm2_mem_init(ws);
    simple_mtx_init(&ws->heap_mtx, mtx_plain);
    simple_mtx_init(&ws->null_prt.lock, mtx_plain);
    util_vma_heap_init(&ws->_32bit_heap, RADV_WDDM2_32BIT_HEAP_START, 1ull << 32);

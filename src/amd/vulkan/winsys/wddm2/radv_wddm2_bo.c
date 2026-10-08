@@ -716,6 +716,15 @@ radv_wddm2_bo_create_internal(struct radeon_winsys *_ws, uint64_t size, unsigned
       virt_alignment = MAX2(virt_alignment, ws->gpu_info.pte_fragment_size);
    const uint64_t phys_size = align64(size, phys_alignment);
 
+   /* C70 (BD-096): a device-local allocation that no eviction can fit is refused here. The
+    * MakeResident below would otherwise evict the whole process for about 80 s and fail all the
+    * same (K245). The allocation's heap is the one the private blob asks for below. */
+   const bool mem_local = !!(initial_domain & RADEON_DOMAIN_VRAM);
+   if (!radv_wddm2_mem_admit(ws, phys_size, mem_local)) {
+      radv_wddm2_bo_struct_free(ws, bo);
+      return VK_ERROR_OUT_OF_DEVICE_MEMORY;
+   }
+
    uint8_t alloc_pdata[824] = {0};
    uint32_t pdata_size;
    if (ws->bc250) {
