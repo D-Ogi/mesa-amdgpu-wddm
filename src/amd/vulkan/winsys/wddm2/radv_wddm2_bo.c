@@ -756,7 +756,10 @@ radv_wddm2_bo_create_internal(struct radeon_winsys *_ws, uint64_t size, unsigned
          .NumAllocations = 1,
          .AllocationList = &bo->base.handle,
          .Flags = {
-            .MustSucceed = 1,
+            /* BD-096 (7f16adb0): MustSucceed puts the device in error when the allocation cannot be made
+             * resident (d3dukmdt.h), so a budget failure became a device loss. CantTrimFurther may exceed
+             * the current budget and fails only above the maximum budget, without removing the device. */
+            .CantTrimFurther = 1,
          },
       };
       status = BC250_WDDM_CALL(&ws->host, MakeResident, &make_resident);
@@ -968,7 +971,10 @@ radv_wddm2_bo_from_handle(struct radeon_winsys *_ws, void *handle, unsigned prio
       .NumAllocations = 1,
       .AllocationList = &bo->base.handle,
       .Flags = {
-         .MustSucceed = 1,
+         /* BD-096 (7f16adb0): MustSucceed puts the device in error when the allocation cannot be made
+          * resident (d3dukmdt.h), so a budget failure became a device loss. CantTrimFurther may exceed
+          * the current budget and fails only above the maximum budget, without removing the device. */
+         .CantTrimFurther = 1,
       },
    };
    status = BC250_WDDM_CALL(&ws->host, MakeResident, &make_resident);
@@ -1104,7 +1110,10 @@ radv_wddm2_bo_make_resident(struct radeon_winsys *_ws, struct radeon_winsys_bo *
          .NumAllocations = 1,
          .AllocationList = &bo->base.handle,
          .Flags = {
-            .MustSucceed = 1,
+            /* BD-096 (7f16adb0): MustSucceed puts the device in error when the allocation cannot be made
+             * resident (d3dukmdt.h), so a budget failure became a device loss. CantTrimFurther may exceed
+             * the current budget and fails only above the maximum budget, without removing the device. */
+            .CantTrimFurther = 1,
          },
       };
       status = BC250_WDDM_CALL(&ws->host, MakeResident, &make_resident);
