@@ -466,15 +466,25 @@ vk_wddm2_fence_wait(struct radv_wddm2_winsys *ws, struct vk_wddm2_fence *fence)
       .hDevice = ws->device_h,
       .StateType = D3DKMT_DEVICESTATE_EXECUTION,
    };
+   status = BC250_WDDM_CALL(&ws->host, GetDeviceState, &get_state);
+   if (unlikely(!NT_SUCCESS(status))) {
+      fprintf(stderr, "GetDeviceState(EXECUTION): 0x%X\n", status);
+   } else if (get_state.ExecutionState != D3DKMT_DEVICEEXECUTION_ACTIVE) {
+      fprintf(stderr, "device execution state: %i\n", get_state.ExecutionState);
 
-   if (get_state.ExecutionState == D3DKMT_DEVICEEXECUTION_ERROR_DMAPAGEFAULT) {
-      get_state.StateType = D3DKMT_DEVICESTATE_PAGE_FAULT;
-      status = BC250_WDDM_CALL(&ws->host, GetDeviceState, &get_state);
-      D3DKMT_DEVICEPAGEFAULT_STATE fault = get_state.PageFaultState;
+      if (get_state.ExecutionState == D3DKMT_DEVICEEXECUTION_ERROR_DMAPAGEFAULT) {
+         get_state.StateType = D3DKMT_DEVICESTATE_PAGE_FAULT;
+         status = BC250_WDDM_CALL(&ws->host, GetDeviceState, &get_state);
+         if (unlikely(!NT_SUCCESS(status))) {
+            fprintf(stderr, "GetDeviceState(PAGE_FAULT): 0x%X\n", status);
+            return false;
+         }
+         D3DKMT_DEVICEPAGEFAULT_STATE fault = get_state.PageFaultState;
 
-      fprintf(stderr, "faulted VA: 0x%" PRIx64 ", error: 0x%x (vendor specific: %i), flags: %i, stage: %i\n",
-             fault.FaultedVirtualAddress, fault.FaultErrorCode.GeneralErrorCode,
-             fault.FaultErrorCode.DeviceSpecificCode, fault.PageFaultFlags, fault.FaultedPipelineStage);
+         fprintf(stderr, "faulted VA: 0x%" PRIx64 ", error: 0x%x (vendor specific: %i), flags: %i, stage: %i\n",
+                fault.FaultedVirtualAddress, fault.FaultErrorCode.GeneralErrorCode,
+                fault.FaultErrorCode.DeviceSpecificCode, fault.PageFaultFlags, fault.FaultedPipelineStage);
+      }
       return false;
    }
 
