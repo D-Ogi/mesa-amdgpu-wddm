@@ -58,6 +58,10 @@ enum radeon_bo_flag { /* bitfield */
                       RADEON_FLAG_VM_PAD_1PAGE = (1 << 15),
                       RADEON_FLAG_ENCRYPTED = (1 << 16),
                       RADEON_FLAG_EMULATE_SPARSE_RESIDENCY = (1 << 17),
+                      /* An allocation the driver makes for itself, not one the application asked for.
+                       * radv_bo_create sets it from its is_internal argument. The WDDM2 winsys keeps
+                       * such an allocation resident with MustSucceed (radv_wddm2_bo.c). */
+                      RADEON_FLAG_INTERNAL = (1 << 18),
 };
 
 enum radeon_ctx_priority {

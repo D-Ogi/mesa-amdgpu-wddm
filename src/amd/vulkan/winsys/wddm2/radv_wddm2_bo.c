@@ -444,7 +444,8 @@ radv_wddm2_init_null_prt_bo(struct radv_wddm2_winsys *ws)
       struct radeon_winsys_bo *bo = NULL;
       result = ws->base.buffer_create(&ws->base, 8 * 1024 * 1024, 65536, RADEON_DOMAIN_VRAM,
                                       RADEON_FLAG_CPU_ACCESS | RADEON_FLAG_READ_ONLY |
-                                         RADEON_FLAG_NO_INTERPROCESS_SHARING | RADEON_FLAG_PREFER_LOCAL_BO,
+                                         RADEON_FLAG_NO_INTERPROCESS_SHARING | RADEON_FLAG_PREFER_LOCAL_BO |
+                                         RADEON_FLAG_INTERNAL,
                                       RADV_BO_PRIORITY_VIRTUAL, 0, NULL, &bo);
       if (result == VK_SUCCESS) {
          /* BC2A does not implement ZERO_VRAM: initialise explicitly before
@@ -751,15 +752,23 @@ radv_wddm2_bo_create_internal(struct radeon_winsys *_ws, uint64_t size, unsigned
    uint64_t paging_fence_value = map.PagingFenceValue;
 
    if (all_resident) {
+      /* BD-096 (7f16adb0): MustSucceed puts the device in error when the allocation cannot be made
+       * resident (d3dukmdt.h), so a budget failure became a device loss. CantTrimFurther may exceed
+       * the current budget and fails only above the maximum budget, without removing the device.
+       *
+       * An allocation the driver makes for itself (RADEON_FLAG_INTERNAL: the shader arena, command
+       * buffers, upload and scratch buffers) keeps MustSucceed with it. The application never asked for
+       * that memory, cannot make it smaller and cannot free it, and a pipeline compile or a submission
+       * that does not get it has no smaller choice to make; the video memory manager pages other memory
+       * out first and only a request it cannot satisfy at all removes the device. Rise of the Tomb
+       * Raider died in lab sessions 486 to 488 on a pipeline whose shader arena was refused. */
       D3DDDI_MAKERESIDENT make_resident = {
          .hPagingQueue = ws->paging_queue_h,
          .NumAllocations = 1,
          .AllocationList = &bo->base.handle,
          .Flags = {
-            /* BD-096 (7f16adb0): MustSucceed puts the device in error when the allocation cannot be made
-             * resident (d3dukmdt.h), so a budget failure became a device loss. CantTrimFurther may exceed
-             * the current budget and fails only above the maximum budget, without removing the device. */
             .CantTrimFurther = 1,
+            .MustSucceed = (flags & RADEON_FLAG_INTERNAL) ? 1u : 0u,
          },
       };
       status = BC250_WDDM_CALL(&ws->host, MakeResident, &make_resident);
@@ -965,15 +974,14 @@ radv_wddm2_bo_from_handle(struct radeon_winsys *_ws, void *handle, unsigned prio
    if (alloc_size)
       *alloc_size = bo->base.size;
 
-   /* Make the allocation resident */
+   /* Make the allocation resident. An opened allocation belongs to the application or to another
+    * process, never to this driver, so it never takes MustSucceed (BD-096, 7f16adb0): a budget failure
+    * is reported as VK_ERROR_OUT_OF_DEVICE_MEMORY and the device survives. */
    D3DDDI_MAKERESIDENT make_resident = {
       .hPagingQueue = ws->paging_queue_h,
       .NumAllocations = 1,
       .AllocationList = &bo->base.handle,
       .Flags = {
-         /* BD-096 (7f16adb0): MustSucceed puts the device in error when the allocation cannot be made
-          * resident (d3dukmdt.h), so a budget failure became a device loss. CantTrimFurther may exceed
-          * the current budget and fails only above the maximum budget, without removing the device. */
          .CantTrimFurther = 1,
       },
    };
@@ -1105,15 +1113,15 @@ radv_wddm2_bo_make_resident(struct radeon_winsys *_ws, struct radeon_winsys_bo *
    NTSTATUS status;
 
    if (resident) {
+      /* BD-096 (7f16adb0) with the driver's own allocations kept resident: see the comment at the
+       * MakeResident of radv_wddm2_bo_create_internal. */
       D3DDDI_MAKERESIDENT make_resident = {
          .hPagingQueue = ws->paging_queue_h,
          .NumAllocations = 1,
          .AllocationList = &bo->base.handle,
          .Flags = {
-            /* BD-096 (7f16adb0): MustSucceed puts the device in error when the allocation cannot be made
-             * resident (d3dukmdt.h), so a budget failure became a device loss. CantTrimFurther may exceed
-             * the current budget and fails only above the maximum budget, without removing the device. */
             .CantTrimFurther = 1,
+            .MustSucceed = (bo->flags & RADEON_FLAG_INTERNAL) ? 1u : 0u,
          },
       };
       status = BC250_WDDM_CALL(&ws->host, MakeResident, &make_resident);

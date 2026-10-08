@@ -2840,7 +2840,7 @@ radv_graphics_shaders_create(struct radv_device *device, struct vk_pipeline_cach
              * shaders without a null check (session 486). */
             return VK_ERROR_OUT_OF_DEVICE_MEMORY;
          }
-   }
+      }
    }
    if (gs_copy_binary) {
       *gs_copy_shader = radv_shader_create(device, cache, gs_copy_binary, skip_shaders_cache, gs_copy_debug);
@@ -3080,11 +3080,11 @@ radv_graphics_pipeline_compile(struct radv_graphics_pipeline *pipeline, const Vk
    struct radv_shader_debug_info debug[MESA_VULKAN_SHADER_STAGES] = {0};
    struct radv_shader_debug_info gs_copy_debug = {0};
    result =
-   radv_graphics_shaders_compile(compiler_info, cache, stages, &gfx_state->key.gfx_state, pipeline->base.is_internal,
-                                 retained_shaders, noop_fs, debug, binaries, &gs_copy_debug, &gs_copy_binary);
+      radv_graphics_shaders_compile(compiler_info, cache, stages, &gfx_state->key.gfx_state, pipeline->base.is_internal,
+                                    retained_shaders, noop_fs, debug, binaries, &gs_copy_debug, &gs_copy_binary);
    if (result == VK_SUCCESS) {
       result = radv_graphics_shaders_create(device, cache, skip_shaders_cache, pipeline->base.shaders, binaries, debug,
-                                &pipeline->base.gs_copy_shader, gs_copy_binary, &gs_copy_debug);
+                                            &pipeline->base.gs_copy_shader, gs_copy_binary, &gs_copy_debug);
    }
 
    /* Only a pipeline that has all of its shaders goes into the shaders cache. An entry without them
