@@ -19,6 +19,7 @@
 #include "radv_pipeline_compute.h"
 #include "radv_pipeline_graphics.h"
 #include "radv_pipeline_rt.h"
+#include "radv_pipeline_stage_cover.h"
 #include "radv_shader.h"
 #include "vk_alloc.h"
 #include "vk_pipeline.h"
@@ -298,10 +299,15 @@ radv_pipeline_cache_object_deserialize(struct vk_pipeline_cache *cache, const vo
    unsigned num_shaders = blob_read_uint32(blob);
    unsigned data_size = blob_read_uint32(blob);
 
-   /* session 486: an entry with no shader was written by a driver that cached a pipeline whose shaders
-    * could not be created. Refusing it here makes vk_pipeline_cache_lookup_object remove it from the
-    * disk cache, so the next run of the application does not read it again. */
-   if (!num_shaders)
+   /* session 486: an entry with neither a shader nor data was written by a driver that cached a
+    * pipeline whose shaders could not be created. Refusing it here makes vk_pipeline_cache_lookup_object
+    * remove it from the disk cache, so the next run of the application does not read it again.
+    *
+    * An entry with no shader but with data is legal and must be kept: a ray tracing pipeline stores its
+    * stage and group table in data, and a library whose stages are all imported from other libraries
+    * has no compiled shader of its own (radv_ray_tracing_pipeline_cache_insert). Deleting those would
+    * make such a pipeline compile again at every launch. */
+   if (!num_shaders && !data_size)
       return NULL;
 
    struct radv_pipeline_cache_object *object;
@@ -426,10 +432,38 @@ radv_graphics_pipeline_cache_search(struct radv_device *device, struct vk_pipeli
    if (!pipeline_obj)
       return false;
 
-   /* session 486: an entry with no shader comes from a driver that cached a pipeline whose shaders could
-    * not be created, and it may be on disk from an earlier run. Treat it as a miss, so the shaders
-    * are compiled again instead of handing the caller a pipeline without them. */
-   if (!pipeline_obj->num_shaders) {
+   /* session 486: read the entry before it touches the pipeline. An entry may come from the disk cache
+    * of an earlier run, possibly of a driver that cached a pipeline whose shaders could not be created,
+    * so it is input and not an invariant. It must hold at least one shader, name each slot once, place
+    * the geometry copy shader last and behind a geometry shader, and cover every stage the application
+    * asked for (radv_pipeline_stage_cover.h). Anything else is a miss: the shaders are compiled again
+    * instead of handing the caller a pipeline that the state setup and the draw read without a null
+    * check. The shape rules stood in an assert, which a build with NDEBUG drops and a build without it
+    * turns into an abort inside the application. */
+   uint32_t slots = 0;
+   bool has_gs_copy = false;
+   bool usable = pipeline_obj->num_shaders > 0;
+
+   for (unsigned i = 0; i < pipeline_obj->num_shaders && usable; i++) {
+      const mesa_shader_stage s = pipeline_obj->shaders[i]->info.stage;
+
+      if ((unsigned)s >= MESA_VULKAN_SHADER_STAGES) {
+         usable = false;
+      } else if (s == MESA_SHADER_VERTEX && i > 0) {
+         /* The GS copy shader is a vertex shader placed after all other stages. */
+         usable = !has_gs_copy && i == pipeline_obj->num_shaders - 1 && (slots & BITFIELD_BIT(MESA_SHADER_GEOMETRY));
+         has_gs_copy = true;
+      } else if (slots & BITFIELD_BIT(s)) {
+         usable = false; /* two shaders for one slot */
+      } else {
+         slots |= BITFIELD_BIT(s);
+      }
+   }
+
+   if (usable)
+      usable = radv_pipeline_stages_covered(pipeline->active_stages, slots);
+
+   if (!usable) {
       vk_pipeline_cache_object_unref(&device->vk, &pipeline_obj->base);
       *found_in_application_cache = false;
       return false;
@@ -438,8 +472,6 @@ radv_graphics_pipeline_cache_search(struct radv_device *device, struct vk_pipeli
    for (unsigned i = 0; i < pipeline_obj->num_shaders; i++) {
       mesa_shader_stage s = pipeline_obj->shaders[i]->info.stage;
       if (s == MESA_SHADER_VERTEX && i > 0) {
-         /* The GS copy-shader is a VS placed after all other stages */
-         assert(i == pipeline_obj->num_shaders - 1 && pipeline->base.shaders[MESA_SHADER_GEOMETRY]);
          pipeline->base.gs_copy_shader = radv_shader_ref(pipeline_obj->shaders[i]);
       } else {
          pipeline->base.shaders[s] = radv_shader_ref(pipeline_obj->shaders[i]);

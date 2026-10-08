@@ -100,9 +100,13 @@ radv_winsys_cs_bo_create(struct radv_winsys_cs *cs, uint32_t ib_size)
    const bool avoid_vram = cs->is_secondary && !can_always_use_ib2;
    const enum radeon_bo_domain domain = avoid_vram ? RADEON_DOMAIN_GTT : cs->ws->cs_domain(cs->ws);
    const enum radeon_bo_flag gtt_wc_flag = avoid_vram ? 0 : RADEON_FLAG_GTT_WC;
-   /* Bypass GL2 because command buffers are read only once and it's better for latency. */
+   /* Bypass GL2 because command buffers are read only once and it's better for latency.
+    * RADEON_FLAG_INTERNAL: the indirect buffer of a command buffer is the driver's own allocation, not
+    * part of the application's working set, and a submission that cannot get one has nowhere to go
+    * (radv_wddm2_bo.c). The amdgpu winsys tests single flag bits, so it ignores this one. */
    const enum radeon_bo_flag flags = RADEON_FLAG_CPU_ACCESS | RADEON_FLAG_NO_INTERPROCESS_SHARING |
-                                     RADEON_FLAG_READ_ONLY | RADEON_FLAG_GL2_BYPASS | gtt_wc_flag;
+                                     RADEON_FLAG_READ_ONLY | RADEON_FLAG_GL2_BYPASS | RADEON_FLAG_INTERNAL |
+                                     gtt_wc_flag;
 
    return cs->ws->buffer_create(cs->ws, ib_size, info->ip[cs->hw_ip].ib_alignment, domain, flags,
                                 RADV_BO_PRIORITY_CS, 0, NULL, &cs->ib_buffer);

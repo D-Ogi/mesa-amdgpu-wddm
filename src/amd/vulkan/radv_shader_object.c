@@ -592,11 +592,15 @@ radv_shader_object_create_linked(VkDevice _device, uint32_t createInfoCount, con
                                                     gs_copy_binary, &gs_copy_debug);
    }
    if (compile_result != VK_SUCCESS) {
-      /* session 486: no shader object without its shader. */
+      /* session 486: no shader object without its shader. Release what the successful path below
+       * releases: the shaders, their binaries, the NIR of every stage and the geometry copy NIR. */
       radv_shader_object_discard_shaders(device, shaders, binaries);
       if (gs_copy_shader)
          radv_shader_unref(device, gs_copy_shader);
       free(gs_copy_binary);
+      for (unsigned i = 0; i < MESA_VULKAN_SHADER_STAGES; i++)
+         ralloc_free(stages[i].nir);
+      ralloc_free(stages[MESA_SHADER_GEOMETRY].gs_copy_shader);
       return vk_error(device, compile_result);
    }
 

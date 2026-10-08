@@ -23,6 +23,7 @@
 #include "radv_physical_device.h"
 #include "radv_pipeline_binary.h"
 #include "radv_pipeline_cache.h"
+#include "radv_pipeline_stage_cover.h"
 #include "radv_shader.h"
 #include "radv_shader_args.h"
 #include "shader_enums.h"
@@ -3296,24 +3297,51 @@ radv_graphics_pipeline_import_binaries(struct radv_device *device, struct radv_g
  * the shaders cache - can leave a stage empty, so check the shaders the state setup needs before it
  * runs and refuse the pipeline instead of faulting on a null shader.
  */
-static VkResult
-radv_graphics_pipeline_check_shaders(const struct radv_graphics_pipeline *pipeline)
+/* radv_pipeline_stage_cover.h mirrors two enums by value, because a host test drives its rule without
+ * a Vulkan or a Mesa header. These hold the two in step. */
+/* The casts keep MSVC quiet about a comparison of two enumeration types (C5287). */
+static_assert((uint32_t)RADV_STAGE_COVER_VERTEX == (uint32_t)VK_SHADER_STAGE_VERTEX_BIT &&
+                 (uint32_t)RADV_STAGE_COVER_TESS_CTRL == (uint32_t)VK_SHADER_STAGE_TESSELLATION_CONTROL_BIT &&
+                 (uint32_t)RADV_STAGE_COVER_TESS_EVAL == (uint32_t)VK_SHADER_STAGE_TESSELLATION_EVALUATION_BIT &&
+                 (uint32_t)RADV_STAGE_COVER_GEOMETRY == (uint32_t)VK_SHADER_STAGE_GEOMETRY_BIT &&
+                 (uint32_t)RADV_STAGE_COVER_FRAGMENT == (uint32_t)VK_SHADER_STAGE_FRAGMENT_BIT &&
+                 (uint32_t)RADV_STAGE_COVER_TASK == (uint32_t)VK_SHADER_STAGE_TASK_BIT_EXT &&
+                 (uint32_t)RADV_STAGE_COVER_MESH == (uint32_t)VK_SHADER_STAGE_MESH_BIT_EXT,
+              "radv_stage_cover_stage must hold VkShaderStageFlagBits values");
+static_assert((uint32_t)RADV_STAGE_COVER_SLOT_VERTEX == BITFIELD_BIT(MESA_SHADER_VERTEX) &&
+                 (uint32_t)RADV_STAGE_COVER_SLOT_TESS_CTRL == BITFIELD_BIT(MESA_SHADER_TESS_CTRL) &&
+                 (uint32_t)RADV_STAGE_COVER_SLOT_TESS_EVAL == BITFIELD_BIT(MESA_SHADER_TESS_EVAL) &&
+                 (uint32_t)RADV_STAGE_COVER_SLOT_GEOMETRY == BITFIELD_BIT(MESA_SHADER_GEOMETRY) &&
+                 (uint32_t)RADV_STAGE_COVER_SLOT_FRAGMENT == BITFIELD_BIT(MESA_SHADER_FRAGMENT) &&
+                 (uint32_t)RADV_STAGE_COVER_SLOT_TASK == BITFIELD_BIT(MESA_SHADER_TASK) &&
+                 (uint32_t)RADV_STAGE_COVER_SLOT_MESH == BITFIELD_BIT(MESA_SHADER_MESH),
+              "radv_stage_cover_slot must hold 1u << mesa_shader_stage");
+
+static uint32_t
+radv_pipeline_shader_slots(struct radv_shader *const *shaders)
 {
-   const VkShaderStageFlags pre_raster_stages = VK_SHADER_STAGE_VERTEX_BIT |
-                                                VK_SHADER_STAGE_TESSELLATION_CONTROL_BIT |
-                                                VK_SHADER_STAGE_TESSELLATION_EVALUATION_BIT |
-                                                VK_SHADER_STAGE_GEOMETRY_BIT;
+   uint32_t slots = 0;
 
-   /* radv_get_shader() answers for the merged stages of GFX9 and later, where the vertex shader
-    * lives in the tessellation control or the geometry slot. */
-   if ((pipeline->active_stages & pre_raster_stages) && !radv_get_shader(pipeline->base.shaders, MESA_SHADER_VERTEX))
-      return VK_ERROR_OUT_OF_DEVICE_MEMORY;
+   for (unsigned s = 0; s < MESA_VULKAN_SHADER_STAGES; s++) {
+      if (shaders[s])
+         slots |= BITFIELD_BIT(s);
+   }
 
-   if ((pipeline->active_stages & VK_SHADER_STAGE_MESH_BIT_EXT) && !pipeline->base.shaders[MESA_SHADER_MESH])
-      return VK_ERROR_OUT_OF_DEVICE_MEMORY;
+   return slots;
+}
 
-   if ((pipeline->active_stages & VK_SHADER_STAGE_TASK_BIT_EXT) && !pipeline->base.shaders[MESA_SHADER_TASK])
-      return VK_ERROR_OUT_OF_DEVICE_MEMORY;
+static VkResult
+radv_graphics_pipeline_check_shaders(struct radv_device *device, const struct radv_graphics_pipeline *pipeline)
+{
+   const uint32_t slots = radv_pipeline_shader_slots(pipeline->base.shaders);
+
+   /* Every stage the application asked for must resolve to a shader, including through the stage
+    * merging of GFX9 and later (radv_pipeline_stage_cover.h). The state setup and the draw read the
+    * shaders without a null check (session 486). */
+   if (!radv_pipeline_stages_covered(pipeline->active_stages, slots)) {
+      return vk_errorf(device, VK_ERROR_OUT_OF_DEVICE_MEMORY,
+                       "pipeline stages 0x%x have shaders in slots 0x%x only", pipeline->active_stages, slots);
+   }
 
    return VK_SUCCESS;
 }
@@ -3362,7 +3390,7 @@ radv_graphics_pipeline_init(struct radv_graphics_pipeline *pipeline, struct radv
    }
 
    if (result == VK_SUCCESS)
-      result = radv_graphics_pipeline_check_shaders(pipeline);
+      result = radv_graphics_pipeline_check_shaders(device, pipeline);
 
    if (result != VK_SUCCESS) {
       radv_graphics_pipeline_state_finish(device, &gfx_state);
