@@ -800,9 +800,10 @@ radv_wddm2_mem_fini(struct radv_wddm2_winsys *ws)
 
 /* C70: true when the allocation may go to the kernel. A device-local allocation that no eviction can
  * fit is refused here, because the MakeResident that would take it evicts the whole process first and
- * fails all the same (K245: 86 s, then STATUS_NO_MEMORY). The two budgets are read again before a
- * refusal: the OS raises them when another process frees memory. The weight of the
- * process is what radv_wddm2_bo_account counts, one total per domain. */
+ * fails all the same (K245: 86 s, then STATUS_NO_MEMORY). The two budgets are read again when the
+ * cached numbers say refuse, and only then, so the second read can turn a refusal into an admission
+ * and never the other way: the OS moves the budget of a process as other processes come and go. The
+ * weight of the process is what radv_wddm2_bo_account counts, one total per domain. */
 bool
 radv_wddm2_mem_admit(struct radv_wddm2_winsys *ws, uint64_t size, bool device_local)
 {
