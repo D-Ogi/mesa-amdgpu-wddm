@@ -2142,7 +2142,7 @@ radv_create_gs_copy_shader(const struct radv_compiler_info *compiler_info, struc
    return gs_copy_binary;
 }
 
-static void
+static VkResult
 radv_graphics_shaders_nir_to_asm(const struct radv_compiler_info *compiler_info, struct vk_pipeline_cache *cache,
                                  struct radv_shader_stage *stages, const struct radv_graphics_state_key *gfx_state,
                                  VkShaderStageFlagBits active_nir_stages, struct radv_shader_debug_info *debug,
@@ -2191,6 +2191,14 @@ radv_graphics_shaders_nir_to_asm(const struct radv_compiler_info *compiler_info,
       }
 
       binaries[s] = radv_shader_nir_to_asm(compiler_info, &stages[s], nir_shaders, shader_count, gfx_state);
+      if (!binaries[s]) {
+         /* The compiler could not produce the binary of this stage, which leaves the pipeline
+          * without a shader for it. Report it to the caller; the pipeline state setup reads the
+          * shaders without a null check (session 486). */
+         if (debug[s].dump_shader)
+            simple_mtx_unlock(compiler_info->debug.shader_dump_mtx);
+         return VK_ERROR_OUT_OF_HOST_MEMORY;
+      }
 
       /* Dump NIR after nir_to_asm, because ACO modifies it. */
       char *nir_string = NULL;
@@ -2215,6 +2223,11 @@ radv_graphics_shaders_nir_to_asm(const struct radv_compiler_info *compiler_info,
       if (s == MESA_SHADER_GEOMETRY && !stages[s].info.is_ngg) {
          *gs_copy_binary =
             radv_create_gs_copy_shader(compiler_info, cache, &stages[MESA_SHADER_GEOMETRY], gfx_state, gs_copy_debug);
+         if (!*gs_copy_binary) {
+            /* A legacy geometry shader cannot run without its copy shader (session 486). */
+            stages[s].feedback.duration += os_time_get_nano() - stage_start;
+            return VK_ERROR_OUT_OF_HOST_MEMORY;
+         }
       }
 
       stages[s].feedback.duration += os_time_get_nano() - stage_start;
@@ -2223,6 +2236,8 @@ radv_graphics_shaders_nir_to_asm(const struct radv_compiler_info *compiler_info,
       if (nir_shaders[1])
          active_nir_stages &= ~(1 << nir_shaders[1]->info.stage);
    }
+
+   return VK_SUCCESS;
 }
 
 static void
@@ -2450,7 +2465,7 @@ radv_skip_graphics_pipeline_compile(const struct radv_device *device, const VkGr
    return binary_stages == active_stages;
 }
 
-void
+VkResult
 radv_graphics_shaders_compile(const struct radv_compiler_info *compiler_info, struct vk_pipeline_cache *cache,
                               struct radv_shader_stage *stages, const struct radv_graphics_state_key *gfx_state,
                               bool is_internal, struct radv_retained_shaders *retained_shaders, bool noop_fs,
@@ -2485,6 +2500,12 @@ radv_graphics_shaders_compile(const struct radv_compiler_info *compiler_info, st
       }
 
       stages[s].feedback.duration += os_time_get_nano() - stage_start;
+
+      if (!stages[s].nir) {
+         /* The shader has no NIR: the SPIR-V could not be translated, which only happens when an
+          * allocation failed. Report it instead of building a pipeline without this stage (session 486). */
+         return VK_ERROR_OUT_OF_HOST_MEMORY;
+      }
    }
 
    if (retained_shaders) {
@@ -2799,11 +2820,11 @@ radv_graphics_shaders_compile(const struct radv_compiler_info *compiler_info, st
       radv_get_legacy_gs_info(compiler_info, NULL, &stages[MESA_SHADER_GEOMETRY].info);
 
    /* Compile NIR shaders to AMD assembly. */
-   radv_graphics_shaders_nir_to_asm(compiler_info, cache, stages, gfx_state, active_nir_stages, debug, binaries,
+   return radv_graphics_shaders_nir_to_asm(compiler_info, cache, stages, gfx_state, active_nir_stages, debug, binaries,
                                     gs_copy_debug, gs_copy_binary);
 }
 
-void
+VkResult
 radv_graphics_shaders_create(struct radv_device *device, struct vk_pipeline_cache *cache, bool skip_shaders_cache,
                              struct radv_shader **shaders, struct radv_shader_binary **binaries,
                              struct radv_shader_debug_info *debug, struct radv_shader **gs_copy_shader,
@@ -2811,11 +2832,23 @@ radv_graphics_shaders_create(struct radv_device *device, struct vk_pipeline_cach
 {
    for (int i = 0; i < MESA_VULKAN_SHADER_STAGES; ++i) {
       struct radv_shader_binary *binary = binaries[i];
-      if (binary)
+      if (binary) {
          shaders[i] = radv_shader_create(device, cache, binary, skip_shaders_cache, &debug[i]);
+         if (!shaders[i]) {
+            /* The shader could not be uploaded, most often because the video memory the shader
+             * arena needs is not there. The caller must fail; the pipeline state setup reads the
+             * shaders without a null check (session 486). */
+            return VK_ERROR_OUT_OF_DEVICE_MEMORY;
+         }
    }
-   if (gs_copy_binary)
+   }
+   if (gs_copy_binary) {
       *gs_copy_shader = radv_shader_create(device, cache, gs_copy_binary, skip_shaders_cache, gs_copy_debug);
+      if (!*gs_copy_shader)
+         return VK_ERROR_OUT_OF_DEVICE_MEMORY;
+   }
+
+   return VK_SUCCESS;
 }
 
 static bool
@@ -3046,12 +3079,17 @@ radv_graphics_pipeline_compile(struct radv_graphics_pipeline *pipeline, const Vk
 
    struct radv_shader_debug_info debug[MESA_VULKAN_SHADER_STAGES] = {0};
    struct radv_shader_debug_info gs_copy_debug = {0};
+   result =
    radv_graphics_shaders_compile(compiler_info, cache, stages, &gfx_state->key.gfx_state, pipeline->base.is_internal,
                                  retained_shaders, noop_fs, debug, binaries, &gs_copy_debug, &gs_copy_binary);
-   radv_graphics_shaders_create(device, cache, skip_shaders_cache, pipeline->base.shaders, binaries, debug,
+   if (result == VK_SUCCESS) {
+      result = radv_graphics_shaders_create(device, cache, skip_shaders_cache, pipeline->base.shaders, binaries, debug,
                                 &pipeline->base.gs_copy_shader, gs_copy_binary, &gs_copy_debug);
+   }
 
-   if (!skip_shaders_cache) {
+   /* Only a pipeline that has all of its shaders goes into the shaders cache. An entry without them
+    * is a hit for every later creation of the same pipeline (session 486). */
+   if (result == VK_SUCCESS && !skip_shaders_cache) {
       radv_pipeline_cache_insert(device, cache, &pipeline->base);
    }
 
@@ -3251,6 +3289,35 @@ radv_graphics_pipeline_import_binaries(struct radv_device *device, struct radv_g
    return VK_SUCCESS;
 }
 
+/* session 486: the state setup of a complete graphics pipeline reads the pipeline's shaders without a
+ * null check. radv_pipeline_init_vertex_input_state reads the vertex shader's info, and
+ * radv_pipeline_init_shader_stages_state reads the registers of every stage. Each of the four ways a
+ * pipeline gets its shaders - a compile, imported libraries, imported pipeline binaries and a hit in
+ * the shaders cache - can leave a stage empty, so check the shaders the state setup needs before it
+ * runs and refuse the pipeline instead of faulting on a null shader.
+ */
+static VkResult
+radv_graphics_pipeline_check_shaders(const struct radv_graphics_pipeline *pipeline)
+{
+   const VkShaderStageFlags pre_raster_stages = VK_SHADER_STAGE_VERTEX_BIT |
+                                                VK_SHADER_STAGE_TESSELLATION_CONTROL_BIT |
+                                                VK_SHADER_STAGE_TESSELLATION_EVALUATION_BIT |
+                                                VK_SHADER_STAGE_GEOMETRY_BIT;
+
+   /* radv_get_shader() answers for the merged stages of GFX9 and later, where the vertex shader
+    * lives in the tessellation control or the geometry slot. */
+   if ((pipeline->active_stages & pre_raster_stages) && !radv_get_shader(pipeline->base.shaders, MESA_SHADER_VERTEX))
+      return VK_ERROR_OUT_OF_DEVICE_MEMORY;
+
+   if ((pipeline->active_stages & VK_SHADER_STAGE_MESH_BIT_EXT) && !pipeline->base.shaders[MESA_SHADER_MESH])
+      return VK_ERROR_OUT_OF_DEVICE_MEMORY;
+
+   if ((pipeline->active_stages & VK_SHADER_STAGE_TASK_BIT_EXT) && !pipeline->base.shaders[MESA_SHADER_TASK])
+      return VK_ERROR_OUT_OF_DEVICE_MEMORY;
+
+   return VK_SUCCESS;
+}
+
 static VkResult
 radv_graphics_pipeline_init(struct radv_graphics_pipeline *pipeline, struct radv_device *device,
                             struct vk_pipeline_cache *cache, const VkGraphicsPipelineCreateInfo *pCreateInfo)
@@ -3293,6 +3360,9 @@ radv_graphics_pipeline_init(struct radv_graphics_pipeline *pipeline, struct radv
             radv_graphics_pipeline_compile(pipeline, pCreateInfo, &gfx_state, device, cache, fast_linking_enabled);
       }
    }
+
+   if (result == VK_SUCCESS)
+      result = radv_graphics_pipeline_check_shaders(pipeline);
 
    if (result != VK_SUCCESS) {
       radv_graphics_pipeline_state_finish(device, &gfx_state);

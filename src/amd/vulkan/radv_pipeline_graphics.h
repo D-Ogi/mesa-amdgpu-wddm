@@ -654,18 +654,19 @@ struct radv_ps_epilog_state {
 struct radv_ps_epilog_key radv_generate_ps_epilog_key(const struct radv_compiler_info *compiler_info,
                                                       const struct radv_ps_epilog_state *state);
 
-void radv_graphics_shaders_compile(const struct radv_compiler_info *compiler_info, struct vk_pipeline_cache *cache,
-                                   struct radv_shader_stage *stages, const struct radv_graphics_state_key *gfx_state,
-                                   bool is_internal, struct radv_retained_shaders *retained_shaders, bool noop_fs,
-                                   struct radv_shader_debug_info *debug, struct radv_shader_binary **binaries,
-                                   struct radv_shader_debug_info *gs_copy_debug,
-                                   struct radv_shader_binary **gs_copy_binary);
+VkResult radv_graphics_shaders_compile(const struct radv_compiler_info *compiler_info, struct vk_pipeline_cache *cache,
+                                       struct radv_shader_stage *stages,
+                                       const struct radv_graphics_state_key *gfx_state, bool is_internal,
+                                       struct radv_retained_shaders *retained_shaders, bool noop_fs,
+                                       struct radv_shader_debug_info *debug, struct radv_shader_binary **binaries,
+                                       struct radv_shader_debug_info *gs_copy_debug,
+                                       struct radv_shader_binary **gs_copy_binary);
 
-void radv_graphics_shaders_create(struct radv_device *device, struct vk_pipeline_cache *cache, bool skip_shaders_cache,
-                                  struct radv_shader **shaders, struct radv_shader_binary **binaries,
-                                  struct radv_shader_debug_info *debug, struct radv_shader **gs_copy_shader,
-                                  struct radv_shader_binary *gs_copy_binary,
-                                  struct radv_shader_debug_info *gs_copy_debug);
+VkResult radv_graphics_shaders_create(struct radv_device *device, struct vk_pipeline_cache *cache,
+                                      bool skip_shaders_cache, struct radv_shader **shaders,
+                                      struct radv_shader_binary **binaries, struct radv_shader_debug_info *debug,
+                                      struct radv_shader **gs_copy_shader, struct radv_shader_binary *gs_copy_binary,
+                                      struct radv_shader_debug_info *gs_copy_debug);
 
 struct radv_vgt_shader_key {
    uint8_t tess : 1;
