@@ -78,7 +78,7 @@ struct radv_wddm2_mem_limits {
    /* D3DKMT_QUERYVIDEOMEMORYINFO.Budget of each segment group. */
    uint64_t budget_local;
    uint64_t budget_nonlocal;
-   /* D3DKMT_SEGMENTSIZEINFO: DedicatedVideoMemorySize, and it plus SharedSystemMemorySize. */
+   /* D3DKMT_SEGMENTSIZEINFO: DedicatedVideoMemorySize, and the three sizes of that struct added up. */
    uint64_t segment_local;
    uint64_t segment_total;
 };
@@ -122,7 +122,12 @@ radv_wddm2_mem_usable_segment_total(struct radv_wddm2_mem_limits limits)
 }
 
 /* The total this process may hold across both segment groups before the rule refuses more
- * device-local memory. Zero means "no threshold", so nothing is refused. */
+ * device-local memory. Zero means "no threshold", so nothing is refused.
+ *
+ * The segment total only ever raises the threshold, through the floor. It never caps it. A cap at the
+ * reported segments would refuse inside the overshoot on a part whose segment total sits within
+ * 3.125 % of the budget total, and the lab has no measurement that says a process cannot pass the
+ * reported segment total. Only the budget and its measured overshoot may refuse. */
 static inline uint64_t
 radv_wddm2_mem_threshold(struct radv_wddm2_mem_limits limits)
 {
@@ -136,9 +141,6 @@ radv_wddm2_mem_threshold(struct radv_wddm2_mem_limits limits)
       const uint64_t floor_bytes = segments / RADV_WDDM2_MEM_FLOOR_DEN * RADV_WDDM2_MEM_FLOOR_NUM;
       if (threshold < floor_bytes)
          threshold = floor_bytes;
-      /* Nothing can hold more than the two segments together. */
-      if (threshold > segments)
-         threshold = segments;
    }
    return threshold;
 }
