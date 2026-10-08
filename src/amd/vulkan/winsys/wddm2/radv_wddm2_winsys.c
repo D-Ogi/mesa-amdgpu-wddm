@@ -633,16 +633,16 @@ radv_wddm2_winsys_query_value(struct radeon_winsys *_ws, enum radeon_value_id va
 
 /* ------------------------------------------------------------------ C70: device-local pre-check */
 
-/* The budget the OS gives this process, the local plus the non-local segment group
+/* The budget the OS gives this process in each segment group
  * (D3DKMT_QUERYVIDEOMEMORYINFO.Budget, d3dkmthk.h). False when either query fails. */
 static bool
-radv_wddm2_query_budget_total(struct radv_wddm2_winsys *ws, uint64_t *budget)
+radv_wddm2_query_budget_groups(struct radv_wddm2_winsys *ws, uint64_t *local, uint64_t *non_local)
 {
    static const D3DKMT_MEMORY_SEGMENT_GROUP groups[2] = {
       D3DKMT_MEMORY_SEGMENT_GROUP_LOCAL,
       D3DKMT_MEMORY_SEGMENT_GROUP_NON_LOCAL,
    };
-   uint64_t total = 0;
+   uint64_t budget[2] = {0, 0};
 
    for (unsigned i = 0; i < 2; i++) {
       D3DKMT_QUERYVIDEOMEMORYINFO mem_info = {
@@ -651,11 +651,12 @@ radv_wddm2_query_budget_total(struct radv_wddm2_winsys *ws, uint64_t *budget)
       };
       if (!NT_SUCCESS(WDDM2_DISPATCH(QueryVideoMemoryInfo(&mem_info))))
          return false;
-      total += mem_info.Budget;
+      budget[i] = mem_info.Budget;
    }
-   if (!total)
+   if (!budget[0] || !budget[1])
       return false;
-   *budget = total;
+   *local = budget[0];
+   *non_local = budget[1];
    return true;
 }
 
@@ -667,17 +668,23 @@ radv_wddm2_query_budget_total(struct radv_wddm2_winsys *ws, uint64_t *budget)
 bool
 radv_wddm2_query_budget(struct radeon_winsys *base, uint64_t *budget)
 {
-   return radv_wddm2_query_budget_total(radv_wddm2_winsys(base), budget);
+   uint64_t local, non_local;
+   if (!radv_wddm2_query_budget_groups(radv_wddm2_winsys(base), &local, &non_local))
+      return false;
+   *budget = local + non_local;
+   return true;
 }
 
-/* The two segments of the adapter together. Zero when the query fails. */
-static uint64_t
-radv_wddm2_query_segment_total(struct radv_wddm2_winsys *ws)
+/* The local segment of the adapter, and the two segments together. Zero when the query fails. */
+static void
+radv_wddm2_query_segments(struct radv_wddm2_winsys *ws, uint64_t *local, uint64_t *total)
 {
    D3DKMT_SEGMENTSIZEINFO segment = {};
+   *local = *total = 0;
    if (!NT_SUCCESS(query_adapter_info(ws, KMTQAITYPE_GETSEGMENTSIZE, &segment, sizeof(segment))))
-      return 0;
-   return segment.DedicatedVideoMemorySize + segment.SharedSystemMemorySize;
+      return;
+   *local = segment.DedicatedVideoMemorySize;
+   *total = segment.DedicatedVideoMemorySize + segment.SharedSystemMemorySize;
 }
 
 /* C70 (BD-096): read the limits once and say whether the rule is on. Without a budget there is no
@@ -689,16 +696,21 @@ radv_wddm2_mem_init(struct radv_wddm2_winsys *ws)
       radv_wddm2_mem_precheck_parse(getenv(RADV_WDDM2_MEM_PRECHECK_ENV));
 
    simple_mtx_init(&ws->mem.lock, mtx_plain);
-   ws->mem.limits.segment_total = radv_wddm2_query_segment_total(ws);
-   if (!radv_wddm2_query_budget_total(ws, &ws->mem.limits.budget_total))
-      ws->mem.limits.budget_total = 0;
-   ws->mem.enabled = choice.enabled && ws->mem.limits.budget_total != 0;
+   radv_wddm2_query_segments(ws, &ws->mem.limits.segment_local, &ws->mem.limits.segment_total);
+   if (!radv_wddm2_query_budget_groups(ws, &ws->mem.limits.budget_local,
+                                      &ws->mem.limits.budget_nonlocal))
+      ws->mem.limits.budget_local = ws->mem.limits.budget_nonlocal = 0;
+   ws->mem.enabled = choice.enabled && radv_wddm2_mem_budget_total(ws->mem.limits) != 0;
 
    fprintf(stderr,
-           "BC250 memory precheck: %s%s budget %.1f MiB segments %.1f MiB threshold %.1f MiB\n",
+           "BC250 memory precheck: %s%s budget %.1f MiB (local %.1f, non-local %.1f) "
+           "segments %.1f MiB (local %.1f) threshold %.1f MiB\n",
            ws->mem.enabled ? "on" : "off", choice.invalid ? " (invalid value, default used)" : "",
-           ws->mem.limits.budget_total / (1024.0 * 1024.0),
+           radv_wddm2_mem_budget_total(ws->mem.limits) / (1024.0 * 1024.0),
+           ws->mem.limits.budget_local / (1024.0 * 1024.0),
+           ws->mem.limits.budget_nonlocal / (1024.0 * 1024.0),
            ws->mem.limits.segment_total / (1024.0 * 1024.0),
+           ws->mem.limits.segment_local / (1024.0 * 1024.0),
            radv_wddm2_mem_threshold(ws->mem.limits) / (1024.0 * 1024.0));
 }
 
@@ -711,10 +723,10 @@ radv_wddm2_mem_fini(struct radv_wddm2_winsys *ws)
    simple_mtx_destroy(&ws->mem.lock);
 }
 
-/* C70: true when the allocation may go to the kernel. A device-local allocation that would put this
- * process over the maximum budget is refused here, because the MakeResident that would take it
- * evicts the whole process first and fails all the same (K245: 86 s, then STATUS_NO_MEMORY). The
- * budget is read again before a refusal: the OS raises it when another process frees memory. */
+/* C70: true when the allocation may go to the kernel. A device-local allocation that no eviction can
+ * fit is refused here, because the MakeResident that would take it evicts the whole process first and
+ * fails all the same (K245: 86 s, then STATUS_NO_MEMORY). The two budgets are read again before a
+ * refusal: the OS raises them when another process frees memory. */
 bool
 radv_wddm2_mem_admit(struct radv_wddm2_winsys *ws, uint64_t size, bool device_local)
 {
@@ -722,22 +734,26 @@ radv_wddm2_mem_admit(struct radv_wddm2_winsys *ws, uint64_t size, bool device_lo
       return true;
 
    simple_mtx_lock(&ws->mem.lock);
-   const uint64_t held = ws->mem.local_bytes + ws->mem.nonlocal_bytes;
-   enum radv_wddm2_mem_verdict verdict = radv_wddm2_mem_check(ws->mem.limits, true, held, size);
+   const uint64_t held_local = ws->mem.local_bytes, held_nonlocal = ws->mem.nonlocal_bytes;
+   enum radv_wddm2_mem_verdict verdict =
+      radv_wddm2_mem_check(ws->mem.limits, true, held_local, held_nonlocal, size);
    if (verdict != RADV_WDDM2_MEM_ADMIT) {
-      uint64_t budget;
-      if (radv_wddm2_query_budget_total(ws, &budget))
-         ws->mem.limits.budget_total = budget;
-      verdict = radv_wddm2_mem_check(ws->mem.limits, true, held, size);
+      uint64_t local, non_local;
+      if (radv_wddm2_query_budget_groups(ws, &local, &non_local)) {
+         ws->mem.limits.budget_local = local;
+         ws->mem.limits.budget_nonlocal = non_local;
+      }
+      verdict = radv_wddm2_mem_check(ws->mem.limits, true, held_local, held_nonlocal, size);
    }
    if (verdict != RADV_WDDM2_MEM_ADMIT) {
       ws->mem.refusals++;
       if (!ws->mem.logged) {
          ws->mem.logged = true;
          fprintf(stderr,
-                 "BC250 memory precheck: %s, %" PRIu64 " bytes device-local, held %.1f MiB, "
-                 "threshold %.1f MiB (C70; %s=off turns this off)\n",
-                 radv_wddm2_mem_verdict_name(verdict), size, held / (1024.0 * 1024.0),
+                 "BC250 memory precheck: %s, %" PRIu64 " bytes device-local, held %.1f MiB "
+                 "local and %.1f MiB non-local, threshold %.1f MiB (C70; %s=off turns this off)\n",
+                 radv_wddm2_mem_verdict_name(verdict), size, held_local / (1024.0 * 1024.0),
+                 held_nonlocal / (1024.0 * 1024.0),
                  radv_wddm2_mem_threshold(ws->mem.limits) / (1024.0 * 1024.0),
                  RADV_WDDM2_MEM_PRECHECK_ENV);
       }
