@@ -35,7 +35,10 @@ static bool invert;
  * fake heaps. So the tests below use that sum and also prove, in test_split_does_not_matter, that no
  * verdict moves when the split changes. The local segment is the one of facts M65 (0x1FD736000
  * bytes, 8151.2 MiB) and the host-visible heap the same adapter reports is 4008.7 MiB, so the two
- * segments together are about 12159.9 MiB. */
+ * segments together are about 12159.9 MiB. That last number is an estimate, and only its order
+ * matters: the floor it sets, 9120 MiB, is far below the threshold the budget sets, so it does not
+ * bind, and the segment total no longer caps the threshold. The ICD reads the real number and prints
+ * it in its first line. */
 static const uint64_t LAB_BUDGET_TOTAL = 10943ull * MIB + 819ull * 1024ull; /* 10943.799 MiB */
 static const uint64_t LAB_SEGMENT_LOCAL = 0x1FD736000ull;                   /* 8151.2 MiB */
 static const uint64_t LAB_SEGMENTS = 0x1FD736000ull + 4008ull * MIB + 734ull * 1024ull;
@@ -96,11 +99,15 @@ test_threshold(void)
    limits.segment_total = 12288ull * MIB;
    CHECK(radv_wddm2_mem_threshold(limits) == 9216ull * MIB);
 
-   /* The two segments together are the ceiling of the threshold. */
+   /* The segment total never caps the threshold. A part whose segments sit just above its budget
+    * total keeps the measured overshoot: a cap there would refuse inside it. */
    limits.budget_local = 8192ull * MIB;
    limits.budget_nonlocal = 4096ull * MIB;
    limits.segment_total = 12288ull * MIB;
-   CHECK(radv_wddm2_mem_threshold(limits) == 12288ull * MIB);
+   CHECK(radv_wddm2_mem_threshold(limits) == 12288ull * MIB + 384ull * MIB);
+   limits.segment_total = 12289ull * MIB;
+   CHECK(radv_wddm2_mem_threshold(limits) == 12288ull * MIB + 384ull * MIB);
+   CHECK(radv_wddm2_mem_check(limits, true, 12288ull * MIB, 0, CHUNK) == RADV_WDDM2_MEM_ADMIT);
 
    /* A segment total under the budget is not a capacity, so it is dropped and does not cap. */
    limits.budget_local = 7168ull * MIB;

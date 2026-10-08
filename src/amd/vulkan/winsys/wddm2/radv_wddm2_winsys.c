@@ -675,7 +675,9 @@ radv_wddm2_query_budget(struct radeon_winsys *base, uint64_t *budget)
    return true;
 }
 
-/* The local segment of the adapter, and the two segments together. Zero when the query fails. */
+/* The local segment of the adapter, and every segment of it added up. Zero when the query fails.
+ * The total takes all three sizes of the struct, so that a part with dedicated system memory is not
+ * understated. The total only raises the threshold, through its floor (radv_wddm2_mem_threshold). */
 static void
 radv_wddm2_query_segments(struct radv_wddm2_winsys *ws, uint64_t *local, uint64_t *total)
 {
@@ -684,7 +686,8 @@ radv_wddm2_query_segments(struct radv_wddm2_winsys *ws, uint64_t *local, uint64_
    if (!NT_SUCCESS(query_adapter_info(ws, KMTQAITYPE_GETSEGMENTSIZE, &segment, sizeof(segment))))
       return;
    *local = segment.DedicatedVideoMemorySize;
-   *total = segment.DedicatedVideoMemorySize + segment.SharedSystemMemorySize;
+   *total = segment.DedicatedVideoMemorySize + segment.DedicatedSystemMemorySize +
+            segment.SharedSystemMemorySize;
 }
 
 /* C70 (BD-096): read the limits once and say whether the rule is on. Without a budget there is no
