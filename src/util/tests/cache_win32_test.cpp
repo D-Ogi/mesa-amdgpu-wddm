@@ -729,6 +729,36 @@ TEST_F(CacheWin32, DatabaseTypeIsMultiFile)
    disk_cache_destroy(custom);
 }
 
+TEST_F(CacheWin32, SingleFileTypeIsMultiFile)
+{
+   /* Steam sets MESA_DISK_CACHE_SINGLE_FILE for the games it starts. The single-file cache has no
+    * Windows implementation: left as it is, it gets no directory and stays off without a word, and
+    * the driver compiles its shaders again at every start.
+    */
+   os_set_option("MESA_DISK_CACHE_SINGLE_FILE", "true", true);
+   struct disk_cache *cache = disk_cache_create(gpu_name, driver_id, 0);
+   os_unset_option("MESA_DISK_CACHE_SINGLE_FILE");
+   ASSERT_TRUE(cache && !cache->path_init_failed);
+   EXPECT_EQ(cache->type, DISK_CACHE_MULTI_FILE);
+
+   std::error_code ec;
+   EXPECT_TRUE(fs::equivalent(fs::u8path(cache->path), cache_dir(), ec));
+
+   /* One writer thread on Windows: four of them compressing and writing during a compile burst add
+    * heat to an APU whose CPU and GPU share one die.
+    */
+   EXPECT_EQ(cache->cache_queue.num_threads, 1u);
+
+   std::vector<uint8_t> data = make_data(23, 5000);
+   cache_key key;
+   put(cache, data, key);
+   disk_cache_wait_for_idle(cache);
+   EXPECT_TRUE(holds(cache, key, data));
+   EXPECT_EQ(scan(cache_dir()).entries, 1u);
+
+   disk_cache_destroy(cache);
+}
+
 TEST_F(CacheWin32, DefaultDirectoryForUserAccountsOnly)
 {
    const std::wstring saved = get_env(L"LOCALAPPDATA");
