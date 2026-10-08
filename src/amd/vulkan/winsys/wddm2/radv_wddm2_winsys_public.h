@@ -28,6 +28,8 @@
 #ifndef RADV_WDDM2_WINSYS_PUBLIC_H
 #define RADV_WDDM2_WINSYS_PUBLIC_H
 
+#include <stdbool.h>
+#include <stdint.h>
 #include <vulkan/vulkan_core.h>
 #include "util/bitset.h"
 
@@ -37,5 +39,8 @@ struct vk_dx_adapter_info;
 
 VkResult radv_wddm2_winsys_create(const struct vk_dx_adapter_info *adapter_info,
                                   const BITSET_WORD *debug_flags, const struct bc250_host *host, struct radeon_winsys **winsys);
+
+/* BD-096: the process's video memory budget, local plus non-local (QueryVideoMemoryInfo). */
+bool radv_wddm2_query_budget(struct radeon_winsys *ws, uint64_t *budget);
 
 #endif /* RADV_WDDM2_WINSYS_PUBLIC_H */

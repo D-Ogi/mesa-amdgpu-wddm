@@ -52,6 +52,8 @@ struct radv_wddm2_bo {
    uint64_t sparse_high_va;
    bool emulate_sparse_residency;
    bool borrowed;
+   /* C70: base.size of this BO is in the winsys memory count, so the destruction takes it out. */
+   bool counted;
 
    void *map;
    uint32_t handle;
