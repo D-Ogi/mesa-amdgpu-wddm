@@ -209,17 +209,25 @@ radv_compute_pipeline_compile(const VkComputePipelineCreateInfo *pCreateInfo, st
    struct radv_shader_debug_info cs_dbg = {0};
    struct radv_shader_binary *cs_binary =
       radv_compile_cs(compiler_info, &cs_stage, pipeline->base.is_internal, &cs_dbg);
-   pipeline->base.shaders[MESA_SHADER_COMPUTE] =
-      radv_shader_create(device, cache, cs_binary, skip_shaders_cache, &cs_dbg);
+   if (cs_binary) {
+      pipeline->base.shaders[MESA_SHADER_COMPUTE] =
+         radv_shader_create(device, cache, cs_binary, skip_shaders_cache, &cs_dbg);
+   }
+
+   /* session 486: a compute pipeline without its shader is not a pipeline. Report the failure instead of
+    * caching an entry that carries no shader and letting the dispatch path read a null shader. */
+   if (!pipeline->base.shaders[MESA_SHADER_COMPUTE])
+      result = cs_binary ? VK_ERROR_OUT_OF_DEVICE_MEMORY : VK_ERROR_OUT_OF_HOST_MEMORY;
 
    cs_stage.feedback.duration += os_time_get_nano() - stage_start;
 
-   if (!skip_shaders_cache) {
+   if (result == VK_SUCCESS && !skip_shaders_cache) {
       radv_pipeline_cache_insert(device, cache, &pipeline->base);
    }
 
    free(cs_binary);
-   if (radv_can_dump_shader_stats(&device->compiler_info, cs_stage.nir)) {
+   if (pipeline->base.shaders[MESA_SHADER_COMPUTE] &&
+       radv_can_dump_shader_stats(&device->compiler_info, cs_stage.nir)) {
       radv_dump_shader_stats(device, &pipeline->base, pipeline->base.shaders[MESA_SHADER_COMPUTE], stderr);
    }
    radv_pipeline_stage_finish(&cs_stage);

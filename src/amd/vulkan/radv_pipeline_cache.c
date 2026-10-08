@@ -210,6 +210,8 @@ radv_shader_create(struct radv_device *device, struct vk_pipeline_cache *cache, 
    if (radv_is_cache_disabled(&device->compiler_info, cache) || skip_cache || (dbg && dbg->dump_shader)) {
       struct radv_shader *shader;
       radv_shader_create_uncached(device, binary, false, NULL, dbg, &shader);
+      if (!shader)
+         return NULL; /* session 486: do not read the debug fields of a shader that was not created. */
       /* radv_parse_binary_debug_info() might have been done earlier by radv_shader_dump_asm(). Skip it in that case to
        * avoid memory leaks. */
       if (!dbg || (!dbg->statistics && !dbg->ir_string && !dbg->disasm_string && !dbg->debug_info_count))
@@ -418,6 +420,15 @@ radv_graphics_pipeline_cache_search(struct radv_device *device, struct vk_pipeli
    if (!pipeline_obj)
       return false;
 
+   /* session 486: an entry with no shader comes from a driver that cached a pipeline whose shaders could
+    * not be created, and it may be on disk from an earlier run. Treat it as a miss, so the shaders
+    * are compiled again instead of handing the caller a pipeline without them. */
+   if (!pipeline_obj->num_shaders) {
+      vk_pipeline_cache_object_unref(&device->vk, &pipeline_obj->base);
+      *found_in_application_cache = false;
+      return false;
+   }
+
    for (unsigned i = 0; i < pipeline_obj->num_shaders; i++) {
       mesa_shader_stage s = pipeline_obj->shaders[i]->info.stage;
       if (s == MESA_SHADER_VERTEX && i > 0) {
@@ -443,7 +454,15 @@ radv_compute_pipeline_cache_search(struct radv_device *device, struct vk_pipelin
    if (!pipeline_obj)
       return false;
 
-   assert(pipeline_obj->num_shaders == 1);
+   /* session 486: an entry of another shape than one compute shader cannot build this pipeline. Treat it
+    * as a miss instead of reading a shader that is not there. */
+   if (pipeline_obj->num_shaders != 1) {
+      assert(!pipeline_obj->num_shaders);
+      vk_pipeline_cache_object_unref(&device->vk, &pipeline_obj->base);
+      *found_in_application_cache = false;
+      return false;
+   }
+
    pipeline->base.shaders[MESA_SHADER_COMPUTE] = radv_shader_ref(pipeline_obj->shaders[0]);
 
    pipeline->base.cache_object = &pipeline_obj->base;
@@ -464,6 +483,12 @@ radv_pipeline_cache_insert(struct radv_device *device, struct vk_pipeline_cache 
    for (unsigned i = 0; i < MESA_VULKAN_SHADER_STAGES; ++i)
       num_shaders += pipeline->shaders[i] ? 1 : 0;
    num_shaders += pipeline->gs_copy_shader ? 1 : 0;
+
+   /* session 486: never cache a pipeline that has no shader. Such an entry carries nothing, and a later
+    * search that hit it would return a pipeline without shaders. A graphics pipeline library that
+    * holds only state has no shaders by design and loses nothing by compiling nothing again. */
+   if (!num_shaders)
+      return;
 
    struct radv_pipeline_cache_object *pipeline_obj;
    pipeline_obj = radv_pipeline_cache_object_create(&device->vk, num_shaders, pipeline->blake3, 0);

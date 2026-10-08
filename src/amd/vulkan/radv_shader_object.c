@@ -181,6 +181,23 @@ radv_shader_stage_init(const VkShaderCreateInfoEXT *sinfo, struct radv_shader_st
    vk_pipeline_hash_shader_stage(0, &pipeline_info, NULL, out_stage->shader_blake3);
 }
 
+/* session 486: drop what one radv_graphics_shaders_compile() and radv_graphics_shaders_create() pair
+ * produced before it failed. Nothing has taken ownership of those shaders and binaries yet.
+ */
+static void
+radv_shader_object_discard_shaders(struct radv_device *device, struct radv_shader **shaders,
+                                   struct radv_shader_binary **binaries)
+{
+   for (unsigned i = 0; i < MESA_VULKAN_SHADER_STAGES; i++) {
+      if (shaders[i]) {
+         radv_shader_unref(device, shaders[i]);
+         shaders[i] = NULL;
+      }
+      free(binaries[i]);
+      binaries[i] = NULL;
+   }
+}
+
 static VkResult
 radv_shader_object_init_graphics(struct radv_shader_object *shader_obj, struct radv_device *device,
                                  const VkShaderCreateInfoEXT *pCreateInfo)
@@ -222,16 +239,26 @@ radv_shader_object_init_graphics(struct radv_shader_object *shader_obj, struct r
       struct radv_shader_debug_info debug[MESA_VULKAN_SHADER_STAGES] = {0};
       struct radv_shader_debug_info gs_copy_debug = {0};
 
-      radv_graphics_shaders_compile(&device->compiler_info, NULL, stages, &gfx_state, false, NULL, false, debug,
-                                    binaries, &gs_copy_debug, &shader_obj->gs.copy_binary);
-      radv_graphics_shaders_create(device, NULL, true, shaders, binaries, debug, &shader_obj->gs.copy_shader,
-                                   shader_obj->gs.copy_binary, &gs_copy_debug);
+      VkResult compile_result =
+         radv_graphics_shaders_compile(&device->compiler_info, NULL, stages, &gfx_state, false, NULL, false, debug,
+                                       binaries, &gs_copy_debug, &shader_obj->gs.copy_binary);
+      if (compile_result == VK_SUCCESS) {
+         compile_result = radv_graphics_shaders_create(device, NULL, true, shaders, binaries, debug,
+                                                       &shader_obj->gs.copy_shader, shader_obj->gs.copy_binary,
+                                                       &gs_copy_debug);
+      }
 
       shader = shaders[stage];
       binary = binaries[stage];
 
       ralloc_free(stages[stage].nir);
       ralloc_free(stages[MESA_SHADER_GEOMETRY].gs_copy_shader);
+
+      if (compile_result != VK_SUCCESS) {
+         /* session 486: no shader object without its shader. */
+         radv_shader_object_discard_shaders(device, shaders, binaries);
+         return compile_result;
+      }
 
       shader_obj->shader = shader;
       shader_obj->binary = binary;
@@ -254,16 +281,26 @@ radv_shader_object_init_graphics(struct radv_shader_object *shader_obj, struct r
          radv_shader_stage_init(pCreateInfo, &stages[stage]);
          stages[stage].next_stage = next_stage;
 
-         radv_graphics_shaders_compile(&device->compiler_info, NULL, stages, &gfx_state, false, NULL, false, debug,
-                                       binaries, &gs_copy_debug, &shader_obj->gs.copy_binary);
-         radv_graphics_shaders_create(device, NULL, true, shaders, binaries, debug, &shader_obj->gs.copy_shader,
-                                      shader_obj->gs.copy_binary, &gs_copy_debug);
+         VkResult compile_result =
+            radv_graphics_shaders_compile(&device->compiler_info, NULL, stages, &gfx_state, false, NULL, false, debug,
+                                          binaries, &gs_copy_debug, &shader_obj->gs.copy_binary);
+         if (compile_result == VK_SUCCESS) {
+            compile_result = radv_graphics_shaders_create(device, NULL, true, shaders, binaries, debug,
+                                                          &shader_obj->gs.copy_shader, shader_obj->gs.copy_binary,
+                                                          &gs_copy_debug);
+         }
 
          shader = shaders[stage];
          binary = binaries[stage];
 
          ralloc_free(stages[stage].nir);
          ralloc_free(stages[MESA_SHADER_GEOMETRY].gs_copy_shader);
+
+         if (compile_result != VK_SUCCESS) {
+            /* session 486: no shader object without its shader. */
+            radv_shader_object_discard_shaders(device, shaders, binaries);
+            return compile_result;
+         }
 
          if (stage == MESA_SHADER_VERTEX) {
             if (next_stage == MESA_SHADER_TESS_CTRL) {
@@ -547,10 +584,21 @@ radv_shader_object_create_linked(VkDevice _device, uint32_t createInfoCount, con
    struct radv_shader_binary *gs_copy_binary = NULL;
    struct radv_shader_debug_info gs_copy_debug = {0};
 
-   radv_graphics_shaders_compile(&device->compiler_info, NULL, stages, &gfx_state, false, NULL, false, debug, binaries,
-                                 &gs_copy_debug, &gs_copy_binary);
-   radv_graphics_shaders_create(device, NULL, true, shaders, binaries, debug, &gs_copy_shader, gs_copy_binary,
-                                &gs_copy_debug);
+   VkResult compile_result = radv_graphics_shaders_compile(&device->compiler_info, NULL, stages, &gfx_state, false,
+                                                           NULL, false, debug, binaries, &gs_copy_debug,
+                                                           &gs_copy_binary);
+   if (compile_result == VK_SUCCESS) {
+      compile_result = radv_graphics_shaders_create(device, NULL, true, shaders, binaries, debug, &gs_copy_shader,
+                                                    gs_copy_binary, &gs_copy_debug);
+   }
+   if (compile_result != VK_SUCCESS) {
+      /* session 486: no shader object without its shader. */
+      radv_shader_object_discard_shaders(device, shaders, binaries);
+      if (gs_copy_shader)
+         radv_shader_unref(device, gs_copy_shader);
+      free(gs_copy_binary);
+      return vk_error(device, compile_result);
+   }
 
    for (unsigned i = 0; i < createInfoCount; i++) {
       const VkShaderCreateInfoEXT *pCreateInfo = &pCreateInfos[i];
