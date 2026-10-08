@@ -659,6 +659,17 @@ radv_wddm2_query_budget_total(struct radv_wddm2_winsys *ws, uint64_t *budget)
    return true;
 }
 
+/* BD-096: the same budget for VK_EXT_memory_budget (radv_physical_device.c). With the default
+ * memory overflow policy an allocation fails only above the maximum budget, and the current budget
+ * is the share the OS asks the process to keep to. The application is told that share, so that it
+ * can size itself to it. False when either query fails, and the caller then keeps the heap-size
+ * arithmetic. */
+bool
+radv_wddm2_query_budget(struct radeon_winsys *base, uint64_t *budget)
+{
+   return radv_wddm2_query_budget_total(radv_wddm2_winsys(base), budget);
+}
+
 /* The two segments of the adapter together. Zero when the query fails. */
 static uint64_t
 radv_wddm2_query_segment_total(struct radv_wddm2_winsys *ws)
