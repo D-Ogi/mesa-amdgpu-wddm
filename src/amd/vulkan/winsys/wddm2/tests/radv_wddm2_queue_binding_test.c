@@ -63,6 +63,16 @@ vk_wddm2_dispatch_table_get(void)
    abort();
 }
 
+/* The budget pre-check lives in radv_wddm2_winsys.c, which these tests do not link: it reads the adapter's
+ * memory budget through the host, and the fake host of these tests has no budget. Its own host test
+ * (radv_wddm2_mem_precheck_test) covers the verdict; here every allocation is admitted, which is the
+ * behaviour every queue test measured before the pre-check existed. */
+bool
+radv_wddm2_mem_admit(struct radv_wddm2_winsys *ws, uint64_t size, bool device_local)
+{
+   return true;
+}
+
 /* Only the submission path of other WDDM drivers dumps its private data. */
 void
 print_hex_data(FILE *fp, const void *data, uint32_t size)
