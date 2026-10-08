@@ -284,6 +284,11 @@ radv_bo_create_for_image(struct radv_device *device, struct vk_object_base *obje
    if (pdev->info.has_smem_partial_oob_access_bug && !is_internal)
       flags |= RADEON_FLAG_VM_PAD_1PAGE;
 
+   /* The winsys needs to know whose allocation this is: a driver allocation keeps its residency even when
+    * the application's allocations may fail (radv_wddm2_mem_overflow.h, lab session 486). */
+   if (is_internal)
+      flags |= RADEON_FLAG_INTERNAL;
+
    result = ws->buffer_create(ws, size, alignment, domain, flags, priority, address, image, out_bo);
    if (result != VK_SUCCESS)
       return result;

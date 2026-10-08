@@ -106,6 +106,47 @@ test_bits(void)
    CHECK(b.must_succeed == 0);
 }
 
+/* The driver's own allocations (RADEON_FLAG_INTERNAL): a user policy never takes MustSucceed away from
+ * them, and the bisect switch still means the flags of the earlier ICDs for every allocation. */
+static void
+test_bits_internal(void)
+{
+   struct radv_wddm2_make_resident_bits b;
+
+   b = radv_wddm2_mem_overflow_bits_internal(RADV_WDDM2_MEM_OVERFLOW_ALLOW);
+   CHECK(b.cant_trim_further == 1 && b.must_succeed == 1);
+   b = radv_wddm2_mem_overflow_bits_internal(RADV_WDDM2_MEM_OVERFLOW_STRICT);
+   CHECK(b.cant_trim_further == 1 && b.must_succeed == 1);
+   /* legacy keeps its own flags for both classes. */
+   b = radv_wddm2_mem_overflow_bits_internal(RADV_WDDM2_MEM_OVERFLOW_LEGACY);
+   CHECK(b.cant_trim_further == 0 && b.must_succeed == 1);
+
+   /* Every user value, from every source, keeps MustSucceed on a driver allocation. */
+   b = radv_wddm2_mem_overflow_bits_internal(radv_wddm2_mem_overflow_choose(NULL, "strict", NULL, NULL).policy);
+   CHECK(b.must_succeed == 1);
+   b = radv_wddm2_mem_overflow_bits_internal(radv_wddm2_mem_overflow_choose(NULL, NULL, "strict", NULL).policy);
+   CHECK(b.must_succeed == 1);
+   b = radv_wddm2_mem_overflow_bits_internal(radv_wddm2_mem_overflow_choose(NULL, NULL, NULL, "allow").policy);
+   CHECK(b.must_succeed == 1);
+   b = radv_wddm2_mem_overflow_bits_internal(radv_wddm2_mem_overflow_choose(NULL, NULL, NULL, NULL).policy);
+   CHECK(b.must_succeed == 1);
+   /* An invalid value falls back to the default, which is still MustSucceed for a driver allocation. */
+   b = radv_wddm2_mem_overflow_bits_internal(radv_wddm2_mem_overflow_choose(NULL, "nonsense", NULL, NULL).policy);
+   CHECK(b.must_succeed == 1);
+
+   /* The two classes differ exactly where the policy allows a failure. */
+   for (int p = RADV_WDDM2_MEM_OVERFLOW_ALLOW; p <= RADV_WDDM2_MEM_OVERFLOW_LEGACY; p++) {
+      const struct radv_wddm2_make_resident_bits app = radv_wddm2_mem_overflow_bits((enum radv_wddm2_mem_overflow)p);
+      const struct radv_wddm2_make_resident_bits drv =
+         radv_wddm2_mem_overflow_bits_internal((enum radv_wddm2_mem_overflow)p);
+      CHECK(drv.must_succeed == 1);
+      CHECK(drv.must_succeed >= app.must_succeed);
+      /* The reference page: MustSucceed may only be set with CantTrimFurther. The legacy pair is the
+       * one exception, and it is kept on purpose, because it is what the earlier ICDs sent. */
+      CHECK(drv.cant_trim_further == 1 || p == RADV_WDDM2_MEM_OVERFLOW_LEGACY);
+   }
+}
+
 static void
 test_app_key(void)
 {
@@ -126,6 +167,7 @@ static const struct {
    {"parse", test_parse},
    {"choose", test_choose},
    {"bits", test_bits},
+   {"bits_internal", test_bits_internal},
    {"app_key", test_app_key},
 };
 

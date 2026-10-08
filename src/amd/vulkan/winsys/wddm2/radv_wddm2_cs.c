@@ -1461,7 +1461,8 @@ radv_wddm2_bc250_submit(struct radv_wddm2_ctx *ctx, struct radv_wddm2_queue *que
          struct radeon_winsys_bo *replacement = NULL;
          uint64_t capacity = align64(bytes, 4096);
          VkResult result = ws->base.buffer_create(&ws->base, capacity, 4096, RADEON_DOMAIN_GTT,
-                                                  RADEON_FLAG_CPU_ACCESS | RADEON_FLAG_NO_INTERPROCESS_SHARING,
+                                                  RADEON_FLAG_CPU_ACCESS | RADEON_FLAG_NO_INTERPROCESS_SHARING |
+                                                     RADEON_FLAG_INTERNAL,
                                                   0, 0, NULL, &replacement);
          if (result != VK_SUCCESS)
             return STATUS_NO_MEMORY;

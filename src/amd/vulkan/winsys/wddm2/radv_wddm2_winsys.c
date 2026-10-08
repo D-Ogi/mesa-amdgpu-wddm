@@ -90,10 +90,11 @@ radv_wddm2_read_hklm_sz(const char *subkey, const char *value, char *buf, DWORD 
    return "invalid";
 }
 
-/* BD-096: the memory overflow policy of this process (radv_wddm2_mem_overflow.h), as MakeResident flags,
- * with one log line that names the value and where it came from. */
+/* BD-096: the memory overflow policy of this process (radv_wddm2_mem_overflow.h), as the MakeResident
+ * flags of the application's allocations and of the driver's own, with one log line that names the value
+ * and where it came from. */
 static unsigned
-radv_wddm2_read_mem_overflow(void)
+radv_wddm2_read_mem_overflow(unsigned *out_internal)
 {
    char exe_path[MAX_PATH], app_key[MAX_PATH + 64], app_buf[64], reg_buf[64];
    const char *exe = NULL, *app = NULL;
@@ -112,14 +113,19 @@ radv_wddm2_read_mem_overflow(void)
    const struct radv_wddm2_mem_overflow_choice choice = radv_wddm2_mem_overflow_choose(
       getenv("BC250_MAKERESIDENT_LEGACY"), getenv("AMDGPU_WDDM_VK_MEM_OVERFLOW"), app, reg);
    const struct radv_wddm2_make_resident_bits bits = radv_wddm2_mem_overflow_bits(choice.policy);
-   D3DDDI_MAKERESIDENT_FLAGS flags = {0};
+   const struct radv_wddm2_make_resident_bits internal = radv_wddm2_mem_overflow_bits_internal(choice.policy);
+   D3DDDI_MAKERESIDENT_FLAGS flags = {0}, internal_flags = {0};
    flags.CantTrimFurther = bits.cant_trim_further;
    flags.MustSucceed = bits.must_succeed;
-   amdgpu_wddm_log("BC250 memory: overflow=%s source=%s%s exe=%s MakeResident CantTrimFurther=%u MustSucceed=%u\n",
+   internal_flags.CantTrimFurther = internal.cant_trim_further;
+   internal_flags.MustSucceed = internal.must_succeed;
+   amdgpu_wddm_log("BC250 memory: overflow=%s source=%s%s exe=%s MakeResident CantTrimFurther=%u MustSucceed=%u, "
+                   "driver allocations CantTrimFurther=%u MustSucceed=%u\n",
                    radv_wddm2_mem_overflow_name(choice.policy),
                    radv_wddm2_mem_overflow_source_name(choice.source),
                    choice.invalid ? " (invalid value, default used)" : "", exe ? exe : "?",
-                   bits.cant_trim_further, bits.must_succeed);
+                   bits.cant_trim_further, bits.must_succeed, internal.cant_trim_further, internal.must_succeed);
+   *out_internal = internal_flags.Value;
    return flags.Value;
 }
 
@@ -910,7 +916,7 @@ radv_wddm2_winsys_create(const struct vk_dx_adapter_info *adapter_info,
    ws->dump_ibs = !!(BITSET_TEST(debug_flags, RADV_DEBUG_DUMP_IBS));
    const char *trace_submits = getenv("BC250_TRACE_SUBMITS");
    ws->bc250_trace_submits = trace_submits && strcmp(trace_submits, "1") == 0;
-   ws->make_resident_flags = radv_wddm2_read_mem_overflow();
+   ws->make_resident_flags = radv_wddm2_read_mem_overflow(&ws->make_resident_flags_internal);
    radv_winsys_bo_list_init(&ws->global_bo_list);
    radv_winsys_bo_log_init(&ws->bo_log, debug_flags);
 

@@ -298,6 +298,12 @@ radv_pipeline_cache_object_deserialize(struct vk_pipeline_cache *cache, const vo
    unsigned num_shaders = blob_read_uint32(blob);
    unsigned data_size = blob_read_uint32(blob);
 
+   /* session 486: an entry with no shader was written by a driver that cached a pipeline whose shaders
+    * could not be created. Refusing it here makes vk_pipeline_cache_lookup_object remove it from the
+    * disk cache, so the next run of the application does not read it again. */
+   if (!num_shaders)
+      return NULL;
+
    struct radv_pipeline_cache_object *object;
    object = radv_pipeline_cache_object_create(&device->vk, num_shaders, key_data, data_size);
    if (!object)
@@ -455,9 +461,9 @@ radv_compute_pipeline_cache_search(struct radv_device *device, struct vk_pipelin
       return false;
 
    /* session 486: an entry of another shape than one compute shader cannot build this pipeline. Treat it
-    * as a miss instead of reading a shader that is not there. */
+    * as a miss instead of reading a shader that is not there. This stood behind an assert, which a build
+    * with NDEBUG removes and a build without it turns into an abort inside the application. */
    if (pipeline_obj->num_shaders != 1) {
-      assert(!pipeline_obj->num_shaders);
       vk_pipeline_cache_object_unref(&device->vk, &pipeline_obj->base);
       *found_in_application_cache = false;
       return false;

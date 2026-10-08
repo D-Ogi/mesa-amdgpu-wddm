@@ -30,6 +30,23 @@
  *           STATUS_GRAPHICS_GPU_EXCEPTION_ON_DEVICE (VK_ERROR_DEVICE_LOST). Only the bisect switch
  *           BC250_MAKERESIDENT_LEGACY=1 selects it, for a negative control on the lab.
  *
+ * A policy governs the allocations of the application: what it asked for with vkAllocateMemory, and the
+ * allocations the driver makes to hold them. The driver's own allocations - the shader arena, command
+ * buffers, descriptor and upload buffers, scratch, query pools - are not the application's working set.
+ * They are small, the application cannot make them smaller, and a pipeline or a submission that cannot
+ * get one has nowhere to go. They keep MustSucceed, which the ICDs before BD-096 used for everything, and
+ * take CantTrimFurther with it as the reference page requires, so that the video memory manager pages
+ * other memory out first and only a request that cannot be satisfied at all removes the device
+ * (radv_wddm2_mem_overflow_bits_internal; RADEON_FLAG_INTERNAL marks these allocations, from the
+ * is_internal argument that radv_bo_create already carries). LEGACY keeps its exact flags for both
+ * classes, so the bisect switch still selects the behaviour of the earlier ICDs and nothing else.
+ *
+ * Why the two classes differ (lab session 486, Rise of the Tomb Raider, 2026-10-08): the shader arena of
+ * a pipeline compile could not be made resident, radv_shader_create returned nothing, and the pipeline
+ * was built without its shaders. The pipeline code reports that failure now, but a compile that fails
+ * ends the frame all the same, and the application has no way to free the memory of a shader it must
+ * have. tester.20, with MustSucceed on every allocation, ran the same scene.
+ *
  * Precedence (the first source that names a value wins; an empty string counts as absent):
  *   1. environment BC250_MAKERESIDENT_LEGACY=1          (bisect only)
  *   2. environment AMDGPU_WDDM_VK_MEM_OVERFLOW
@@ -183,6 +200,21 @@ radv_wddm2_mem_overflow_bits(enum radv_wddm2_mem_overflow policy)
       bits.cant_trim_further = 1;
       break;
    }
+   return bits;
+}
+
+/* The flags of an allocation the driver makes for itself (RADEON_FLAG_INTERNAL). A user policy never
+ * takes MustSucceed away from these, because the application cannot free them and a pipeline or a
+ * submission that does not get one has no smaller choice to make. LEGACY keeps its own flags, so the
+ * bisect switch means one thing for every allocation. */
+static inline struct radv_wddm2_make_resident_bits
+radv_wddm2_mem_overflow_bits_internal(enum radv_wddm2_mem_overflow policy)
+{
+   struct radv_wddm2_make_resident_bits bits;
+   if (policy == RADV_WDDM2_MEM_OVERFLOW_LEGACY)
+      return radv_wddm2_mem_overflow_bits(policy);
+   bits.cant_trim_further = 1; /* the reference page: MustSucceed needs it */
+   bits.must_succeed = 1;
    return bits;
 }
 

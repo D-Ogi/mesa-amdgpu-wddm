@@ -66,9 +66,11 @@ struct radv_wddm2_winsys {
    bool chain_ib;
    bool dump_ibs;
    bool bc250_trace_submits; /* optional hot-path diagnostic output */
-   /* BD-096: the D3DDDI_MAKERESIDENT_FLAGS.Value of every MakeResident of this winsys, from the memory
-    * overflow policy (radv_wddm2_mem_overflow.h), read once at winsys creation. */
+   /* BD-096: the D3DDDI_MAKERESIDENT_FLAGS.Value of the MakeResident calls of this winsys, from the memory
+    * overflow policy (radv_wddm2_mem_overflow.h), read once at winsys creation. The application's
+    * allocations take the policy; the driver's own allocations (RADEON_FLAG_INTERNAL) keep MustSucceed. */
    unsigned make_resident_flags;
+   unsigned make_resident_flags_internal;
    bool bc250; /* caps blob was ours; allocate/context/submit use the BC2* contract */
    /* bc250 submission of several IBs: false (the default) writes IB2 calls into the gather
     * slot, true copies every IB into it (BC250_IB_NOCOPY=0, or BC250_IB_DWORDS set). */

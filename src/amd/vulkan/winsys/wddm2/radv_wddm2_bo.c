@@ -512,7 +512,8 @@ radv_wddm2_init_null_prt_bo(struct radv_wddm2_winsys *ws)
       struct radeon_winsys_bo *bo = NULL;
       result = ws->base.buffer_create(&ws->base, 8 * 1024 * 1024, 65536, RADEON_DOMAIN_VRAM,
                                       RADEON_FLAG_CPU_ACCESS | RADEON_FLAG_READ_ONLY |
-                                         RADEON_FLAG_NO_INTERPROCESS_SHARING | RADEON_FLAG_PREFER_LOCAL_BO,
+                                         RADEON_FLAG_NO_INTERPROCESS_SHARING | RADEON_FLAG_PREFER_LOCAL_BO |
+                                         RADEON_FLAG_INTERNAL,
                                       RADV_BO_PRIORITY_VIRTUAL, 0, NULL, &bo);
       if (result == VK_SUCCESS) {
          /* BC2A does not implement ZERO_VRAM: initialise explicitly before
@@ -842,20 +843,23 @@ radv_wddm2_bo_create_internal(struct radeon_winsys *_ws, uint64_t size, unsigned
    uint64_t paging_fence_value = map.PagingFenceValue;
 
    if (all_resident) {
+      /* BD-096: the memory overflow policy, never MustSucceed by default (radv_wddm2_mem_overflow.h).
+       * An allocation the driver makes for itself keeps MustSucceed: the application cannot free it and
+       * a pipeline compile or a submission that does not get one has no smaller choice (session 486). */
+      const unsigned resident_flags =
+         (flags & RADEON_FLAG_INTERNAL) ? ws->make_resident_flags_internal : ws->make_resident_flags;
       D3DDDI_MAKERESIDENT make_resident = {
          .hPagingQueue = ws->paging_queue_h,
          .NumAllocations = 1,
          .AllocationList = &bo->base.handle,
-         /* BD-096: the memory overflow policy, never MustSucceed by default (radv_wddm2_mem_overflow.h). */
          .Flags = {
-            .Value = ws->make_resident_flags,
+            .Value = resident_flags,
          },
       };
       status = BC250_WDDM_CALL(&ws->host, MakeResident, &make_resident);
       if (!NT_SUCCESS(status)) {
          amdgpu_wddm_log("MakeResident failed 0x%X, %" PRIu64 " bytes, %" PRIu64 " bytes over budget, flags 0x%X\n",
-                         (unsigned)status, phys_size, (uint64_t)make_resident.NumBytesToTrim,
-                         ws->make_resident_flags);
+                         (unsigned)status, phys_size, (uint64_t)make_resident.NumBytesToTrim, resident_flags);
          result = VK_ERROR_OUT_OF_DEVICE_MEMORY;
          goto error_va_alloc;
       }
@@ -1107,7 +1111,9 @@ radv_wddm2_bo_from_handle(struct radeon_winsys *_ws, void *handle, unsigned prio
    if (alloc_size)
       *alloc_size = bo->base.size;
 
-   /* Make the allocation resident */
+   /* Make the allocation resident. An opened allocation belongs to the application or to another
+    * process, never to this driver, so it takes the memory overflow policy and not the flags of a
+    * driver allocation (radv_wddm2_mem_overflow.h). */
    D3DDDI_MAKERESIDENT make_resident = {
       .hPagingQueue = ws->paging_queue_h,
       .NumAllocations = 1,
@@ -1260,18 +1266,21 @@ radv_wddm2_bo_make_resident(struct radeon_winsys *_ws, struct radeon_winsys_bo *
    NTSTATUS status;
 
    if (resident) {
+      /* A driver allocation keeps MustSucceed, the application's takes the policy (session 486). */
+      const unsigned resident_flags =
+         (bo->flags & RADEON_FLAG_INTERNAL) ? ws->make_resident_flags_internal : ws->make_resident_flags;
       D3DDDI_MAKERESIDENT make_resident = {
          .hPagingQueue = ws->paging_queue_h,
          .NumAllocations = 1,
          .AllocationList = &bo->base.handle,
          .Flags = {
-            .Value = ws->make_resident_flags,
+            .Value = resident_flags,
          },
       };
       status = BC250_WDDM_CALL(&ws->host, MakeResident, &make_resident);
       if (!NT_SUCCESS(status)) {
-         amdgpu_wddm_log("MakeResident failed 0x%X, %" PRIu64 " bytes over budget\n", (unsigned)status,
-                         (uint64_t)make_resident.NumBytesToTrim);
+         amdgpu_wddm_log("MakeResident failed 0x%X, %" PRIu64 " bytes over budget, flags 0x%X\n", (unsigned)status,
+                         (uint64_t)make_resident.NumBytesToTrim, resident_flags);
          return VK_ERROR_OUT_OF_DEVICE_MEMORY;
       }
 
