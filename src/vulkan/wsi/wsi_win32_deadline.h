@@ -204,6 +204,51 @@ wsi_win32_route_usable(const struct wsi_win32_route_state *state)
    return !state->dead;
 }
 
+/* The work a dead route leaves behind, and the one value that releases it.
+ *
+ * The route's synchronisation, read from wsi_common.c (wsi_common_queue_present) and
+ * wsi_common_win32.cpp (wsi_dxgi_blit), for one image i of a DXGI swapchain:
+ *
+ *   1. the application's own queue submission waits for the application's present semaphores and
+ *      signals the image's SHARED blit timeline semaphore to V (chain->blit.semaphores[i],
+ *      ++chain->blit.timeline_values[i]);
+ *   2. wsi_dxgi_blit makes the presenter's D3D12 queue Wait for V on the same object seen as an
+ *      ID3D12Fence (chain->d3d12_blit_fences[i]), execute the copy into the back buffer, and
+ *      Signal V+1, which becomes timeline_values[i];
+ *   3. a SECOND submission on the application's queue waits for V+1 on that semaphore and signals
+ *      the image's Vulkan fence and semaphores - the fence the next acquire of that image waits on.
+ *
+ * Only the presenter's D3D12 queue can take the semaphore to V+1. When that presenter is gone - its
+ * device removed, its queue never draining, the route retired on a deadline - step 3 waits for a
+ * value nothing will ever signal, and the submission stays on the application's queue for the life
+ * of the process. The lab round of 2026-10-09 measured exactly that: the route retired itself after
+ * 2000 ms as it was designed to, vkcube took VK_ERROR_OUT_OF_DATE_KHR, entered its recreate path,
+ * and froze in vkDeviceWaitIdle - which carries no timeout in the API, so no deadline of this route
+ * reaches it. Retiring the route is not enough; the work the route queued has to be retired too.
+ *
+ * The release is a CPU signal of the Vulkan side of that timeline semaphore to the value the
+ * presenter's Signal should have reached (vkSignalSemaphore). It satisfies step 3's wait, the
+ * submission runs - it carries no command buffer on this path, because the copy was the D3D12
+ * queue's - and it signals the image's fence and semaphores. There is no CPU signal for a VkFence
+ * in Vulkan and none is needed: the released submission signals them.
+ *
+ * image_present_value is chain->blit.timeline_values[i], V+1 above, and 0 for an image that was
+ * never presented. semaphore_value is what the semaphore reads now
+ * (vkGetSemaphoreCounterValue). Returns true, with *out_value set, when a CPU signal is needed:
+ * never for an image that was never presented, and never when the value has already been reached,
+ * because vkSignalSemaphore may only raise a timeline semaphore.
+ */
+static inline bool
+wsi_win32_route_retire_value(uint64_t image_present_value, uint64_t semaphore_value,
+                             uint64_t *out_value)
+{
+   if (!image_present_value || semaphore_value >= image_present_value)
+      return false;
+   if (out_value)
+      *out_value = image_present_value;
+   return true;
+}
+
 /* The stages of a first present, in the order the route runs them, and then the acquire of the next
  * frame, which is where the route froze once the present itself ran to the end (BD-105, the lab arm
  * of 2026-10-09). The route logs each stage once per chain while it has not proved itself, so a

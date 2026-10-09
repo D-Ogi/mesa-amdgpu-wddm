@@ -230,6 +230,12 @@ wsi_device_init(struct wsi_device *wsi,
    WSI_GET_CB(GetQueryPoolResults);
    WSI_GET_CB(GetSemaphoreFdKHR);
    WSI_GET_CB(GetSemaphoreWin32HandleKHR);
+   /* Timeline semaphores are core in Vulkan 1.2. The Win32 DXGI present route needs both to
+    * release the queue work a dead presenter left waiting on a shared blit timeline
+    * (wsi_win32_deadline.h, wsi_win32_route_retire_value); every caller checks the pointer.
+    */
+   WSI_GET_CB(GetSemaphoreCounterValue);
+   WSI_GET_CB(SignalSemaphore);
    WSI_GET_CB(ResetFences);
    WSI_GET_CB(QueueSubmit2);
    WSI_GET_CB(SetDebugUtilsObjectNameEXT);

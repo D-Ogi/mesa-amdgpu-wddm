@@ -139,10 +139,11 @@ struct wsi_win32_swapchain {
    uint64_t                     submitted_present_id;
    const char                *route_reason;
    ID3D12Fence              **d3d12_blit_fences;
-   /* The present this chain queued last, and the proof it completed. pending_present_value is the
-    * value wsi_dxgi_blit signalled on d3d12_blit_fences[pending_present_image] after the copy; 0
-    * means no present is outstanding. The acquire reads the fence against it and that, with the
-    * acquire returning, is what lifts the route's deadlines (wsi_win32_deadline.h).
+   /* The present this chain queued last. pending_present_value is the value wsi_dxgi_blit signalled
+    * on d3d12_blit_fences[pending_present_image] after that copy; 0 means no present has been
+    * queued. These two are diagnostic: the expired-acquire line prints them. What lifts the route's
+    * deadlines is the ACQUIRED image's own timeline value and not this pair, because on a two-image
+    * chain the last present always belongs to the other image (wsi_win32_deadline.h).
     */
    uint32_t                     pending_present_image;
    uint64_t                     pending_present_value;
@@ -501,9 +502,16 @@ wsi_win32_list_surface_formats(VkIcdSurfaceBase *icd_surface, struct wsi_device 
    /* The formats without a CPU path are offered only when this device can take the DXGI route
     * now. A driver that cannot make its D3D12 presenter says so here, before the application
     * picks a format, so that the swapchain can still fall back to CPU images.
+    *
+    * A route a deadline already retired counts as unavailable. Without that, an application that
+    * was given its window back went on being offered a format with no CPU path, and the swapchain
+    * it then created on that format answered VK_ERROR_INITIALIZATION_FAILED instead of taking CPU
+    * images: the fallback the retired route exists for would not have been reachable.
     */
    const char *reason = NULL;
+   struct wsi_win32 *win32 = (struct wsi_win32 *)wsi_device->wsi[VK_ICD_WSI_PLATFORM_WIN32];
    const bool dxgi = wsi_win32_device_uses_dxgi(wsi_device) &&
+                     (!win32 || wsi_win32_route_usable(&win32->route)) &&
                      (!wsi_device->win32.route_allowed ||
                       wsi_device->win32.route_allowed(wsi_device->pdevice, &reason));
    unsigned count = 0;
@@ -697,6 +705,71 @@ wsi_win32_stage_log(struct wsi_win32_swapchain *chain, enum wsi_win32_present_st
       return;
    wsi_win32_route_log(chain, "chain %p: first present stage %s", (void *)chain,
                        wsi_win32_present_stage_name(stage));
+}
+
+/* Why the presenter's D3D12 device is gone, or S_OK while it is alive. ID3D12Fence::GetCompletedValue
+ * answers UINT64_MAX for a removed device, which is what arm A2f of the round-3 lab plan read on the
+ * expiry path: have 18446744073709551615 against want 2. That reading is the removal sentinel and not
+ * a fence value, so the only line that says anything more is this one. It costs one virtual call on a
+ * path that has already given up, and it is written whenever a wait of the route expires.
+ */
+static HRESULT
+wsi_win32_device_removed_reason(struct wsi_win32_swapchain *chain)
+{
+   const struct wsi_device *wsi = chain->base.wsi;
+   if (!wsi->win32.get_d3d12_device)
+      return S_OK;
+   ID3D12Device *device = (ID3D12Device *)wsi->win32.get_d3d12_device(chain->base.device);
+   return device ? device->GetDeviceRemovedReason() : S_OK;
+}
+
+/* Releases the queue work a dead route left waiting on its shared blit timelines.
+ *
+ * The rule and the reason are wsi_win32_route_retire_value in wsi_win32_deadline.h: the application's
+ * second submission per presented image waits for the value only the presenter's D3D12 Signal can
+ * reach, and a presenter that is gone leaves that wait outstanding for the life of the process. The
+ * application then freezes not in a call of ours but in its own recovery - vkDeviceWaitIdle of a
+ * resize path, which has no timeout - and no deadline of this route reaches it (BD-105, the lab round
+ * of 2026-10-09).
+ *
+ * Every image of the chain is released, not only the one whose wait expired: a two-image chain had
+ * both presented, and the one that is not being acquired carries the same outstanding wait.
+ *
+ * Signalling a value the presenter's queue may still reach is deliberate. A timeline semaphore takes
+ * the same value twice without harm, the route is dead either way, and the alternative is a thread
+ * that never returns. This runs once per expiry, on a path that is already giving the window back.
+ */
+static void
+wsi_win32_retire_blit_waits(struct wsi_win32_swapchain *chain)
+{
+   const struct wsi_device *wsi = chain->base.wsi;
+
+   if (!chain->is_dxgi || !chain->base.blit.semaphores || !chain->base.blit.timeline_values ||
+       !wsi->SignalSemaphore || !wsi->GetSemaphoreCounterValue)
+      return;
+
+   for (uint32_t i = 0; i < chain->base.image_count; i++) {
+      const VkSemaphore semaphore = chain->base.blit.semaphores[i];
+      uint64_t want = 0, have = 0;
+
+      if (semaphore == VK_NULL_HANDLE)
+         continue;
+      if (wsi->GetSemaphoreCounterValue(chain->base.device, semaphore, &have) != VK_SUCCESS)
+         continue;
+      if (!wsi_win32_route_retire_value(chain->base.blit.timeline_values[i], have, &want))
+         continue;
+
+      const VkSemaphoreSignalInfo signal_info = {
+         VK_STRUCTURE_TYPE_SEMAPHORE_SIGNAL_INFO,
+         NULL,
+         semaphore,
+         want,
+      };
+      const VkResult result = wsi->SignalSemaphore(chain->base.device, &signal_info);
+      wsi_win32_route_log(chain, "chain %p: image %u: the shared blit timeline signalled from the "
+                          "CPU, %" PRIu64 " -> %" PRIu64 " (%d), so the submission the dead route "
+                          "left waiting can complete", (void *)chain, i, have, want, (int)result);
+   }
 }
 
 static VkResult
@@ -1092,6 +1165,8 @@ wsi_win32_flush_d3d12_queue(struct wsi_win32_swapchain *chain)
          wsi_win32_route_log(chain, "chain %p: the D3D12 queue did not drain in %u ms%s",
                              (void *)chain, deadline_ms,
                              dead ? ", route off for this process (CPU images from now on)" : "");
+         wsi_win32_route_log(chain, "chain %p: presenter device removed reason 0x%08lx",
+                             (void *)chain, (unsigned long)wsi_win32_device_removed_reason(chain));
          /* The Signal(fence, 1) is still outstanding: the queue may write this fence after this
           * call returns, so the last reference stays with it instead of being dropped here. One
           * fence per expiry is the price of not freeing an object the GPU scheduler still names,
@@ -1151,6 +1226,16 @@ wsi_win32_swapchain_destroy(struct wsi_swapchain *drv_chain,
 
    if (chain->is_dxgi)
       wsi_win32_flush_d3d12_queue(chain);
+
+   /* A dead route's chain is torn down with the application's second submission per presented image
+    * still waiting on a shared blit timeline the presenter will never signal. Release those waits
+    * before the semaphores they wait on are destroyed, so that the teardown does not leave a thread
+    * of the application blocked for the life of the process. A route that is still alive is left
+    * alone: the value is the GPU's to signal, and signalling it here would call a frame presented
+    * before the copy ran.
+    */
+   if (chain->is_dxgi && !wsi_win32_route_usable(&chain->wsi->route))
+      wsi_win32_retire_blit_waits(chain);
 
    for (uint32_t i = 0; i < chain->base.image_count; i++)
       wsi_win32_image_finish(chain, allocator, &chain->images[i]);
@@ -1368,6 +1453,16 @@ wsi_win32_acquire_next_image(struct wsi_swapchain *drv_chain,
                              chain->base.blit.timeline_values[index],
                              chain->pending_present_image, chain->pending_present_value);
       }
+      /* have == UINT64_MAX above is the documented answer of GetCompletedValue for a REMOVED device
+       * and not a fence value, which is the fourth case of the round-3 decision table and the one
+       * the lab read. This line says whether that is what happened and why.
+       */
+      wsi_win32_route_log(chain, "chain %p: presenter device removed reason 0x%08lx",
+                          (void *)chain, (unsigned long)wsi_win32_device_removed_reason(chain));
+      /* The route is retired; now retire the work it queued, or the application freezes in its own
+       * recovery instead (wsi_win32_retire_blit_waits).
+       */
+      wsi_win32_retire_blit_waits(chain);
       return VK_ERROR_OUT_OF_DATE_KHR;
    }
 
@@ -1452,7 +1547,9 @@ wsi_win32_queue_present_dxgi(struct wsi_win32_swapchain *chain,
    /* Present1 took the frame. That is a QUEUED present and nothing more: neither the GPU copy this
     * route asked for before it nor the flip need have run, so the route is not proved here and the
     * deadlines stay on (BD-105, the lab arm of 2026-10-09, which froze one frame after this point).
-    * What is recorded is the fence value that will say the copy completed; the acquire reads it.
+    * What is recorded is the fence value that will say this image's copy completed, for the
+    * expired-acquire line to print. The proof of the route is read from the acquired image's own
+    * timeline value, not from this pair.
     */
    chain->pending_present_image = image_index;
    chain->pending_present_value = chain->base.blit.timeline_values ?

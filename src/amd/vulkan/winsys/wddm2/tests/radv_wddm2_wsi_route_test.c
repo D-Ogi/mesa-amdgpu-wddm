@@ -358,6 +358,70 @@ test_present_completion(void)
    CHECK(wsi_win32_acquire_timeout_capped(forever, retired.presented));
 }
 
+/* Retiring the work a dead route queued, which is what round 3 left undone: the route retired itself
+ * on its deadline, the application took the error, and then it froze in its own vkDeviceWaitIdle
+ * waiting for the submission whose shared blit timeline only the dead presenter could signal
+ * (BD-105, lab round 3 of 2026-10-09, stack-vkcube-12308).
+ */
+static void
+test_retire_waits(void)
+{
+   uint64_t value = 0;
+
+   /* The shape of one presented image: the application signalled V = 1, wsi_dxgi_blit signalled
+    * V + 1 = 2, and the second submission waits for 2. The presenter is gone, so the semaphore
+    * still reads 1 and the release value is 2.
+    */
+   value = 0;
+   CHECK(wsi_win32_route_retire_value(2, 1, &value) && value == 2);
+   /* Signalled: the same image asks for nothing a second time, because vkSignalSemaphore may only
+    * raise a timeline semaphore and 2 -> 2 is not a raise.
+    */
+   value = 0;
+   CHECK(!wsi_win32_route_retire_value(2, 2, &value) && value == 0);
+   CHECK(!wsi_win32_route_retire_value(2, 3, &value));
+
+   /* An image that was never presented has timeline value 0 and no wait of ours behind it. */
+   value = 0;
+   CHECK(!wsi_win32_route_retire_value(0, 0, &value) && value == 0);
+   CHECK(!wsi_win32_route_retire_value(0, 7, &value));
+
+   /* Both images of the lab's two-image chain, with the readings arm A2f printed (want 2 on image 0
+    * and a queued present of image 1 at value 2): every image with an outstanding value is
+    * released, not only the one whose acquire expired.
+    */
+   const uint64_t want[2] = {2, 2};
+   uint64_t have[2] = {1, 1};
+   unsigned released = 0;
+   for (unsigned i = 0; i < 2; i++) {
+      if (wsi_win32_route_retire_value(want[i], have[i], &value)) {
+         have[i] = value;
+         released++;
+      }
+   }
+   CHECK(released == 2 && have[0] == 2 && have[1] == 2);
+   /* And the chain's teardown, which runs the same release again, finds nothing left to do. */
+   for (unsigned i = 0; i < 2; i++)
+      CHECK(!wsi_win32_route_retire_value(want[i], have[i], &value));
+
+   /* The deadline rules are unchanged by the release: a route a wait retired stays retired, and the
+    * release is not a proof of anything. An expiry releases the waits and keeps the route dead.
+    */
+   struct wsi_win32_route_state dead = {false, false};
+   CHECK(wsi_win32_route_wait_expired(&dead));
+   CHECK(dead.dead && !wsi_win32_route_usable(&dead));
+   CHECK(wsi_win32_route_retire_value(2, 1, &value) && value == 2);
+   CHECK(!wsi_win32_route_note_acquired(&dead, 2, 2));
+   CHECK(!dead.presented && !wsi_win32_route_usable(&dead));
+
+   /* A live route must not be released from the CPU: there the value is the presenter's to signal,
+    * and the rule is only ever reached on a path that has already given the route up. The rule
+    * itself still answers for the state, which is what the caller's gate rests on.
+    */
+   struct wsi_win32_route_state alive = {true, false};
+   CHECK(wsi_win32_route_usable(&alive));
+}
+
 /* The stage lines. One bit per stage per chain, so a stage first reached on the tenth frame is
  * still named; the round-2 gate was the route's presented flag, which silenced every stage from the
  * second frame on - including the acquire that froze.
@@ -434,6 +498,7 @@ static const struct {
    {"lb7a", test_lb7a},
    {"deadline", test_deadline},
    {"present_completion", test_present_completion},
+   {"retire_waits", test_retire_waits},
    {"stage_bits", test_stage_bits},
    {"first_present_freeze", test_first_present_freeze},
 };

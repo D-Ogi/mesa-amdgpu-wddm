@@ -279,7 +279,9 @@ struct wsi_device {
    WSI_CB(GetQueryPoolResults);
    WSI_CB(GetSemaphoreFdKHR);
    WSI_CB(GetSemaphoreWin32HandleKHR);
+   WSI_CB(GetSemaphoreCounterValue);
    WSI_CB(ResetFences);
+   WSI_CB(SignalSemaphore);
    WSI_CB(QueueSubmit2);
    WSI_CB(SetDebugUtilsObjectNameEXT);
    WSI_CB(WaitForFences);
