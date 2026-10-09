@@ -253,8 +253,9 @@ test_deadline(void)
    CHECK(wsi_win32_wait_ms(1) == 1);          /* under a millisecond still waits once */
    CHECK(wsi_win32_wait_ms(0) == 0);          /* a poll stays a poll */
 
-   /* The deadline is a lab bound: far above a present (under 2 ms at 1920x1200 in b26) and far
-    * below the three minutes a lab trial has.
+   /* The deadline is a chosen lab bound, not a measured one: no present of this route has ever
+    * completed. It sits far above the only present cost this file has shown, the GDI path's median
+    * 3.18 ms at 1920x1200 (b26), and far below the three minutes a lab trial has.
     */
    CHECK(WSI_WIN32_ROUTE_DEADLINE_NS >= 100000000ull);
    CHECK(WSI_WIN32_ROUTE_DEADLINE_NS <= 10000000000ull);
