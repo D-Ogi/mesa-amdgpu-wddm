@@ -27,9 +27,15 @@
 extern "C" {
 #endif
 
-/* The deadline of a wait the route owns, in nanoseconds. Two seconds is far above any present of a
- * working route (a 1920x1200 GPU copy and a Present1 are under two milliseconds, b26 evidence) and
- * far below the three-minute bound of a lab trial or a player's patience.
+/* The deadline of a wait the route owns, in nanoseconds. Two seconds is a chosen bound, not a
+ * measured one: no present of this route has ever completed, so the cost of one is unknown. What is
+ * measured is the GDI path of the same file at 1920x1200, whose median present costs 3.18 ms of CPU
+ * (copy 1343 us plus BitBlt 1832 us over 640 rows, the b26 present log). A GPU copy and a Present1
+ * have no reason to need three orders of magnitude more than that, so two seconds sits far above any
+ * present a working route should need and far below the three-minute bound of a lab trial or a
+ * player's patience. Arm A2 of the lab plan is the measurement that first says what a present of
+ * this route really costs; if one ever needs more than this bound, the bound is wrong and that arm
+ * is where it shows.
  */
 #define WSI_WIN32_ROUTE_DEADLINE_NS 2000000000ull
 
@@ -77,8 +83,21 @@ wsi_win32_acquire_timeout_capped(uint64_t app_timeout_ns, bool route_presented)
 
 /* What the route has shown so far, per Vulkan instance (struct wsi_win32). presented is set by the
  * first present that Present1 accepted; dead is set when a wait of the route expired before that.
- * A dead route makes every later swapchain of the instance take CPU images, so one application that
- * meets this keeps a window instead of a frozen process, and the next swapchain does not try again.
+ * A dead route makes every later swapchain of the instance take CPU images, so an application that
+ * stops in one of the two waits this route bounds gets a usable window back instead of a frozen
+ * thread, and the next swapchain does not try the route again.
+ *
+ * What this does not cover: a freeze in a call that no deadline of ours sits in front of, which is
+ * everything in wsi_win32_image_init (GetBuffer, CreateCommittedResource, CreateSharedHandle, the
+ * Vulkan import of the D3D12 resource, the layout check, the command list). Such a thread is still a
+ * frozen thread, and BD-105 cannot yet say which of the two it is: that is outcome 3 of arm A2.
+ *
+ * Both fields are plain bools with no synchronisation. presented is written by the thread that
+ * presents, dead by whichever thread's wait expires, and both are read by acquire and by swapchain
+ * creation, possibly on another thread. Every write is a one-way transition to true and every reader
+ * that misses one only ends up being more careful (one more bounded wait, one more swapchain on the
+ * route), never wrong. They are deliberately not atomics while that holds; make them atomic before
+ * any reader starts to depend on the two fields together or on a write becoming visible promptly.
  */
 struct wsi_win32_route_state {
    bool presented;

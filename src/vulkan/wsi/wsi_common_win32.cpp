@@ -1028,7 +1028,8 @@ wsi_win32_image_init(VkDevice device_h,
  * which blocks the calling thread with no deadline, and a queue whose own wait never completed then
  * froze the process with the GPU idle (BD-105). On expiry the route is reported dead, so the next
  * swapchain of this instance takes CPU images, and the release goes ahead: the chain is being torn
- * down either way, and the alternative is a thread that never returns.
+ * down either way, and the alternative is a thread that never returns. The fence of an expired wait
+ * is not released, because the queue's Signal of it is still outstanding.
  */
 static void
 wsi_win32_flush_d3d12_queue(struct wsi_win32_swapchain *chain)
@@ -1040,6 +1041,7 @@ wsi_win32_flush_d3d12_queue(struct wsi_win32_swapchain *chain)
       (ID3D12CommandQueue *)wsi->win32.get_d3d12_command_queue(chain->base.device);
    ID3D12Device *device = (ID3D12Device *)wsi->win32.get_d3d12_device(chain->base.device);
    ID3D12Fence *fence = NULL;
+   bool queue_keeps_fence = false;
    if (!queue || !device ||
        FAILED(device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&fence))))
       return;
@@ -1062,13 +1064,20 @@ wsi_win32_flush_d3d12_queue(struct wsi_win32_swapchain *chain)
       if (event)
          CloseHandle(event);
       if (!done) {
+         const bool dead = wsi_win32_route_wait_expired(&chain->wsi->route);
          wsi_win32_route_log(chain, "chain %p: the D3D12 queue did not drain in %u ms%s",
                              (void *)chain, deadline_ms,
-                             wsi_win32_route_wait_expired(&chain->wsi->route) ?
-                                ", route off for this process (CPU images from now on)" : "");
+                             dead ? ", route off for this process (CPU images from now on)" : "");
+         /* The Signal(fence, 1) is still outstanding: the queue may write this fence after this
+          * call returns, so the last reference stays with it instead of being dropped here. One
+          * fence per expiry is the price of not freeing an object the GPU scheduler still names,
+          * and an expiry means the route is being abandoned anyway.
+          */
+         queue_keeps_fence = true;
       }
    }
-   fence->Release();
+   if (!queue_keeps_fence)
+      fence->Release();
 }
 
 /* Releases what ties an image to the DXGI swap chain's buffers: the back buffer and the command
@@ -1303,11 +1312,11 @@ wsi_win32_acquire_next_image(struct wsi_swapchain *drv_chain,
                                       false, timeout) != VK_SUCCESS) {
       if (!wsi_win32_acquire_timeout_capped(info->timeout, presented))
          return VK_TIMEOUT;
+      const bool dead = wsi_win32_route_wait_expired(&chain->wsi->route);
       wsi_win32_route_log(chain, "chain %p: image %u was still busy after %" PRIu64 " ms and the "
                           "route has never presented%s", (void *)chain, index,
                           timeout / 1000000ull,
-                          wsi_win32_route_wait_expired(&chain->wsi->route) ?
-                             ", route off for this process (CPU images from now on)" : "");
+                          dead ? ", route off for this process (CPU images from now on)" : "");
       return VK_ERROR_OUT_OF_DATE_KHR;
    }
 
