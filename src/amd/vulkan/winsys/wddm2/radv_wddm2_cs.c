@@ -462,6 +462,17 @@ vk_wddm2_fence_wait(struct radv_wddm2_winsys *ws, struct vk_wddm2_fence *fence)
    if (result != VK_SUCCESS)
       fprintf(stderr, "async wait event: 0x%x\n", result);
 
+   /* Read the fence back before asking the kernel anything. A wait that returned with the fence valid and at
+    * or past its wait value is the ordinary case: the work is done, the device is executing, and the
+    * execution state can say nothing the caller does not already know. GetDeviceState is a kernel call on
+    * the wait path, so that case must not pay for it. Query the device only for the two shapes in which the
+    * state is worth reading: a wait that failed or timed out, and a wait that returned while the fence did
+    * not advance to its wait value (or reads the host's invalid value).
+    */
+   observed = p_atomic_read(fence->value_map);
+   if (result == VK_SUCCESS && bc250_host_fence_valid(&ws->host, observed) && observed >= fence->wait_value)
+      return true;
+
    D3DKMT_GETDEVICESTATE get_state = {
       .hDevice = ws->device_h,
       .StateType = D3DKMT_DEVICESTATE_EXECUTION,
