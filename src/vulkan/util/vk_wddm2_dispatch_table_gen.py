@@ -46,10 +46,14 @@ TEMPLATE_H = Template(COPYRIGHT + """\
 
  #ifdef _WIN32
 
+ /* NTSTATUS and the STATUS_* codes also come from winnt.h and ntstatus.h, and a translation unit
+  * that sees one of those first hands this header a name that is already defined. Guard every name
+  * on its own: one guard over the whole block tests one name and then redefines all of them, which
+  * is 7 macro redefinition warnings (C4005) in an MSVC build, and the name that block was guarded
+  * with ("NSTATUS", a typo for NTSTATUS) is one that nothing ever defines. */
  #ifndef NTSTATUS
  #define NTSTATUS LONG
  #endif
- /* winnt.h already defines some STATUS_* codes; guard each one. */
  #ifndef STATUS_SUCCESS
  #define STATUS_SUCCESS                  ((NTSTATUS)(0))
  #endif
@@ -106,9 +110,6 @@ TEMPLATE_H = Template(COPYRIGHT + """\
  #endif
  #ifndef STATUS_UNSUCCESSFUL
  #define STATUS_UNSUCCESSFUL             ((NTSTATUS)(0xC0000001L))
- #endif
- #ifndef STATUS_INVALID_PARAMETER
- #define STATUS_INVALID_PARAMETER        ((NTSTATUS)(0xC000000DL))
  #endif
  #ifndef NT_SUCCESS
  #define NT_SUCCESS(status)              (status >= 0)
@@ -179,7 +180,9 @@ ${e[1]}
 </%def>
 
 % for e in entrypoints:
-static NTSTATUS
+/* APIENTRY like the PFND3DKMT_* types the table holds: on x86 (the WoW64 build) that is __stdcall, not the
+ * compiler's default __cdecl; on x64 there is one calling convention and the keyword changes nothing. */
+static NTSTATUS APIENTRY
 ${e[0]}_not_supported(${arg(e)})
 {
   fprintf(stderr, "D3DKMT${e[0]} is not supported\\n");
