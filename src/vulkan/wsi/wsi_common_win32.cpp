@@ -1346,6 +1346,28 @@ wsi_win32_acquire_next_image(struct wsi_swapchain *drv_chain,
                           "route has never completed a present%s", (void *)chain, index,
                           timeout / 1000000ull,
                           dead ? ", route off for this process (CPU images from now on)" : "");
+      /* The one measurement BD-105 still needs, written where the freeze happens instead of asking
+       * for a debugger on the lab. want is the value the presenter's Signal of the copy should have
+       * reached on this image's shared blit fence (one past the application's own signal), have is
+       * where the fence really is, and the three cases decide between the candidates:
+       *
+       *   have <  want - 1   the application's own signal never reached the GPU: our submission
+       *                      path, not the presenter (and the kernel driver's log says whether a
+       *                      packet of that context is outstanding at all).
+       *   have == want - 1   the application signalled and the presenter's Wait was satisfied, but
+       *                      the Signal after ExecuteCommandLists did not retire: the copy or the
+       *                      D3D12 queue behind it is stuck. This is the mutual-wait shape.
+       *   have >= want       the copy completed and the fence is done, yet the Vulkan fence of the
+       *                      image did not signal: the wait on our side is the defect.
+       */
+      if (chain->d3d12_blit_fences && chain->base.blit.timeline_values) {
+         ID3D12Fence *fence = chain->d3d12_blit_fences[index];
+         wsi_win32_route_log(chain, "chain %p: image %u blit fence have %" PRIu64 " want %" PRIu64
+                             ", queued present image %u value %" PRIu64, (void *)chain, index,
+                             fence ? fence->GetCompletedValue() : 0,
+                             chain->base.blit.timeline_values[index],
+                             chain->pending_present_image, chain->pending_present_value);
+      }
       return VK_ERROR_OUT_OF_DATE_KHR;
    }
 
