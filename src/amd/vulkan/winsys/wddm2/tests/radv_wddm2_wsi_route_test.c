@@ -2,9 +2,10 @@
 /*
  * Copyright 2026 amdgpu-wddm contributors
  *
- * Host test of radv_wddm2_wsi_route.h: the present route switch, the report of application-local
- * runtime modules, the D3D12 implementation check and the LB7A checks of the shared-resource
- * import. No GPU, no Vulkan, no Windows header. Run through
+ * Host test of radv_wddm2_wsi_route.h and wsi_win32_deadline.h: the present route switch, the
+ * report of application-local runtime modules, the D3D12 implementation check, the LB7A checks of
+ * the shared-resource import, and the deadlines and the degrade rule of the DXGI route (BD-105).
+ * No GPU, no Vulkan, no Windows header. Run through
  * bc250-win tools/build/build-radv-wsi-route-test.ps1.
  *
  * Usage: radv_wddm2_wsi_route_test [--negative-control]
@@ -12,6 +13,7 @@
  * that a broken rule is reported.
  */
 #include "../radv_wddm2_wsi_route.h"
+#include "../../../../../vulkan/wsi/wsi_win32_deadline.h"
 
 #include <stdio.h>
 #include <string.h>
@@ -51,13 +53,15 @@ test_choose(void)
 {
    struct radv_wddm2_wsi_route_choice c;
 
-   /* Nothing set: the default is the DXGI route (owner decision 2026-10-07). */
+   /* Nothing set: the default is GDI while the DXGI route has never completed a present on the lab
+    * (BD-105). An application reaches the DXGI route only by asking for it.
+    */
    c = radv_wddm2_wsi_route_choose(NULL, NULL);
-   CHECK(c.route == RADV_WDDM2_WSI_ROUTE_DXGI && c.source == RADV_WDDM2_WSI_SOURCE_DEFAULT &&
+   CHECK(c.route == RADV_WDDM2_WSI_ROUTE_GDI && c.source == RADV_WDDM2_WSI_SOURCE_DEFAULT &&
          !c.invalid);
-   CHECK(RADV_WDDM2_WSI_ROUTE_DEFAULT == RADV_WDDM2_WSI_ROUTE_DXGI);
+   CHECK(RADV_WDDM2_WSI_ROUTE_DEFAULT == RADV_WDDM2_WSI_ROUTE_GDI);
    c = radv_wddm2_wsi_route_choose("", "");
-   CHECK(c.route == RADV_WDDM2_WSI_ROUTE_DXGI && c.source == RADV_WDDM2_WSI_SOURCE_DEFAULT);
+   CHECK(c.route == RADV_WDDM2_WSI_ROUTE_GDI && c.source == RADV_WDDM2_WSI_SOURCE_DEFAULT);
 
    /* "gdi" is the rollback, from either source, and the environment overrides the registry. */
    c = radv_wddm2_wsi_route_choose("gdi", NULL);
@@ -235,6 +239,81 @@ test_lb7a(void)
    CHECK(!radv_wddm2_lb7a_valid(&s));
 }
 
+/* The deadlines of the DXGI route (wsi_win32_deadline.h). The rule under test is the one the route
+ * broke on 2026-10-09: no CPU wait it owns may be unbounded, whatever the application asks for.
+ */
+static void
+test_deadline(void)
+{
+   /* INFINITE is never the answer of a Win32 wait of this route, whatever the deadline. */
+   CHECK(wsi_win32_wait_ms(UINT64_MAX) != 0xffffffffu);
+   CHECK(wsi_win32_wait_ms(UINT64_MAX) == WSI_WIN32_WAIT_MS_MAX);
+   CHECK(wsi_win32_wait_ms(WSI_WIN32_ROUTE_DEADLINE_NS) == 2000);
+   CHECK(wsi_win32_wait_ms(1500000ull) == 1); /* 1.5 ms: truncated, never rounded to no wait */
+   CHECK(wsi_win32_wait_ms(1) == 1);          /* under a millisecond still waits once */
+   CHECK(wsi_win32_wait_ms(0) == 0);          /* a poll stays a poll */
+
+   /* The deadline is a lab bound: far above a present (under 2 ms at 1920x1200 in b26) and far
+    * below the three minutes a lab trial has.
+    */
+   CHECK(WSI_WIN32_ROUTE_DEADLINE_NS >= 100000000ull);
+   CHECK(WSI_WIN32_ROUTE_DEADLINE_NS <= 10000000000ull);
+
+   /* An application timeout at or under the route's deadline passes through unchanged, and the
+    * vkAcquireNextImageKHR poll (timeout 0) stays a poll, so it still answers VK_NOT_READY.
+    */
+   CHECK(wsi_win32_acquire_timeout_ns(0, false) == 0);
+   CHECK(!wsi_win32_acquire_timeout_capped(0, false));
+   CHECK(wsi_win32_acquire_timeout_ns(1000000ull, false) == 1000000ull);
+   CHECK(wsi_win32_acquire_timeout_ns(WSI_WIN32_ROUTE_DEADLINE_NS, false) ==
+         WSI_WIN32_ROUTE_DEADLINE_NS);
+   CHECK(wsi_win32_acquire_timeout_ns(WSI_WIN32_ROUTE_DEADLINE_NS + 1, false) ==
+         WSI_WIN32_ROUTE_DEADLINE_NS);
+   CHECK(wsi_win32_acquire_timeout_capped(WSI_WIN32_ROUTE_DEADLINE_NS + 1, false));
+
+   /* Every stage of a first present has a name of its own, so one log line names the call that did
+    * not return.
+    */
+   CHECK(!strcmp(wsi_win32_present_stage_name(WSI_WIN32_STAGE_IMAGES), "images"));
+   CHECK(!strcmp(wsi_win32_present_stage_name(WSI_WIN32_STAGE_FENCE_WAIT), "queue-wait"));
+   CHECK(!strcmp(wsi_win32_present_stage_name(WSI_WIN32_STAGE_PRESENT), "present1"));
+   CHECK(strcmp(wsi_win32_present_stage_name(WSI_WIN32_STAGE_DONE),
+                wsi_win32_present_stage_name(WSI_WIN32_STAGE_PRESENT)) != 0);
+}
+
+/* The b26 lab failure, played through the rules: a swapchain takes the DXGI route, its first
+ * present never completes, and the application waits for the image with UINT64_MAX (Quake II RTX
+ * and vkcube both do). The old route waited there for ever, with the GPU idle and no TDR to end it.
+ */
+static void
+test_first_present_freeze(void)
+{
+   struct wsi_win32_route_state route = {false, false};
+   struct wsi_win32_route_state healthy = {true, false};
+   const uint64_t forever = UINT64_MAX;
+
+   CHECK(wsi_win32_route_usable(&route)); /* a fresh instance may take the route */
+   CHECK(wsi_win32_acquire_timeout_ns(forever, route.presented) == WSI_WIN32_ROUTE_DEADLINE_NS);
+   CHECK(wsi_win32_acquire_timeout_capped(forever, route.presented));
+   /* The wait expired before any present: the route is retired for the process, and the swapchain
+    * is reported out of date so that the application creates the next one on CPU images.
+    */
+   CHECK(wsi_win32_route_wait_expired(&route));
+   CHECK(route.dead && !wsi_win32_route_usable(&route));
+   /* It stays retired; nothing re-arms it inside the process. */
+   CHECK(wsi_win32_route_wait_expired(&route));
+   CHECK(!wsi_win32_route_usable(&route));
+
+   /* A route that has shown a frame keeps the application's own timeout, and one late wait after
+    * that is a slow frame, not a broken route.
+    */
+   CHECK(wsi_win32_acquire_timeout_ns(forever, healthy.presented) == forever);
+   CHECK(!wsi_win32_acquire_timeout_capped(forever, healthy.presented));
+   CHECK(!wsi_win32_route_wait_expired(&healthy));
+   CHECK(wsi_win32_route_usable(&healthy));
+   CHECK(!healthy.dead);
+}
+
 static const struct {
    const char *name;
    void (*fn)(void);
@@ -245,6 +324,8 @@ static const struct {
    {"app_local", test_app_local},
    {"d3d12_impl", test_d3d12_impl},
    {"lb7a", test_lb7a},
+   {"deadline", test_deadline},
+   {"first_present_freeze", test_first_present_freeze},
 };
 
 int

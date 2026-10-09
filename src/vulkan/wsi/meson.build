@@ -28,7 +28,7 @@ if with_platform_wayland
 endif
 
 if with_platform_windows
-  files_vulkan_wsi += files('wsi_common_win32.cpp')
+  files_vulkan_wsi += files('wsi_common_win32.cpp', 'wsi_win32_deadline.h')
   platform_deps += [dep_dxheaders, cc.find_library('dwmapi')]
 else
   files_vulkan_wsi += files('wsi_common_headless.c')

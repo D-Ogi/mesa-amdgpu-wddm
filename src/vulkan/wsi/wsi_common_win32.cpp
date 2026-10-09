@@ -38,6 +38,7 @@
 #include "vk_util.h"
 #include "wsi_common_entrypoints.h"
 #include "wsi_common_private.h"
+#include "wsi_win32_deadline.h"
 
 #include <dxgi1_6.h>
 #include "util/u_win32_library.h"
@@ -64,6 +65,10 @@ struct wsi_win32 {
       IDXGIFactory4 *factory;
       IDCompositionDevice *dcomp;
    } dxgi;
+   /* What the DXGI present route has shown and whether it is still allowed (wsi_win32_deadline.h).
+    * Written by the first present that succeeds and by a wait of the route that expires.
+    */
+   struct wsi_win32_route_state route;
 };
 
 enum wsi_win32_image_state {
@@ -657,6 +662,19 @@ wsi_win32_route_log(struct wsi_win32_swapchain *chain, const char *fmt, ...)
    wsi->win32.route_log(chain->base.device, line);
 }
 
+/* One line per stage of a first present, while the route has not shown a frame yet, so that a
+ * freeze names the call that did not return without a debugger on the machine (BD-105). Silent for
+ * every present after the route's first one, and for the GDI path.
+ */
+static void
+wsi_win32_stage_log(struct wsi_win32_swapchain *chain, enum wsi_win32_present_stage stage)
+{
+   if (!chain->is_dxgi || chain->wsi->route.presented)
+      return;
+   wsi_win32_route_log(chain, "chain %p: first present stage %s", (void *)chain,
+                       wsi_win32_present_stage_name(stage));
+}
+
 static VkResult
 wsi_dxgi_create_d3d12_resource(struct wsi_win32_swapchain *chain,
                                struct wsi_win32_image *win32_image,
@@ -813,16 +831,22 @@ wsi_dxgi_blit(struct wsi_swapchain *drv_chain, uint32_t image_index)
    if (!queue)
       return VK_ERROR_OUT_OF_DEVICE_MEMORY;
 
+   /* The queue wait is a GPU-side wait and takes no deadline; the acquire that waits for this copy
+    * is the bounded end of it (wsi_win32_deadline.h).
+    */
    uint64_t wait_value = chain->base.blit.timeline_values[image_index];
+   wsi_win32_stage_log(chain, WSI_WIN32_STAGE_FENCE_WAIT);
    queue->Wait(chain->d3d12_blit_fences[image_index], wait_value);
 
    /* A detached chain gave its DXGI buffers to a newer chain: keep the fence order, skip the copy. */
    if (!chain->detached && win32_image->dxgi.cmd_list) {
       ID3D12CommandList *cmd_lists[] = {(ID3D12CommandList *)win32_image->dxgi.cmd_list};
+      wsi_win32_stage_log(chain, WSI_WIN32_STAGE_EXECUTE);
       queue->ExecuteCommandLists(1, cmd_lists);
    }
 
    uint64_t signal_value = ++chain->base.blit.timeline_values[image_index];
+   wsi_win32_stage_log(chain, WSI_WIN32_STAGE_SIGNAL);
    queue->Signal(chain->d3d12_blit_fences[image_index], signal_value);
 
    return VK_SUCCESS;
@@ -995,9 +1019,16 @@ wsi_win32_image_init(VkDevice device_h,
    return VK_SUCCESS;
 }
 
-/* Blocks until the D3D12 present queue has finished everything submitted so far: the copies of this
+/* Waits until the D3D12 present queue has finished everything submitted so far: the copies of this
  * chain and of any chain that shares the queue. Needed before a back buffer or a command list that
  * the queue may still use is released.
+ *
+ * The wait has a deadline (WSI_WIN32_ROUTE_DEADLINE_NS). A queue that does not advance is a route
+ * failure, not a reason to stop the application for good: it was SetEventOnCompletion(1, NULL),
+ * which blocks the calling thread with no deadline, and a queue whose own wait never completed then
+ * froze the process with the GPU idle (BD-105). On expiry the route is reported dead, so the next
+ * swapchain of this instance takes CPU images, and the release goes ahead: the chain is being torn
+ * down either way, and the alternative is a thread that never returns.
  */
 static void
 wsi_win32_flush_d3d12_queue(struct wsi_win32_swapchain *chain)
@@ -1012,8 +1043,31 @@ wsi_win32_flush_d3d12_queue(struct wsi_win32_swapchain *chain)
    if (!queue || !device ||
        FAILED(device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&fence))))
       return;
-   if (SUCCEEDED(queue->Signal(fence, 1)))
-      fence->SetEventOnCompletion(1, NULL); /* a NULL event waits here */
+   if (SUCCEEDED(queue->Signal(fence, 1))) {
+      const uint32_t deadline_ms = wsi_win32_wait_ms(WSI_WIN32_ROUTE_DEADLINE_NS);
+      bool done = false;
+      HANDLE event = CreateEventW(NULL, FALSE, FALSE, NULL);
+      if (event && SUCCEEDED(fence->SetEventOnCompletion(1, event))) {
+         done = WaitForSingleObject(event, deadline_ms) == WAIT_OBJECT_0;
+      } else {
+         /* No event to wait on: poll the fence to the same deadline instead of blocking. */
+         const uint64_t end = os_time_get_nano() + WSI_WIN32_ROUTE_DEADLINE_NS;
+         do {
+            done = fence->GetCompletedValue() >= 1;
+            if (done)
+               break;
+            Sleep(1);
+         } while (os_time_get_nano() < end);
+      }
+      if (event)
+         CloseHandle(event);
+      if (!done) {
+         wsi_win32_route_log(chain, "chain %p: the D3D12 queue did not drain in %u ms%s",
+                             (void *)chain, deadline_ms,
+                             wsi_win32_route_wait_expired(&chain->wsi->route) ?
+                                ", route off for this process (CPU images from now on)" : "");
+      }
+   }
    fence->Release();
 }
 
@@ -1236,10 +1290,26 @@ wsi_win32_acquire_next_image(struct wsi_swapchain *drv_chain,
       index = (index + 1) % chain->base.image_count;
       assert(chain->images[index].state == WSI_IMAGE_QUEUED);
    }
+   /* The wait is bounded while the route has never presented: the image becomes free when the
+    * D3D12 queue has copied it and signalled the shared fence, so an application that asks for
+    * UINT64_MAX would otherwise wait here for ever if that copy never runs (BD-105). On expiry the
+    * route is retired for this instance and the swapchain goes out of date, which is the answer
+    * that sends the application back through swapchain creation and onto CPU images.
+    */
+   const bool presented = chain->wsi->route.presented;
+   const uint64_t timeout = wsi_win32_acquire_timeout_ns(info->timeout, presented);
    if (chain->wsi->wsi->WaitForFences(chain->base.device, 1,
                                       &chain->base.fences[index],
-                                      false, info->timeout) != VK_SUCCESS)
-      return VK_TIMEOUT;
+                                      false, timeout) != VK_SUCCESS) {
+      if (!wsi_win32_acquire_timeout_capped(info->timeout, presented))
+         return VK_TIMEOUT;
+      wsi_win32_route_log(chain, "chain %p: image %u was still busy after %" PRIu64 " ms and the "
+                          "route has never presented%s", (void *)chain, index,
+                          timeout / 1000000ull,
+                          wsi_win32_route_wait_expired(&chain->wsi->route) ?
+                             ", route off for this process (CPU images from now on)" : "");
+      return VK_ERROR_OUT_OF_DATE_KHR;
+   }
 
    *image_index = index;
    chain->images[index].state = WSI_IMAGE_DRAWING;
@@ -1274,7 +1344,9 @@ wsi_win32_queue_present_dxgi(struct wsi_win32_swapchain *chain,
        (chain->swap_chain_flags & DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING))
       present_flags |= DXGI_PRESENT_ALLOW_TEARING;
 
+   wsi_win32_stage_log(chain, WSI_WIN32_STAGE_PRESENT);
    HRESULT hres = chain->dxgi->Present1(sync_interval, present_flags, &params);
+   wsi_win32_stage_log(chain, WSI_WIN32_STAGE_DONE);
    switch (hres) {
    case DXGI_ERROR_DEVICE_REMOVED: return VK_ERROR_DEVICE_LOST;
    case DXGI_ERROR_DEVICE_RESET: return VK_ERROR_DEVICE_LOST;
@@ -1293,6 +1365,11 @@ wsi_win32_queue_present_dxgi(struct wsi_win32_swapchain *chain,
       chain->wsi->dxgi.dcomp->Commit();
       chain->surface->current_swapchain = chain;
    }
+
+   /* The route has shown a frame: the deadlines of a first present no longer apply, and a later
+    * late wait does not retire the route (wsi_win32_deadline.h).
+    */
+   chain->wsi->route.presented = true;
 
    /* The common completion path publishes status under acquire_mutex. */
    return VK_SUCCESS;
@@ -1874,6 +1951,12 @@ wsi_win32_create_chain(wsi_win32_surface *surface,
          goto fail;
    }
 
+   /* The images and their D3D12 blit contexts exist. Before this line the chain was only the swap
+    * chain; after it the next route line comes from the first present (BD-105: the evidence of the
+    * freeze ended at the swap chain line, which left both halves open).
+    */
+   wsi_win32_stage_log(chain, WSI_WIN32_STAGE_IMAGES);
+
    *swapchain_out = &chain->base;
 
    return VK_SUCCESS;
@@ -1930,6 +2013,13 @@ wsi_win32_surface_create_swapchain(
    if (use_dxgi && wsi_device->win32.route_allowed &&
        !wsi_device->win32.route_allowed(wsi_device->pdevice, &reason))
       use_dxgi = false;
+   /* A wait of the route expired before it had ever presented: this instance does not try the DXGI
+    * route again (wsi_win32_deadline.h, BD-105).
+    */
+   if (use_dxgi && !wsi_win32_route_usable(&wsi->route)) {
+      use_dxgi = false;
+      reason = "route-deadline";
+   }
    if (use_dxgi && !format) {
       use_dxgi = false;
       reason = "format";

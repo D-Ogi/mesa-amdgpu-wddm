@@ -10,7 +10,8 @@
  *                     It is the explicit rollback ("gdi") and the automatic fallback of the DXGI routes.
  *   DXGI              a D3D12 device on the same adapter (our D3D12 shell), a flip-model swap chain for the
  *                     window (CreateSwapChainForHwnd), one GPU copy per present on the D3D12 queue, Present1.
- *                     This is the shape the native D3D12 games present through, and the default.
+ *                     This is the shape the native D3D12 games present through. It is opt-in while
+ *                     its first present has not completed on the lab (BD-105); GDI is the default.
  *   DXGI_COMPOSITION  the same, but the swap chain is created for composition and bound to the window
  *                     through a DirectComposition visual (upstream Mesa's shape).
  *
@@ -36,13 +37,20 @@ enum radv_wddm2_wsi_route {
    RADV_WDDM2_WSI_ROUTE_DXGI_COMPOSITION = 2,
 };
 
-/* The default route (owner decision 2026-10-07: a GPU route that has to be switched on gets
- * forgotten). A real failure of it still ends on GDI for that swapchain: no DXGI factory, no D3D12
+/* The default route. It was DXGI (owner decision 2026-10-07: a GPU route that has to be switched on
+ * gets forgotten), until the first lab trial of that route froze every client before its first
+ * present (BD-105, 2026-10-09: Quake II RTX and vkcube, GPU idle, no TDR). While the first present
+ * of this route has never completed on the lab, the default is GDI and DXGI is what a trial asks
+ * for: a route that hangs is a dead game, and a route nobody reaches by accident is an experiment.
+ * The default goes back to DXGI in the train whose lab arm presents a frame through it.
+ *
+ * A real failure of the DXGI route still ends on GDI for that swapchain: no DXGI factory, no D3D12
  * device or queue, a D3D12 device that a replacement runtime implements, a fence or resource import
- * that fails, a swap chain that cannot be made (docs/design/vulkan-wsi-dxgi.md in bc250-win,
- * section "The switch and the fallback").
+ * that fails, a swap chain that cannot be made, and now a wait of the route that expires before the
+ * first present (wsi_win32_deadline.h; docs/design/vulkan-wsi-dxgi.md in bc250-win, section "The
+ * switch and the fallback").
  */
-#define RADV_WDDM2_WSI_ROUTE_DEFAULT RADV_WDDM2_WSI_ROUTE_DXGI
+#define RADV_WDDM2_WSI_ROUTE_DEFAULT RADV_WDDM2_WSI_ROUTE_GDI
 
 enum radv_wddm2_wsi_route_source {
    RADV_WDDM2_WSI_SOURCE_DEFAULT = 0,
