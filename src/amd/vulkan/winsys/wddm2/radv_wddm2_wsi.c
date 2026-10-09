@@ -377,8 +377,16 @@ radv_wddm2_wsi_read_route(void)
    DWORD size = sizeof(reg);
    const char *reg_value = NULL;
 
+   /* The 64-bit view on both images. The installer and the control application write
+    * HKLM\SOFTWARE\amdgpu-wddm in the 64-bit view, so a 32-bit image that does not ask for that view
+    * reads the empty WOW6432Node copy and the rollback value never reaches a 32-bit Vulkan
+    * application. The D3D12 shell and the DXVK front of this driver ask the same way (bc250-win
+    * driver/umd/d3d12/ddi-trace.h, driver/umd/dxvk/scanout-primary.h). 0 on x64 keeps that image as
+    * it was.
+    */
+   const DWORD registry_view = sizeof(void *) == 4 ? RRF_SUBKEY_WOW6464KEY : 0;
    const LSTATUS status = RegGetValueA(HKEY_LOCAL_MACHINE, "SOFTWARE\\amdgpu-wddm\\Vulkan", "WsiRoute",
-                                       RRF_RT_REG_SZ, NULL, reg, &size);
+                                       RRF_RT_REG_SZ | registry_view, NULL, reg, &size);
    if (status == ERROR_SUCCESS) {
       reg[sizeof(reg) - 1] = 0;
       reg_value = reg;
