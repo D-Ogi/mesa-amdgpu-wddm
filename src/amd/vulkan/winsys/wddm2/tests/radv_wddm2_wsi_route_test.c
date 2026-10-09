@@ -282,6 +282,96 @@ test_deadline(void)
                 wsi_win32_present_stage_name(WSI_WIN32_STAGE_PRESENT)) != 0);
 }
 
+/* The round-3 rule, and the one the lab arm of 2026-10-09 bought with a frozen message pump: the
+ * route's deadlines are lifted by a present that COMPLETED, never by Present1 returning. A present
+ * that never completes must leave the bounded wait and the fallback in place.
+ */
+static void
+test_present_completion(void)
+{
+   const uint64_t forever = UINT64_MAX;
+   /* The value wsi_dxgi_blit signalled on the image's shared blit fence after the copy. */
+   const uint64_t queued = 7;
+
+   /* Present1 returned, the route recorded that value, and the fence has not reached it: nothing
+    * completed, so the next acquire still gets the route's own deadline and not the application's
+    * UINT64_MAX. This is the state the b27 round-2 ICD lifted the deadline in.
+    */
+   struct wsi_win32_route_state queued_only = {false, false};
+   CHECK(!wsi_win32_route_present_complete(queued, 0));
+   CHECK(!wsi_win32_route_present_complete(queued, queued - 1));
+   CHECK(!wsi_win32_route_note_acquired(&queued_only, queued, queued - 1));
+   CHECK(!queued_only.presented);
+   CHECK(wsi_win32_acquire_timeout_ns(forever, queued_only.presented) ==
+         WSI_WIN32_ROUTE_DEADLINE_NS);
+   CHECK(wsi_win32_acquire_timeout_capped(forever, queued_only.presented));
+   /* And when that bounded wait expires, the route is retired and the next swapchain takes CPU
+    * images: outcome 2 of the lab plan (a usable window), not outcome 3 (a dead message pump).
+    */
+   CHECK(wsi_win32_route_wait_expired(&queued_only));
+   CHECK(queued_only.dead && !wsi_win32_route_usable(&queued_only));
+
+   /* The same present, completed: the fence reached the queued value and the acquire returned. Only
+    * then are the deadlines lifted, and only once.
+    */
+   struct wsi_win32_route_state proved = {false, false};
+   CHECK(wsi_win32_route_present_complete(queued, queued));
+   CHECK(wsi_win32_route_present_complete(queued, queued + 3));
+   CHECK(wsi_win32_route_note_acquired(&proved, queued, queued));
+   CHECK(proved.presented && !proved.dead);
+   CHECK(!wsi_win32_route_note_acquired(&proved, queued, queued));
+   CHECK(wsi_win32_acquire_timeout_ns(forever, proved.presented) == forever);
+   CHECK(!wsi_win32_route_wait_expired(&proved));
+   CHECK(wsi_win32_route_usable(&proved));
+
+   /* No present outstanding (pending value 0): an acquire that returns proves nothing. The first
+    * acquires of a chain take an idle image and never wait, so they must not lift anything.
+    */
+   struct wsi_win32_route_state fresh = {false, false};
+   CHECK(!wsi_win32_route_present_complete(0, 0));
+   CHECK(!wsi_win32_route_present_complete(0, 99));
+   CHECK(!wsi_win32_route_note_acquired(&fresh, 0, 99));
+   CHECK(!fresh.presented);
+   CHECK(wsi_win32_acquire_timeout_capped(forever, fresh.presented));
+
+   /* A route a wait already retired is never revived by a fence that completes afterwards. */
+   struct wsi_win32_route_state retired = {false, true};
+   CHECK(!wsi_win32_route_note_acquired(&retired, queued, queued + 1));
+   CHECK(!retired.presented && !wsi_win32_route_usable(&retired));
+   CHECK(wsi_win32_acquire_timeout_capped(forever, retired.presented));
+}
+
+/* The stage lines. One bit per stage per chain, so a stage first reached on the tenth frame is
+ * still named; the round-2 gate was the route's presented flag, which silenced every stage from the
+ * second frame on - including the acquire that froze.
+ */
+static void
+test_stage_bits(void)
+{
+   uint32_t bits = 0;
+
+   CHECK(wsi_win32_stage_first(&bits, WSI_WIN32_STAGE_IMAGES));
+   CHECK(!wsi_win32_stage_first(&bits, WSI_WIN32_STAGE_IMAGES));
+   /* Every stage has a bit of its own: one stage already written never hides another. */
+   for (int s = WSI_WIN32_STAGE_IMAGES; s < WSI_WIN32_STAGE_COUNT; s++)
+      CHECK(wsi_win32_stage_first(&bits, (enum wsi_win32_present_stage)s) ==
+            (s != WSI_WIN32_STAGE_IMAGES));
+   CHECK(bits == (1u << (unsigned)WSI_WIN32_STAGE_COUNT) - 1u);
+
+   /* Seven stages, and the seventh is the acquire of the next frame, with a name of its own. */
+   CHECK((int)WSI_WIN32_STAGE_COUNT == 7);
+   CHECK((int)WSI_WIN32_STAGE_ACQUIRE == (int)WSI_WIN32_STAGE_DONE + 1);
+   CHECK(!strcmp(wsi_win32_present_stage_name(WSI_WIN32_STAGE_ACQUIRE), "acquire-wait"));
+   for (int s = WSI_WIN32_STAGE_IMAGES; s < (int)WSI_WIN32_STAGE_ACQUIRE; s++)
+      CHECK(strcmp(wsi_win32_present_stage_name((enum wsi_win32_present_stage)s),
+                   wsi_win32_present_stage_name(WSI_WIN32_STAGE_ACQUIRE)) != 0);
+
+   /* A stage out of range writes nothing at all. */
+   uint32_t none = 0;
+   CHECK(!wsi_win32_stage_first(&none, WSI_WIN32_STAGE_COUNT));
+   CHECK(none == 0);
+}
+
 /* The b26 lab failure, played through the rules: a swapchain takes the DXGI route, its first
  * present never completes, and the application waits for the image with UINT64_MAX (Quake II RTX
  * and vkcube both do). The old route waited there for ever, with the GPU idle and no TDR to end it.
@@ -326,6 +416,8 @@ static const struct {
    {"d3d12_impl", test_d3d12_impl},
    {"lb7a", test_lb7a},
    {"deadline", test_deadline},
+   {"present_completion", test_present_completion},
+   {"stage_bits", test_stage_bits},
    {"first_present_freeze", test_first_present_freeze},
 };
 

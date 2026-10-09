@@ -139,6 +139,15 @@ struct wsi_win32_swapchain {
    uint64_t                     submitted_present_id;
    const char                *route_reason;
    ID3D12Fence              **d3d12_blit_fences;
+   /* The present this chain queued last, and the proof it completed. pending_present_value is the
+    * value wsi_dxgi_blit signalled on d3d12_blit_fences[pending_present_image] after the copy; 0
+    * means no present is outstanding. The acquire reads the fence against it and that, with the
+    * acquire returning, is what lifts the route's deadlines (wsi_win32_deadline.h).
+    */
+   uint32_t                     pending_present_image;
+   uint64_t                     pending_present_value;
+   /* One bit per enum wsi_win32_present_stage: the stage lines this chain has already written. */
+   uint32_t                     stage_log_bits;
    /* BC250_WSI_PRESENT_LOG=<file>: one CSV line per queued present with the
     * time spent in the CPU copy, BitBlt/Present1 and DwmFlush. Diagnostics
     * only; NULL unless the variable is set. */
@@ -159,7 +168,16 @@ wsi_win32_present_log(struct wsi_win32_swapchain *chain, const char *path,
            (void *)chain, path, present_id, t_enter / 1000,
            (t_copy - t_enter) / 1000, (t_blit - t_copy) / 1000,
            (t_done - t_blit) / 1000, (int)result);
-   if ((++chain->present_log_lines & 63) == 0)
+   chain->present_log_lines++;
+   /* A lab arm is killed, not asked to quit, so a buffered row never reaches the file: the one row
+    * the route's first present wrote on 2026-10-09 was lost exactly that way, and the arm reported
+    * rows 0 for a present it had made. Flush at once while this chain is on a route that has not
+    * proved itself, and for every one of the first 64 rows, whatever the path; after that the flush
+    * is every 64 rows again, which is what a timedemo of thousands of frames wants.
+    */
+   if (chain->present_log_lines <= 64 ||
+       (chain->is_dxgi && !chain->wsi->route.presented) ||
+       (chain->present_log_lines & 63) == 0)
       fflush(chain->present_log);
 }
 
@@ -662,14 +680,20 @@ wsi_win32_route_log(struct wsi_win32_swapchain *chain, const char *fmt, ...)
    wsi->win32.route_log(chain->base.device, line);
 }
 
-/* One line per stage of a first present, while the route has not shown a frame yet, so that a
- * freeze names the call that did not return without a debugger on the machine (BD-105). Silent for
- * every present after the route's first one, and for the GDI path.
+/* One line per stage per chain, while the route has not proved itself, so that a freeze names the
+ * call that did not return without a debugger on the machine (BD-105). Silent for the GDI path and
+ * for a route that has completed a present and an acquire.
+ *
+ * The gate is a bit per stage of this chain, not the route's presented flag: on 2026-10-09 the flag
+ * went true when Present1 returned and silenced the acquire of the next frame, which is the call
+ * that froze.
  */
 static void
 wsi_win32_stage_log(struct wsi_win32_swapchain *chain, enum wsi_win32_present_stage stage)
 {
    if (!chain->is_dxgi || chain->wsi->route.presented)
+      return;
+   if (!wsi_win32_stage_first(&chain->stage_log_bits, stage))
       return;
    wsi_win32_route_log(chain, "chain %p: first present stage %s", (void *)chain,
                        wsi_win32_present_stage_name(stage));
@@ -1299,12 +1323,17 @@ wsi_win32_acquire_next_image(struct wsi_swapchain *drv_chain,
       index = (index + 1) % chain->base.image_count;
       assert(chain->images[index].state == WSI_IMAGE_QUEUED);
    }
-   /* The wait is bounded while the route has never presented: the image becomes free when the
-    * D3D12 queue has copied it and signalled the shared fence, so an application that asks for
+   /* The wait is bounded while the route has never completed a present: the image becomes free when
+    * the D3D12 queue has copied it and signalled the shared fence, so an application that asks for
     * UINT64_MAX would otherwise wait here for ever if that copy never runs (BD-105). On expiry the
     * route is retired for this instance and the swapchain goes out of date, which is the answer
     * that sends the application back through swapchain creation and onto CPU images.
+    *
+    * This is the call the lab found frozen on 2026-10-09, one frame after a present that ran to the
+    * end: the flag that took its deadline away was set by Present1 returning. It is now set below,
+    * after this wait has returned and the blit fence of the present before it has completed.
     */
+   wsi_win32_stage_log(chain, WSI_WIN32_STAGE_ACQUIRE);
    const bool presented = chain->wsi->route.presented;
    const uint64_t timeout = wsi_win32_acquire_timeout_ns(info->timeout, presented);
    if (chain->wsi->wsi->WaitForFences(chain->base.device, 1,
@@ -1314,10 +1343,25 @@ wsi_win32_acquire_next_image(struct wsi_swapchain *drv_chain,
          return VK_TIMEOUT;
       const bool dead = wsi_win32_route_wait_expired(&chain->wsi->route);
       wsi_win32_route_log(chain, "chain %p: image %u was still busy after %" PRIu64 " ms and the "
-                          "route has never presented%s", (void *)chain, index,
+                          "route has never completed a present%s", (void *)chain, index,
                           timeout / 1000000ull,
                           dead ? ", route off for this process (CPU images from now on)" : "");
       return VK_ERROR_OUT_OF_DATE_KHR;
+   }
+
+   /* The wait returned. If the present this chain queued last has also completed - its shared blit
+    * fence has reached the value wsi_dxgi_blit signalled after the copy - then the route has shown
+    * one full present-acquire cycle and its deadlines are lifted, once, with a line that says what
+    * proved it. Until then every acquire of this instance keeps the bounded deadline.
+    */
+   if (!presented && chain->pending_present_value && chain->d3d12_blit_fences) {
+      ID3D12Fence *fence = chain->d3d12_blit_fences[chain->pending_present_image];
+      const uint64_t done = fence ? fence->GetCompletedValue() : 0;
+      if (wsi_win32_route_note_acquired(&chain->wsi->route, chain->pending_present_value, done))
+         wsi_win32_route_log(chain, "chain %p: route presented: blit fence of image %u reached %"
+                             PRIu64 " (queued %" PRIu64 ") and the acquire of image %u returned; "
+                             "deadlines off", (void *)chain, chain->pending_present_image, done,
+                             chain->pending_present_value, index);
    }
 
    *image_index = index;
@@ -1327,6 +1371,7 @@ wsi_win32_acquire_next_image(struct wsi_swapchain *drv_chain,
 
 static VkResult
 wsi_win32_queue_present_dxgi(struct wsi_win32_swapchain *chain,
+                             uint32_t image_index,
                              struct wsi_win32_image *image,
                              const VkPresentRegionKHR *damage)
 {
@@ -1375,10 +1420,14 @@ wsi_win32_queue_present_dxgi(struct wsi_win32_swapchain *chain,
       chain->surface->current_swapchain = chain;
    }
 
-   /* The route has shown a frame: the deadlines of a first present no longer apply, and a later
-    * late wait does not retire the route (wsi_win32_deadline.h).
+   /* Present1 took the frame. That is a QUEUED present and nothing more: neither the GPU copy this
+    * route asked for before it nor the flip need have run, so the route is not proved here and the
+    * deadlines stay on (BD-105, the lab arm of 2026-10-09, which froze one frame after this point).
+    * What is recorded is the fence value that will say the copy completed; the acquire reads it.
     */
-   chain->wsi->route.presented = true;
+   chain->pending_present_image = image_index;
+   chain->pending_present_value = chain->base.blit.timeline_values ?
+      chain->base.blit.timeline_values[image_index] : 0;
 
    /* The common completion path publishes status under acquire_mutex. */
    return VK_SUCCESS;
@@ -1490,7 +1539,7 @@ wsi_win32_queue_present(struct wsi_swapchain *drv_chain,
    const uint64_t t_enter = chain->present_log ? os_time_get_nano() : 0;
 
    if (chain->is_dxgi) {
-      VkResult result = wsi_win32_queue_present_dxgi(chain, image, damage);
+      VkResult result = wsi_win32_queue_present_dxgi(chain, image_index, image, damage);
       const uint64_t t_blit = chain->present_log ? os_time_get_nano() : 0;
       /* copy_us is 0 on this path: the copy runs on the GPU (the D3D12 queue). dwmflush_us is 0
        * as well: completion waits in wait_for_present.
@@ -1913,6 +1962,9 @@ wsi_win32_create_chain(wsi_win32_surface *surface,
 
    chain->present_log = NULL;
    chain->present_log_lines = 0;
+   chain->pending_present_image = 0;
+   chain->pending_present_value = 0;
+   chain->stage_log_bits = 0;
    const char *present_log_path = getenv("BC250_WSI_PRESENT_LOG");
    if (present_log_path && present_log_path[0]) {
       chain->present_log = fopen(present_log_path, "a");
