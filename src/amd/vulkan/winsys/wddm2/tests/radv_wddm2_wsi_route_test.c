@@ -324,8 +324,9 @@ test_present_completion(void)
    CHECK(!wsi_win32_route_wait_expired(&proved));
    CHECK(wsi_win32_route_usable(&proved));
 
-   /* No present outstanding (pending value 0): an acquire that returns proves nothing. The first
-    * acquires of a chain take an idle image and never wait, so they must not lift anything.
+   /* An image that was never presented has timeline value 0: an acquire that returns it proves
+    * nothing. The first acquires of a chain take an idle image and never wait, so they must not lift
+    * anything, whatever any fence reads.
     */
    struct wsi_win32_route_state fresh = {false, false};
    CHECK(!wsi_win32_route_present_complete(0, 0));
@@ -333,6 +334,22 @@ test_present_completion(void)
    CHECK(!wsi_win32_route_note_acquired(&fresh, 0, 99));
    CHECK(!fresh.presented);
    CHECK(wsi_win32_acquire_timeout_capped(forever, fresh.presented));
+
+   /* The value must be the ACQUIRED image's own, not the chain's most recent present. A two-image
+    * chain alternates, so the most recent present always belongs to the other image and its fence
+    * lags by one frame: a route proved against it would stay behind for ever. Played through: image
+    * 0 was presented at value 2 and its copy is done, image 1 was presented at 4 and its copy is
+    * not. The acquire of image 0 lifts the deadlines, and the lagging value would not have.
+    */
+   struct wsi_win32_route_state alternating = {false, false};
+   const uint64_t image0_value = 2, image0_fence = 2;
+   const uint64_t image1_value = 4, image1_fence = 3;
+   CHECK(!wsi_win32_route_present_complete(image1_value, image1_fence));
+   CHECK(!wsi_win32_route_note_acquired(&alternating, image1_value, image1_fence));
+   CHECK(!alternating.presented);
+   CHECK(wsi_win32_route_present_complete(image0_value, image0_fence));
+   CHECK(wsi_win32_route_note_acquired(&alternating, image0_value, image0_fence));
+   CHECK(alternating.presented);
 
    /* A route a wait already retired is never revived by a fence that completes afterwards. */
    struct wsi_win32_route_state retired = {false, true};

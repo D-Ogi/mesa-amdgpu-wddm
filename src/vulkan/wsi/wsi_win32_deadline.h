@@ -114,15 +114,15 @@ struct wsi_win32_route_state {
    bool dead;
 };
 
-/* Has the present the route queued last actually completed?
+/* Has the present of one image of the route actually completed?
  *
  * How completion is observed, decided from this file's own code and not from a guess:
  *
- *   pending_value is the value wsi_dxgi_blit signalled on the image's SHARED BLIT FENCE after
+ *   image_present_value is the value wsi_dxgi_blit signalled on that image's SHARED BLIT FENCE after
  *   ExecuteCommandLists of the copy into the back buffer (chain->base.blit.timeline_values[i], one
  *   past the value the application's own queue signals). That fence is the D3D12 side of the
  *   Vulkan timeline semaphore of the same image, and the chain holds it in d3d12_blit_fences[i].
- *   So fence_completed_value >= pending_value says, in one read of one object the route already
+ *   So fence_completed_value >= image_present_value says, in one read of one object the route already
  *   owns: the presenter queue's Wait for the application's signal was satisfied, the copy executed,
  *   and the queue retired the Signal. That is the end of the route's own GPU work and it is exactly
  *   the thing BD-105 says never happens (the kernel driver counted blits 0 while both stacks waited).
@@ -148,18 +148,21 @@ struct wsi_win32_route_state {
  * the waitable flag) with a buffer count to match. It is the next step, not this one, and until the
  * route completes one copy at all it would answer a question nobody has reached yet.
  *
- * pending_value 0 means no present is outstanding: the timeline values are pre-incremented, so a
- * value a present has signalled is always at least 1.
+ * image_present_value 0 means the image was never presented: the timeline values are
+ * pre-incremented, so a value a present has signalled is always at least 1.
  */
 static inline bool
-wsi_win32_route_present_complete(uint64_t pending_value, uint64_t fence_completed_value)
+wsi_win32_route_present_complete(uint64_t image_present_value, uint64_t fence_completed_value)
 {
-   return pending_value != 0 && fence_completed_value >= pending_value;
+   return image_present_value != 0 && fence_completed_value >= image_present_value;
 }
 
 /* An acquire of the route returned an image. This is the ONLY place that may lift the route's
- * deadlines, and it does so only when the present before it completed by the rule above. Both
- * halves are needed, and each one covers the other's blind spot:
+ * deadlines, and it does so only when the last present OF THAT IMAGE completed by the rule above.
+ * The image matters: an image cannot be presented again before it is acquired, so the acquired
+ * image's own timeline value is the value its last blit signalled, while the chain's most recent
+ * present belongs to another image and would stay one frame behind for ever on a two-image chain.
+ * Both halves are needed, and each one covers the other's blind spot:
  *
  *   the completed present says the presenter's GPU work ran at all, which Present1's return did not;
  *   the returned acquire says the wait that presented would disable can in fact finish, which a
@@ -173,11 +176,11 @@ wsi_win32_route_present_complete(uint64_t pending_value, uint64_t fence_complete
  */
 static inline bool
 wsi_win32_route_note_acquired(struct wsi_win32_route_state *state,
-                              uint64_t pending_value, uint64_t fence_completed_value)
+                              uint64_t image_present_value, uint64_t fence_completed_value)
 {
    if (state->presented || state->dead)
       return false;
-   if (!wsi_win32_route_present_complete(pending_value, fence_completed_value))
+   if (!wsi_win32_route_present_complete(image_present_value, fence_completed_value))
       return false;
    state->presented = true;
    return true;

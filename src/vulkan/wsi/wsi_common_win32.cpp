@@ -1371,19 +1371,26 @@ wsi_win32_acquire_next_image(struct wsi_swapchain *drv_chain,
       return VK_ERROR_OUT_OF_DATE_KHR;
    }
 
-   /* The wait returned. If the present this chain queued last has also completed - its shared blit
-    * fence has reached the value wsi_dxgi_blit signalled after the copy - then the route has shown
+   /* The wait returned. If the copy of THIS image also completed - its shared blit fence has reached
+    * the value wsi_dxgi_blit signalled for it after ExecuteCommandLists - then the route has shown
     * one full present-acquire cycle and its deadlines are lifted, once, with a line that says what
     * proved it. Until then every acquire of this instance keeps the bounded deadline.
+    *
+    * The value to compare against is base.blit.timeline_values[index] and not the one the chain's
+    * last present recorded. An image cannot be presented again before it is acquired, so at this
+    * point timeline_values[index] is exactly the value the last blit of this image signalled, and it
+    * is 0 for an image that was never presented. The chain's last present belongs to the OTHER image
+    * of a two-image swapchain, so a route proved against it would stay one frame behind for ever and
+    * might never lift the deadlines on a route that works.
     */
-   if (!presented && chain->pending_present_value && chain->d3d12_blit_fences) {
-      ID3D12Fence *fence = chain->d3d12_blit_fences[chain->pending_present_image];
+   if (!presented && chain->d3d12_blit_fences && chain->base.blit.timeline_values) {
+      const uint64_t want = chain->base.blit.timeline_values[index];
+      ID3D12Fence *fence = chain->d3d12_blit_fences[index];
       const uint64_t done = fence ? fence->GetCompletedValue() : 0;
-      if (wsi_win32_route_note_acquired(&chain->wsi->route, chain->pending_present_value, done))
+      if (wsi_win32_route_note_acquired(&chain->wsi->route, want, done))
          wsi_win32_route_log(chain, "chain %p: route presented: blit fence of image %u reached %"
-                             PRIu64 " (queued %" PRIu64 ") and the acquire of image %u returned; "
-                             "deadlines off", (void *)chain, chain->pending_present_image, done,
-                             chain->pending_present_value, index);
+                             PRIu64 " (wanted %" PRIu64 ") and the acquire of that image returned; "
+                             "deadlines off", (void *)chain, index, done, want);
    }
 
    *image_index = index;
