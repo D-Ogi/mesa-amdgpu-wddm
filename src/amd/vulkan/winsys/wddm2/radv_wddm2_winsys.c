@@ -73,6 +73,22 @@
 
 static simple_mtx_t winsys_creation_mutex = SIMPLE_MTX_INITIALIZER;
 static struct hash_table *winsyses = NULL;
+/* Hosted identity remains a pointer key. Standalone adapters have their own
+ * namespace, keyed by the complete LUID, including on 32-bit builds. */
+static struct hash_table *standalone_winsyses = NULL;
+
+static uint32_t
+radv_wddm2_luid_hash(const void *key)
+{
+   return _mesa_hash_data(key, sizeof(LUID));
+}
+
+static bool
+radv_wddm2_luid_equal(const void *a, const void *b)
+{
+   const LUID *left = a, *right = b;
+   return left->LowPart == right->LowPart && left->HighPart == right->HighPart;
+}
 
 static NTSTATUS
 query_adapter_info(struct radv_wddm2_winsys *ws,
@@ -639,13 +655,14 @@ radv_wddm2_winsys_destroy(struct radeon_winsys *_ws)
 
    simple_mtx_lock(&winsys_creation_mutex);
    if (!--ws->refcount) {
-      _mesa_hash_table_remove_key(winsyses, ws->cache_key);
+      struct hash_table **cache = ws->cache_hosted ? &winsyses : &standalone_winsyses;
+      _mesa_hash_table_remove_key(*cache, ws->cache_key);
 
       /* Clean the hashtable up if empty, though there is no
        * empty function. */
-      if (_mesa_hash_table_num_entries(winsyses) == 0) {
-         _mesa_hash_table_destroy(winsyses, NULL);
-         winsyses = NULL;
+      if (_mesa_hash_table_num_entries(*cache) == 0) {
+         _mesa_hash_table_destroy(*cache, NULL);
+         *cache = NULL;
       }
 
       destroy = true;
@@ -747,20 +764,22 @@ radv_wddm2_winsys_create(const struct vk_dx_adapter_info *adapter_info,
    NTSTATUS status;
    fprintf(stderr, "radv_wddm2_winsys_create\n");
 
-   const void *key = host ? host->identity : (void *)1;
+   const void *key = host ? host->identity : &adapter_info->adapter_luid;
    if (host && memcmp(&host->adapter_luid, &adapter_info->adapter_luid, sizeof(uint64_t)))
       return VK_ERROR_INCOMPATIBLE_DRIVER;
    /* We have to keep this lock till insertion. */
    simple_mtx_lock(&winsys_creation_mutex);
-   if (!winsyses)
-      winsyses = _mesa_pointer_hash_table_create(NULL);
-   if (!winsyses) {
+   struct hash_table **cache = host ? &winsyses : &standalone_winsyses;
+   if (!*cache)
+      *cache = host ? _mesa_pointer_hash_table_create(NULL) :
+                     _mesa_hash_table_create(NULL, radv_wddm2_luid_hash, radv_wddm2_luid_equal);
+   if (!*cache) {
       fprintf(stderr, "radv/amdgpu: failed to alloc winsys hash table.\n");
       result = VK_ERROR_OUT_OF_HOST_MEMORY;
       goto fail;
    }
 
-   struct hash_entry *entry = _mesa_hash_table_search(winsyses, key);
+   struct hash_entry *entry = _mesa_hash_table_search(*cache, key);
    if (entry) {
       ws = (struct radv_wddm2_winsys *)entry->data;
       ++ws->refcount;
@@ -779,7 +798,10 @@ radv_wddm2_winsys_create(const struct vk_dx_adapter_info *adapter_info,
    }
 
    ws->refcount = 1;
-   ws->cache_key = key;
+   ws->cache_hosted = host != NULL;
+   /* The caller's adapter_info can expire after create. Keep the key in the
+    * cached object until its last reference removes the entry. */
+   ws->cache_key = host ? key : &ws->adapter_luid;
    if (host) ws->host = *host;
    ws->adapter_luid = adapter_info->adapter_luid;
    ws->chain_ib = !(BITSET_TEST(debug_flags, RADV_DEBUG_NO_IB_CHAINING));
@@ -895,7 +917,7 @@ radv_wddm2_winsys_create(const struct vk_dx_adapter_info *adapter_info,
    ws->sync_types[1] = &ws->sync_binary_type.sync;
    ws->sync_types[2] = NULL;
 
-   _mesa_hash_table_insert(winsyses, key, ws);
+   _mesa_hash_table_insert(*cache, ws->cache_key, ws);
    simple_mtx_unlock(&winsys_creation_mutex);
 
    *winsys = &ws->base;
