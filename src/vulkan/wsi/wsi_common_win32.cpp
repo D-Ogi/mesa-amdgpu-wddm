@@ -85,6 +85,12 @@ struct wsi_win32_image {
    struct wsi_image base;
    enum wsi_win32_image_state state;
    struct wsi_win32_swapchain *chain;
+   /* Whether the presenter's D3D12 Signal of the value now in base.blit.timeline_values[this image]
+    * was accepted, which is what makes that value the presenter's and not the application's own
+    * pending signal (wsi_win32_image_debt in wsi_win32_deadline.h). The retirement may host-signal a
+    * shared blit timeline only for an image the presenter owes a value for.
+    */
+   struct wsi_win32_image_debt debt;
    struct {
       ID3D12Resource *swapchain_res;
       ID3D12Resource *blit_res;
@@ -819,6 +825,14 @@ wsi_win32_route_failed(struct wsi_win32_swapchain *chain, const char *call, HRES
  * cannot release is reported as outstanding, and the caller answers the application VK_ERROR_DEVICE_LOST
  * instead of pretending a frame completed.
  *
+ * What the review of round 4b adds is the second half of that proof. The semaphore reading "one
+ * below the timeline value" only means the presenter owes one value when the timeline value IS the
+ * presenter's; after a blit that failed it is the application's own pending signal, and signalling
+ * past it is the very thing 03259 forbids. So each image is asked whether the presenter's Signal for
+ * the value it carries was accepted (wsi_win32_image_debt, written in wsi_dxgi_blit), and an image
+ * the presenter owes nothing for has nothing of ours outstanding behind it at all - the second
+ * submission was never made.
+ *
  * Returns true when at least one image is left with an outstanding wait of ours.
  */
 static bool
@@ -835,17 +849,21 @@ wsi_win32_retire_blit_waits(struct wsi_win32_swapchain *chain,
    for (uint32_t i = 0; i < chain->base.image_count; i++) {
       const VkSemaphore semaphore = chain->base.blit.semaphores[i];
       const uint64_t want_present = chain->base.blit.timeline_values[i];
+      /* Whether that value is the presenter's at all. A blit that failed left the application's own
+       * pending value there, and nothing of ours waits for it.
+       */
+      const bool owes = wsi_win32_image_debt_owed(&chain->images[i].debt);
       uint64_t want = 0, have = 0;
 
       if (semaphore == VK_NULL_HANDLE)
          continue;
       if (wsi->GetSemaphoreCounterValue(chain->base.device, semaphore, &have) != VK_SUCCESS) {
-         outstanding = outstanding || want_present != 0;
+         outstanding = outstanding || (owes && want_present != 0);
          continue;
       }
 
       enum wsi_win32_retire_action action =
-         wsi_win32_route_retire_action(presenter, want_present, have, &want);
+         wsi_win32_route_retire_action(presenter, owes, want_present, have, &want);
 
       /* The application's own signal of the value below ours has not completed yet. It runs on the
        * application's own device, which is not the one that died, so it is expected to be satisfied
@@ -867,7 +885,7 @@ wsi_win32_retire_blit_waits(struct wsi_win32_swapchain *chain,
                                                         WSI_WIN32_ROUTE_RETIRE_DEADLINE_NS);
             if (waited == VK_SUCCESS &&
                 wsi->GetSemaphoreCounterValue(chain->base.device, semaphore, &have) == VK_SUCCESS)
-               action = wsi_win32_route_retire_action(presenter, want_present, have, &want);
+               action = wsi_win32_route_retire_action(presenter, owes, want_present, have, &want);
             wsi_win32_route_log(chain, "chain %p: image %u: waited %" PRIu64 " ms for the "
                                 "application's own signal %" PRIu64 " (%d), semaphore now %" PRIu64,
                                 (void *)chain, i,
@@ -876,8 +894,18 @@ wsi_win32_retire_blit_waits(struct wsi_win32_swapchain *chain,
          }
       }
 
-      if (action == WSI_WIN32_RETIRE_NOTHING)
+      if (action == WSI_WIN32_RETIRE_NOTHING) {
+         /* The aliased reading the review of round 4b caught: a value below the timeline value, and
+          * the presenter owes nothing for it. Said once per image, so a lab record shows that the
+          * host declined to signal because the blit failed and not because nothing was presented.
+          */
+         if (want_present && !owes && have < want_present)
+            wsi_win32_route_log(chain, "chain %p: image %u: nothing of ours is outstanding: the "
+                                "presenter accepted no signal for %" PRIu64 ", so that value is the "
+                                "application's own pending signal (semaphore %" PRIu64 ")",
+                                (void *)chain, i, want_present, have);
          continue;
+      }
 
       if (action == WSI_WIN32_RETIRE_REFUSE) {
          outstanding = true;
@@ -1087,6 +1115,15 @@ wsi_dxgi_blit(struct wsi_swapchain *drv_chain, uint32_t image_index)
    struct wsi_win32_image *win32_image = &chain->images[image_index];
    struct wsi_device *wsi_device = chain->wsi->wsi;
 
+   /* The presenter owes this image nothing until its Signal below is accepted. Everything that
+    * returns from here on leaves the application's own pending value in timeline_values[image_index],
+    * and the retirement must not read that as a value the presenter still has to reach
+    * (VUID-VkSemaphoreSignalInfo-value-03259; wsi_win32_image_debt in wsi_win32_deadline.h). The
+    * previous cycle's debt is not lost by this: the application acquired this image to get here, and
+    * that acquire waited for the fence the previous cycle's second submission signals.
+    */
+   wsi_win32_image_debt_reset(&win32_image->debt);
+
    ID3D12CommandQueue *queue = (ID3D12CommandQueue *)
       wsi_device->win32.get_d3d12_command_queue(chain->base.device);
    if (!queue)
@@ -1142,6 +1179,10 @@ wsi_dxgi_blit(struct wsi_swapchain *drv_chain, uint32_t image_index)
       return VK_ERROR_DEVICE_LOST;
    }
    chain->base.blit.timeline_values[image_index] = signal_value;
+   /* After the value, never before it: a retirement that saw the debt against the application's own
+    * value would host-signal past a pending signal, which is the defect this order prevents.
+    */
+   wsi_win32_image_debt_note_signalled(&win32_image->debt);
 
    return VK_SUCCESS;
 }

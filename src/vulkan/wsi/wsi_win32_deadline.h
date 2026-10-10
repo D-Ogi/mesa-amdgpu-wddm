@@ -31,6 +31,12 @@
  *       or unproven, and unproven keeps the whole dependent set alive.
  *   V3  the two route flags were plain bools written and read by threads driving independent
  *       swapchains. They are one word now, and every access is an atomic operation.
+ *
+ * The review of round 4b then found V1 still reachable through the one number the rule read: a blit
+ * that failed leaves the APPLICATION's own pending value in timeline_values[i], and the rule could
+ * not tell it from the presenter's. The retirement therefore asks a second question of each image -
+ * did the presenter's Signal of this value get accepted (struct wsi_win32_image_debt) - and a host
+ * signal needs that too.
  */
 #ifndef WSI_WIN32_DEADLINE_H
 #define WSI_WIN32_DEADLINE_H
@@ -69,6 +75,11 @@ wsi_win32_atomic_cas32(uint32_t *word, uint32_t expect, uint32_t desired)
 {
    return (uint32_t)_InterlockedCompareExchange((volatile long *)word, (long)desired, (long)expect);
 }
+static inline void
+wsi_win32_atomic_store32(uint32_t *word, uint32_t value)
+{
+   (void)_InterlockedExchange((volatile long *)word, (long)value);
+}
 #else
 static inline uint32_t
 wsi_win32_atomic_load32(uint32_t *word)
@@ -80,6 +91,11 @@ wsi_win32_atomic_cas32(uint32_t *word, uint32_t expect, uint32_t desired)
 {
    __atomic_compare_exchange_n(word, &expect, desired, false, __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST);
    return expect;
+}
+static inline void
+wsi_win32_atomic_store32(uint32_t *word, uint32_t value)
+{
+   __atomic_store_n(word, value, __ATOMIC_SEQ_CST);
 }
 #endif
 
@@ -397,6 +413,27 @@ wsi_win32_presenter_state_name(enum wsi_win32_presenter_state state)
  * When either half is missing the answer is REFUSE: the caller reports the loss and does not
  * manufacture completion. NOTHING is the honest answer for an image that was never presented, and
  * for a timeline the presenter did reach.
+ *
+ * WHAT ROUND 4b STILL GOT WRONG, and what presenter_owes is for. The review of round 4b found that
+ * the proof above is read off ONE number that two different signallers write. timeline_values[i]
+ * holds V while the application's own first submission is the thing that signals it
+ * (wsi_common.c:2767-2769, pre-incremented there), and V+1 only after wsi_dxgi_blit's
+ * ID3D12CommandQueue::Signal was ACCEPTED. On every failure return of that function - a refused
+ * queue Wait, a device removed by ExecuteCommandLists, a refused Signal - the entry keeps V, and
+ * then "semaphore == image_present_value - 1" reads V-1, which does not mean the presenter owes one
+ * last value: it means the APPLICATION's signal of V is still pending, which is exactly the state
+ * 03259 forbids passing. A two-image chain in that state (present image 0, blit refused, the first
+ * submission not yet retired) would have been host-signalled to V with V pending.
+ *
+ * So the rule takes a second input that no arithmetic on those values can recover: presenter_owes,
+ * the per-image fact that the presenter's Signal of the value now in timeline_values[i] was
+ * accepted (wsi_win32_image_debt below, set at that one place in wsi_dxgi_blit and cleared when that
+ * function is entered again for the image). Without it there is nothing of ours outstanding behind
+ * the image at all: wsi_common_queue_present skips the SECOND submission and the present itself when
+ * the blit does not return VK_SUCCESS (wsi_common.c:2831-2832, 2887-2888), so the only submission
+ * left is the application's own first one, which waits on the application's own semaphores on a
+ * device that is alive and retires by itself. That is NOTHING, not a refusal: reporting it as
+ * outstanding would end a client with VK_ERROR_DEVICE_LOST over a wait that does not exist.
  */
 enum wsi_win32_retire_action {
    WSI_WIN32_RETIRE_NOTHING = 0, /* no outstanding wait of ours behind this image */
@@ -404,12 +441,59 @@ enum wsi_win32_retire_action {
    WSI_WIN32_RETIRE_REFUSE,      /* an outstanding wait, and no proof that a host signal is allowed */
 };
 
+/* Whether the PRESENTER promised the value that an image's blit timeline value now holds: one word
+ * per image of a DXGI chain, written by the thread that presents and read by the thread that retires
+ * the route, so every access is an atomic operation (the V3 rule applies to this word too).
+ *
+ * It is set at exactly one place - after ID3D12CommandQueue::Signal was accepted AND
+ * timeline_values[i] was raised to the value it signalled, in that order, so a reader can never see
+ * the debt against the application's own value - and cleared when wsi_dxgi_blit is entered again for
+ * that image. The clear loses nothing: entering the blit for image i means the application acquired
+ * image i, and that acquire waited on the image's own VkFence, which the second submission of the
+ * previous cycle signals. A cycle whose debt is cleared here is therefore a cycle that completed.
+ *
+ * Clearing can only ever turn a SIGNAL into a NOTHING, never the reverse, which is the direction a
+ * mistake has to fall: a host signal that is not proved allowed is the defect being fixed.
+ */
+#define WSI_WIN32_IMAGE_DEBT_OWED 0x1u
+
+struct wsi_win32_image_debt {
+   uint32_t word;
+};
+
+static inline void
+wsi_win32_image_debt_reset(struct wsi_win32_image_debt *debt)
+{
+   wsi_win32_atomic_store32(&debt->word, 0u);
+}
+
+/* The presenter's Signal of the value now in timeline_values[i] was accepted. */
+static inline void
+wsi_win32_image_debt_note_signalled(struct wsi_win32_image_debt *debt)
+{
+   wsi_win32_atomic_store32(&debt->word, WSI_WIN32_IMAGE_DEBT_OWED);
+}
+
+static inline bool
+wsi_win32_image_debt_owed(struct wsi_win32_image_debt *debt)
+{
+   return (wsi_win32_atomic_load32(&debt->word) & WSI_WIN32_IMAGE_DEBT_OWED) != 0;
+}
+
 static inline enum wsi_win32_retire_action
-wsi_win32_route_retire_action(enum wsi_win32_presenter_state presenter,
+wsi_win32_route_retire_action(enum wsi_win32_presenter_state presenter, bool presenter_owes,
                               uint64_t image_present_value, uint64_t semaphore_value,
                               uint64_t *out_value)
 {
    if (!image_present_value || semaphore_value >= image_present_value)
+      return WSI_WIN32_RETIRE_NOTHING;
+   /* The value in timeline_values[i] is the APPLICATION's own pending signal, not a value the
+    * presenter ever accepted: the blit failed, the second submission that would wait for the
+    * presenter's value was never made, and the gap below the value is the application's signal in
+    * flight on its own device. Nothing of ours is outstanding, and a host signal here is the very
+    * thing VUID-VkSemaphoreSignalInfo-value-03259 forbids.
+    */
+   if (!presenter_owes)
       return WSI_WIN32_RETIRE_NOTHING;
    if (presenter != WSI_WIN32_PRESENTER_REMOVED)
       return WSI_WIN32_RETIRE_REFUSE;
@@ -425,6 +509,10 @@ wsi_win32_route_retire_action(enum wsi_win32_presenter_state presenter,
 
 /* The value the caller waits for before it asks again: V, the application's own signal, which is one
  * below the value the presenter should have reached. 0 for an image with nothing outstanding.
+ *
+ * It is consulted only for a REFUSE, and a refusal now implies presenter_owes, so image_present_value
+ * is the presenter's value there and image_present_value - 1 is the application's. For an image the
+ * presenter owes nothing for, the rule above answers NOTHING and this value is never asked for.
  */
 static inline uint64_t
 wsi_win32_route_retire_wait_value(uint64_t image_present_value, uint64_t semaphore_value)

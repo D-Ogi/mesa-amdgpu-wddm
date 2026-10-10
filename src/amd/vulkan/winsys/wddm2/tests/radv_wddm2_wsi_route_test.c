@@ -434,6 +434,11 @@ test_retire_action(void)
    const enum wsi_win32_presenter_state removed = WSI_WIN32_PRESENTER_REMOVED;
    const enum wsi_win32_presenter_state live = WSI_WIN32_PRESENTER_LIVE;
    const enum wsi_win32_presenter_state unproven = WSI_WIN32_PRESENTER_UNPROVEN;
+   /* The presenter's Signal of the value the image carries was accepted, which is what makes that
+    * value the presenter's. Every case below this constant models a cycle whose blit succeeded; the
+    * cases for a blit that failed pass false and are the second half of this test.
+    */
+   const bool owed = true;
 
    /* The shape of one presented image: the application signalled V = 1, wsi_dxgi_blit signalled
     * V + 1 = 2, and the second submission waits for 2. With the presenter PROVED removed and the
@@ -441,7 +446,7 @@ test_retire_action(void)
     * greater than the current value (03258) and below no pending one (03259).
     */
    value = 0;
-   CHECK(wsi_win32_route_retire_action(removed, 2, 1, &value) == WSI_WIN32_RETIRE_SIGNAL);
+   CHECK(wsi_win32_route_retire_action(removed, owed, 2, 1, &value) == WSI_WIN32_RETIRE_SIGNAL);
    CHECK(value == 2);
 
    /* The delayed first signal, which is the case VUID-VkSemaphoreSignalInfo-value-03259 forbids and
@@ -450,13 +455,13 @@ test_retire_action(void)
     * first is 1.
     */
    value = 0;
-   CHECK(wsi_win32_route_retire_action(removed, 2, 0, &value) == WSI_WIN32_RETIRE_REFUSE);
+   CHECK(wsi_win32_route_retire_action(removed, owed, 2, 0, &value) == WSI_WIN32_RETIRE_REFUSE);
    CHECK(value == 0); /* nothing is handed back for a refusal */
    CHECK(wsi_win32_route_retire_wait_value(2, 0) == 1);
    /* Once that wait is satisfied the same reading becomes a signal: this is the whole bounded-wait
     * step of wsi_win32_retire_blit_waits, played through.
     */
-   CHECK(wsi_win32_route_retire_action(removed, 2, 1, &value) == WSI_WIN32_RETIRE_SIGNAL);
+   CHECK(wsi_win32_route_retire_action(removed, owed, 2, 1, &value) == WSI_WIN32_RETIRE_SIGNAL);
    CHECK(value == 2);
    CHECK(wsi_win32_route_retire_wait_value(2, 1) == 0); /* nothing left to wait for */
 
@@ -464,28 +469,28 @@ test_retire_action(void)
     * presenter's to signal, and a host signal would call a frame presented that never was. Refused
     * whatever the semaphore reads.
     */
-   CHECK(wsi_win32_route_retire_action(live, 2, 1, &value) == WSI_WIN32_RETIRE_REFUSE);
-   CHECK(wsi_win32_route_retire_action(live, 2, 0, &value) == WSI_WIN32_RETIRE_REFUSE);
+   CHECK(wsi_win32_route_retire_action(live, owed, 2, 1, &value) == WSI_WIN32_RETIRE_REFUSE);
+   CHECK(wsi_win32_route_retire_action(live, owed, 2, 0, &value) == WSI_WIN32_RETIRE_REFUSE);
    /* And the UNPROVEN presenter, which is not a synonym for either: also refused. */
-   CHECK(wsi_win32_route_retire_action(unproven, 2, 1, &value) == WSI_WIN32_RETIRE_REFUSE);
-   CHECK(wsi_win32_route_retire_action(unproven, 2, 0, &value) == WSI_WIN32_RETIRE_REFUSE);
+   CHECK(wsi_win32_route_retire_action(unproven, owed, 2, 1, &value) == WSI_WIN32_RETIRE_REFUSE);
+   CHECK(wsi_win32_route_retire_action(unproven, owed, 2, 0, &value) == WSI_WIN32_RETIRE_REFUSE);
 
    /* Signalled already: the same image asks for nothing a second time, because vkSignalSemaphore may
     * only raise a timeline semaphore and 2 -> 2 is not a raise. True for every presenter state: an
     * image with nothing outstanding is nothing outstanding.
     */
    value = 0;
-   CHECK(wsi_win32_route_retire_action(removed, 2, 2, &value) == WSI_WIN32_RETIRE_NOTHING);
+   CHECK(wsi_win32_route_retire_action(removed, owed, 2, 2, &value) == WSI_WIN32_RETIRE_NOTHING);
    CHECK(value == 0);
-   CHECK(wsi_win32_route_retire_action(removed, 2, 3, &value) == WSI_WIN32_RETIRE_NOTHING);
-   CHECK(wsi_win32_route_retire_action(live, 2, 2, &value) == WSI_WIN32_RETIRE_NOTHING);
-   CHECK(wsi_win32_route_retire_action(unproven, 2, 9, &value) == WSI_WIN32_RETIRE_NOTHING);
+   CHECK(wsi_win32_route_retire_action(removed, owed, 2, 3, &value) == WSI_WIN32_RETIRE_NOTHING);
+   CHECK(wsi_win32_route_retire_action(live, owed, 2, 2, &value) == WSI_WIN32_RETIRE_NOTHING);
+   CHECK(wsi_win32_route_retire_action(unproven, owed, 2, 9, &value) == WSI_WIN32_RETIRE_NOTHING);
 
    /* An image that was never presented has timeline value 0 and no wait of ours behind it. */
    value = 0;
-   CHECK(wsi_win32_route_retire_action(removed, 0, 0, &value) == WSI_WIN32_RETIRE_NOTHING);
+   CHECK(wsi_win32_route_retire_action(removed, owed, 0, 0, &value) == WSI_WIN32_RETIRE_NOTHING);
    CHECK(value == 0);
-   CHECK(wsi_win32_route_retire_action(removed, 0, 7, &value) == WSI_WIN32_RETIRE_NOTHING);
+   CHECK(wsi_win32_route_retire_action(removed, owed, 0, 7, &value) == WSI_WIN32_RETIRE_NOTHING);
    CHECK(wsi_win32_route_retire_wait_value(0, 0) == 0);
 
    /* Both images of the lab's two-image chain, with the readings arm A2f printed (want 2 on image 0
@@ -497,7 +502,7 @@ test_retire_action(void)
    uint64_t have[2] = {1, 1};
    unsigned released = 0, refused = 0;
    for (unsigned i = 0; i < 2; i++) {
-      switch (wsi_win32_route_retire_action(removed, want[i], have[i], &value)) {
+      switch (wsi_win32_route_retire_action(removed, owed, want[i], have[i], &value)) {
       case WSI_WIN32_RETIRE_SIGNAL: have[i] = value; released++; break;
       case WSI_WIN32_RETIRE_REFUSE: refused++; break;
       default: break;
@@ -506,7 +511,7 @@ test_retire_action(void)
    CHECK(released == 2 && refused == 0 && have[0] == 2 && have[1] == 2);
    /* And the chain's teardown, which runs the same release again, finds nothing left to do. */
    for (unsigned i = 0; i < 2; i++)
-      CHECK(wsi_win32_route_retire_action(removed, want[i], have[i], &value) ==
+      CHECK(wsi_win32_route_retire_action(removed, owed, want[i], have[i], &value) ==
             WSI_WIN32_RETIRE_NOTHING);
 
    /* The same chain with a LIVE presenter: nothing is released and both images are reported
@@ -515,7 +520,7 @@ test_retire_action(void)
    uint64_t live_have[2] = {1, 1};
    released = 0; refused = 0;
    for (unsigned i = 0; i < 2; i++) {
-      switch (wsi_win32_route_retire_action(live, want[i], live_have[i], &value)) {
+      switch (wsi_win32_route_retire_action(live, owed, want[i], live_have[i], &value)) {
       case WSI_WIN32_RETIRE_SIGNAL: live_have[i] = value; released++; break;
       case WSI_WIN32_RETIRE_REFUSE: refused++; break;
       default: break;
@@ -529,7 +534,7 @@ test_retire_action(void)
    struct wsi_win32_route_state dead = {0};
    CHECK(wsi_win32_route_wait_expired(&dead));
    CHECK(!wsi_win32_route_usable(&dead));
-   CHECK(wsi_win32_route_retire_action(removed, 2, 1, &value) == WSI_WIN32_RETIRE_SIGNAL);
+   CHECK(wsi_win32_route_retire_action(removed, owed, 2, 1, &value) == WSI_WIN32_RETIRE_SIGNAL);
    CHECK(!wsi_win32_route_note_acquired(&dead, 2, 2));
    CHECK(!wsi_win32_route_presented(&dead) && !wsi_win32_route_usable(&dead));
 
@@ -543,6 +548,119 @@ test_retire_action(void)
    CHECK(!strcmp(wsi_win32_retire_action_name(WSI_WIN32_RETIRE_SIGNAL), "signal"));
    CHECK(!strcmp(wsi_win32_retire_action_name(WSI_WIN32_RETIRE_REFUSE), "refuse"));
    CHECK(!strcmp(wsi_win32_retire_action_name(WSI_WIN32_RETIRE_NOTHING), "nothing"));
+}
+
+/* V1, the third half, which the review of round 4b sent back: the value an image carries is the
+ * APPLICATION's own pending signal whenever wsi_dxgi_blit returned a failure, and no arithmetic on
+ * the timeline tells it from the presenter's value. Every case here has an image_present_value that
+ * the presenter never promised, and the old rule - which asked only whether the semaphore read one
+ * below it - answered SIGNAL for the first of them.
+ */
+static void
+test_retire_debt(void)
+{
+   uint64_t value = 0;
+   const enum wsi_win32_presenter_state removed = WSI_WIN32_PRESENTER_REMOVED;
+   const enum wsi_win32_presenter_state live = WSI_WIN32_PRESENTER_LIVE;
+   const enum wsi_win32_presenter_state unproven = WSI_WIN32_PRESENTER_UNPROVEN;
+
+   /* THE FAILURE SCENARIO of the review, on the two-image chain the lab measured. Image 0 is
+    * presented; the application's own submission signalling V = 1 has not retired, so the semaphore
+    * reads 0; wsi_dxgi_blit fails (a refused queue Wait, a device removed by ExecuteCommandLists or
+    * a refused Signal) and returns VK_ERROR_DEVICE_LOST, so timeline_values[0] keeps 1 - the
+    * application's value, not the presenter's 2. A later acquire expires, the route is retired and
+    * the presenter reads REMOVED, exactly as round 3 measured. The reading is then "present value 1,
+    * semaphore 0", which is 'one below' and which round 4b would have host-signalled to 1 while the
+    * application's own signal of 1 was pending: VUID-VkSemaphoreSignalInfo-value-03259 requires the
+    * host value to be LESS than any pending signal, and 1 < 1 is false.
+    */
+   value = 0;
+   CHECK(wsi_win32_route_retire_action(removed, false, 1, 0, &value) == WSI_WIN32_RETIRE_NOTHING);
+   CHECK(value == 0); /* nothing is handed back, so nothing is signalled */
+   /* And with the debt - the same numbers for a cycle whose Signal WAS accepted (V = 0 can never
+    * happen; this is the shape, kept apart from the case above only by the debt).
+    */
+   CHECK(wsi_win32_route_retire_action(removed, true, 1, 0, &value) == WSI_WIN32_RETIRE_SIGNAL);
+   CHECK(value == 1);
+
+   /* The same state after one good cycle, which is the second reading the review names: V = 3 with
+    * the semaphore at 2. Without the debt it is the application's pending 3 and must not be passed;
+    * with it, it is the presenter's.
+    */
+   value = 0;
+   CHECK(wsi_win32_route_retire_action(removed, false, 3, 2, &value) == WSI_WIN32_RETIRE_NOTHING);
+   CHECK(value == 0);
+   CHECK(wsi_win32_route_retire_action(removed, true, 3, 2, &value) == WSI_WIN32_RETIRE_SIGNAL);
+   CHECK(value == 3);
+
+   /* NOTHING and not REFUSE, for a reason read from wsi_common.c:2831-2832 and 2887-2888: a blit
+    * that does not return VK_SUCCESS skips the second submission and the present, so the only
+    * submission behind the image is the application's own first one, which waits on the
+    * application's own semaphores on a device that is alive. Reporting that as outstanding would end
+    * the client with VK_ERROR_DEVICE_LOST over a wait that does not exist, so the report for every
+    * presenter state here is out-of-date and the client falls back to CPU images.
+    */
+   CHECK(wsi_win32_route_retire_action(live, false, 1, 0, &value) == WSI_WIN32_RETIRE_NOTHING);
+   CHECK(wsi_win32_route_retire_action(unproven, false, 1, 0, &value) == WSI_WIN32_RETIRE_NOTHING);
+   CHECK(wsi_win32_route_retire_action(removed, false, 2, 0, &value) == WSI_WIN32_RETIRE_NOTHING);
+   CHECK(wsi_win32_route_retire_action(removed, false, 9, 4, &value) == WSI_WIN32_RETIRE_NOTHING);
+   CHECK(wsi_win32_route_report(wsi_win32_route_retire_action(removed, false, 1, 0, &value) ==
+                                WSI_WIN32_RETIRE_REFUSE) == WSI_WIN32_REPORT_OUT_OF_DATE);
+   /* An image with nothing outstanding stays nothing outstanding whatever the debt says, and so does
+    * an image that was never presented: the debt is a precondition of a signal, not a trigger.
+    */
+   CHECK(wsi_win32_route_retire_action(removed, true, 2, 2, &value) == WSI_WIN32_RETIRE_NOTHING);
+   CHECK(wsi_win32_route_retire_action(removed, false, 2, 2, &value) == WSI_WIN32_RETIRE_NOTHING);
+   CHECK(wsi_win32_route_retire_action(removed, true, 0, 0, &value) == WSI_WIN32_RETIRE_NOTHING);
+   CHECK(wsi_win32_route_retire_action(removed, false, 0, 0, &value) == WSI_WIN32_RETIRE_NOTHING);
+
+   /* The two-image chain of the failure scenario, played through as the retirement loop runs it:
+    * image 0's blit failed (debt false, the application's own value 1 outstanding on our device) and
+    * image 1 completed a cycle whose presenter value is 2. Only image 1 is released, and nothing is
+    * reported outstanding, so the acquire answers VK_ERROR_OUT_OF_DATE_KHR and the client recreates.
+    */
+   const uint64_t want[2] = {1, 2};
+   const bool debt[2] = {false, true};
+   uint64_t have[2] = {0, 1};
+   unsigned released = 0, refused = 0, nothing = 0;
+   for (unsigned i = 0; i < 2; i++) {
+      switch (wsi_win32_route_retire_action(removed, debt[i], want[i], have[i], &value)) {
+      case WSI_WIN32_RETIRE_SIGNAL: have[i] = value; released++; break;
+      case WSI_WIN32_RETIRE_REFUSE: refused++; break;
+      default: nothing++; break;
+      }
+   }
+   CHECK(released == 1 && refused == 0 && nothing == 1);
+   CHECK(have[0] == 0 && have[1] == 2); /* image 0's timeline is left to the application */
+   CHECK(wsi_win32_route_report(refused != 0) == WSI_WIN32_REPORT_OUT_OF_DATE);
+
+   /* The word the production path carries this fact in: one per image, zero-initialised with the
+    * chain (vk_zalloc), set only where the presenter's Signal was accepted, cleared when the blit is
+    * entered again for that image.
+    */
+   struct wsi_win32_image_debt word = {0};
+   CHECK(!wsi_win32_image_debt_owed(&word)); /* a zeroed image owes nothing */
+   wsi_win32_image_debt_note_signalled(&word);
+   CHECK(wsi_win32_image_debt_owed(&word));
+   wsi_win32_image_debt_note_signalled(&word); /* idempotent: one accepted Signal per cycle */
+   CHECK(wsi_win32_image_debt_owed(&word));
+   wsi_win32_image_debt_reset(&word);
+   CHECK(!wsi_win32_image_debt_owed(&word));
+   wsi_win32_image_debt_reset(&word);
+   CHECK(!wsi_win32_image_debt_owed(&word));
+   /* The order the blit writes them in, as the state a reader may see: the value first and the debt
+    * after it, so a reader that sees the debt always sees the presenter's value with it. The reverse
+    * order is the defect: debt set against the application's value is the 03259 state.
+    */
+   uint64_t timeline = 1; /* the application's own signal of V = 1 */
+   wsi_win32_image_debt_reset(&word);
+   CHECK(wsi_win32_route_retire_action(removed, wsi_win32_image_debt_owed(&word), timeline, 0,
+                                       &value) == WSI_WIN32_RETIRE_NOTHING);
+   timeline = 2; /* the presenter's Signal of V + 1 was accepted, then the value was raised */
+   wsi_win32_image_debt_note_signalled(&word);
+   CHECK(wsi_win32_route_retire_action(removed, wsi_win32_image_debt_owed(&word), timeline, 1,
+                                       &value) == WSI_WIN32_RETIRE_SIGNAL);
+   CHECK(value == 2);
 }
 
 /* What the route ANSWERS when it could not retire what it queued. Reporting out-of-date there is
@@ -563,19 +681,26 @@ test_route_report(void)
    const uint64_t want = 2;
    const struct {
       enum wsi_win32_presenter_state presenter;
+      bool owes;
       uint64_t have;
       enum wsi_win32_route_report report;
    } cases[] = {
-      {WSI_WIN32_PRESENTER_REMOVED, 1, WSI_WIN32_REPORT_OUT_OF_DATE},
-      {WSI_WIN32_PRESENTER_REMOVED, 0, WSI_WIN32_REPORT_DEVICE_LOST},
-      {WSI_WIN32_PRESENTER_LIVE, 1, WSI_WIN32_REPORT_DEVICE_LOST},
-      {WSI_WIN32_PRESENTER_UNPROVEN, 1, WSI_WIN32_REPORT_DEVICE_LOST},
-      {WSI_WIN32_PRESENTER_REMOVED, 2, WSI_WIN32_REPORT_OUT_OF_DATE}, /* nothing outstanding */
+      {WSI_WIN32_PRESENTER_REMOVED, true, 1, WSI_WIN32_REPORT_OUT_OF_DATE},
+      {WSI_WIN32_PRESENTER_REMOVED, true, 0, WSI_WIN32_REPORT_DEVICE_LOST},
+      {WSI_WIN32_PRESENTER_LIVE, true, 1, WSI_WIN32_REPORT_DEVICE_LOST},
+      {WSI_WIN32_PRESENTER_UNPROVEN, true, 1, WSI_WIN32_REPORT_DEVICE_LOST},
+      {WSI_WIN32_PRESENTER_REMOVED, true, 2, WSI_WIN32_REPORT_OUT_OF_DATE}, /* nothing outstanding */
+      /* The blit of this image failed, so the value is the application's own and the second
+       * submission was never made: out-of-date, and no client ended over a wait of no one's.
+       */
+      {WSI_WIN32_PRESENTER_REMOVED, false, 1, WSI_WIN32_REPORT_OUT_OF_DATE},
+      {WSI_WIN32_PRESENTER_LIVE, false, 1, WSI_WIN32_REPORT_OUT_OF_DATE},
+      {WSI_WIN32_PRESENTER_UNPROVEN, false, 0, WSI_WIN32_REPORT_OUT_OF_DATE},
    };
    for (unsigned i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
       uint64_t value = 0;
       const enum wsi_win32_retire_action action =
-         wsi_win32_route_retire_action(cases[i].presenter, want, cases[i].have, &value);
+         wsi_win32_route_retire_action(cases[i].presenter, cases[i].owes, want, cases[i].have, &value);
       const bool outstanding = action == WSI_WIN32_RETIRE_REFUSE;
       CHECK(wsi_win32_route_report(outstanding) == cases[i].report);
    }
@@ -1001,6 +1126,7 @@ static const struct {
    {"present_completion", test_present_completion},
    {"presenter_state", test_presenter_state},
    {"retire_action", test_retire_action},
+   {"retire_debt", test_retire_debt},
    {"route_report", test_route_report},
    {"flush_lifetime", test_flush_lifetime},
    {"handle_ownership", test_handle_ownership},
