@@ -424,6 +424,28 @@ radv_wddm2_ctx_destroy(struct radeon_winsys_ctx *rwctx)
    FREE(ctx);
 }
 
+/* The bounds of a CPU wait for one of the queue's own fences. The host tests
+ * shorten them; nothing else writes them. */
+uint64_t radv_wddm2_fence_wait_slice_ns = 1000000000ull;   /* 1 s between liveness checks */
+uint64_t radv_wddm2_fence_wait_total_ns = 120000000000ull; /* 120 s: well past a TDR and its reset */
+
+/* Whether the kernel device can still complete work. A hosted device has no
+ * kernel device of its own: the host status and the fences tell its state,
+ * and the host does not answer GetDeviceState. An unanswered query is no
+ * evidence of a loss. */
+static bool
+radv_wddm2_device_executing(struct radv_wddm2_winsys *ws)
+{
+   if (ws->host.dispatch)
+      return true;
+   D3DKMT_GETDEVICESTATE get_state = {
+      .hDevice = ws->device_h,
+      .StateType = D3DKMT_DEVICESTATE_EXECUTION,
+   };
+   NTSTATUS status = BC250_WDDM_CALL(&ws->host, GetDeviceState, &get_state);
+   return !NT_SUCCESS(status) || get_state.ExecutionState == D3DKMT_DEVICEEXECUTION_ACTIVE;
+}
+
 static bool
 vk_wddm2_fence_wait(struct radv_wddm2_winsys *ws, struct vk_wddm2_fence *fence)
 {
@@ -457,10 +479,51 @@ vk_wddm2_fence_wait(struct radv_wddm2_winsys *ws, struct vk_wddm2_fence *fence)
       return false;
    }
 
-   result = vk_async_event_wait(async_event, 10000000000ull);
+   /* A wait that runs past one slice is not a device loss. When another
+    * device hangs the engine, the work of this device waits behind it until
+    * the scheduler resets the engine and resubmits the render packets of the
+    * other devices with new fence ids. Only the device of the hung packet
+    * goes into the error state ("TDR changes in Windows 8", engine reset).
+    * That takes TdrDelay and the reset: 14.6 s in lab trial D1 of KMD
+    * 0.7.216.17 with TdrDelay 10, which a single 10 s wait turned into a
+    * lost DWM device (K225). So wait in slices and stop early only when the
+    * device is lost: the fence reads UINT64_MAX, the host reports the loss,
+    * or the kernel device is not in the ACTIVE execution state.
+    */
+   uint64_t waited_ns = 0;
+   const uint64_t slice_ns = MAX2(radv_wddm2_fence_wait_slice_ns, 1000000ull);
+   const uint64_t total_ns = MAX2(radv_wddm2_fence_wait_total_ns, slice_ns);
+   bool lost = false;
+   for (;;) {
+      result = vk_async_event_wait(async_event, MIN2(slice_ns, total_ns - waited_ns));
+      if (result != VK_TIMEOUT)
+         break;
+      waited_ns += MIN2(slice_ns, total_ns - waited_ns);
+      observed = p_atomic_read(fence->value_map);
+      if (!bc250_host_fence_valid(&ws->host, observed) || observed == UINT64_MAX ||
+          !radv_wddm2_device_executing(ws)) {
+         lost = true;
+         break;
+      }
+      if (observed >= fence->wait_value) {
+         result = VK_SUCCESS;
+         break;
+      }
+      if (waited_ns >= total_ns)
+         break;
+      if (waited_ns == slice_ns)
+         fprintf(stderr,
+                 "radv/wddm2: fence %u value %" PRIu64 " pending after %" PRIu64
+                 " ms, device active: waiting on\n",
+                 fence->handle, fence->wait_value, waited_ns / 1000000);
+   }
    vk_async_event_close(async_event);
    if (result != VK_SUCCESS)
-      fprintf(stderr, "async wait event: 0x%x\n", result);
+      fprintf(stderr, "async wait event: 0x%x after %" PRIu64 " ms%s\n", result, waited_ns / 1000000,
+              lost ? ", device lost" : "");
+   else if (waited_ns >= slice_ns)
+      fprintf(stderr, "radv/wddm2: fence %u value %" PRIu64 " completed after %" PRIu64 " ms of wait\n",
+              fence->handle, fence->wait_value, waited_ns / 1000000);
 
    /* Read the fence back before asking the kernel anything. A wait that returned with the fence valid and at
     * or past its wait value is the ordinary case: the work is done, the device is executing, and the
