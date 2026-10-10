@@ -429,21 +429,53 @@ radv_wddm2_ctx_destroy(struct radeon_winsys_ctx *rwctx)
 uint64_t radv_wddm2_fence_wait_slice_ns = 1000000000ull;   /* 1 s between liveness checks */
 uint64_t radv_wddm2_fence_wait_total_ns = 120000000000ull; /* 120 s: well past a TDR and its reset */
 
-/* Whether the kernel device can still complete work. A hosted device has no
+/* How many device-state queries may fail in a row before the wait ends. One
+ * unanswered query is no evidence of a loss, and a second may still be a
+ * transient failure; a device that keeps not answering cannot be waited out
+ * to the total bound, because its wait will not be signalled either. */
+#define RADV_WDDM2_UNANSWERED_STATE_MAX 3u
+
+/* Whether the device can no longer complete this work. A hosted device has no
  * kernel device of its own: the host status and the fences tell its state,
- * and the host does not answer GetDeviceState. An unanswered query is no
- * evidence of a loss. */
+ * and the host does not answer GetDeviceState.
+ *
+ * On a kernel device the query itself can fail. D3DKMTGetDeviceState
+ * documents STATUS_DEVICE_REMOVED ("the graphics adapter was stopped or the
+ * display device was reset") and STATUS_INVALID_PARAMETER, and may return
+ * other NTSTATUS values. A removed device, or one whose handle the kernel no
+ * longer knows, is gone: its async wait will never be signalled, so that is a
+ * loss at once and the caller must not be held for the total bound. Any other
+ * failure may be transient and is tolerated, up to
+ * RADV_WDDM2_UNANSWERED_STATE_MAX in a row; after that the wait ends too,
+ * which is what the query after the wait does with the same event. unanswered
+ * counts the consecutive failures within one wait.
+ */
 static bool
-radv_wddm2_device_executing(struct radv_wddm2_winsys *ws)
+radv_wddm2_device_lost(struct radv_wddm2_winsys *ws, unsigned *unanswered)
 {
    if (ws->host.dispatch)
-      return true;
+      return false;
    D3DKMT_GETDEVICESTATE get_state = {
       .hDevice = ws->device_h,
       .StateType = D3DKMT_DEVICESTATE_EXECUTION,
    };
    NTSTATUS status = BC250_WDDM_CALL(&ws->host, GetDeviceState, &get_state);
-   return !NT_SUCCESS(status) || get_state.ExecutionState == D3DKMT_DEVICEEXECUTION_ACTIVE;
+   if (unlikely(!NT_SUCCESS(status))) {
+      if (status == STATUS_DEVICE_REMOVED || status == STATUS_INVALID_HANDLE) {
+         fprintf(stderr, "radv/wddm2: GetDeviceState(EXECUTION): 0x%X, the device is gone\n", status);
+         return true;
+      }
+      if (++*unanswered < RADV_WDDM2_UNANSWERED_STATE_MAX) {
+         fprintf(stderr, "radv/wddm2: GetDeviceState(EXECUTION): 0x%X, unanswered %u of %u\n", status,
+                 *unanswered, RADV_WDDM2_UNANSWERED_STATE_MAX);
+         return false;
+      }
+      fprintf(stderr, "radv/wddm2: GetDeviceState(EXECUTION): 0x%X, %u unanswered in a row: the device is lost\n",
+              status, *unanswered);
+      return true;
+   }
+   *unanswered = 0;
+   return get_state.ExecutionState != D3DKMT_DEVICEEXECUTION_ACTIVE;
 }
 
 static bool
@@ -488,11 +520,13 @@ vk_wddm2_fence_wait(struct radv_wddm2_winsys *ws, struct vk_wddm2_fence *fence)
     * 0.7.216.17 with TdrDelay 10, which a single 10 s wait turned into a
     * lost DWM device (K225). So wait in slices and stop early only when the
     * device is lost: the fence reads UINT64_MAX, the host reports the loss,
-    * or the kernel device is not in the ACTIVE execution state.
+    * or the kernel device is not in the ACTIVE execution state (and a kernel
+    * device that is gone, or that stops answering at all, is lost as well).
     */
    uint64_t waited_ns = 0;
    const uint64_t slice_ns = MAX2(radv_wddm2_fence_wait_slice_ns, 1000000ull);
    const uint64_t total_ns = MAX2(radv_wddm2_fence_wait_total_ns, slice_ns);
+   unsigned unanswered = 0;
    bool lost = false;
    for (;;) {
       result = vk_async_event_wait(async_event, MIN2(slice_ns, total_ns - waited_ns));
@@ -501,7 +535,7 @@ vk_wddm2_fence_wait(struct radv_wddm2_winsys *ws, struct vk_wddm2_fence *fence)
       waited_ns += MIN2(slice_ns, total_ns - waited_ns);
       observed = p_atomic_read(fence->value_map);
       if (!bc250_host_fence_valid(&ws->host, observed) || observed == UINT64_MAX ||
-          !radv_wddm2_device_executing(ws)) {
+          radv_wddm2_device_lost(ws, &unanswered)) {
          lost = true;
          break;
       }
