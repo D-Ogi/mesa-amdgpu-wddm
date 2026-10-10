@@ -25,6 +25,8 @@
 
 #include <assert.h>
 #include <inttypes.h>
+#include <stdlib.h>
+#include <wchar.h>
 
 #include "util/os_time.h"
 #include "util/u_atomic.h"
@@ -99,12 +101,8 @@ vk_wddm2_monitored_fence_init(struct vk_device *device,
    struct vk_wddm2_monitored_fence *fence = to_wddm2_monitored_fence(sync);
    NTSTATUS status;
 
-   /* An exportable semaphore (VkExportSemaphoreCreateInfo) arrives here with
-    * VK_SYNC_IS_SHAREABLE only; the runtime sets VK_SYNC_IS_SHARED after the
-    * first successful export. D3DKMTShareObjects needs NtSecuritySharing at
-    * creation time, so the object must be created shareable now, otherwise
-    * the export below has no NT handle to duplicate (vkd3d-proton's
-    * D3D12_FENCE export then failed with VK_ERROR_UNKNOWN).
+   /* The payload must be shareable before export parameters are applied.
+    * Create the NT handle only after its security and name are known.
     */
    const bool shareable = (sync->flags & VK_SYNC_IS_SHAREABLE) != 0;
 
@@ -131,25 +129,9 @@ vk_wddm2_monitored_fence_init(struct vk_device *device,
    fence->handle = create.hSyncObject;
    fence->value_map = create.Info.MonitoredFence.FenceValueCPUVirtualAddress;
 #ifdef _WIN32
-   if (shareable && !device->bc250_host.dispatch) {
-      OBJECT_ATTRIBUTES oa = { sizeof(OBJECT_ATTRIBUTES) };
-      status = WDDM2_DISPATCH(ShareObjects(
-         1,
-         &fence->handle,
-         &oa,
-         D3DDDI_SYNC_OBJECT_ALL_ACCESS,
-         &fence->shared_handle
-      ));
-      if (unlikely(!NT_SUCCESS(status))) {
-         const D3DKMT_DESTROYSYNCHRONIZATIONOBJECT destroy = {
-            .hSyncObject = fence->handle,
-         };
-         BC250_WDDM_CALL(&device->bc250_host, DestroySynchronizationObject, &destroy);
-         fence->handle = 0;
-         fence->shared_handle = NULL;
-         return NTSTATUS_to_VkResult(device, status);
-      }
-   }
+   fence->shared_handle = NULL;
+   fence->export_access = GENERIC_ALL;
+   fence->shared_handle_inheritable = false;
 #endif
 
    return VK_SUCCESS;
@@ -312,6 +294,94 @@ fail_close_event:
 
 #ifdef _WIN32
 static VkResult
+vk_wddm2_fence_object_name(struct vk_device *device, const wchar_t *name,
+                          UNICODE_STRING *object_name)
+{
+   *object_name = (UNICODE_STRING){0};
+   if (!name)
+      return VK_SUCCESS;
+
+   bool global = wcsncmp(name, L"Global\\", 7) == 0;
+   if (global)
+      name += 7;
+   else if (wcsncmp(name, L"Local\\", 6) == 0)
+      name += 6;
+   if (!*name)
+      return vk_errorf(device, VK_ERROR_UNKNOWN, "unsupported semaphore namespace");
+
+   DWORD session = 0;
+   if (!global && !ProcessIdToSessionId(GetCurrentProcessId(), &session))
+      return vk_errorf(device, VK_ERROR_UNKNOWN, "cannot resolve semaphore session");
+
+   wchar_t prefix[64];
+   int prefix_len = session == 0 ?
+      swprintf(prefix, ARRAY_SIZE(prefix), L"\\BaseNamedObjects\\") :
+      swprintf(prefix, ARRAY_SIZE(prefix), L"\\Sessions\\%lu\\BaseNamedObjects\\",
+               (unsigned long)session);
+   if (prefix_len < 0)
+      return vk_error(device, VK_ERROR_UNKNOWN);
+
+   size_t name_len = 0;
+   const size_t max_chars = UINT16_MAX / sizeof(wchar_t) - 1;
+   while (name_len <= max_chars && name[name_len]) {
+      if (name[name_len] == L'\\')
+         return vk_errorf(device, VK_ERROR_UNKNOWN, "unsupported semaphore namespace");
+      name_len++;
+   }
+   if (name_len > max_chars - (size_t)prefix_len)
+      return vk_errorf(device, VK_ERROR_UNKNOWN, "semaphore name too long");
+
+   size_t chars = (size_t)prefix_len + name_len;
+   wchar_t *buffer = malloc((chars + 1) * sizeof(wchar_t));
+   if (!buffer)
+      return vk_error(device, VK_ERROR_OUT_OF_HOST_MEMORY);
+   memcpy(buffer, prefix, (size_t)prefix_len * sizeof(wchar_t));
+   memcpy(buffer + prefix_len, name, (name_len + 1) * sizeof(wchar_t));
+   object_name->Length = (USHORT)(chars * sizeof(wchar_t));
+   object_name->MaximumLength = (USHORT)((chars + 1) * sizeof(wchar_t));
+   object_name->Buffer = buffer;
+   return VK_SUCCESS;
+}
+
+static VkResult
+vk_wddm2_monitored_fence_set_win32_export_params(struct vk_device *device,
+                                                struct vk_sync *sync,
+                                                const void *security_attributes,
+                                                uint32_t access,
+                                                const wchar_t *name)
+{
+   struct vk_wddm2_monitored_fence *fence = to_wddm2_monitored_fence(sync);
+   if (device->bc250_host.dispatch || fence->shared_handle)
+      return vk_error(device, VK_ERROR_UNKNOWN);
+
+   const SECURITY_ATTRIBUTES *sa = security_attributes;
+   UNICODE_STRING object_name;
+   VkResult result = vk_wddm2_fence_object_name(device, name, &object_name);
+   if (result != VK_SUCCESS)
+      return result;
+
+   OBJECT_ATTRIBUTES oa = {
+      .Length = sizeof(OBJECT_ATTRIBUTES),
+      .ObjectName = name ? &object_name : NULL,
+      .Attributes = 0,
+      .SecurityDescriptor = sa ? sa->lpSecurityDescriptor : NULL,
+   };
+   HANDLE shared_handle = NULL;
+   NTSTATUS status = WDDM2_DISPATCH(ShareObjects(
+      1, &fence->handle, &oa, access, &shared_handle));
+   free(object_name.Buffer);
+   if (!NT_SUCCESS(status))
+      return vk_error(device, status == STATUS_NO_MEMORY ?
+                      VK_ERROR_OUT_OF_HOST_MEMORY : VK_ERROR_UNKNOWN);
+
+   assert(fence->shared_handle == NULL);
+   fence->shared_handle = shared_handle;
+   fence->export_access = access;
+   fence->shared_handle_inheritable = sa && sa->bInheritHandle;
+   return VK_SUCCESS;
+}
+
+static VkResult
 vk_wddm2_monitored_fence_import_opaque_win32_handle(struct vk_device *device,
                                                     struct vk_sync *sync,
                                                     void *handle,
@@ -321,10 +391,42 @@ vk_wddm2_monitored_fence_import_opaque_win32_handle(struct vk_device *device,
    bool shared = (sync->flags & VK_SYNC_IS_SHARED) != 0;
    NTSTATUS status;
    
-   assert(name == NULL);
+   HANDLE owned_handle = NULL;
+   if (name) {
+      if (device->bc250_host.dispatch)
+         return vk_error(device, VK_ERROR_INVALID_EXTERNAL_HANDLE);
+      UNICODE_STRING object_name;
+      VkResult result = vk_wddm2_fence_object_name(device, name, &object_name);
+      if (result != VK_SUCCESS)
+         return result == VK_ERROR_OUT_OF_HOST_MEMORY ? result :
+                vk_error(device, VK_ERROR_INVALID_EXTERNAL_HANDLE);
+      OBJECT_ATTRIBUTES oa = {
+         .Length = sizeof(OBJECT_ATTRIBUTES),
+         .ObjectName = &object_name,
+      };
+      D3DKMT_OPENSYNCOBJECTNTHANDLEFROMNAME named = {
+         .dwDesiredAccess = D3DDDI_SYNC_OBJECT_ALL_ACCESS,
+         .pObjAttrib = &oa,
+      };
+      status = WDDM2_DISPATCH(OpenSyncObjectNtHandleFromName(&named));
+      free(object_name.Buffer);
+      if (!NT_SUCCESS(status))
+         return vk_error(device, status == STATUS_NO_MEMORY ?
+                         VK_ERROR_OUT_OF_HOST_MEMORY : VK_ERROR_INVALID_EXTERNAL_HANDLE);
+      owned_handle = named.hNtHandle;
+   } else {
+      HANDLE process = GetCurrentProcess();
+      if (!DuplicateHandle(process, (HANDLE)handle, process, &owned_handle,
+                           0, false, DUPLICATE_SAME_ACCESS)) {
+         DWORD error = GetLastError();
+         return vk_error(device, error == ERROR_NOT_ENOUGH_MEMORY ||
+                         error == ERROR_OUTOFMEMORY ? VK_ERROR_OUT_OF_HOST_MEMORY :
+                         VK_ERROR_INVALID_EXTERNAL_HANDLE);
+      }
+   }
 
    D3DKMT_OPENSYNCOBJECTFROMNTHANDLE2 open = {
-      .hNtHandle = (HANDLE) handle,
+      .hNtHandle = owned_handle,
       .hDevice = device->wddm2_handle,
       .Flags = {
          .Shared = shared,
@@ -335,13 +437,16 @@ vk_wddm2_monitored_fence_import_opaque_win32_handle(struct vk_device *device,
    };
 
    status = BC250_WDDM_CALL(&device->bc250_host, OpenSyncObjectFromNtHandle2, &open);
-   if (unlikely(!NT_SUCCESS(status)))
-      return NTSTATUS_to_VkResult(device, status);
+   if (unlikely(!NT_SUCCESS(status))) {
+      CloseHandle(owned_handle);
+      return vk_error(device, status == STATUS_NO_MEMORY ?
+                      VK_ERROR_OUT_OF_HOST_MEMORY : VK_ERROR_INVALID_EXTERNAL_HANDLE);
+   }
 
    vk_wddm2_monitored_fence_finish(device, sync);
 
    fence->handle = open.hSyncObject;
-   fence->shared_handle = handle;
+   fence->shared_handle = owned_handle;
    fence->value_map = open.MonitoredFence.FenceValueCPUVirtualAddress;
 
    return VK_SUCCESS;
@@ -354,14 +459,24 @@ vk_wddm2_monitored_fence_export_opaque_win32_handle(struct vk_device *device,
 {
    struct vk_wddm2_monitored_fence *fence = to_wddm2_monitored_fence(sync);
 
-   if (!fence->shared_handle)
-      return vk_errorf(device, VK_ERROR_FEATURE_NOT_PRESENT,
-                       "monitored fence was not created shareable");
+   if (!fence->shared_handle) {
+      if (device->bc250_host.dispatch)
+         return vk_error(device, VK_ERROR_UNKNOWN);
+      OBJECT_ATTRIBUTES oa = { .Length = sizeof(OBJECT_ATTRIBUTES) };
+      HANDLE exported = NULL;
+      NTSTATUS status = WDDM2_DISPATCH(ShareObjects(
+         1, &fence->handle, &oa, fence->export_access, &exported));
+      if (!NT_SUCCESS(status))
+         return vk_error(device, status == STATUS_NO_MEMORY ?
+                         VK_ERROR_OUT_OF_HOST_MEMORY : VK_ERROR_UNKNOWN);
+      *handle = exported;
+      return VK_SUCCESS;
+   }
 
    HANDLE process = GetCurrentProcess();
    BOOL ok = DuplicateHandle(process, (HANDLE)fence->shared_handle,
-                             process, (HANDLE *)handle, 0,
-                             false, DUPLICATE_SAME_ACCESS);
+                             process, (HANDLE *)handle, fence->export_access,
+                             fence->shared_handle_inheritable, 0);
    if (!ok)
       return vk_errorf(device, VK_ERROR_UNKNOWN, "DuplicateHandle failed");
 
@@ -385,6 +500,7 @@ const struct vk_sync_type vk_wddm2_monitored_fence_type = {
    .wait_many = vk_wddm2_monitored_fence_wait_many,
    .export_win32_handle = vk_wddm2_monitored_fence_export_opaque_win32_handle,
    .import_win32_handle = vk_wddm2_monitored_fence_import_opaque_win32_handle,
+   .set_win32_export_params = vk_wddm2_monitored_fence_set_win32_export_params,
 };
 
 VkResult

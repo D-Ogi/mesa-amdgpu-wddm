@@ -29,6 +29,7 @@
 #include "util/u_debug.h"
 #include "util/macros.h"
 #include "util/os_time.h"
+#include "util/u_atomic.h"
 
 #include "vk_alloc.h"
 #include "vk_device.h"
@@ -535,13 +536,16 @@ vk_sync_export_win32_handle(struct vk_device *device,
                             struct vk_sync *sync,
                             void **handle)
 {
-   assert(sync->flags & VK_SYNC_IS_SHAREABLE);
+   assert(p_atomic_read(&sync->flags) & VK_SYNC_IS_SHAREABLE);
 
    VkResult result = sync->type->export_win32_handle(device, sync, handle);
    if (unlikely(result != VK_SUCCESS))
       return result;
 
-   sync->flags |= VK_SYNC_IS_SHARED;
+   enum vk_sync_flags flags;
+   do {
+      flags = p_atomic_read(&sync->flags);
+   } while (p_atomic_cmpxchg(&sync->flags, flags, flags | VK_SYNC_IS_SHARED) != flags);
 
    return VK_SUCCESS;
 }
@@ -553,7 +557,12 @@ vk_sync_set_win32_export_params(struct vk_device *device,
                                 uint32_t access,
                                 const wchar_t *name)
 {
-   assert(sync->flags & VK_SYNC_IS_SHARED);
+   if (!(sync->flags & VK_SYNC_IS_SHAREABLE))
+      return VK_SUCCESS;
+
+   assert(sync->flags & VK_SYNC_IS_SHAREABLE);
+   if (!sync->type->set_win32_export_params)
+      return vk_error(device, VK_ERROR_UNKNOWN);
 
    return sync->type->set_win32_export_params(device, sync, security_attributes, access, name);
 }
