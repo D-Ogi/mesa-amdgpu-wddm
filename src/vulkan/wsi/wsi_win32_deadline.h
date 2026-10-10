@@ -62,6 +62,13 @@ extern "C" {
  * costs a locked instruction. The paths that read it are one per acquire and one per swapchain
  * creation, so the cost is a few hundred locked instructions a second at frame rate, against a
  * present whose own measured cost is milliseconds.
+ *
+ * A 64-bit pair comes with the same rule, for the timeline value an image's debt is recorded
+ * against (wsi_win32_image_debt below). It is spelled with _InterlockedCompareExchange64 alone:
+ * _InterlockedOr64 and _InterlockedExchange64 are x64/ARM intrinsics, while the 64-bit
+ * compare-exchange is documented for x86 as well, and the release ships an x86 ICD beside the x64
+ * one, so this header has to compile for either target. A compare-exchange of 0 against 0 is the
+ * load: it returns the current value and writes only when that value is already 0.
  */
 #if defined(_MSC_VER)
 #include <intrin.h>
@@ -80,6 +87,23 @@ wsi_win32_atomic_store32(uint32_t *word, uint32_t value)
 {
    (void)_InterlockedExchange((volatile long *)word, (long)value);
 }
+static inline uint64_t
+wsi_win32_atomic_load64(uint64_t *word)
+{
+   return (uint64_t)_InterlockedCompareExchange64((volatile __int64 *)word, 0, 0);
+}
+static inline void
+wsi_win32_atomic_store64(uint64_t *word, uint64_t value)
+{
+   __int64 seen = _InterlockedCompareExchange64((volatile __int64 *)word, 0, 0);
+   for (;;) {
+      const __int64 prev =
+         _InterlockedCompareExchange64((volatile __int64 *)word, (__int64)value, seen);
+      if (prev == seen)
+         return;
+      seen = prev;
+   }
+}
 #else
 static inline uint32_t
 wsi_win32_atomic_load32(uint32_t *word)
@@ -94,6 +118,16 @@ wsi_win32_atomic_cas32(uint32_t *word, uint32_t expect, uint32_t desired)
 }
 static inline void
 wsi_win32_atomic_store32(uint32_t *word, uint32_t value)
+{
+   __atomic_store_n(word, value, __ATOMIC_SEQ_CST);
+}
+static inline uint64_t
+wsi_win32_atomic_load64(uint64_t *word)
+{
+   return __atomic_load_n(word, __ATOMIC_SEQ_CST);
+}
+static inline void
+wsi_win32_atomic_store64(uint64_t *word, uint64_t value)
 {
    __atomic_store_n(word, value, __ATOMIC_SEQ_CST);
 }
@@ -434,6 +468,14 @@ wsi_win32_presenter_state_name(enum wsi_win32_presenter_state state)
  * left is the application's own first one, which waits on the application's own semaphores on a
  * device that is alive and retires by itself. That is NOTHING, not a refusal: reporting it as
  * outstanding would end a client with VK_ERROR_DEVICE_LOST over a wait that does not exist.
+ *
+ * AND THAT FACT NAMES A VALUE. The second reading of the same review found the bit form of it
+ * aliasing one level up: timeline_values[i] moves to W+1 for the application's next submission
+ * before that submission is made (wsi_common.c:2768), and the debt is cleared only inside
+ * wsi_dxgi_blit, which that path skips when the submission fails (wsi_common.c:2820-2821). A bit
+ * recorded for W then reads as a debt for W+1. So the record carries the value it was recorded
+ * against, and presenter_owes is "the presenter promised THIS value" rather than "the presenter
+ * promised something" (wsi_win32_image_debt below).
  */
 enum wsi_win32_retire_action {
    WSI_WIN32_RETIRE_NOTHING = 0, /* no outstanding wait of ours behind this image */
@@ -441,43 +483,73 @@ enum wsi_win32_retire_action {
    WSI_WIN32_RETIRE_REFUSE,      /* an outstanding wait, and no proof that a host signal is allowed */
 };
 
-/* Whether the PRESENTER promised the value that an image's blit timeline value now holds: one word
- * per image of a DXGI chain, written by the thread that presents and read by the thread that retires
- * the route, so every access is an atomic operation (the V3 rule applies to this word too).
+/* WHICH value the PRESENTER promised for an image: one record per image of a DXGI chain, written by
+ * the thread that presents and read by the thread that retires the route, so every access is an
+ * atomic operation (the V3 rule applies here too).
+ *
+ * WHY THE VALUE AND NOT A BIT (the review of round 4b, second reading). A bare "the presenter owes
+ * one more value" bit is a fact about a value it does not name, and the entry it is read against
+ * moves without it. wsi_common.c:2768 pre-increments blit.timeline_values[i] to W+1 for the
+ * application's NEXT submission before it calls wsi_queue_submit2_unordered, and
+ * wsi_common.c:2820-2821 skips wsi->blit - the only place that clears the debt - when that submit
+ * fails. The entry then holds W+1 while the bit still records the accepted Signal of W, and a
+ * retirement reading want=W+1, have=W, owes=true would host-signal W+1, a value nobody promised:
+ * the same aliasing of two signallers' values on one number that this round exists to close, one
+ * level up. The same window is open to any concurrent retirement, and this record is read across
+ * threads by construction, so no argument about which thread calls what can shut it.
+ *
+ * So the record carries the owed VALUE next to the word, written BEFORE the word is set, and the
+ * question is not "does the presenter owe something" but "does the presenter owe THIS value":
+ *
+ *   owes(entry) = word != 0 && value == entry
+ *
+ * Every stale or aliased reading then collapses to NOTHING by construction. A reader that sees the
+ * word of a newer cycle with the value of an older one reads value != entry; a reader that sees the
+ * value of a newer cycle with no word yet reads word == 0. Both are NOTHING, which is the direction
+ * a mistake has to fall: a host signal that is not proved allowed is the defect being fixed.
  *
  * It is set at exactly one place - after ID3D12CommandQueue::Signal was accepted AND
- * timeline_values[i] was raised to the value it signalled, in that order, so a reader can never see
- * the debt against the application's own value - and cleared when wsi_dxgi_blit is entered again for
- * that image. The clear loses nothing: entering the blit for image i means the application acquired
- * image i, and that acquire waited on the image's own VkFence, which the second submission of the
- * previous cycle signals. A cycle whose debt is cleared here is therefore a cycle that completed.
- *
- * Clearing can only ever turn a SIGNAL into a NOTHING, never the reverse, which is the direction a
- * mistake has to fall: a host signal that is not proved allowed is the defect being fixed.
+ * timeline_values[i] was raised to the value it signalled - and cleared when wsi_dxgi_blit is
+ * entered again for that image. The clear loses nothing: entering the blit for image i means the
+ * application acquired image i, and that acquire waited on the image's own VkFence, which the second
+ * submission of the previous cycle signals. A cycle whose debt is cleared here is therefore a cycle
+ * that completed.
  */
 #define WSI_WIN32_IMAGE_DEBT_OWED 0x1u
 
 struct wsi_win32_image_debt {
-   uint32_t word;
+   uint64_t value; /* the timeline value the presenter's accepted Signal promised */
+   uint32_t word;  /* WSI_WIN32_IMAGE_DEBT_OWED when `value` means anything */
 };
 
 static inline void
 wsi_win32_image_debt_reset(struct wsi_win32_image_debt *debt)
 {
+   /* The word first: a reader that sees it cleared asks nothing about the value. */
    wsi_win32_atomic_store32(&debt->word, 0u);
+   wsi_win32_atomic_store64(&debt->value, 0u);
 }
 
-/* The presenter's Signal of the value now in timeline_values[i] was accepted. */
+/* The presenter's Signal of `value` was accepted, and timeline_values[i] now holds `value`. */
 static inline void
-wsi_win32_image_debt_note_signalled(struct wsi_win32_image_debt *debt)
+wsi_win32_image_debt_note_signalled(struct wsi_win32_image_debt *debt, uint64_t value)
 {
+   /* The value first, the word after it: a reader that sees the word always sees the value with it,
+    * and a reader that sees only the value answers "nothing owed".
+    */
+   wsi_win32_atomic_store64(&debt->value, value);
    wsi_win32_atomic_store32(&debt->word, WSI_WIN32_IMAGE_DEBT_OWED);
 }
 
+/* Whether the presenter promised exactly `image_present_value`, the value the timeline entry of that
+ * image holds now. A debt recorded against any other value is not a debt for this entry.
+ */
 static inline bool
-wsi_win32_image_debt_owed(struct wsi_win32_image_debt *debt)
+wsi_win32_image_debt_owed(struct wsi_win32_image_debt *debt, uint64_t image_present_value)
 {
-   return (wsi_win32_atomic_load32(&debt->word) & WSI_WIN32_IMAGE_DEBT_OWED) != 0;
+   if ((wsi_win32_atomic_load32(&debt->word) & WSI_WIN32_IMAGE_DEBT_OWED) == 0)
+      return false;
+   return wsi_win32_atomic_load64(&debt->value) == image_present_value;
 }
 
 static inline enum wsi_win32_retire_action

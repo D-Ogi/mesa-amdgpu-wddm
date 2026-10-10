@@ -555,6 +555,11 @@ test_retire_action(void)
  * the timeline tells it from the presenter's value. Every case here has an image_present_value that
  * the presenter never promised, and the old rule - which asked only whether the semaphore read one
  * below it - answered SIGNAL for the first of them.
+ *
+ * The second review of the same round sent back the FORM of the extra input: a bit saying "the
+ * presenter owes one more value" is a fact about a value it does not name, and the timeline entry it
+ * is read against moves without it. The last part of this case is that reading - a debt recorded for
+ * W read against an entry of W+1 - and it must answer NOTHING.
  */
 static void
 test_retire_debt(void)
@@ -634,33 +639,72 @@ test_retire_debt(void)
    CHECK(have[0] == 0 && have[1] == 2); /* image 0's timeline is left to the application */
    CHECK(wsi_win32_route_report(refused != 0) == WSI_WIN32_REPORT_OUT_OF_DATE);
 
-   /* The word the production path carries this fact in: one per image, zero-initialised with the
-    * chain (vk_zalloc), set only where the presenter's Signal was accepted, cleared when the blit is
-    * entered again for that image.
+   /* The record the production path carries this fact in: one per image, zero-initialised with the
+    * chain (vk_zalloc), set only where the presenter's accepted Signal raised the value, cleared
+    * when the blit is entered again for that image. It carries the VALUE it was recorded against,
+    * and every question asked of it names the value the timeline entry holds now.
     */
    struct wsi_win32_image_debt word = {0};
-   CHECK(!wsi_win32_image_debt_owed(&word)); /* a zeroed image owes nothing */
-   wsi_win32_image_debt_note_signalled(&word);
-   CHECK(wsi_win32_image_debt_owed(&word));
-   wsi_win32_image_debt_note_signalled(&word); /* idempotent: one accepted Signal per cycle */
-   CHECK(wsi_win32_image_debt_owed(&word));
+   CHECK(!wsi_win32_image_debt_owed(&word, 0)); /* a zeroed image owes nothing, for any value */
+   CHECK(!wsi_win32_image_debt_owed(&word, 2));
+   wsi_win32_image_debt_note_signalled(&word, 2);
+   CHECK(wsi_win32_image_debt_owed(&word, 2));
+   wsi_win32_image_debt_note_signalled(&word, 2); /* idempotent: one accepted Signal per cycle */
+   CHECK(wsi_win32_image_debt_owed(&word, 2));
+
+   /* THE READING THE REVIEW OF ROUND 4b SENT BACK, and the reason the record is not a bit. The
+    * timeline entry moves without the debt: wsi_common.c:2768 pre-increments it to W+1 for the
+    * application's next submission, and the clear of the debt lives inside wsi_dxgi_blit, which
+    * wsi_common.c:2820-2821 skips when that submission fails. A debt recorded for 2 is then read
+    * against an entry of 3 - and a bit would have answered "owed", which is a host signal of a
+    * value nobody promised.
+    */
+   CHECK(!wsi_win32_image_debt_owed(&word, 3));
+   CHECK(!wsi_win32_image_debt_owed(&word, 1));
+   CHECK(!wsi_win32_image_debt_owed(&word, 0));
+   /* The same through the rule: want = 3, have = 2, presenter REMOVED is the exact SIGNAL shape,
+    * and it answers NOTHING because the 3 is nobody's promise.
+    */
+   value = 0;
+   CHECK(wsi_win32_route_retire_action(removed, wsi_win32_image_debt_owed(&word, 3), 3, 2, &value) ==
+         WSI_WIN32_RETIRE_NOTHING);
+   CHECK(value == 0); /* nothing handed back, so nothing signalled */
+   /* And the same numbers once the next cycle's Signal really was accepted for 3. */
+   wsi_win32_image_debt_note_signalled(&word, 3);
+   CHECK(wsi_win32_route_retire_action(removed, wsi_win32_image_debt_owed(&word, 3), 3, 2, &value) ==
+         WSI_WIN32_RETIRE_SIGNAL);
+   CHECK(value == 3);
    wsi_win32_image_debt_reset(&word);
-   CHECK(!wsi_win32_image_debt_owed(&word));
-   wsi_win32_image_debt_reset(&word);
-   CHECK(!wsi_win32_image_debt_owed(&word));
+   CHECK(!wsi_win32_image_debt_owed(&word, 3));
+   CHECK(!wsi_win32_image_debt_owed(&word, 0));
+   wsi_win32_image_debt_reset(&word); /* idempotent */
+   CHECK(!wsi_win32_image_debt_owed(&word, 3));
+
    /* The order the blit writes them in, as the state a reader may see: the value first and the debt
     * after it, so a reader that sees the debt always sees the presenter's value with it. The reverse
     * order is the defect: debt set against the application's value is the 03259 state.
     */
    uint64_t timeline = 1; /* the application's own signal of V = 1 */
    wsi_win32_image_debt_reset(&word);
-   CHECK(wsi_win32_route_retire_action(removed, wsi_win32_image_debt_owed(&word), timeline, 0,
-                                       &value) == WSI_WIN32_RETIRE_NOTHING);
+   CHECK(wsi_win32_route_retire_action(removed, wsi_win32_image_debt_owed(&word, timeline), timeline,
+                                       0, &value) == WSI_WIN32_RETIRE_NOTHING);
    timeline = 2; /* the presenter's Signal of V + 1 was accepted, then the value was raised */
-   wsi_win32_image_debt_note_signalled(&word);
-   CHECK(wsi_win32_route_retire_action(removed, wsi_win32_image_debt_owed(&word), timeline, 1,
-                                       &value) == WSI_WIN32_RETIRE_SIGNAL);
+   wsi_win32_image_debt_note_signalled(&word, timeline);
+   CHECK(wsi_win32_route_retire_action(removed, wsi_win32_image_debt_owed(&word, timeline), timeline,
+                                       1, &value) == WSI_WIN32_RETIRE_SIGNAL);
    CHECK(value == 2);
+
+   /* The whole chain of the review's scenario, in the order the production path runs it: the cycle
+    * above completed for 2, then the next vkQueuePresentKHR pre-increments the entry to 3 and its
+    * own submit fails, so neither the blit nor the clear of the debt ever runs. A retirement on that
+    * state - an acquire that expired, or the teardown - reads want = 3 against a debt for 2.
+    */
+   timeline = 3;
+   CHECK(!wsi_win32_image_debt_owed(&word, timeline));
+   CHECK(wsi_win32_route_retire_action(removed, wsi_win32_image_debt_owed(&word, timeline), timeline,
+                                       2, &value) == WSI_WIN32_RETIRE_NOTHING);
+   /* So nothing of ours is reported outstanding and the client recreates instead of being ended. */
+   CHECK(wsi_win32_route_report(false) == WSI_WIN32_REPORT_OUT_OF_DATE);
 }
 
 /* What the route ANSWERS when it could not retire what it queued. Reporting out-of-date there is

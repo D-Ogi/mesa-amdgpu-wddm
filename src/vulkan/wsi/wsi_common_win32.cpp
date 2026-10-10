@@ -85,10 +85,10 @@ struct wsi_win32_image {
    struct wsi_image base;
    enum wsi_win32_image_state state;
    struct wsi_win32_swapchain *chain;
-   /* Whether the presenter's D3D12 Signal of the value now in base.blit.timeline_values[this image]
-    * was accepted, which is what makes that value the presenter's and not the application's own
-    * pending signal (wsi_win32_image_debt in wsi_win32_deadline.h). The retirement may host-signal a
-    * shared blit timeline only for an image the presenter owes a value for.
+   /* WHICH value the presenter's D3D12 Signal was accepted for, which is what makes the value in
+    * base.blit.timeline_values[this image] the presenter's and not the application's own pending
+    * signal (wsi_win32_image_debt in wsi_win32_deadline.h). The retirement may host-signal a shared
+    * blit timeline only for an image whose entry holds exactly the value the presenter promised.
     */
    struct wsi_win32_image_debt debt;
    struct {
@@ -833,6 +833,11 @@ wsi_win32_route_failed(struct wsi_win32_swapchain *chain, const char *call, HRES
  * the presenter owes nothing for has nothing of ours outstanding behind it at all - the second
  * submission was never made.
  *
+ * The question names the value, because the entry moves without the debt: wsi_common.c:2768
+ * pre-increments it to W+1 for the application's next submission, and the clear of the debt lives
+ * inside wsi_dxgi_blit, which wsi_common.c:2820-2821 skips when that submission fails. A debt
+ * recorded for W read against an entry of W+1 answers "nothing owed" here, not "owed".
+ *
  * Returns true when at least one image is left with an outstanding wait of ours.
  */
 static bool
@@ -850,9 +855,11 @@ wsi_win32_retire_blit_waits(struct wsi_win32_swapchain *chain,
       const VkSemaphore semaphore = chain->base.blit.semaphores[i];
       const uint64_t want_present = chain->base.blit.timeline_values[i];
       /* Whether that value is the presenter's at all. A blit that failed left the application's own
-       * pending value there, and nothing of ours waits for it.
+       * pending value there, and nothing of ours waits for it. The question is asked about THIS
+       * value: a debt recorded against an older one (the entry moves to W+1 for the application's
+       * next submission before that submission is made, wsi_common.c:2768) is not a debt for it.
        */
-      const bool owes = wsi_win32_image_debt_owed(&chain->images[i].debt);
+      const bool owes = wsi_win32_image_debt_owed(&chain->images[i].debt, want_present);
       uint64_t want = 0, have = 0;
 
       if (semaphore == VK_NULL_HANDLE)
@@ -1179,10 +1186,13 @@ wsi_dxgi_blit(struct wsi_swapchain *drv_chain, uint32_t image_index)
       return VK_ERROR_DEVICE_LOST;
    }
    chain->base.blit.timeline_values[image_index] = signal_value;
-   /* After the value, never before it: a retirement that saw the debt against the application's own
-    * value would host-signal past a pending signal, which is the defect this order prevents.
+   /* After the value, never before it, and with the value it was accepted for: a retirement that
+    * saw the debt against the application's own value would host-signal past a pending signal,
+    * which is the defect this order prevents, and a retirement that saw it against a value the
+    * entry has since moved past would host-signal a value nobody promised, which is what naming the
+    * value prevents.
     */
-   wsi_win32_image_debt_note_signalled(&win32_image->debt);
+   wsi_win32_image_debt_note_signalled(&win32_image->debt, signal_value);
 
    return VK_SUCCESS;
 }
