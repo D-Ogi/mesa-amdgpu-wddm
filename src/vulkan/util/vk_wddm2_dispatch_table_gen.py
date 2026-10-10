@@ -272,6 +272,7 @@ def main():
       ('CreateSynchronizationObject2', 'D3DKMT_CREATESYNCHRONIZATIONOBJECT2 *arg'),
       ('DestroySynchronizationObject', None),
       ('OpenSyncObjectFromNtHandle2', 'D3DKMT_OPENSYNCOBJECTFROMNTHANDLE2 *arg'),
+      ('OpenSyncObjectNtHandleFromName', 'D3DKMT_OPENSYNCOBJECTNTHANDLEFROMNAME *arg'),
       ('WaitForSynchronizationObjectFromCpu', None),
       ('WaitForSynchronizationObjectFromGpu', None),
       ('SubmitWaitForSyncObjectsToHwQueue', None),
