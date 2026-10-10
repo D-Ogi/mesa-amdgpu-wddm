@@ -4,8 +4,10 @@
  *
  * Host test of radv_wddm2_wsi_route.h and wsi_win32_deadline.h: the present route switch, the
  * report of application-local runtime modules, the D3D12 implementation check, the LB7A checks of
- * the shared-resource import, and the deadlines and the degrade rule of the DXGI route (BD-105).
- * No GPU, no Vulkan, no Windows header. Run through
+ * the shared-resource import, and the deadlines, the degrade rule and the retirement rules of the
+ * DXGI route (BD-105). No GPU, no Vulkan and no Windows header: the one thing outside the C library
+ * is _beginthread from <process.h>, which the concurrency case of round 4b needs to run the route
+ * flags from two threads at once (V3). Run through
  * bc250-win tools/build/build-radv-wsi-route-test.ps1.
  *
  * Usage: radv_wddm2_wsi_route_test [--negative-control]
@@ -15,6 +17,7 @@
 #include "../radv_wddm2_wsi_route.h"
 #include "../../../../../vulkan/wsi/wsi_win32_deadline.h"
 
+#include <process.h>
 #include <stdio.h>
 #include <string.h>
 
@@ -272,6 +275,16 @@ test_deadline(void)
          WSI_WIN32_ROUTE_DEADLINE_NS);
    CHECK(wsi_win32_acquire_timeout_capped(WSI_WIN32_ROUTE_DEADLINE_NS + 1, false));
 
+   /* The retirement's own wait sits INSIDE the route deadline: by the time it runs, the route has
+    * already spent that deadline once, and the thing it waits for is work on the application's own
+    * healthy device. It is still a wait, so it still has a bound and the bound is still never
+    * INFINITE.
+    */
+   CHECK(WSI_WIN32_ROUTE_RETIRE_DEADLINE_NS > 0);
+   CHECK(WSI_WIN32_ROUTE_RETIRE_DEADLINE_NS < WSI_WIN32_ROUTE_DEADLINE_NS);
+   CHECK(wsi_win32_wait_ms(WSI_WIN32_ROUTE_RETIRE_DEADLINE_NS) == 200);
+   CHECK(wsi_win32_wait_ms(WSI_WIN32_ROUTE_RETIRE_DEADLINE_NS) != 0xffffffffu);
+
    /* Every stage of a first present has a name of its own, so one log line names the call that did
     * not return.
     */
@@ -297,43 +310,54 @@ test_present_completion(void)
     * completed, so the next acquire still gets the route's own deadline and not the application's
     * UINT64_MAX. This is the state the b27 round-2 ICD lifted the deadline in.
     */
-   struct wsi_win32_route_state queued_only = {false, false};
+   struct wsi_win32_route_state queued_only = {0};
    CHECK(!wsi_win32_route_present_complete(queued, 0));
    CHECK(!wsi_win32_route_present_complete(queued, queued - 1));
    CHECK(!wsi_win32_route_note_acquired(&queued_only, queued, queued - 1));
-   CHECK(!queued_only.presented);
-   CHECK(wsi_win32_acquire_timeout_ns(forever, queued_only.presented) ==
+   CHECK(!wsi_win32_route_presented(&queued_only));
+   CHECK(wsi_win32_acquire_timeout_ns(forever, wsi_win32_route_presented(&queued_only)) ==
          WSI_WIN32_ROUTE_DEADLINE_NS);
-   CHECK(wsi_win32_acquire_timeout_capped(forever, queued_only.presented));
+   CHECK(wsi_win32_acquire_timeout_capped(forever, wsi_win32_route_presented(&queued_only)));
    /* And when that bounded wait expires, the route is retired and the next swapchain takes CPU
     * images: outcome 2 of the lab plan (a usable window), not outcome 3 (a dead message pump).
     */
    CHECK(wsi_win32_route_wait_expired(&queued_only));
-   CHECK(queued_only.dead && !wsi_win32_route_usable(&queued_only));
+   CHECK(!wsi_win32_route_usable(&queued_only));
 
    /* The same present, completed: the fence reached the queued value and the acquire returned. Only
     * then are the deadlines lifted, and only once.
     */
-   struct wsi_win32_route_state proved = {false, false};
+   struct wsi_win32_route_state proved = {0};
    CHECK(wsi_win32_route_present_complete(queued, queued));
    CHECK(wsi_win32_route_present_complete(queued, queued + 3));
    CHECK(wsi_win32_route_note_acquired(&proved, queued, queued));
-   CHECK(proved.presented && !proved.dead);
+   CHECK(wsi_win32_route_presented(&proved) && wsi_win32_route_usable(&proved));
    CHECK(!wsi_win32_route_note_acquired(&proved, queued, queued));
-   CHECK(wsi_win32_acquire_timeout_ns(forever, proved.presented) == forever);
+   CHECK(wsi_win32_acquire_timeout_ns(forever, wsi_win32_route_presented(&proved)) == forever);
    CHECK(!wsi_win32_route_wait_expired(&proved));
    CHECK(wsi_win32_route_usable(&proved));
+
+   /* UINT64_MAX is NOT a very high fence value: it is the documented answer of
+    * ID3D12Fence::GetCompletedValue for a REMOVED device (sdk-api
+    * nf-d3d12-id3d12fence-getcompletedvalue.md:61), which is exactly what lab round 3 read. Round 4
+    * compared it with >= and would have called the route proved by a presenter that had died.
+    */
+   struct wsi_win32_route_state removed = {0};
+   CHECK(!wsi_win32_route_present_complete(queued, UINT64_MAX));
+   CHECK(!wsi_win32_route_note_acquired(&removed, queued, UINT64_MAX));
+   CHECK(!wsi_win32_route_presented(&removed));
+   CHECK(wsi_win32_acquire_timeout_capped(forever, wsi_win32_route_presented(&removed)));
 
    /* An image that was never presented has timeline value 0: an acquire that returns it proves
     * nothing. The first acquires of a chain take an idle image and never wait, so they must not lift
     * anything, whatever any fence reads.
     */
-   struct wsi_win32_route_state fresh = {false, false};
+   struct wsi_win32_route_state fresh = {0};
    CHECK(!wsi_win32_route_present_complete(0, 0));
    CHECK(!wsi_win32_route_present_complete(0, 99));
    CHECK(!wsi_win32_route_note_acquired(&fresh, 0, 99));
-   CHECK(!fresh.presented);
-   CHECK(wsi_win32_acquire_timeout_capped(forever, fresh.presented));
+   CHECK(!wsi_win32_route_presented(&fresh));
+   CHECK(wsi_win32_acquire_timeout_capped(forever, wsi_win32_route_presented(&fresh)));
 
    /* The value must be the ACQUIRED image's own, not the chain's most recent present. A two-image
     * chain alternates, so the most recent present always belongs to the other image and its fence
@@ -341,85 +365,562 @@ test_present_completion(void)
     * 0 was presented at value 2 and its copy is done, image 1 was presented at 4 and its copy is
     * not. The acquire of image 0 lifts the deadlines, and the lagging value would not have.
     */
-   struct wsi_win32_route_state alternating = {false, false};
+   struct wsi_win32_route_state alternating = {0};
    const uint64_t image0_value = 2, image0_fence = 2;
    const uint64_t image1_value = 4, image1_fence = 3;
    CHECK(!wsi_win32_route_present_complete(image1_value, image1_fence));
    CHECK(!wsi_win32_route_note_acquired(&alternating, image1_value, image1_fence));
-   CHECK(!alternating.presented);
+   CHECK(!wsi_win32_route_presented(&alternating));
    CHECK(wsi_win32_route_present_complete(image0_value, image0_fence));
    CHECK(wsi_win32_route_note_acquired(&alternating, image0_value, image0_fence));
-   CHECK(alternating.presented);
+   CHECK(wsi_win32_route_presented(&alternating));
 
    /* A route a wait already retired is never revived by a fence that completes afterwards. */
-   struct wsi_win32_route_state retired = {false, true};
+   struct wsi_win32_route_state retired = {WSI_WIN32_ROUTE_DEAD};
    CHECK(!wsi_win32_route_note_acquired(&retired, queued, queued + 1));
-   CHECK(!retired.presented && !wsi_win32_route_usable(&retired));
-   CHECK(wsi_win32_acquire_timeout_capped(forever, retired.presented));
+   CHECK(!wsi_win32_route_presented(&retired) && !wsi_win32_route_usable(&retired));
+   CHECK(wsi_win32_acquire_timeout_capped(forever, wsi_win32_route_presented(&retired)));
 }
 
-/* Retiring the work a dead route queued, which is what round 3 left undone: the route retired itself
- * on its deadline, the application took the error, and then it froze in its own vkDeviceWaitIdle
- * waiting for the submission whose shared blit timeline only the dead presenter could signal
- * (BD-105, lab round 3 of 2026-10-09, stack-vkcube-12308).
+/* V1, the first half: a wait that expired says nothing about the presenter, and the three states it
+ * could be in are told apart by the two readings that exist. The audit of 2026-10-10 found round 4
+ * inferring "removed" from a timeout and then host-signalling a Vulkan timeline on that inference.
  */
 static void
-test_retire_waits(void)
+test_presenter_state(void)
+{
+   /* The reading lab round 3 took: GetDeviceRemovedReason answered DXGI_ERROR_DEVICE_REMOVED
+    * (0x887A0005) and the blit fence answered the UINT64_MAX sentinel. Either one alone proves it.
+    */
+   CHECK(wsi_win32_presenter_state(true, 0x887A0005u, true, UINT64_MAX) ==
+         WSI_WIN32_PRESENTER_REMOVED);
+   CHECK(wsi_win32_presenter_state(true, 0x887A0005u, false, 0) == WSI_WIN32_PRESENTER_REMOVED);
+   CHECK(wsi_win32_presenter_state(false, 0, true, UINT64_MAX) == WSI_WIN32_PRESENTER_REMOVED);
+   CHECK(wsi_win32_presenter_state(true, 0x887A0006u, true, 1) == WSI_WIN32_PRESENTER_REMOVED);
+
+   /* A LIVE presenter that is merely slow: the removal reason was read and it is S_OK, and the fence
+    * sits at a real value below the one the copy should have reached. This is the state round 4
+    * could not tell from a removed one, and the one in which a host signal is forbidden.
+    */
+   CHECK(wsi_win32_presenter_state(true, 0u, true, 1) == WSI_WIN32_PRESENTER_LIVE);
+   CHECK(wsi_win32_presenter_state(true, 0u, false, 0) == WSI_WIN32_PRESENTER_LIVE);
+
+   /* UNPROVEN: nothing answered. A driver that gave the WSI no get_d3d12_device hook, or a chain
+    * with no blit fences. Round 4's reader returned S_OK here, which reads as a live device on
+    * evidence nobody has; the state is its own now.
+    */
+   CHECK(wsi_win32_presenter_state(false, 0u, false, 0) == WSI_WIN32_PRESENTER_UNPROVEN);
+   CHECK(wsi_win32_presenter_state(false, 0x887A0005u, false, 0) == WSI_WIN32_PRESENTER_UNPROVEN);
+   /* A fence that reads a real value is not a proof of life: only the removal reason is. */
+   CHECK(wsi_win32_presenter_state(false, 0u, true, 2) == WSI_WIN32_PRESENTER_UNPROVEN);
+
+   /* Three names, all different, so a log line says which one it was. */
+   CHECK(!strcmp(wsi_win32_presenter_state_name(WSI_WIN32_PRESENTER_LIVE), "live"));
+   CHECK(!strcmp(wsi_win32_presenter_state_name(WSI_WIN32_PRESENTER_REMOVED), "removed"));
+   CHECK(!strcmp(wsi_win32_presenter_state_name(WSI_WIN32_PRESENTER_UNPROVEN), "unproven"));
+   CHECK((int)WSI_WIN32_PRESENTER_UNPROVEN == 0); /* a zeroed state is "nothing is known" */
+}
+
+/* V1, the second half: retiring the work a dead route queued, which round 3 left undone and round 4
+ * did by breaking a signal rule. The route retired itself on its deadline, the application took the
+ * error, and then it froze in its own vkDeviceWaitIdle waiting for the submission whose shared blit
+ * timeline only the dead presenter could signal (BD-105, lab round 3 of 2026-10-09,
+ * stack-vkcube-12308). The host may release that wait, and only with the two proofs below.
+ */
+static void
+test_retire_action(void)
 {
    uint64_t value = 0;
+   const enum wsi_win32_presenter_state removed = WSI_WIN32_PRESENTER_REMOVED;
+   const enum wsi_win32_presenter_state live = WSI_WIN32_PRESENTER_LIVE;
+   const enum wsi_win32_presenter_state unproven = WSI_WIN32_PRESENTER_UNPROVEN;
 
    /* The shape of one presented image: the application signalled V = 1, wsi_dxgi_blit signalled
-    * V + 1 = 2, and the second submission waits for 2. The presenter is gone, so the semaphore
-    * still reads 1 and the release value is 2.
+    * V + 1 = 2, and the second submission waits for 2. With the presenter PROVED removed and the
+    * semaphore reading exactly 1, there is no pending Vulkan signal left on the object, so 2 is
+    * greater than the current value (03258) and below no pending one (03259).
     */
    value = 0;
-   CHECK(wsi_win32_route_retire_value(2, 1, &value) && value == 2);
-   /* Signalled: the same image asks for nothing a second time, because vkSignalSemaphore may only
-    * raise a timeline semaphore and 2 -> 2 is not a raise.
+   CHECK(wsi_win32_route_retire_action(removed, 2, 1, &value) == WSI_WIN32_RETIRE_SIGNAL);
+   CHECK(value == 2);
+
+   /* The delayed first signal, which is the case VUID-VkSemaphoreSignalInfo-value-03259 forbids and
+    * round 4 signalled anyway: the semaphore still reads 0, so the application's own signal of 1 is
+    * PENDING, and a host signal of 2 would pass it. Refused, and the value the caller must wait for
+    * first is 1.
     */
    value = 0;
-   CHECK(!wsi_win32_route_retire_value(2, 2, &value) && value == 0);
-   CHECK(!wsi_win32_route_retire_value(2, 3, &value));
+   CHECK(wsi_win32_route_retire_action(removed, 2, 0, &value) == WSI_WIN32_RETIRE_REFUSE);
+   CHECK(value == 0); /* nothing is handed back for a refusal */
+   CHECK(wsi_win32_route_retire_wait_value(2, 0) == 1);
+   /* Once that wait is satisfied the same reading becomes a signal: this is the whole bounded-wait
+    * step of wsi_win32_retire_blit_waits, played through.
+    */
+   CHECK(wsi_win32_route_retire_action(removed, 2, 1, &value) == WSI_WIN32_RETIRE_SIGNAL);
+   CHECK(value == 2);
+   CHECK(wsi_win32_route_retire_wait_value(2, 1) == 0); /* nothing left to wait for */
+
+   /* The LATE LIVE presenter: the wait expired, and the device is alive. The value is still the
+    * presenter's to signal, and a host signal would call a frame presented that never was. Refused
+    * whatever the semaphore reads.
+    */
+   CHECK(wsi_win32_route_retire_action(live, 2, 1, &value) == WSI_WIN32_RETIRE_REFUSE);
+   CHECK(wsi_win32_route_retire_action(live, 2, 0, &value) == WSI_WIN32_RETIRE_REFUSE);
+   /* And the UNPROVEN presenter, which is not a synonym for either: also refused. */
+   CHECK(wsi_win32_route_retire_action(unproven, 2, 1, &value) == WSI_WIN32_RETIRE_REFUSE);
+   CHECK(wsi_win32_route_retire_action(unproven, 2, 0, &value) == WSI_WIN32_RETIRE_REFUSE);
+
+   /* Signalled already: the same image asks for nothing a second time, because vkSignalSemaphore may
+    * only raise a timeline semaphore and 2 -> 2 is not a raise. True for every presenter state: an
+    * image with nothing outstanding is nothing outstanding.
+    */
+   value = 0;
+   CHECK(wsi_win32_route_retire_action(removed, 2, 2, &value) == WSI_WIN32_RETIRE_NOTHING);
+   CHECK(value == 0);
+   CHECK(wsi_win32_route_retire_action(removed, 2, 3, &value) == WSI_WIN32_RETIRE_NOTHING);
+   CHECK(wsi_win32_route_retire_action(live, 2, 2, &value) == WSI_WIN32_RETIRE_NOTHING);
+   CHECK(wsi_win32_route_retire_action(unproven, 2, 9, &value) == WSI_WIN32_RETIRE_NOTHING);
 
    /* An image that was never presented has timeline value 0 and no wait of ours behind it. */
    value = 0;
-   CHECK(!wsi_win32_route_retire_value(0, 0, &value) && value == 0);
-   CHECK(!wsi_win32_route_retire_value(0, 7, &value));
+   CHECK(wsi_win32_route_retire_action(removed, 0, 0, &value) == WSI_WIN32_RETIRE_NOTHING);
+   CHECK(value == 0);
+   CHECK(wsi_win32_route_retire_action(removed, 0, 7, &value) == WSI_WIN32_RETIRE_NOTHING);
+   CHECK(wsi_win32_route_retire_wait_value(0, 0) == 0);
 
    /* Both images of the lab's two-image chain, with the readings arm A2f printed (want 2 on image 0
-    * and a queued present of image 1 at value 2): every image with an outstanding value is
-    * released, not only the one whose acquire expired.
+    * and a queued present of image 1 at value 2), the presenter proved removed, and the application's
+    * own signals completed: every image with an outstanding value is released, not only the one
+    * whose acquire expired.
     */
    const uint64_t want[2] = {2, 2};
    uint64_t have[2] = {1, 1};
-   unsigned released = 0;
+   unsigned released = 0, refused = 0;
    for (unsigned i = 0; i < 2; i++) {
-      if (wsi_win32_route_retire_value(want[i], have[i], &value)) {
-         have[i] = value;
-         released++;
+      switch (wsi_win32_route_retire_action(removed, want[i], have[i], &value)) {
+      case WSI_WIN32_RETIRE_SIGNAL: have[i] = value; released++; break;
+      case WSI_WIN32_RETIRE_REFUSE: refused++; break;
+      default: break;
       }
    }
-   CHECK(released == 2 && have[0] == 2 && have[1] == 2);
+   CHECK(released == 2 && refused == 0 && have[0] == 2 && have[1] == 2);
    /* And the chain's teardown, which runs the same release again, finds nothing left to do. */
    for (unsigned i = 0; i < 2; i++)
-      CHECK(!wsi_win32_route_retire_value(want[i], have[i], &value));
+      CHECK(wsi_win32_route_retire_action(removed, want[i], have[i], &value) ==
+            WSI_WIN32_RETIRE_NOTHING);
+
+   /* The same chain with a LIVE presenter: nothing is released and both images are reported
+    * outstanding, which is what the caller turns into an answer instead of a forced signal.
+    */
+   uint64_t live_have[2] = {1, 1};
+   released = 0; refused = 0;
+   for (unsigned i = 0; i < 2; i++) {
+      switch (wsi_win32_route_retire_action(live, want[i], live_have[i], &value)) {
+      case WSI_WIN32_RETIRE_SIGNAL: live_have[i] = value; released++; break;
+      case WSI_WIN32_RETIRE_REFUSE: refused++; break;
+      default: break;
+      }
+   }
+   CHECK(released == 0 && refused == 2 && live_have[0] == 1 && live_have[1] == 1);
 
    /* The deadline rules are unchanged by the release: a route a wait retired stays retired, and the
     * release is not a proof of anything. An expiry releases the waits and keeps the route dead.
     */
-   struct wsi_win32_route_state dead = {false, false};
+   struct wsi_win32_route_state dead = {0};
    CHECK(wsi_win32_route_wait_expired(&dead));
-   CHECK(dead.dead && !wsi_win32_route_usable(&dead));
-   CHECK(wsi_win32_route_retire_value(2, 1, &value) && value == 2);
+   CHECK(!wsi_win32_route_usable(&dead));
+   CHECK(wsi_win32_route_retire_action(removed, 2, 1, &value) == WSI_WIN32_RETIRE_SIGNAL);
    CHECK(!wsi_win32_route_note_acquired(&dead, 2, 2));
-   CHECK(!dead.presented && !wsi_win32_route_usable(&dead));
+   CHECK(!wsi_win32_route_presented(&dead) && !wsi_win32_route_usable(&dead));
 
    /* A live route must not be released from the CPU: there the value is the presenter's to signal,
     * and the rule is only ever reached on a path that has already given the route up. The rule
     * itself still answers for the state, which is what the caller's gate rests on.
     */
-   struct wsi_win32_route_state alive = {true, false};
+   struct wsi_win32_route_state alive = {WSI_WIN32_ROUTE_PRESENTED};
    CHECK(wsi_win32_route_usable(&alive));
+
+   CHECK(!strcmp(wsi_win32_retire_action_name(WSI_WIN32_RETIRE_SIGNAL), "signal"));
+   CHECK(!strcmp(wsi_win32_retire_action_name(WSI_WIN32_RETIRE_REFUSE), "refuse"));
+   CHECK(!strcmp(wsi_win32_retire_action_name(WSI_WIN32_RETIRE_NOTHING), "nothing"));
+}
+
+/* What the route ANSWERS when it could not retire what it queued. Reporting out-of-date there is
+ * what froze lab round 3: the application recreated the swapchain and its own vkDeviceWaitIdle then
+ * waited for a submission nothing could retire, with no timeout in the API to end it.
+ */
+static void
+test_route_report(void)
+{
+   CHECK(wsi_win32_route_report(false) == WSI_WIN32_REPORT_OUT_OF_DATE);
+   CHECK(wsi_win32_route_report(true) == WSI_WIN32_REPORT_DEVICE_LOST);
+   CHECK((int)WSI_WIN32_REPORT_OUT_OF_DATE == 0); /* the answer for a chain with nothing left */
+
+   /* Played through the three presenter states of one presented image whose copy never ran. Removed
+    * with the application's signal complete is the only one the host may release, so it is the only
+    * one that answers out-of-date and lets the client fall back to CPU images.
+    */
+   const uint64_t want = 2;
+   const struct {
+      enum wsi_win32_presenter_state presenter;
+      uint64_t have;
+      enum wsi_win32_route_report report;
+   } cases[] = {
+      {WSI_WIN32_PRESENTER_REMOVED, 1, WSI_WIN32_REPORT_OUT_OF_DATE},
+      {WSI_WIN32_PRESENTER_REMOVED, 0, WSI_WIN32_REPORT_DEVICE_LOST},
+      {WSI_WIN32_PRESENTER_LIVE, 1, WSI_WIN32_REPORT_DEVICE_LOST},
+      {WSI_WIN32_PRESENTER_UNPROVEN, 1, WSI_WIN32_REPORT_DEVICE_LOST},
+      {WSI_WIN32_PRESENTER_REMOVED, 2, WSI_WIN32_REPORT_OUT_OF_DATE}, /* nothing outstanding */
+   };
+   for (unsigned i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+      uint64_t value = 0;
+      const enum wsi_win32_retire_action action =
+         wsi_win32_route_retire_action(cases[i].presenter, want, cases[i].have, &value);
+      const bool outstanding = action == WSI_WIN32_RETIRE_REFUSE;
+      CHECK(wsi_win32_route_report(outstanding) == cases[i].report);
+   }
+}
+
+/* V5. The lifetime rule of the bounded queue drain, with a reference-count model of exactly the
+ * objects wsi_win32_swapchain_destroy and wsi_win32_take_old_dxgi release: the back buffer, the copy
+ * command list, its allocator, the D3D12 blit resource behind the imported Vulkan memory, the shared
+ * blit fence and the DXGI swap chain. Round 4's flush returned void and its callers released all of
+ * them whatever happened, including after a drain that timed out.
+ *
+ * This is a model of the caller's rule, not of the caller: what it proves is that
+ * wsi_win32_flush_releases answers the three states correctly and that a release driven by it leaves
+ * nothing dropped in the unproven one. That the production path really asks it is a source gate.
+ */
+struct model_chain {
+   int back_buffer, cmd_list, cmd_alloc, blit_res, blit_fence, swap_chain, imported_memory;
+   bool resized;
+};
+
+static void
+model_chain_init(struct model_chain *chain)
+{
+   chain->back_buffer = chain->cmd_list = chain->cmd_alloc = 1;
+   chain->blit_res = chain->blit_fence = chain->swap_chain = chain->imported_memory = 1;
+   chain->resized = false;
+}
+
+static int
+model_chain_live(const struct model_chain *chain)
+{
+   return chain->back_buffer + chain->cmd_list + chain->cmd_alloc + chain->blit_res +
+          chain->blit_fence + chain->swap_chain + chain->imported_memory;
+}
+
+/* The teardown, gated the way the production one is. */
+static void
+model_destroy(struct model_chain *chain, enum wsi_win32_flush_result flushed)
+{
+   if (!wsi_win32_flush_releases(flushed))
+      return;
+   chain->back_buffer = chain->cmd_list = chain->cmd_alloc = 0;
+   chain->blit_res = chain->blit_fence = chain->swap_chain = chain->imported_memory = 0;
+}
+
+/* The steal, which releases the back buffers AND resizes the swap chain under them. */
+static void
+model_steal(struct model_chain *chain, enum wsi_win32_flush_result flushed, bool *handed_over)
+{
+   *handed_over = false;
+   if (!wsi_win32_flush_releases(flushed))
+      return;
+   chain->back_buffer = chain->cmd_list = chain->cmd_alloc = 0;
+   chain->resized = true;
+   *handed_over = true;
+}
+
+static void
+test_flush_lifetime(void)
+{
+   struct model_chain chain;
+
+   CHECK(wsi_win32_flush_releases(WSI_WIN32_FLUSH_DRAINED));
+   CHECK(wsi_win32_flush_releases(WSI_WIN32_FLUSH_REMOVED));
+   CHECK(!wsi_win32_flush_releases(WSI_WIN32_FLUSH_UNPROVEN));
+   CHECK((int)WSI_WIN32_FLUSH_UNPROVEN == 0); /* a zeroed result releases nothing */
+   CHECK(!strcmp(wsi_win32_flush_result_name(WSI_WIN32_FLUSH_DRAINED), "drained"));
+   CHECK(!strcmp(wsi_win32_flush_result_name(WSI_WIN32_FLUSH_REMOVED), "removed"));
+   CHECK(!strcmp(wsi_win32_flush_result_name(WSI_WIN32_FLUSH_UNPROVEN), "unproven"));
+
+   /* The drain completed: everything submitted before the drain fence retired, so every reference
+    * goes. This is the ordinary teardown and it must stay ordinary.
+    */
+   model_chain_init(&chain);
+   CHECK(model_chain_live(&chain) == 7);
+   model_destroy(&chain, WSI_WIN32_FLUSH_DRAINED);
+   CHECK(model_chain_live(&chain) == 0);
+
+   /* The presenter's device is proved removed: its queues execute nothing further, which is the
+    * other releasable state (and the one assumption this round names out loud).
+    */
+   model_chain_init(&chain);
+   model_destroy(&chain, WSI_WIN32_FLUSH_REMOVED);
+   CHECK(model_chain_live(&chain) == 0);
+
+   /* The three unproven shapes the audit named - the wait expired, the drain fence could not be
+    * created, the drain Signal failed - are one state here, and in it NOTHING is dropped. Not the
+    * back buffer the queue may be writing, not the command list, not the memory the imported image
+    * aliases, not the fence, not the swap chain.
+    */
+   model_chain_init(&chain);
+   model_destroy(&chain, WSI_WIN32_FLUSH_UNPROVEN);
+   CHECK(model_chain_live(&chain) == 7);
+   CHECK(chain.back_buffer == 1 && chain.cmd_list == 1 && chain.cmd_alloc == 1);
+   CHECK(chain.blit_res == 1 && chain.blit_fence == 1 && chain.swap_chain == 1);
+   CHECK(chain.imported_memory == 1);
+   /* Running the teardown again changes nothing: an expiry is not a countdown to a release. */
+   model_destroy(&chain, WSI_WIN32_FLUSH_UNPROVEN);
+   CHECK(model_chain_live(&chain) == 7);
+
+   /* The steal path. A proved drain hands the swap chain over and resizes it; an unproven one hands
+    * nothing over and resizes nothing, so the new chain cannot take the route and the application
+    * gets CPU images.
+    */
+   bool handed_over = true;
+   model_chain_init(&chain);
+   model_steal(&chain, WSI_WIN32_FLUSH_DRAINED, &handed_over);
+   CHECK(handed_over && chain.resized && chain.back_buffer == 0);
+
+   model_chain_init(&chain);
+   model_steal(&chain, WSI_WIN32_FLUSH_UNPROVEN, &handed_over);
+   CHECK(!handed_over && !chain.resized && chain.back_buffer == 1 && chain.cmd_list == 1);
+   CHECK(model_chain_live(&chain) == 7);
+
+   /* A route that was retired is not a drain. The flags and the flush are separate answers, and the
+    * audit's finding is exactly that round 4 read the first one as the second.
+    */
+   struct wsi_win32_route_state retired = {0};
+   CHECK(wsi_win32_route_wait_expired(&retired));
+   CHECK(!wsi_win32_route_usable(&retired));
+   model_chain_init(&chain);
+   model_destroy(&chain, WSI_WIN32_FLUSH_UNPROVEN);
+   CHECK(model_chain_live(&chain) == 7);
+}
+
+/* V6. The NT handle CreateSharedHandle makes for the swapchain's own D3D12 resource belongs to us:
+ * ref/Vulkan-Docs/chapters/memory.adoc:2466-2472 says importing it transfers no ownership and the
+ * application must close it. RADV keeps the payload without consuming the handle, so nothing closed
+ * it, on either outcome of the import, and every swapchain recreation leaked one per image.
+ *
+ * The model is a handle table: open counts up, close counts down, a double close is an error, and a
+ * handle still open at the end is a leak. Both outcomes of the import are driven.
+ */
+struct model_handles {
+   int open, closed, double_closed;
+};
+
+static int
+model_handle_create(struct model_handles *table)
+{
+   table->open++;
+   return table->open;  /* a non-zero handle */
+}
+
+static void
+model_handle_close(struct model_handles *table, int handle)
+{
+   if (!handle)
+      return;
+   if (table->closed >= table->open)
+      table->double_closed++;
+   table->closed++;
+}
+
+/* The import, with the close placed where the production path places it: after AllocateMemory, on
+ * both outcomes, and once.
+ */
+static bool
+model_import(struct model_handles *table, bool allocate_succeeds)
+{
+   int handle = model_handle_create(table);
+   const bool imported = allocate_succeeds;
+   model_handle_close(table, handle);
+   handle = 0;
+   return imported;
+}
+
+static void
+test_handle_ownership(void)
+{
+   struct model_handles table = {0};
+
+   /* A successful import: the memory keeps the resource alive through its own reference, so the
+    * handle is closed and nothing is lost.
+    */
+   CHECK(model_import(&table, true));
+   CHECK(table.open == 1 && table.closed == 1 && table.double_closed == 0);
+
+   /* A failed import: there is nothing to keep the handle for, and round 4 returned
+    * AllocateMemory's result straight out of the function with the handle still open.
+    */
+   CHECK(!model_import(&table, false));
+   CHECK(table.open == 2 && table.closed == 2 && table.double_closed == 0);
+
+   /* Four images of two swapchain generations, the shape a resizing game walks: no handle survives
+    * its import, whichever way the import went.
+    */
+   struct model_handles chain_handles = {0};
+   for (unsigned generation = 0; generation < 2; generation++)
+      for (unsigned image = 0; image < 2; image++)
+         (void)model_import(&chain_handles, generation == 0);
+   CHECK(chain_handles.open == 4 && chain_handles.closed == 4);
+   CHECK(chain_handles.open - chain_handles.closed == 0);
+   CHECK(chain_handles.double_closed == 0);
+
+   /* The exported SEMAPHORE handle is a different one, closed where it is opened, and the model says
+    * so: closing a handle that was never created must not count as a close of ours.
+    */
+   struct model_handles semaphore_handles = {0};
+   const int exported = model_handle_create(&semaphore_handles);
+   model_handle_close(&semaphore_handles, exported);
+   model_handle_close(&semaphore_handles, 0);  /* no handle: nothing happens */
+   CHECK(semaphore_handles.open == 1 && semaphore_handles.closed == 1);
+   CHECK(semaphore_handles.double_closed == 0);
+}
+
+/* V2. The first D3D12 call of the route that failed, kept once and logged once. Round 4 dropped the
+ * HRESULT of Close, of the queue's Wait and of the queue's Signal, returned VK_SUCCESS, and left the
+ * first diagnostic to a timeout two seconds later that could name no call at all.
+ */
+static void
+test_route_error(void)
+{
+   struct wsi_win32_route_error error = {0};
+
+   CHECK(!wsi_win32_route_error_taken(&error));
+   /* The first failure is recorded, and its recorder is the one caller that logs it. */
+   CHECK(wsi_win32_route_note_error(&error, "ID3D12CommandQueue::Wait", 0x887A0005u, 0x887A0005u, 1));
+   CHECK(wsi_win32_route_error_taken(&error));
+   CHECK(!strcmp(error.call, "ID3D12CommandQueue::Wait"));
+   CHECK(error.hr == 0x887A0005u && error.removed_reason == 0x887A0005u && error.image == 1);
+
+   /* The cascade after it writes nothing: the later refusals are consequences of the first, and the
+    * first is the one that answers the question.
+    */
+   CHECK(!wsi_win32_route_note_error(&error, "IDXGISwapChain3::Present1", 0x887A0006u, 0, 0));
+   CHECK(!wsi_win32_route_note_error(&error, "ID3D12CommandQueue::Signal", 0x80004005u, 0, 1));
+   CHECK(!strcmp(error.call, "ID3D12CommandQueue::Wait"));
+   CHECK(error.hr == 0x887A0005u && error.image == 1);
+
+   /* A call with no image of its own says so, and it says it with a value no image index can be. */
+   struct wsi_win32_route_error create = {0};
+   CHECK(wsi_win32_route_note_error(&create, "ID3D12GraphicsCommandList::Close", 0x80070057u, 0,
+                                    WSI_WIN32_ROUTE_ERROR_NO_IMAGE));
+   CHECK(create.image == WSI_WIN32_ROUTE_ERROR_NO_IMAGE);
+   CHECK(create.image > 16); /* no swapchain of this route has that many images */
+   CHECK(create.removed_reason == 0); /* the reason could not be read: 0 is not "alive" here */
+
+   /* A zeroed ledger is an empty one, which is what vk_zalloc gives the instance. */
+   struct wsi_win32_route_error fresh = {0};
+   CHECK(!wsi_win32_route_error_taken(&fresh));
+   CHECK(fresh.taken == 0);
+}
+
+/* V3. The route flags from two threads at once, on two independent swapchains, which is the case the
+ * audit found missing and the reason the flags are one atomic word now. Round 4 had two plain bools
+ * with a comment that called the race benign.
+ *
+ * What is driven: many threads, each acting for a swapchain of its own, racing note_acquired against
+ * wait_expired on the SAME instance state. Two invariants must hold however the interleaving falls.
+ *   1. note_acquired returns true to AT MOST ONE caller, ever. It is what writes the "deadlines off"
+ *      line, and two of those lines would mean two threads lifted the same deadline.
+ *   2. PRESENTED and DEAD are never both set. They are read together - the expiry rule asks about
+ *      PRESENTED before it sets DEAD - and that is exactly the dependency the old comment said to
+ *      make atomic before anything relied on it.
+ */
+#define MODEL_THREADS 8
+#define MODEL_ROUNDS 2000
+
+struct concurrent_case {
+   struct wsi_win32_route_state state;
+   uint32_t claimed;     /* the next thread identity, claimed atomically */
+   uint32_t lifted;      /* how many threads got true from note_acquired */
+   uint32_t both_flags;  /* how many times both flags were seen set */
+   uint32_t done;        /* threads that finished */
+   uint32_t mix;         /* which thread acquires and which one expires */
+};
+
+/* An atomic increment out of the two operations the header offers, so the counters of this case are
+ * not themselves a data race.
+ */
+static uint32_t
+model_atomic_inc(uint32_t *word)
+{
+   for (;;) {
+      const uint32_t have = wsi_win32_atomic_load32(word);
+      if (wsi_win32_atomic_cas32(word, have, have + 1) == have)
+         return have;
+   }
+}
+
+static void
+concurrent_worker(void *arg)
+{
+   struct concurrent_case *c = (struct concurrent_case *)arg;
+   const uint32_t id = model_atomic_inc(&c->claimed);
+   for (uint32_t round = 0; round < MODEL_ROUNDS; round++) {
+      /* Each thread drives its own swapchain's values: the acquired image's present value and the
+       * fence reading that proves that present completed.
+       */
+      if ((id + round) % c->mix == 0) {
+         if (wsi_win32_route_note_acquired(&c->state, 2, 2))
+            (void)model_atomic_inc(&c->lifted);
+      } else {
+         (void)wsi_win32_route_wait_expired(&c->state);
+      }
+      const uint32_t flags = wsi_win32_route_flags(&c->state);
+      if ((flags & WSI_WIN32_ROUTE_PRESENTED) && (flags & WSI_WIN32_ROUTE_DEAD))
+         (void)model_atomic_inc(&c->both_flags);
+   }
+   (void)model_atomic_inc(&c->done);
+}
+
+static void
+test_route_flags_concurrent(void)
+{
+   /* Two mixes, so both orders are driven: one where the acquire usually wins and one where the
+    * expiry usually does.
+    */
+   for (uint32_t mix = 2; mix <= 3; mix++) {
+      struct concurrent_case c = {{0}, 0, 0, 0, 0, mix};
+      unsigned started = 0;
+      for (unsigned t = 0; t < MODEL_THREADS; t++)
+         if (_beginthread(concurrent_worker, 0, &c) != (uintptr_t)-1)
+            started++;
+      CHECK(started > 0);
+      /* Joined on the state this header already provides: the worker counts itself out atomically,
+       * so no Windows wait object is needed to see them all finish.
+       */
+      while (wsi_win32_atomic_load32(&c.done) < started) {
+         /* spin: the workers do a fixed number of rounds and then count themselves out */
+      }
+      const uint32_t flags = wsi_win32_route_flags(&c.state);
+      /* Exactly one of the two transitions won, and the loser never happened. */
+      CHECK((flags & (WSI_WIN32_ROUTE_PRESENTED | WSI_WIN32_ROUTE_DEAD)) != 0);
+      CHECK((flags & WSI_WIN32_ROUTE_PRESENTED) == 0 || (flags & WSI_WIN32_ROUTE_DEAD) == 0);
+      CHECK(c.both_flags == 0);
+      /* The "deadlines off" line is written at most once in the life of the process. */
+      CHECK(c.lifted <= 1);
+      CHECK(c.lifted == ((flags & WSI_WIN32_ROUTE_PRESENTED) ? 1u : 0u));
+      /* And the derived answers agree with the word. */
+      CHECK(wsi_win32_route_presented(&c.state) ==
+            ((flags & WSI_WIN32_ROUTE_PRESENTED) != 0));
+      CHECK(wsi_win32_route_usable(&c.state) == ((flags & WSI_WIN32_ROUTE_DEAD) == 0));
+   }
+
+   /* The two accessors are atomic operations and nothing else, which is what the LLVM memory model
+    * asks for (Atomics.rst:148-165). A compare-and-swap that does not match leaves the word alone
+    * and answers what was there.
+    */
+   uint32_t word = 5;
+   CHECK(wsi_win32_atomic_load32(&word) == 5);
+   CHECK(wsi_win32_atomic_cas32(&word, 4, 9) == 5 && word == 5);
+   CHECK(wsi_win32_atomic_cas32(&word, 5, 9) == 5 && word == 9);
+   CHECK(wsi_win32_atomic_load32(&word) == 9);
 }
 
 /* The stage lines. One bit per stage per chain, so a stage first reached on the tenth frame is
@@ -460,18 +961,19 @@ test_stage_bits(void)
 static void
 test_first_present_freeze(void)
 {
-   struct wsi_win32_route_state route = {false, false};
-   struct wsi_win32_route_state healthy = {true, false};
+   struct wsi_win32_route_state route = {0};
+   struct wsi_win32_route_state healthy = {WSI_WIN32_ROUTE_PRESENTED};
    const uint64_t forever = UINT64_MAX;
 
    CHECK(wsi_win32_route_usable(&route)); /* a fresh instance may take the route */
-   CHECK(wsi_win32_acquire_timeout_ns(forever, route.presented) == WSI_WIN32_ROUTE_DEADLINE_NS);
-   CHECK(wsi_win32_acquire_timeout_capped(forever, route.presented));
+   CHECK(wsi_win32_acquire_timeout_ns(forever, wsi_win32_route_presented(&route)) ==
+         WSI_WIN32_ROUTE_DEADLINE_NS);
+   CHECK(wsi_win32_acquire_timeout_capped(forever, wsi_win32_route_presented(&route)));
    /* The wait expired before any present: the route is retired for the process, and the swapchain
     * is reported out of date so that the application creates the next one on CPU images.
     */
    CHECK(wsi_win32_route_wait_expired(&route));
-   CHECK(route.dead && !wsi_win32_route_usable(&route));
+   CHECK(!wsi_win32_route_usable(&route));
    /* It stays retired; nothing re-arms it inside the process. */
    CHECK(wsi_win32_route_wait_expired(&route));
    CHECK(!wsi_win32_route_usable(&route));
@@ -479,11 +981,10 @@ test_first_present_freeze(void)
    /* A route that has shown a frame keeps the application's own timeout, and one late wait after
     * that is a slow frame, not a broken route.
     */
-   CHECK(wsi_win32_acquire_timeout_ns(forever, healthy.presented) == forever);
-   CHECK(!wsi_win32_acquire_timeout_capped(forever, healthy.presented));
+   CHECK(wsi_win32_acquire_timeout_ns(forever, wsi_win32_route_presented(&healthy)) == forever);
+   CHECK(!wsi_win32_acquire_timeout_capped(forever, wsi_win32_route_presented(&healthy)));
    CHECK(!wsi_win32_route_wait_expired(&healthy));
    CHECK(wsi_win32_route_usable(&healthy));
-   CHECK(!healthy.dead);
 }
 
 static const struct {
@@ -498,7 +999,13 @@ static const struct {
    {"lb7a", test_lb7a},
    {"deadline", test_deadline},
    {"present_completion", test_present_completion},
-   {"retire_waits", test_retire_waits},
+   {"presenter_state", test_presenter_state},
+   {"retire_action", test_retire_action},
+   {"route_report", test_route_report},
+   {"flush_lifetime", test_flush_lifetime},
+   {"handle_ownership", test_handle_ownership},
+   {"route_error", test_route_error},
+   {"route_flags_concurrent", test_route_flags_concurrent},
    {"stage_bits", test_stage_bits},
    {"first_present_freeze", test_first_present_freeze},
 };

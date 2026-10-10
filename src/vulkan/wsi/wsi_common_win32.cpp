@@ -69,6 +69,10 @@ struct wsi_win32 {
     * Written by the first present that succeeds and by a wait of the route that expires.
     */
    struct wsi_win32_route_state route;
+   /* The first D3D12 call of this instance's route that failed, with its HRESULT and the presenter's
+    * removal reason read right after it (V2). Always on, written once, logged once.
+    */
+   struct wsi_win32_route_error error;
 };
 
 enum wsi_win32_image_state {
@@ -132,6 +136,15 @@ struct wsi_win32_swapchain {
    bool is_dxgi;
    bool hwnd_target;
    bool detached;
+   /* A bounded drain of the presenter's queue could not prove that the queue stopped referencing
+    * this chain's resources (WSI_WIN32_FLUSH_UNPROVEN, V5). Nothing the queue may still name is
+    * released while this is set: not the back buffers, not the copy command lists, not the imported
+    * image memory, not the D3D12 resources, not the shared blit fences and not the DXGI chain. The
+    * chain's own allocation is kept too, because every one of those references lives in it. It is a
+    * deliberate leak of one swapchain, bounded by the route being retired at the same moment, and
+    * the alternative is a release of memory a live GPU queue is reading.
+    */
+   bool resources_pinned;
    UINT swap_chain_flags;           /* DXGI_SWAP_CHAIN_FLAG_*, for ResizeBuffers on a steal */
    DXGI_FORMAT buffer_format;       /* the DXGI swap chain's buffer format */
    DXGI_COLOR_SPACE_TYPE color_space;
@@ -177,7 +190,7 @@ wsi_win32_present_log(struct wsi_win32_swapchain *chain, const char *path,
     * is every 64 rows again, which is what a timedemo of thousands of frames wants.
     */
    if (chain->present_log_lines <= 64 ||
-       (chain->is_dxgi && !chain->wsi->route.presented) ||
+       (chain->is_dxgi && !wsi_win32_route_presented(&chain->wsi->route)) ||
        (chain->present_log_lines & 63) == 0)
       fflush(chain->present_log);
 }
@@ -699,7 +712,7 @@ wsi_win32_route_log(struct wsi_win32_swapchain *chain, const char *fmt, ...)
 static void
 wsi_win32_stage_log(struct wsi_win32_swapchain *chain, enum wsi_win32_present_stage stage)
 {
-   if (!chain->is_dxgi || chain->wsi->route.presented)
+   if (!chain->is_dxgi || wsi_win32_route_presented(&chain->wsi->route))
       return;
    if (!wsi_win32_stage_first(&chain->stage_log_bits, stage))
       return;
@@ -707,57 +720,174 @@ wsi_win32_stage_log(struct wsi_win32_swapchain *chain, enum wsi_win32_present_st
                        wsi_win32_present_stage_name(stage));
 }
 
-/* Why the presenter's D3D12 device is gone, or S_OK while it is alive. ID3D12Fence::GetCompletedValue
- * answers UINT64_MAX for a removed device, which is what arm A2f of the round-3 lab plan read on the
- * expiry path: have 18446744073709551615 against want 2. That reading is the removal sentinel and not
- * a fence value, so the only line that says anything more is this one. It costs one virtual call on a
- * path that has already given up, and it is written whenever a wait of the route expires.
+/* The presenter's removal reason, and whether it could be read at all.
+ *
+ * S_OK from ID3D12Device::GetDeviceRemovedReason means a live device, so "could not be read" and
+ * "alive" must not come out as the same value: round 4 returned S_OK for a driver that gave the WSI
+ * no get_d3d12_device hook, which reads as a live presenter on evidence nobody has. The answer is
+ * therefore a bool and an out parameter (V1, wsi_win32_presenter_state in wsi_win32_deadline.h).
  */
-static HRESULT
-wsi_win32_device_removed_reason(struct wsi_win32_swapchain *chain)
+static bool
+wsi_win32_device_removed_reason(struct wsi_win32_swapchain *chain, HRESULT *out_reason)
 {
    const struct wsi_device *wsi = chain->base.wsi;
+   *out_reason = S_OK;
    if (!wsi->win32.get_d3d12_device)
-      return S_OK;
+      return false;
    ID3D12Device *device = (ID3D12Device *)wsi->win32.get_d3d12_device(chain->base.device);
-   return device ? device->GetDeviceRemovedReason() : S_OK;
+   if (!device)
+      return false;
+   *out_reason = device->GetDeviceRemovedReason();
+   return true;
 }
 
-/* Releases the queue work a dead route left waiting on its shared blit timelines.
- *
- * The rule and the reason are wsi_win32_route_retire_value in wsi_win32_deadline.h: the application's
- * second submission per presented image waits for the value only the presenter's D3D12 Signal can
- * reach, and a presenter that is gone leaves that wait outstanding for the life of the process. The
- * application then freezes not in a call of ours but in its own recovery - vkDeviceWaitIdle of a
- * resize path, which has no timeout - and no deadline of this route reaches it (BD-105, the lab round
- * of 2026-10-09).
- *
- * Every image of the chain is released, not only the one whose wait expired: a two-image chain had
- * both presented, and the one that is not being acquired carries the same outstanding wait.
- *
- * Signalling a value the presenter's queue may still reach is deliberate. A timeline semaphore takes
- * the same value twice without harm, the route is dead either way, and the alternative is a thread
- * that never returns. This runs once per expiry, on a path that is already giving the window back.
+/* What is established about the presenter, from the two readings there are. image is the image whose
+ * shared blit fence is read for the UINT64_MAX removal sentinel, or UINT32_MAX for no fence reading.
+ * The log line names the state and both readings, so a lab record says which of the three it was.
+ */
+static enum wsi_win32_presenter_state
+wsi_win32_presenter_read(struct wsi_win32_swapchain *chain, uint32_t image)
+{
+   HRESULT reason = S_OK;
+   const bool reason_read = wsi_win32_device_removed_reason(chain, &reason);
+   bool fence_read = false;
+   uint64_t fence_value = 0;
+
+   if (image != WSI_WIN32_ROUTE_ERROR_NO_IMAGE && chain->d3d12_blit_fences &&
+       image < chain->base.image_count && chain->d3d12_blit_fences[image]) {
+      fence_value = chain->d3d12_blit_fences[image]->GetCompletedValue();
+      fence_read = true;
+   }
+
+   const enum wsi_win32_presenter_state state =
+      wsi_win32_presenter_state(reason_read, (uint32_t)reason, fence_read, fence_value);
+   wsi_win32_route_log(chain, "chain %p: presenter %s: removed reason %s0x%08lx, blit fence of "
+                       "image %u %s%" PRIu64, (void *)chain,
+                       wsi_win32_presenter_state_name(state), reason_read ? "" : "unread ",
+                       (unsigned long)reason, image, fence_read ? "" : "unread ", fence_value);
+   return state;
+}
+
+/* The removal reason as a bare number, for the error ledger. 0 when it could not be read, which the
+ * ledger's own line says.
+ */
+static uint32_t
+wsi_win32_removed_reason_value(struct wsi_win32_swapchain *chain)
+{
+   HRESULT reason = S_OK;
+   if (!wsi_win32_device_removed_reason(chain, &reason))
+      return 0u;
+   return (uint32_t)reason;
+}
+
+/* V2. One D3D12 call of the route failed. The first such call of the process is kept and logged with
+ * its name, its HRESULT, the presenter's removal reason read immediately afterwards and the image it
+ * was for; later ones are counted by nothing and written by nothing, because the first one caused
+ * them. Always on: no switch, one line, and the budget is one record per process.
  */
 static void
-wsi_win32_retire_blit_waits(struct wsi_win32_swapchain *chain)
+wsi_win32_route_failed(struct wsi_win32_swapchain *chain, const char *call, HRESULT hr,
+                       uint32_t image)
+{
+   const uint32_t reason = wsi_win32_removed_reason_value(chain);
+   if (!wsi_win32_route_note_error(&chain->wsi->error, call, (uint32_t)hr, reason, image))
+      return;
+   wsi_win32_route_log(chain, "chain %p: FIRST route failure: %s hr=0x%08lx image %u, presenter "
+                       "removed reason 0x%08lx", (void *)chain, call, (unsigned long)hr, image,
+                       (unsigned long)reason);
+}
+
+/* Releases the queue work a dead route left waiting on its shared blit timelines, as far as it can
+ * PROVE it is allowed to.
+ *
+ * The rule and the reason are wsi_win32_route_retire_action in wsi_win32_deadline.h: the
+ * application's second submission per presented image waits for the value only the presenter's D3D12
+ * Signal can reach, and a presenter that is gone leaves that wait outstanding for the life of the
+ * process. The application then freezes not in a call of ours but in its own recovery -
+ * vkDeviceWaitIdle of a resize path, which has no timeout - and no deadline of this route reaches it
+ * (BD-105, the lab round of 2026-10-09).
+ *
+ * Every image of the chain is considered, not only the one whose wait expired: a two-image chain had
+ * both presented, and the one that is not being acquired carries the same outstanding wait.
+ *
+ * What round 4b adds is the proof the signal needs (V1). A host signal of a timeline may only raise
+ * it above its current value and must stay below any PENDING signal
+ * (VUID-VkSemaphoreSignalInfo-value-03258/03259), and the application's own first submission signals
+ * the value one below ours. So each image is released only when the presenter is proved REMOVED and
+ * the semaphore reads exactly that one-below value; when it reads lower, the first submission is
+ * still pending and this function waits for it, bounded, once, and asks again. An image it still
+ * cannot release is reported as outstanding, and the caller answers the application VK_ERROR_DEVICE_LOST
+ * instead of pretending a frame completed.
+ *
+ * Returns true when at least one image is left with an outstanding wait of ours.
+ */
+static bool
+wsi_win32_retire_blit_waits(struct wsi_win32_swapchain *chain,
+                            enum wsi_win32_presenter_state presenter)
 {
    const struct wsi_device *wsi = chain->base.wsi;
+   bool outstanding = false;
 
    if (!chain->is_dxgi || !chain->base.blit.semaphores || !chain->base.blit.timeline_values ||
        !wsi->SignalSemaphore || !wsi->GetSemaphoreCounterValue)
-      return;
+      return false;
 
    for (uint32_t i = 0; i < chain->base.image_count; i++) {
       const VkSemaphore semaphore = chain->base.blit.semaphores[i];
+      const uint64_t want_present = chain->base.blit.timeline_values[i];
       uint64_t want = 0, have = 0;
 
       if (semaphore == VK_NULL_HANDLE)
          continue;
-      if (wsi->GetSemaphoreCounterValue(chain->base.device, semaphore, &have) != VK_SUCCESS)
+      if (wsi->GetSemaphoreCounterValue(chain->base.device, semaphore, &have) != VK_SUCCESS) {
+         outstanding = outstanding || want_present != 0;
          continue;
-      if (!wsi_win32_route_retire_value(chain->base.blit.timeline_values[i], have, &want))
+      }
+
+      enum wsi_win32_retire_action action =
+         wsi_win32_route_retire_action(presenter, want_present, have, &want);
+
+      /* The application's own signal of the value below ours has not completed yet. It runs on the
+       * application's own device, which is not the one that died, so it is expected to be satisfied
+       * at once or never. Wait for it once, inside a bound of its own, and read the semaphore again.
+       */
+      if (action == WSI_WIN32_RETIRE_REFUSE && presenter == WSI_WIN32_PRESENTER_REMOVED &&
+          wsi->WaitSemaphores) {
+         const uint64_t wait_value = wsi_win32_route_retire_wait_value(want_present, have);
+         if (wait_value) {
+            const VkSemaphoreWaitInfo wait_info = {
+               VK_STRUCTURE_TYPE_SEMAPHORE_WAIT_INFO,
+               NULL,
+               0,
+               1,
+               &semaphore,
+               &wait_value,
+            };
+            const VkResult waited = wsi->WaitSemaphores(chain->base.device, &wait_info,
+                                                        WSI_WIN32_ROUTE_RETIRE_DEADLINE_NS);
+            if (waited == VK_SUCCESS &&
+                wsi->GetSemaphoreCounterValue(chain->base.device, semaphore, &have) == VK_SUCCESS)
+               action = wsi_win32_route_retire_action(presenter, want_present, have, &want);
+            wsi_win32_route_log(chain, "chain %p: image %u: waited %" PRIu64 " ms for the "
+                                "application's own signal %" PRIu64 " (%d), semaphore now %" PRIu64,
+                                (void *)chain, i,
+                                WSI_WIN32_ROUTE_RETIRE_DEADLINE_NS / 1000000ull, wait_value,
+                                (int)waited, have);
+         }
+      }
+
+      if (action == WSI_WIN32_RETIRE_NOTHING)
          continue;
+
+      if (action == WSI_WIN32_RETIRE_REFUSE) {
+         outstanding = true;
+         wsi_win32_route_log(chain, "chain %p: image %u: the shared blit timeline is NOT signalled "
+                             "from the CPU: presenter %s, semaphore %" PRIu64 ", the presenter's "
+                             "value %" PRIu64 ". Signalling it would pass a pending signal "
+                             "(VUID-VkSemaphoreSignalInfo-value-03259)", (void *)chain, i,
+                             wsi_win32_presenter_state_name(presenter), have, want_present);
+         continue;
+      }
 
       const VkSemaphoreSignalInfo signal_info = {
          VK_STRUCTURE_TYPE_SEMAPHORE_SIGNAL_INFO,
@@ -766,10 +896,14 @@ wsi_win32_retire_blit_waits(struct wsi_win32_swapchain *chain)
          want,
       };
       const VkResult result = wsi->SignalSemaphore(chain->base.device, &signal_info);
+      if (result != VK_SUCCESS)
+         outstanding = true;
       wsi_win32_route_log(chain, "chain %p: image %u: the shared blit timeline signalled from the "
                           "CPU, %" PRIu64 " -> %" PRIu64 " (%d), so the submission the dead route "
                           "left waiting can complete", (void *)chain, i, have, want, (int)result);
    }
+
+   return outstanding;
 }
 
 static VkResult
@@ -808,8 +942,11 @@ wsi_dxgi_create_d3d12_resource(struct wsi_win32_swapchain *chain,
                                               NULL,
                                               IID_PPV_ARGS(&win32_image->dxgi.blit_res));
 
-   if (hr != S_OK)
+   if (hr != S_OK) {
+      wsi_win32_route_failed(chain, "ID3D12Device::CreateCommittedResource", hr,
+                             WSI_WIN32_ROUTE_ERROR_NO_IMAGE);
       return VK_ERROR_OUT_OF_DEVICE_MEMORY;
+   }
 
    if (out_handle) {
       hr = d3d12_device->CreateSharedHandle((ID3D12DeviceChild *)win32_image->dxgi.blit_res,
@@ -818,7 +955,10 @@ wsi_dxgi_create_d3d12_resource(struct wsi_win32_swapchain *chain,
                                             NULL,
                                             out_handle);
       if (hr != S_OK) {
+         wsi_win32_route_failed(chain, "ID3D12Device::CreateSharedHandle", hr,
+                                WSI_WIN32_ROUTE_ERROR_NO_IMAGE);
          win32_image->dxgi.blit_res->Release();
+         win32_image->dxgi.blit_res = NULL;
          return VK_ERROR_OUT_OF_DEVICE_MEMORY;
       }
    }
@@ -835,19 +975,27 @@ wsi_dxgi_create_blit_context(struct wsi_win32_swapchain *chain,
    ID3D12Resource *src = win32_image->dxgi.blit_res;
    ID3D12Resource *dst = win32_image->dxgi.swapchain_res;
    HRESULT hr;
-   VkResult result;
 
    d3d12_device = (ID3D12Device *)wsi_device->win32.get_d3d12_device(chain->base.device);
    hr = d3d12_device->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT,
                                              IID_PPV_ARGS(&win32_image->dxgi.cmd_alloc));
-   if (FAILED(hr))
+   if (FAILED(hr)) {
+      wsi_win32_route_failed(chain, "ID3D12Device::CreateCommandAllocator", hr,
+                             WSI_WIN32_ROUTE_ERROR_NO_IMAGE);
       return VK_ERROR_OUT_OF_DEVICE_MEMORY;
+   }
 
    hr = d3d12_device->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT,
                                         win32_image->dxgi.cmd_alloc, NULL,
                                         IID_PPV_ARGS(&win32_image->dxgi.cmd_list));
    if (FAILED(hr)) {
+      wsi_win32_route_failed(chain, "ID3D12Device::CreateCommandList", hr,
+                             WSI_WIN32_ROUTE_ERROR_NO_IMAGE);
+      /* The pointer goes with the reference: wsi_win32_image_release_dxgi_buffers releases whatever
+       * is still in the image, so a released allocator left in place would be released twice.
+       */
       win32_image->dxgi.cmd_alloc->Release();
+      win32_image->dxgi.cmd_alloc = NULL;
       return VK_ERROR_OUT_OF_DEVICE_MEMORY;
    }
 
@@ -878,7 +1026,23 @@ wsi_dxgi_create_blit_context(struct wsi_win32_swapchain *chain,
    barrier.Transition.StateAfter = D3D12_RESOURCE_STATE_RENDER_TARGET;
    cmd_list->ResourceBarrier(1, &barrier);
 
-   cmd_list->Close();
+   /* V2. Close is where a recording error is reported (local sdk-api
+    * nf-d3d12-id3d12graphicscommandlist-close.md:59-75), and round 4 dropped its HRESULT. A list
+    * that did not close must never be executed: ExecuteCommandLists of an invalid list is one of
+    * the documented reasons the runtime removes the device (:71-79), and that removal would then be
+    * the thing a later timeout could not explain. The chain's creation fails instead, which the
+    * caller turns into CPU images.
+    */
+   hr = cmd_list->Close();
+   if (FAILED(hr)) {
+      wsi_win32_route_failed(chain, "ID3D12GraphicsCommandList::Close", hr,
+                             WSI_WIN32_ROUTE_ERROR_NO_IMAGE);
+      win32_image->dxgi.cmd_list->Release();
+      win32_image->dxgi.cmd_list = NULL;
+      win32_image->dxgi.cmd_alloc->Release();
+      win32_image->dxgi.cmd_alloc = NULL;
+      return VK_ERROR_INITIALIZATION_FAILED;
+   }
 
    return VK_SUCCESS;
 }
@@ -928,23 +1092,56 @@ wsi_dxgi_blit(struct wsi_swapchain *drv_chain, uint32_t image_index)
    if (!queue)
       return VK_ERROR_OUT_OF_DEVICE_MEMORY;
 
-   /* The queue wait is a GPU-side wait and takes no deadline; the acquire that waits for this copy
-    * is the bounded end of it (wsi_win32_deadline.h).
+   /* V2. Every HRESULT on this path is read, and a failure stops the enqueueing that depends on it.
+    * Why it matters more here than anywhere else in the file: wsi_common_queue_present skips the
+    * application's SECOND submission and the present itself when this function does not return
+    * VK_SUCCESS (wsi_common.c:2831-2832, 2887-2888), so a reported failure leaves nothing waiting on
+    * the shared timeline, while a swallowed one left the application waiting for a copy that was
+    * never enqueued and the first diagnostic came two seconds later from a timeout that could name
+    * nothing.
+    *
+    * The queue's Wait is GPU-side and returns before the GPU does anything (local sdk-api
+    * nf-d3d12-id3d12commandqueue-wait.md:50), so its HRESULT is the only thing it tells us; the
+    * acquire that waits for this copy is the bounded end of it (wsi_win32_deadline.h).
     */
    uint64_t wait_value = chain->base.blit.timeline_values[image_index];
    wsi_win32_stage_log(chain, WSI_WIN32_STAGE_FENCE_WAIT);
-   queue->Wait(chain->d3d12_blit_fences[image_index], wait_value);
+   HRESULT hr = queue->Wait(chain->d3d12_blit_fences[image_index], wait_value);
+   if (FAILED(hr)) {
+      wsi_win32_route_failed(chain, "ID3D12CommandQueue::Wait", hr, image_index);
+      return VK_ERROR_DEVICE_LOST;
+   }
 
    /* A detached chain gave its DXGI buffers to a newer chain: keep the fence order, skip the copy. */
    if (!chain->detached && win32_image->dxgi.cmd_list) {
       ID3D12CommandList *cmd_lists[] = {(ID3D12CommandList *)win32_image->dxgi.cmd_list};
       wsi_win32_stage_log(chain, WSI_WIN32_STAGE_EXECUTE);
       queue->ExecuteCommandLists(1, cmd_lists);
+      /* ExecuteCommandLists returns void, and an invalid list or state transition is one of the
+       * documented reasons the runtime removes the device (nf-d3d12-id3d12commandqueue-
+       * executecommandlists.md:71-79). The removal reason read right here is the only thing that
+       * names this call as the one that did it.
+       */
+      const uint32_t removed = wsi_win32_removed_reason_value(chain);
+      if (removed) {
+         wsi_win32_route_failed(chain, "ID3D12CommandQueue::ExecuteCommandLists",
+                                (HRESULT)removed, image_index);
+         return VK_ERROR_DEVICE_LOST;
+      }
    }
 
-   uint64_t signal_value = ++chain->base.blit.timeline_values[image_index];
+   /* The timeline value is raised only for a Signal that was accepted. A Signal that failed with the
+    * value already raised would leave the chain claiming the presenter owes a value nothing waits
+    * for, and the retirement rule would then read an outstanding wait that does not exist.
+    */
+   const uint64_t signal_value = chain->base.blit.timeline_values[image_index] + 1;
    wsi_win32_stage_log(chain, WSI_WIN32_STAGE_SIGNAL);
-   queue->Signal(chain->d3d12_blit_fences[image_index], signal_value);
+   hr = queue->Signal(chain->d3d12_blit_fences[image_index], signal_value);
+   if (FAILED(hr)) {
+      wsi_win32_route_failed(chain, "ID3D12CommandQueue::Signal", hr, image_index);
+      return VK_ERROR_DEVICE_LOST;
+   }
+   chain->base.blit.timeline_values[image_index] = signal_value;
 
    return VK_SUCCESS;
 }
@@ -972,9 +1169,12 @@ wsi_create_dxgi_image_mem(const struct wsi_swapchain *drv_chain,
    uint32_t image_idx =
       ((uintptr_t)win32_image - (uintptr_t)chain->images) /
       sizeof(*win32_image);
-   if (FAILED(chain->dxgi->GetBuffer(image_idx,
-                                     IID_PPV_ARGS(&win32_image->dxgi.swapchain_res))))
+   const HRESULT buffer_hr = chain->dxgi->GetBuffer(image_idx,
+                                                    IID_PPV_ARGS(&win32_image->dxgi.swapchain_res));
+   if (FAILED(buffer_hr)) {
+      wsi_win32_route_failed(chain, "IDXGISwapChain::GetBuffer", buffer_hr, image_idx);
       return VK_ERROR_OUT_OF_DEVICE_MEMORY;
+   }
 
    if (wsi->win32.create_image_memory) {
       VkResult result =
@@ -1029,8 +1229,27 @@ wsi_create_dxgi_image_mem(const struct wsi_swapchain *drv_chain,
    if (!wsi->win32.create_image_memory)
       __vk_append_struct(&memory_info, &import_memory_info);
 
-   return wsi->AllocateMemory(chain->base.device, &memory_info,
-                              &chain->base.alloc, &image->memory);
+   const VkResult result = wsi->AllocateMemory(chain->base.device, &memory_info,
+                                               &chain->base.alloc, &image->memory);
+
+   /* V6. The NT handle wsi_dxgi_create_d3d12_resource made with CreateSharedHandle is OURS.
+    * ref/Vulkan-Docs/chapters/memory.adoc:2466-2472: importing memory through
+    * VkImportMemoryWin32HandleInfoKHR does not transfer ownership of the handle, and the application
+    * must close it when it no longer needs it. RADV deliberately keeps the payload without consuming
+    * the handle (radv_device_memory.c:198-205), so nothing below this line closes it either, and the
+    * import path inherited from 2026-09-26 leaked one handle per swapchain image - every swapchain
+    * recreation of a resizing or mode-switching game. The CloseHandle at the end of
+    * wsi_win32_surface_create_swapchain_dxgi is a different handle: the exported SEMAPHORE.
+    *
+    * Closed on both outcomes. The imported VkDeviceMemory keeps the resource alive through its own
+    * reference, and a failed import has nothing to keep the handle for.
+    */
+   if (import_memory_info.handle) {
+      CloseHandle(import_memory_info.handle);
+      import_memory_info.handle = NULL;
+   }
+
+   return result;
 }
 
 enum wsi_swapchain_blit_type
@@ -1117,66 +1336,118 @@ wsi_win32_image_init(VkDevice device_h,
 }
 
 /* Waits until the D3D12 present queue has finished everything submitted so far: the copies of this
- * chain and of any chain that shares the queue. Needed before a back buffer or a command list that
- * the queue may still use is released.
+ * chain and of any chain that shares the queue. The caller needs this before it releases a back
+ * buffer, a copy command list or the memory behind them.
  *
- * The wait has a deadline (WSI_WIN32_ROUTE_DEADLINE_NS). A queue that does not advance is a route
- * failure, not a reason to stop the application for good: it was SetEventOnCompletion(1, NULL),
- * which blocks the calling thread with no deadline, and a queue whose own wait never completed then
- * froze the process with the GPU idle (BD-105). On expiry the route is reported dead, so the next
- * swapchain of this instance takes CPU images, and the release goes ahead: the chain is being torn
- * down either way, and the alternative is a thread that never returns. The fence of an expired wait
- * is not released, because the queue's Signal of it is still outstanding.
+ * The wait has a deadline (WSI_WIN32_ROUTE_DEADLINE_NS). It was SetEventOnCompletion(1, NULL), which
+ * blocks the calling thread with no deadline at all, and a queue whose own wait never completed then
+ * froze the process with the GPU idle (BD-105).
+ *
+ * V5: what this function ANSWERS is now the point of it. Round 4 returned void, and returned early
+ * on a fence it could not create and on a Signal that failed, after which every caller released the
+ * back buffers, the command lists, the imported memory and the D3D12 resources, or handed the DXGI
+ * chain to a new swapchain and resized it. ref/win32-docs/desktop-src/direct3d12/binding-model.md:35
+ * is the rule it broke: the application must make sure the GPU has finished referencing a resource
+ * before it frees it, and a route marked dead is not a statement about a queue. So:
+ *
+ *   DRAINED  the drain fence reached 1: everything submitted before it has retired.
+ *   REMOVED  the presenter's device is proved removed, which is the other state in which the queue
+ *            will not read those objects again (see the enum's comment for what that assumes).
+ *   UNPROVEN anything else - no fence, a failed Signal, an expired wait - and then the caller keeps
+ *            every dependent object alive.
+ *
+ * On expiry the route is still retired, so the next swapchain of this instance takes CPU images. The
+ * drain fence of an expired wait is not released either, because the queue's Signal of it is still
+ * outstanding.
  */
-static void
+static enum wsi_win32_flush_result
 wsi_win32_flush_d3d12_queue(struct wsi_win32_swapchain *chain)
 {
    const struct wsi_device *wsi = chain->base.wsi;
    if (!wsi->win32.get_d3d12_command_queue || !wsi->win32.get_d3d12_device)
-      return;
+      return WSI_WIN32_FLUSH_UNPROVEN;
    ID3D12CommandQueue *queue =
       (ID3D12CommandQueue *)wsi->win32.get_d3d12_command_queue(chain->base.device);
    ID3D12Device *device = (ID3D12Device *)wsi->win32.get_d3d12_device(chain->base.device);
    ID3D12Fence *fence = NULL;
    bool queue_keeps_fence = false;
-   if (!queue || !device ||
-       FAILED(device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&fence))))
-      return;
-   if (SUCCEEDED(queue->Signal(fence, 1))) {
-      const uint32_t deadline_ms = wsi_win32_wait_ms(WSI_WIN32_ROUTE_DEADLINE_NS);
-      bool done = false;
-      HANDLE event = CreateEventW(NULL, FALSE, FALSE, NULL);
-      if (event && SUCCEEDED(fence->SetEventOnCompletion(1, event))) {
-         done = WaitForSingleObject(event, deadline_ms) == WAIT_OBJECT_0;
-      } else {
-         /* No event to wait on: poll the fence to the same deadline instead of blocking. */
-         const uint64_t end = os_time_get_nano() + WSI_WIN32_ROUTE_DEADLINE_NS;
-         do {
-            done = fence->GetCompletedValue() >= 1;
-            if (done)
-               break;
-            Sleep(1);
-         } while (os_time_get_nano() < end);
-      }
-      if (event)
-         CloseHandle(event);
-      if (!done) {
-         const bool dead = wsi_win32_route_wait_expired(&chain->wsi->route);
-         wsi_win32_route_log(chain, "chain %p: the D3D12 queue did not drain in %u ms%s",
-                             (void *)chain, deadline_ms,
-                             dead ? ", route off for this process (CPU images from now on)" : "");
-         wsi_win32_route_log(chain, "chain %p: presenter device removed reason 0x%08lx",
-                             (void *)chain, (unsigned long)wsi_win32_device_removed_reason(chain));
-         /* The Signal(fence, 1) is still outstanding: the queue may write this fence after this
-          * call returns, so the last reference stays with it instead of being dropped here. One
-          * fence per expiry is the price of not freeing an object the GPU scheduler still names,
-          * and an expiry means the route is being abandoned anyway.
-          */
-         queue_keeps_fence = true;
-      }
+   enum wsi_win32_flush_result result = WSI_WIN32_FLUSH_UNPROVEN;
+
+   if (!queue || !device)
+      return WSI_WIN32_FLUSH_UNPROVEN;
+
+   HRESULT hr = device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&fence));
+   if (FAILED(hr)) {
+      wsi_win32_route_failed(chain, "ID3D12Device::CreateFence (queue drain)", hr,
+                             WSI_WIN32_ROUTE_ERROR_NO_IMAGE);
+      wsi_win32_route_log(chain, "chain %p: no drain fence (hr=0x%08lx): the queue's use of this "
+                          "chain's resources is UNPROVEN", (void *)chain, (unsigned long)hr);
+      return wsi_win32_presenter_read(chain, WSI_WIN32_ROUTE_ERROR_NO_IMAGE) ==
+             WSI_WIN32_PRESENTER_REMOVED ? WSI_WIN32_FLUSH_REMOVED : WSI_WIN32_FLUSH_UNPROVEN;
+   }
+
+   hr = queue->Signal(fence, 1);
+   if (FAILED(hr)) {
+      wsi_win32_route_failed(chain, "ID3D12CommandQueue::Signal (queue drain)", hr,
+                             WSI_WIN32_ROUTE_ERROR_NO_IMAGE);
+      wsi_win32_route_log(chain, "chain %p: the drain Signal failed (hr=0x%08lx): the queue's use "
+                          "of this chain's resources is UNPROVEN", (void *)chain,
+                          (unsigned long)hr);
+      result = wsi_win32_presenter_read(chain, WSI_WIN32_ROUTE_ERROR_NO_IMAGE) ==
+               WSI_WIN32_PRESENTER_REMOVED ? WSI_WIN32_FLUSH_REMOVED : WSI_WIN32_FLUSH_UNPROVEN;
+      fence->Release();
+      return result;
+   }
+
+   const uint32_t deadline_ms = wsi_win32_wait_ms(WSI_WIN32_ROUTE_DEADLINE_NS);
+   bool done = false;
+   HANDLE event = CreateEventW(NULL, FALSE, FALSE, NULL);
+   if (event) {
+      hr = fence->SetEventOnCompletion(1, event);
+      if (FAILED(hr))
+         wsi_win32_route_failed(chain, "ID3D12Fence::SetEventOnCompletion (queue drain)", hr,
+                                WSI_WIN32_ROUTE_ERROR_NO_IMAGE);
+   }
+   if (event && SUCCEEDED(hr)) {
+      done = WaitForSingleObject(event, deadline_ms) == WAIT_OBJECT_0;
+   } else {
+      /* No event to wait on: poll the fence to the same deadline instead of blocking. UINT64_MAX is
+       * the removal sentinel and not a completed value, so it is not read as a drain.
+       */
+      const uint64_t end = os_time_get_nano() + WSI_WIN32_ROUTE_DEADLINE_NS;
+      do {
+         const uint64_t value = fence->GetCompletedValue();
+         done = value != UINT64_MAX && value >= 1;
+         if (done)
+            break;
+         Sleep(1);
+      } while (os_time_get_nano() < end);
+   }
+   if (event)
+      CloseHandle(event);
+
+   if (done) {
+      result = WSI_WIN32_FLUSH_DRAINED;
+   } else {
+      const bool dead = wsi_win32_route_wait_expired(&chain->wsi->route);
+      wsi_win32_route_log(chain, "chain %p: the D3D12 queue did not drain in %u ms%s",
+                          (void *)chain, deadline_ms,
+                          dead ? ", route off for this process (CPU images from now on)" : "");
+      result = wsi_win32_presenter_read(chain, WSI_WIN32_ROUTE_ERROR_NO_IMAGE) ==
+               WSI_WIN32_PRESENTER_REMOVED ? WSI_WIN32_FLUSH_REMOVED : WSI_WIN32_FLUSH_UNPROVEN;
+      /* The Signal(fence, 1) is still outstanding: the queue may write this fence after this
+       * call returns, so the last reference stays with it instead of being dropped here. One
+       * fence per expiry is the price of not freeing an object the GPU scheduler still names,
+       * and an expiry means the route is being abandoned anyway.
+       */
+      queue_keeps_fence = true;
    }
    if (!queue_keeps_fence)
       fence->Release();
+
+   wsi_win32_route_log(chain, "chain %p: queue drain %s", (void *)chain,
+                       wsi_win32_flush_result_name(result));
+   return result;
 }
 
 /* Releases what ties an image to the DXGI swap chain's buffers: the back buffer and the command
@@ -1224,18 +1495,51 @@ wsi_win32_swapchain_destroy(struct wsi_swapchain *drv_chain,
    struct wsi_win32_swapchain *chain =
       (struct wsi_win32_swapchain *) drv_chain;
 
-   if (chain->is_dxgi)
-      wsi_win32_flush_d3d12_queue(chain);
+   /* V5. The drain decides what this teardown may touch. UNPROVEN means the presenter's queue may
+    * still be reading this chain's back buffers, its copy command lists and the memory behind them,
+    * and nothing below releases any of it: the chain and every reference in it are pinned and the
+    * function returns. One leaked swapchain against a release of memory a live queue is reading.
+    */
+   const enum wsi_win32_flush_result flushed =
+      chain->is_dxgi ? wsi_win32_flush_d3d12_queue(chain) : WSI_WIN32_FLUSH_DRAINED;
+   if (!wsi_win32_flush_releases(flushed)) {
+      chain->resources_pinned = true;
+      /* The application's own waits are still released where that is proved safe: they are waits on
+       * the application's own device and they do not depend on this chain's D3D12 objects.
+       */
+      const enum wsi_win32_presenter_state presenter =
+         wsi_win32_presenter_read(chain, WSI_WIN32_ROUTE_ERROR_NO_IMAGE);
+      const bool outstanding = wsi_win32_retire_blit_waits(chain, presenter);
+      if (chain->surface->current_swapchain == chain)
+         chain->surface->current_swapchain = NULL;
+      if (chain->present_log) {
+         fclose(chain->present_log);
+         chain->present_log = NULL;
+      }
+      wsi_win32_route_log(chain, "chain %p: destroyed with the queue's use of its resources %s: the "
+                          "chain, its %u images, its D3D12 resources, its shared blit fences and its "
+                          "swap chain are kept (work still outstanding: %s)", (void *)chain,
+                          wsi_win32_flush_result_name(flushed), chain->base.image_count,
+                          outstanding ? "yes" : "no");
+      return VK_SUCCESS;
+   }
 
    /* A dead route's chain is torn down with the application's second submission per presented image
     * still waiting on a shared blit timeline the presenter will never signal. Release those waits
     * before the semaphores they wait on are destroyed, so that the teardown does not leave a thread
     * of the application blocked for the life of the process. A route that is still alive is left
     * alone: the value is the GPU's to signal, and signalling it here would call a frame presented
-    * before the copy ran.
+    * before the copy ran. What proves the host may signal at all is the presenter's state, not the
+    * route's flag (V1).
     */
-   if (chain->is_dxgi && !wsi_win32_route_usable(&chain->wsi->route))
-      wsi_win32_retire_blit_waits(chain);
+   if (chain->is_dxgi && !wsi_win32_route_usable(&chain->wsi->route)) {
+      const enum wsi_win32_presenter_state presenter =
+         wsi_win32_presenter_read(chain, WSI_WIN32_ROUTE_ERROR_NO_IMAGE);
+      if (wsi_win32_retire_blit_waits(chain, presenter))
+         wsi_win32_route_log(chain, "chain %p: destroyed with a submission of this device still "
+                             "waiting on a shared blit timeline: presenter %s", (void *)chain,
+                             wsi_win32_presenter_state_name(presenter));
+   }
 
    for (uint32_t i = 0; i < chain->base.image_count; i++)
       wsi_win32_image_finish(chain, allocator, &chain->images[i]);
@@ -1419,7 +1723,7 @@ wsi_win32_acquire_next_image(struct wsi_swapchain *drv_chain,
     * after this wait has returned and the blit fence of the present before it has completed.
     */
    wsi_win32_stage_log(chain, WSI_WIN32_STAGE_ACQUIRE);
-   const bool presented = chain->wsi->route.presented;
+   const bool presented = wsi_win32_route_presented(&chain->wsi->route);
    const uint64_t timeout = wsi_win32_acquire_timeout_ns(info->timeout, presented);
    if (chain->wsi->wsi->WaitForFences(chain->base.device, 1,
                                       &chain->base.fences[index],
@@ -1455,14 +1759,23 @@ wsi_win32_acquire_next_image(struct wsi_swapchain *drv_chain,
       }
       /* have == UINT64_MAX above is the documented answer of GetCompletedValue for a REMOVED device
        * and not a fence value, which is the fourth case of the round-3 decision table and the one
-       * the lab read. This line says whether that is what happened and why.
+       * the lab read. This reading says which of the three presenter states holds, and a timeout on
+       * its own says none of them (V1).
        */
-      wsi_win32_route_log(chain, "chain %p: presenter device removed reason 0x%08lx",
-                          (void *)chain, (unsigned long)wsi_win32_device_removed_reason(chain));
-      /* The route is retired; now retire the work it queued, or the application freezes in its own
-       * recovery instead (wsi_win32_retire_blit_waits).
+      const enum wsi_win32_presenter_state presenter = wsi_win32_presenter_read(chain, index);
+      /* The route is retired; now retire the work it queued, as far as the presenter's state proves
+       * the host may, or the application freezes in its own recovery instead
+       * (wsi_win32_retire_blit_waits). What cannot be proved is reported, not forced.
        */
-      wsi_win32_retire_blit_waits(chain);
+      const bool outstanding = wsi_win32_retire_blit_waits(chain, presenter);
+      if (wsi_win32_route_report(outstanding) == WSI_WIN32_REPORT_DEVICE_LOST) {
+         wsi_win32_route_log(chain, "chain %p: VK_ERROR_DEVICE_LOST: a submission of this device "
+                             "waits on a shared blit timeline that only a presenter this round "
+                             "could not prove removed (%s) can signal", (void *)chain,
+                             wsi_win32_presenter_state_name(presenter));
+         chain->status = VK_ERROR_DEVICE_LOST;
+         return VK_ERROR_DEVICE_LOST;
+      }
       return VK_ERROR_OUT_OF_DATE_KHR;
    }
 
@@ -1525,6 +1838,8 @@ wsi_win32_queue_present_dxgi(struct wsi_win32_swapchain *chain,
    wsi_win32_stage_log(chain, WSI_WIN32_STAGE_PRESENT);
    HRESULT hres = chain->dxgi->Present1(sync_interval, present_flags, &params);
    wsi_win32_stage_log(chain, WSI_WIN32_STAGE_DONE);
+   if (FAILED(hres))
+      wsi_win32_route_failed(chain, "IDXGISwapChain3::Present1", hres, image_index);
    switch (hres) {
    case DXGI_ERROR_DEVICE_REMOVED: return VK_ERROR_DEVICE_LOST;
    case DXGI_ERROR_DEVICE_RESET: return VK_ERROR_DEVICE_LOST;
@@ -1795,7 +2110,23 @@ wsi_win32_take_old_dxgi(struct wsi_win32_swapchain *old_chain, HWND hwnd)
        !old_chain->dxgi || old_chain->wnd != hwnd)
       return NULL;
 
-   wsi_win32_flush_d3d12_queue(old_chain);
+   /* V5. The steal releases the old chain's back buffers and copy command lists and then RESIZES the
+    * swap chain under them. Both are forbidden while the presenter's queue cannot be proved to have
+    * stopped referencing them, and a route that was retired is not that proof. The old chain keeps
+    * everything, nothing is handed over, and the caller's chain fails to take the DXGI route: the
+    * swapchain the application asked for then takes CPU images, which is the fallback this route has
+    * for every other failure too.
+    */
+   const enum wsi_win32_flush_result flushed = wsi_win32_flush_d3d12_queue(old_chain);
+   if (!wsi_win32_flush_releases(flushed)) {
+      old_chain->resources_pinned = true;
+      wsi_win32_route_wait_expired(&old_chain->wsi->route);
+      wsi_win32_route_log(old_chain, "chain %p: its swap chain is NOT handed to the new chain: the "
+                          "queue's use of its buffers is %s, so they are neither released nor "
+                          "resized", (void *)old_chain, wsi_win32_flush_result_name(flushed));
+      return NULL;
+   }
+
    for (uint32_t i = 0; i < old_chain->base.image_count; i++)
       wsi_win32_image_release_dxgi_buffers(&old_chain->images[i]);
 
@@ -1884,6 +2215,18 @@ wsi_win32_surface_create_swapchain_dxgi(
 
    bool reused = false;
    IDXGISwapChain3 *stolen = chain->hwnd_target ? wsi_win32_take_old_dxgi(old_chain, hwnd) : NULL;
+   /* The old chain kept its swap chain because its queue could not be proved idle (V5). The window
+    * already has a flip-model swap chain, so creating another one for it cannot succeed; say so here
+    * instead of letting CreateSwapChainForHwnd answer DXGI_ERROR_INVALID_CALL. The caller takes CPU
+    * images.
+    */
+   if (!stolen && chain->hwnd_target && old_chain && old_chain->resources_pinned &&
+       old_chain->wnd == hwnd) {
+      wsi_win32_route_log(chain, "chain %p: no DXGI route: the window's swap chain is pinned to "
+                          "chain %p, whose presenter queue could not be proved idle",
+                          (void *)chain, (void *)old_chain);
+      return VK_ERROR_INITIALIZATION_FAILED;
+   }
    if (stolen) {
       DXGI_SWAP_CHAIN_DESC1 old_desc = {};
       if (SUCCEEDED(stolen->GetDesc1(&old_desc)) && old_desc.Flags == desc.Flags &&
@@ -1906,6 +2249,10 @@ wsi_win32_surface_create_swapchain_dxgi(
       else
          hr = factory->CreateSwapChainForComposition(queue, &desc, NULL, &swapchain1);
       if (FAILED(hr)) {
+         wsi_win32_route_failed(chain, chain->hwnd_target ?
+                                "IDXGIFactory2::CreateSwapChainForHwnd" :
+                                "IDXGIFactory2::CreateSwapChainForComposition", hr,
+                                WSI_WIN32_ROUTE_ERROR_NO_IMAGE);
          wsi_win32_route_log(chain, "%s failed hr=0x%08lx %ux%u format %u flags 0x%x",
                              chain->hwnd_target ? "CreateSwapChainForHwnd" :
                                                   "CreateSwapChainForComposition",
@@ -2000,8 +2347,14 @@ wsi_win32_surface_create_swapchain_dxgi(
       }
       hr = d3d12_device->OpenSharedHandle(handle,
                                           IID_PPV_ARGS(&chain->d3d12_blit_fences[i]));
+      /* This handle is the EXPORTED SEMAPHORE's, and closing it here is right: ownership of a
+       * semaphore handle obtained from vkGetSemaphoreWin32HandleKHR is the application's. The
+       * resource handle of the image import is a different one and is closed where it is made
+       * (wsi_create_dxgi_image_mem, V6).
+       */
       CloseHandle(handle);
       if (FAILED(hr)) {
+         wsi_win32_route_failed(chain, "ID3D12Device::OpenSharedHandle (blit fence)", hr, i);
          wsi_win32_route_log(chain, "blit fence %u: OpenSharedHandle failed hr=0x%08lx", i,
                              (unsigned long)hr);
          return VK_ERROR_INITIALIZATION_FAILED;
