@@ -151,7 +151,7 @@ bc250_rd64(const uint8_t *p, uint32_t off)
  */
 static bool
 radv_wddm2_try_bc250(struct radv_wddm2_winsys *ws, struct drm_amdgpu_info_device *dev,
-                     struct drm_amdgpu_memory_info *mem, bool compiler_compat_mode)
+                     struct drm_amdgpu_memory_info *mem, NTSTATUS segment_status, bool compiler_compat_mode)
 {
    struct radeon_info *info = &ws->gpu_info;
    uint8_t blob[1472];
@@ -171,7 +171,12 @@ radv_wddm2_try_bc250(struct radv_wddm2_winsys *ws, struct drm_amdgpu_info_device
    memcpy(dev, blob + BC250_OFF_DEVICE, sizeof(*dev));
    mem->vram.total_heap_size = bc250_rd64(blob, BC250_OFF_MEMORY + 0 * 32);
    mem->cpu_accessible_vram.total_heap_size = bc250_rd64(blob, BC250_OFF_MEMORY + 1 * 32);
-   mem->gtt.total_heap_size = bc250_rd64(blob, BC250_OFF_MEMORY + 2 * 32);
+   /* Preserve a successful OS GTT query, including zero; only failure uses captured caps. */
+   if (!NT_SUCCESS(segment_status)) {
+      mem->gtt.total_heap_size = bc250_rd64(blob, BC250_OFF_MEMORY + 2 * 32);
+      fprintf(stderr, "bc250: GETSEGMENTSIZE failed (NTSTATUS 0x%08x); using captured GTT size\n",
+              (unsigned)segment_status);
+   }
 
    info->drm_major = bc250_rd32(blob, BC250_OFF_DRM_MAJOR);
    info->drm_minor = bc250_rd32(blob, BC250_OFF_DRM_MAJOR + 4);
@@ -296,11 +301,14 @@ radv_wddm2_fill_gpu_info(struct radv_wddm2_winsys *ws,
    info->valid_luid = true;
    memcpy(info->luid, &ws->adapter_luid, sizeof(info->luid));
 
+   NTSTATUS segment_status;
+
    /* GTT size */
    {
       D3DKMT_SEGMENTSIZEINFO segment = {};
-      if (NT_SUCCESS(query_adapter_info(ws, KMTQAITYPE_GETSEGMENTSIZE,
-                                        &segment, sizeof(segment)))) {
+      segment_status = query_adapter_info(ws, KMTQAITYPE_GETSEGMENTSIZE,
+                                          &segment, sizeof(segment));
+      if (NT_SUCCESS(segment_status)) {
          mem.gtt.total_heap_size = segment.SharedSystemMemorySize;
       }
    }
@@ -333,7 +341,7 @@ radv_wddm2_fill_gpu_info(struct radv_wddm2_winsys *ws,
    }
 
    (void)node;
-   if (radv_wddm2_try_bc250(ws, &dev, &mem, compiler_compat_mode))
+   if (radv_wddm2_try_bc250(ws, &dev, &mem, segment_status, compiler_compat_mode))
       return STATUS_SUCCESS;
 
    struct PACKED umdprivatedata_header {
