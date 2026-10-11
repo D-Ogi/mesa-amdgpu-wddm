@@ -39,6 +39,7 @@
 #include "wsi_common_entrypoints.h"
 #include "wsi_common_private.h"
 #include "wsi_win32_deadline.h"
+#include "wsi_win32_shared_fence.h"
 
 #include <dxgi1_6.h>
 #include "util/u_win32_library.h"
@@ -2190,6 +2191,102 @@ wsi_win32_take_old_dxgi(struct wsi_win32_swapchain *old_chain, HWND hwnd)
    return dxgi;
 }
 
+/* BD-105: a successful OpenSharedHandle can yield a NON_MONITORED fence whose
+ * completed value is UINT64_MAX while the device remains healthy. Such an object
+ * cannot be a presenter dependency. Let the presenter's runtime create its fence
+ * and import that payload into Vulkan instead. This changes only internal WSI
+ * fences, not application semaphore export/import semantics.
+ */
+struct wsi_win32_blit_fence_ops {
+   struct wsi_win32_swapchain *chain;
+   struct wsi_device *wsi;
+   VkDevice device;
+   ID3D12Device *presenter;
+   unsigned index;
+   ID3D12Fence *fence = nullptr;
+   HANDLE handle = nullptr;
+   VkSemaphore timeline = VK_NULL_HANDLE;
+
+   VkResult hr_result(HRESULT hr, const char *call) {
+      if (SUCCEEDED(hr)) return VK_SUCCESS;
+      wsi_win32_route_failed(chain, call, hr, index);
+      return hr == E_OUTOFMEMORY ? VK_ERROR_OUT_OF_HOST_MEMORY : VK_ERROR_INITIALIZATION_FAILED;
+   }
+   VkResult invalid(const char *what) {
+      wsi_win32_route_log(chain, "blit fence %u: %s", index, what);
+      return VK_ERROR_INITIALIZATION_FAILED;
+   }
+   VkResult create_fence() {
+      return hr_result(presenter->CreateFence(0, D3D12_FENCE_FLAG_SHARED, IID_PPV_ARGS(&fence)),
+                       "ID3D12Device::CreateFence (shared blit fence)");
+   }
+   VkResult check_fence() {
+      if (!fence) return invalid("CreateFence returned no object");
+      const UINT64 value = fence->GetCompletedValue();
+      if (value != 0) {
+         wsi_win32_route_log(chain, "blit fence %u: initial D3D12 value 0x%016" PRIx64
+                             ", device reason 0x%08lx; no work submitted", index,
+                             (uint64_t)value, (unsigned long)presenter->GetDeviceRemovedReason());
+         return VK_ERROR_INITIALIZATION_FAILED;
+      }
+      return VK_SUCCESS;
+   }
+   VkResult share_fence() {
+      VkResult result = hr_result(presenter->CreateSharedHandle(fence, nullptr, GENERIC_ALL,
+                                                               nullptr, &handle),
+                                 "ID3D12Device::CreateSharedHandle (blit fence)");
+      return result == VK_SUCCESS && !handle ? invalid("shared fence handle is null") : result;
+   }
+   VkResult create_timeline() {
+      const VkSemaphoreTypeCreateInfo type = {
+         VK_STRUCTURE_TYPE_SEMAPHORE_TYPE_CREATE_INFO, nullptr, VK_SEMAPHORE_TYPE_TIMELINE, 0,
+      };
+      const VkSemaphoreCreateInfo info = {
+         VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO, &type, 0,
+      };
+      VkResult result = wsi->CreateSemaphore(device, &info, &chain->base.alloc, &timeline);
+      return result == VK_SUCCESS && !timeline ? invalid("Vulkan timeline is null") : result;
+   }
+   VkResult import_fence() {
+      const VkImportSemaphoreWin32HandleInfoKHR info = {
+         VK_STRUCTURE_TYPE_IMPORT_SEMAPHORE_WIN32_HANDLE_INFO_KHR, nullptr,
+         timeline, 0, VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_D3D12_FENCE_BIT, handle, nullptr,
+      };
+      VkResult result = wsi->ImportSemaphoreWin32HandleKHR(device, &info);
+      if (result != VK_SUCCESS)
+         wsi_win32_route_log(chain, "blit fence %u: permanent D3D12_FENCE import failed (%d)",
+                             index, (int)result);
+      return result;
+   }
+   void close_handle() {
+      /* Win32 import retains its own reference on success. Application ownership
+       * of the NT handle is unchanged on both success and failure. */
+      if (handle) CloseHandle(handle);
+      handle = nullptr;
+   }
+   VkResult check_timeline() {
+      uint64_t value = UINT64_MAX;
+      VkResult result = wsi->GetSemaphoreCounterValue(device, timeline, &value);
+      if (result != VK_SUCCESS) return result;
+      if (value != 0) return invalid("imported Vulkan timeline did not read initial zero");
+      return check_fence();
+   }
+   void publish() {
+      chain->base.blit.semaphores[index] = timeline;
+      chain->d3d12_blit_fences[index] = fence;
+      timeline = VK_NULL_HANDLE;
+      fence = nullptr;
+      wsi_win32_route_log(chain, "blit fence %u: D3D12-created, permanently imported, both values zero",
+                          index);
+   }
+   void discard() {
+      if (timeline) wsi->DestroySemaphore(device, timeline, &chain->base.alloc);
+      if (fence) fence->Release();
+      timeline = VK_NULL_HANDLE;
+      fence = nullptr;
+   }
+};
+
 static VkResult
 wsi_win32_surface_create_swapchain_dxgi(
    wsi_win32_surface *surface,
@@ -2362,54 +2459,14 @@ wsi_win32_surface_create_swapchain_dxgi(
          8, VK_SYSTEM_ALLOCATION_SCOPE_OBJECT);
    if (!chain->d3d12_blit_fences)
       return VK_ERROR_OUT_OF_HOST_MEMORY;
+   if (!d3d12_device || !wsi->wsi->ImportSemaphoreWin32HandleKHR ||
+       !wsi->wsi->GetSemaphoreCounterValue)
+      return VK_ERROR_FEATURE_NOT_PRESENT;
    for (unsigned i = 0; i < create_info->minImageCount; i++) {
-      const VkSemaphoreTypeCreateInfo type_info = {
-         VK_STRUCTURE_TYPE_SEMAPHORE_TYPE_CREATE_INFO,
-         NULL,
-         VK_SEMAPHORE_TYPE_TIMELINE,
-      };
-      const VkExportSemaphoreCreateInfo export_info = {
-         VK_STRUCTURE_TYPE_EXPORT_SEMAPHORE_CREATE_INFO,
-         &type_info,
-         VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_D3D12_FENCE_BIT,
-      };
-      const VkSemaphoreCreateInfo sem_info = {
-         VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO,
-         &export_info,
-         0,
-      };
-
-      VkResult result = wsi->wsi->CreateSemaphore(device, &sem_info, &chain->base.alloc,
-                                                  &chain->base.blit.semaphores[i]);
+      wsi_win32_blit_fence_ops ops{chain, wsi->wsi, device, d3d12_device, i};
+      VkResult result = wsi_win32_create_shared_fence(ops);
       if (result != VK_SUCCESS)
          return result;
-
-      HANDLE handle = nullptr;
-      const VkSemaphoreGetWin32HandleInfoKHR get_info = {
-         VK_STRUCTURE_TYPE_SEMAPHORE_GET_WIN32_HANDLE_INFO_KHR,
-         NULL,
-         chain->base.blit.semaphores[i],
-         VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_D3D12_FENCE_BIT,
-      };
-      result = wsi->wsi->GetSemaphoreWin32HandleKHR(device, &get_info, &handle);
-      if (result != VK_SUCCESS || !handle) {
-         wsi_win32_route_log(chain, "blit fence %u: no D3D12 fence handle (%d)", i, (int)result);
-         return VK_ERROR_INITIALIZATION_FAILED;
-      }
-      hr = d3d12_device->OpenSharedHandle(handle,
-                                          IID_PPV_ARGS(&chain->d3d12_blit_fences[i]));
-      /* This handle is the EXPORTED SEMAPHORE's, and closing it here is right: ownership of a
-       * semaphore handle obtained from vkGetSemaphoreWin32HandleKHR is the application's. The
-       * resource handle of the image import is a different one and is closed where it is made
-       * (wsi_create_dxgi_image_mem, V6).
-       */
-      CloseHandle(handle);
-      if (FAILED(hr)) {
-         wsi_win32_route_failed(chain, "ID3D12Device::OpenSharedHandle (blit fence)", hr, i);
-         wsi_win32_route_log(chain, "blit fence %u: OpenSharedHandle failed hr=0x%08lx", i,
-                             (unsigned long)hr);
-         return VK_ERROR_INITIALIZATION_FAILED;
-      }
    }
 
    wsi_win32_route_log(chain, "chain %p: %s swap chain %ux%u format %u images %u flags 0x%x "
