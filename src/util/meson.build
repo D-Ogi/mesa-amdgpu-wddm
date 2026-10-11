@@ -213,6 +213,11 @@ else
   files_mesa_util += files('cache_ops_null.c')
 endif
 
+# amdgpu-wddm: the log stream of the WDDM2 winsys lines (amdgpu_wddm_stdio.h).
+if host_machine.system() == 'windows' and cc.get_argument_syntax() == 'msvc'
+  files_mesa_util += files('u_amdgpu_wddm_stdio.c', 'amdgpu_wddm_stdio.h')
+endif
+
 files_drirc = files('00-mesa-defaults.conf')
 devenv.set('DRIRC_CONFIGDIR', meson.current_source_dir())
 

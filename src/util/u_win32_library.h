@@ -9,6 +9,10 @@
 
 /* An ICD must not enter app-local DXVK/vkd3d while initializing native WDDM.
  * Use a full system path: a bare name can return an already-loaded proxy DLL.
+ * The module's own dependencies that are not loaded yet are searched in
+ * System32 only, never in the application directory. A dependency that the
+ * process already holds under the same base name still binds to that module
+ * (facts M792); callers take their entry points from the returned handle.
  */
 static inline HMODULE
 util_load_system_library(const wchar_t *name)
@@ -20,6 +24,7 @@ util_load_system_library(const wchar_t *name)
       return NULL;
    path[len++] = L'\\';
    memcpy(path + len, name, (name_len + 1) * sizeof(wchar_t));
-   return LoadLibraryW(path);
+   return LoadLibraryExW(path, NULL,
+                         LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR | LOAD_LIBRARY_SEARCH_SYSTEM32);
 }
 #endif

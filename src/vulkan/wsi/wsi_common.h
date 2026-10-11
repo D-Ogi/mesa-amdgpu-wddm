@@ -146,6 +146,28 @@ struct wsi_device {
       VkResult (*create_image_memory)(VkDevice device, void *resource,
                                       const VkAllocationCallbacks *alloc,
                                       VkDeviceMemory *out);
+
+      /* The hooks below serve a driver whose D3D12 shared resources are linear surfaces (the
+       * amdgpu-wddm BC-250 port). All are optional; NULL or false keeps upstream behaviour.
+       *
+       * route_allowed: asked when the surface formats are listed and once per swapchain before
+       * the DXGI path is used. False makes that swapchain take the CPU-image path and hides the
+       * formats that have no CPU path; *reason names why, for the log.
+       */
+      bool (*route_allowed)(VkPhysicalDevice pdevice, const char **reason);
+      /* The application image aliases the D3D12 shared resource and must have its linear layout. */
+      bool linear_blit_image;
+      /* Checks that the memory bound to a linear blit image has the image's own layout. */
+      VkResult (*check_blit_image)(VkDevice device, VkImage image, VkDeviceMemory memory);
+      /* true: CreateSwapChainForHwnd. false: CreateSwapChainForComposition with a DComp target. */
+      bool hwnd_target;
+      /* One line per swapchain: the route it took and why. */
+      void (*route_log)(VkDevice device, const char *line);
+      /* Set by wsi_win32_init_wsi when it could not set up the DXGI runtime: the step that
+       * failed ("dxgi-load", "dxgi-factory", "dcomp-load", "dcomp-device") and its HRESULT.
+       */
+      const char *init_failure;
+      long init_hr;
    } win32;
 
    struct {
@@ -257,7 +279,9 @@ struct wsi_device {
    WSI_CB(GetQueryPoolResults);
    WSI_CB(GetSemaphoreFdKHR);
    WSI_CB(GetSemaphoreWin32HandleKHR);
+   WSI_CB(GetSemaphoreCounterValue);
    WSI_CB(ResetFences);
+   WSI_CB(SignalSemaphore);
    WSI_CB(QueueSubmit2);
    WSI_CB(SetDebugUtilsObjectNameEXT);
    WSI_CB(WaitForFences);
