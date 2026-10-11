@@ -437,9 +437,11 @@ vk_wddm2_monitored_fence_import_opaque_win32_handle(struct vk_device *device,
          .ObjectName = &object_name,
       };
       D3DKMT_OPENSYNCOBJECTNTHANDLEFROMNAME named = {
-         /* Import needs wait and signal, not WRITE_DAC/WRITE_OWNER. */
-         .dwDesiredAccess = SYNCHRONIZE | D3DDDI_SYNC_OBJECT_WAIT |
-                            D3DDDI_SYNC_OBJECT_SIGNAL,
+         /* Match the full-access name-open used by D3D12. Wait/signal rights
+          * alone can open the NT handle but fail the subsequent KMT import.
+          * The object's DACL still controls access; export rights are separate.
+          */
+         .dwDesiredAccess = D3DDDI_SYNC_OBJECT_ALL_ACCESS,
          .pObjAttrib = &oa,
       };
       status = WDDM2_DISPATCH(OpenSyncObjectNtHandleFromName(&named));

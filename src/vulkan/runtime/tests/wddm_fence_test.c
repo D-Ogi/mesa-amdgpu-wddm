@@ -234,23 +234,43 @@ int main(void)
         f.base.type->finish(&device, &f.base); CloseHandle(caller);
     }
 
-    group = "named import and re-export need no administrative rights";
-    f=make_fence(); named_allowed=SYNCHRONIZE|D3DDDI_SYNC_OBJECT_WAIT|D3DDDI_SYNC_OBJECT_SIGNAL;
+    group = "named import obtains full access independently of the export handle mask";
+    f=make_fence(); named_allowed=D3DDDI_SYNC_OBJECT_ALL_ACCESS;
+    CHECK(vk_sync_set_win32_export_params(&device, &f.base, NULL, 0x120003, L"Local\\named-import") == VK_SUCCESS);
+    CHECK(nt_handles[(uintptr_t)f.shared_handle].access == 0x120003);
     CHECK(vk_sync_import_win32_handle(&device, &f.base, NULL, L"Local\\named-import") == VK_SUCCESS);
+    CHECK(nt_handles[(uintptr_t)f.shared_handle].access == D3DDDI_SYNC_OBJECT_ALL_ACCESS);
     CHECK(vk_sync_export_win32_handle(&device, &f.base, &exported) == VK_SUCCESS);
     CHECK(live(exported));
     if (live(exported)) {
-        CHECK(nt_handles[(uintptr_t)exported].access == named_allowed);
+        CHECK(nt_handles[(uintptr_t)exported].access == 0x120003);
         CloseHandle(exported);
     }
     f.base.type->finish(&device, &f.base); named_allowed=D3DDDI_SYNC_OBJECT_ALL_ACCESS;
 
-    group = "limited unnamed handle re-export preserves granted access";
+    group = "restrictive object DACL refuses name-open without replacing the destination";
+    f=make_fence(); old=f.handle; old_map=f.value_map;
+    named_allowed=SYNCHRONIZE|3; opened_before=open_calls;
+    CHECK(vk_sync_import_win32_handle(&device, &f.base, NULL, L"Local\\named-import") == VK_ERROR_INVALID_EXTERNAL_HANDLE);
+    CHECK(open_calls == opened_before);
+    CHECK(f.handle == old && f.value_map == old_map && objects[old]);
+    f.base.type->finish(&device, &f.base); named_allowed=D3DDDI_SYNC_OBJECT_ALL_ACCESS;
+
+    group = "insufficient unnamed access fails transactionally without rights escalation";
     f=make_fence(); caller=new_nt(206,SYNCHRONIZE|3,false);
+    old=f.handle; old_map=f.value_map; opened_before=open_calls; before=closes;
+    CHECK(vk_sync_import_win32_handle(&device, &f.base, caller, NULL) == VK_ERROR_INVALID_EXTERNAL_HANDLE);
+    CHECK(open_calls == opened_before + 1);
+    CHECK(f.handle == old && f.value_map == old_map && objects[old]);
+    CHECK(live(caller) && closes == before + 1);
+    f.base.type->finish(&device, &f.base); CloseHandle(caller);
+
+    group = "unnamed handle re-export preserves granted access";
+    f=make_fence(); caller=new_nt(206,D3DDDI_SYNC_OBJECT_ALL_ACCESS,false);
     CHECK(vk_sync_import_win32_handle(&device, &f.base, caller, NULL) == VK_SUCCESS);
     CHECK(vk_sync_export_win32_handle(&device, &f.base, &exported) == VK_SUCCESS);
     CHECK(live(exported));
-    if (live(exported)) { CHECK(nt_handles[(uintptr_t)exported].access == (SYNCHRONIZE|3)); CloseHandle(exported); }
+    if (live(exported)) { CHECK(nt_handles[(uintptr_t)exported].access == D3DDDI_SYNC_OBJECT_ALL_ACCESS); CloseHandle(exported); }
     f.base.type->finish(&device, &f.base); CloseHandle(caller);
 
     group = "successful open without a local handle preserves the old payload";
@@ -277,7 +297,7 @@ int main(void)
     diagnostic_probe=false; mapped_only=false;
 
     group = "explicit export access still restricts a re-exported imported payload";
-    f=make_fence(); caller=new_nt(209,SYNCHRONIZE|3,false);
+    f=make_fence(); caller=new_nt(209,D3DDDI_SYNC_OBJECT_ALL_ACCESS,false);
     if (f.base.type->set_win32_export_params) {
         CHECK(vk_sync_set_win32_export_params(&device, &f.base, NULL, SYNCHRONIZE|D3DDDI_SYNC_OBJECT_WAIT, NULL) == VK_SUCCESS);
         CHECK(vk_sync_import_win32_handle(&device, &f.base, caller, NULL) == VK_SUCCESS);

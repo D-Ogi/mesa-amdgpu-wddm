@@ -131,6 +131,12 @@ static NTSTATUS mock_OpenSyncObjectFromNtHandle2(D3DKMT_OPENSYNCOBJECTFROMNTHAND
     if (fail_open) return STATUS_NO_MEMORY;
     if (open_error) return open_error;
     if (!live(p->hNtHandle) || !p->hDevice) return STATUS_INVALID_HANDLE;
+    /* Device regression: this exact access mask opened by name succeeds, then
+     * NtHandle2 refuses it. This does not establish the minimum accepted mask.
+     */
+    if (nt_handles[(uintptr_t)p->hNtHandle].access ==
+        (SYNCHRONIZE | D3DDDI_SYNC_OBJECT_WAIT | D3DDDI_SYNC_OBJECT_SIGNAL))
+        return STATUS_ACCESS_DENIED;
     if (p->Flags.Reserved || p->Flags.NoWait || p->Flags.NoSignal) return STATUS_INVALID_PARAMETER;
     if (mapped_only && p->Flags.NoGPUAccess) {
         if (dirty_failed_outputs) {
