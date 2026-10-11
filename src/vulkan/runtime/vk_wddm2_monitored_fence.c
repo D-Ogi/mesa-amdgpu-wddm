@@ -160,6 +160,7 @@ vk_wddm2_monitored_fence_init(struct vk_device *device,
    fence->export_access = GENERIC_ALL;
    fence->shared_handle_inheritable = false;
    fence->shared_handle_imported = false;
+   fence->export_access_explicit = false;
 #endif
 
    return VK_SUCCESS;
@@ -408,6 +409,7 @@ vk_wddm2_monitored_fence_set_win32_export_params(struct vk_device *device,
    assert(fence->shared_handle == NULL);
    fence->shared_handle = shared_handle;
    fence->export_access = access;
+   fence->export_access_explicit = true;
    fence->shared_handle_inheritable = sa && sa->bInheritHandle;
    return VK_SUCCESS;
 }
@@ -582,11 +584,12 @@ vk_wddm2_monitored_fence_export_opaque_win32_handle(struct vk_device *device,
    }
 
    HANDLE process = GetCurrentProcess();
+   const bool same_access = fence->shared_handle_imported && !fence->export_access_explicit;
    BOOL ok = DuplicateHandle(process, (HANDLE)fence->shared_handle,
                              process, (HANDLE *)handle,
-                             fence->shared_handle_imported ? 0 : fence->export_access,
+                             same_access ? 0 : fence->export_access,
                              fence->shared_handle_inheritable,
-                             fence->shared_handle_imported ? DUPLICATE_SAME_ACCESS : 0);
+                             same_access ? DUPLICATE_SAME_ACCESS : 0);
    if (!ok)
       return vk_errorf(device, VK_ERROR_UNKNOWN, "DuplicateHandle failed");
 

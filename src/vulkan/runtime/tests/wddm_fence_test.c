@@ -276,6 +276,20 @@ int main(void)
     }
     diagnostic_probe=false; mapped_only=false;
 
+    group = "explicit export access still restricts a re-exported imported payload";
+    f=make_fence(); caller=new_nt(209,SYNCHRONIZE|3,false);
+    if (f.base.type->set_win32_export_params) {
+        CHECK(vk_sync_set_win32_export_params(&device, &f.base, NULL, SYNCHRONIZE|D3DDDI_SYNC_OBJECT_WAIT, NULL) == VK_SUCCESS);
+        CHECK(vk_sync_import_win32_handle(&device, &f.base, caller, NULL) == VK_SUCCESS);
+        CHECK(vk_sync_export_win32_handle(&device, &f.base, &exported) == VK_SUCCESS);
+        CHECK(live(exported));
+        if (live(exported)) {
+            CHECK(nt_handles[(uintptr_t)exported].access == (SYNCHRONIZE|D3DDDI_SYNC_OBJECT_WAIT));
+            CloseHandle(exported);
+        }
+    }
+    f.base.type->finish(&device, &f.base); CloseHandle(caller);
+
     printf("%u checks, %u failures; mock graphics boundary, real host threads only\n", checks, failures);
     return failures ? 1 : 0;
 }

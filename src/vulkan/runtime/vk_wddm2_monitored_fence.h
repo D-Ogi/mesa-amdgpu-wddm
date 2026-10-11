@@ -47,6 +47,7 @@ struct vk_wddm2_monitored_fence {
    HANDLE shared_handle;
    bool shared_handle_inheritable;
    bool shared_handle_imported;
+   bool export_access_explicit;
    uint32_t export_access;
 #endif
    uint64_t *value_map;
