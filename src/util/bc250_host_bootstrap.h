@@ -255,6 +255,29 @@ static inline int bc250_host_fence_valid(const struct bc250_host *host, uint64_t
 #define BC250_HOST_SubmitCommandToHwQueue 42u
 #define BC250_HOST_SubmitWaitForSyncObjectsToHwQueue 43u
 #define BC250_HOST_SubmitSignalSyncObjectsToHwQueue 44u
+#define BC250_HOST_CONTRACT_QUERY_NAME "bc250GetHostContract"
+#define BC250_HOST_CONTRACT_REVISION 1u
+struct bc250_host_contract {
+   uint32_t size, revision, pointer_size;
+   uint32_t host_version, host_size, host_dispatch_offset;
+   uint32_t query_version, query_size;
+   uint32_t binding_version, binding_size, queue_funcs_size;
+   uint32_t policy_version, policy_size, policy_flags, policy_specified;
+   uint32_t import_size, import_va_offset;
+};
+static inline struct bc250_host_contract bc250_host_contract_description(void)
+{
+   const struct bc250_host_contract result = {
+      sizeof(struct bc250_host_contract), BC250_HOST_CONTRACT_REVISION, sizeof(void *),
+      BC250_HOST_VERSION, sizeof(struct bc250_host), offsetof(struct bc250_host, dispatch),
+      BC250_HOST_ADAPTER_QUERY_VERSION, sizeof(struct bc250_host_adapter_query),
+      BC250_HOST_QUEUE_BINDING_VERSION, sizeof(struct bc250_host_queue_binding), sizeof(struct bc250_host_queue_funcs),
+      BC250_HOST_POLICY_VERSION, sizeof(struct bc250_host_policy),
+      BC250_HOST_POLICY_KNOWN_FLAGS, BC250_HOST_POLICY_KNOWN_SPECIFIED,
+      sizeof(struct bc250_host_import), offsetof(struct bc250_host_import, va),
+   };
+   return result;
+}
 #define BC250_WDDM_CALL(host, name, argument) \
    ((host)->dispatch ? (host)->dispatch((host)->userdata, BC250_HOST_##name, (void *)(argument)) : WDDM2_DISPATCH(name(argument)))
 #endif

@@ -489,9 +489,20 @@ radv_EnumerateInstanceLayerProperties(uint32_t *pPropertyCount, VkLayerPropertie
    return vk_error(NULL, VK_ERROR_LAYER_NOT_PRESENT);
 }
 
+static VKAPI_ATTR VkResult VKAPI_CALL
+radv_bc250_get_host_contract(uint32_t size, struct bc250_host_contract *out)
+{
+   if (!out || size != sizeof(*out))
+      return VK_ERROR_INITIALIZATION_FAILED;
+   *out = bc250_host_contract_description();
+   return VK_SUCCESS;
+}
+
 VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL
 radv_GetInstanceProcAddr(VkInstance _instance, const char *pName)
 {
+   if (!_instance && pName && !strcmp(pName, BC250_HOST_CONTRACT_QUERY_NAME))
+      return (PFN_vkVoidFunction)radv_bc250_get_host_contract;
    VK_FROM_HANDLE(vk_instance, instance, _instance);
    return vk_instance_get_proc_addr(instance, &radv_instance_entrypoints, pName);
 }
