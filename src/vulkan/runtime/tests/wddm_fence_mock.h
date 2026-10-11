@@ -19,11 +19,17 @@
 #define VK_ERROR_INVALID_EXTERNAL_HANDLE -1000072003
 #define VK_ERROR_DEVICE_LOST -4
 #define STATUS_SUCCESS 0
-#define STATUS_NO_MEMORY -1
-#define STATUS_DEVICE_REMOVED -2
+#define STATUS_NO_MEMORY ((int)0xc0000017)
+#define STATUS_DEVICE_REMOVED ((int)0xc00002b6)
+#define STATUS_INVALID_PARAMETER ((int)0xc000000d)
+#define STATUS_INVALID_HANDLE ((int)0xc0000008)
+#define STATUS_ACCESS_DENIED ((int)0xc0000022)
 #define NT_SUCCESS(s) ((s)>=0)
 #define D3DDDI_MONITORED_FENCE 5
 #define D3DDDI_SYNC_OBJECT_ALL_ACCESS 0x1f0003
+#define D3DDDI_SYNC_OBJECT_SIGNAL 2u
+#define D3DDDI_SYNC_OBJECT_WAIT 1u
+#define SYNCHRONIZE 0x100000u
 #define DUPLICATE_SAME_ACCESS 2
 #define OBJ_INHERIT 2
 #define OBJ_CASE_INSENSITIVE 0x40
@@ -62,8 +68,16 @@ struct vk_sync_type {
  VkResult (*set_win32_export_params)(struct vk_device*,struct vk_sync*,const void*,uint32_t,const wchar_t*);
 };
 struct vk_sync {const struct vk_sync_type *type;enum vk_sync_flags flags;};
-struct mock_flags {unsigned Shared,NtSecuritySharing,NoGPUAccess;};
-struct mock_monitored {uint64_t InitialFenceValue;unsigned EngineAffinity;uint64_t *FenceValueCPUVirtualAddress;};
+struct mock_flags {
+    union {
+        struct {
+            unsigned Shared:1, NtSecuritySharing:1, CrossAdapter:1, TopOfPipeline:1;
+            unsigned NoSignal:1, NoWait:1, NoSignalMaxValueOnTdr:1, NoGPUAccess:1, Reserved:24;
+        };
+        unsigned Value;
+    };
+};
+struct mock_monitored {uint64_t InitialFenceValue;unsigned EngineAffinity;uint64_t *FenceValueCPUVirtualAddress;uint64_t FenceValueGPUVirtualAddress;};
 typedef struct {unsigned hDevice;struct {unsigned Type;struct mock_flags Flags;struct mock_monitored MonitoredFence;} Info;unsigned hSyncObject;} D3DKMT_CREATESYNCHRONIZATIONOBJECT2;
 typedef struct {unsigned hSyncObject;} D3DKMT_DESTROYSYNCHRONIZATIONOBJECT;
 typedef struct {HANDLE hNtHandle;unsigned hDevice;struct mock_flags Flags;unsigned hSyncObject;struct mock_monitored MonitoredFence;} D3DKMT_OPENSYNCOBJECTFROMNTHANDLE2;
@@ -79,6 +93,20 @@ static void unlock_mock(void){atomic_flag_clear(&mock_lock);}
 static struct {bool alive;unsigned object;unsigned access;bool inherit;} nt_handles[512];
 static uint64_t values[512];static bool objects[512];
 static bool fail_duplicate,fail_open,fail_share;
+/* Contract models, not a claim about the untraced lab NTSTATUS. The mapped-only
+ * model exercises the bounded retry used by the Windows runtime. */
+static bool mapped_only, missing_cpu_map, misaligned_cpu_map, missing_sync_handle, dirty_failed_outputs;
+static NTSTATUS open_error;
+static unsigned open_calls, packet_attempts, mapped_attempts, destroyed;
+static bool retry_outputs_clean = true;
+static unsigned named_allowed = D3DDDI_SYNC_OBJECT_ALL_ACCESS;
+static bool diagnostic_probe;
+static char *mock_getenv(const char *name)
+{
+    if (!strcmp(name, "MESA_WDDM_FENCE_IMPORT_PROBE")) return diagnostic_probe ? "1" : NULL;
+    return getenv(name);
+}
+#define getenv mock_getenv
 static unsigned closes,bad_closes,shares,last_access,last_flags;
 static void *last_security;static wchar_t last_name[128];
 #define CHECK(c) do{checks++;if(!(c)){failures++;printf("FAIL CHECK %s line %u: %s\n",group,__LINE__,#c);}}while(0)
@@ -93,10 +121,36 @@ static HANDLE new_nt(unsigned object,unsigned access,bool inherit) {unsigned n=n
 static bool live(HANDLE h){unsigned n=(unsigned)(uintptr_t)h;return n<512&&nt_handles[n].alive;}
 static HANDLE GetCurrentProcess(void){return (HANDLE)(uintptr_t)-1;}
 static BOOL CloseHandle(HANDLE h){if(!live(h)){bad_closes++;return false;}nt_handles[(uintptr_t)h].alive=false;closes++;return true;}
-static BOOL DuplicateHandle(HANDLE a,HANDLE h,HANDLE b,HANDLE *out,DWORD access,BOOL inherit,DWORD options){(void)a;(void)b;if(fail_duplicate||!live(h))return false;lock_mock();*out=new_nt(nt_handles[(uintptr_t)h].object,(options&DUPLICATE_SAME_ACCESS)?nt_handles[(uintptr_t)h].access:access,inherit);unlock_mock();return true;}
-static NTSTATUS mock_CreateSynchronizationObject2(D3DKMT_CREATESYNCHRONIZATIONOBJECT2 *p){p->hSyncObject=next_object++;objects[p->hSyncObject]=true;values[p->hSyncObject]=p->Info.MonitoredFence.InitialFenceValue;p->Info.MonitoredFence.FenceValueCPUVirtualAddress=&values[p->hSyncObject];return 0;}
-static NTSTATUS mock_DestroySynchronizationObject(const D3DKMT_DESTROYSYNCHRONIZATIONOBJECT *p){objects[p->hSyncObject]=false;return 0;}
-static NTSTATUS mock_OpenSyncObjectFromNtHandle2(D3DKMT_OPENSYNCOBJECTFROMNTHANDLE2 *p){if(fail_open)return STATUS_NO_MEMORY;p->hSyncObject=next_object++;objects[p->hSyncObject]=true;/* A valid name-only old import must reach a CHECK, not abort. */p->MonitoredFence.FenceValueCPUVirtualAddress=&values[p->hSyncObject];last_flags=p->Flags.Shared|(p->Flags.NtSecuritySharing<<1);return 0;}
+static BOOL DuplicateHandle(HANDLE a,HANDLE h,HANDLE b,HANDLE *out,DWORD access,BOOL inherit,DWORD options){(void)a;(void)b;if(fail_duplicate||!live(h))return false;unsigned requested=access==GENERIC_ALL?D3DDDI_SYNC_OBJECT_ALL_ACCESS:access;unsigned available=nt_handles[(uintptr_t)h].access==GENERIC_ALL?D3DDDI_SYNC_OBJECT_ALL_ACCESS:nt_handles[(uintptr_t)h].access;if(!(options&DUPLICATE_SAME_ACCESS)&&(requested&~available))return false;lock_mock();*out=new_nt(nt_handles[(uintptr_t)h].object,(options&DUPLICATE_SAME_ACCESS)?nt_handles[(uintptr_t)h].access:access,inherit);unlock_mock();return true;}
+static NTSTATUS mock_CreateSynchronizationObject2(D3DKMT_CREATESYNCHRONIZATIONOBJECT2 *p){if(p->Info.Type!=D3DDDI_MONITORED_FENCE||(p->Info.Flags.NtSecuritySharing&&!p->Info.Flags.Shared)||p->Info.Flags.Reserved)return STATUS_INVALID_PARAMETER;p->hSyncObject=next_object++;objects[p->hSyncObject]=true;values[p->hSyncObject]=p->Info.MonitoredFence.InitialFenceValue;p->Info.MonitoredFence.FenceValueCPUVirtualAddress=&values[p->hSyncObject];p->Info.MonitoredFence.FenceValueGPUVirtualAddress=p->Info.Flags.NoGPUAccess?0:0x200000;return 0;}
+static NTSTATUS mock_DestroySynchronizationObject(const D3DKMT_DESTROYSYNCHRONIZATIONOBJECT *p){objects[p->hSyncObject]=false;destroyed++;return 0;}
+static NTSTATUS mock_OpenSyncObjectFromNtHandle2(D3DKMT_OPENSYNCOBJECTFROMNTHANDLE2 *p)
+{
+    open_calls++;
+    if (p->Flags.NoGPUAccess) packet_attempts++; else mapped_attempts++;
+    if (fail_open) return STATUS_NO_MEMORY;
+    if (open_error) return open_error;
+    if (!live(p->hNtHandle) || !p->hDevice) return STATUS_INVALID_HANDLE;
+    if (p->Flags.Reserved || p->Flags.NoWait || p->Flags.NoSignal) return STATUS_INVALID_PARAMETER;
+    if (mapped_only && p->Flags.NoGPUAccess) {
+        if (dirty_failed_outputs) {
+            p->hSyncObject = 511;
+            p->MonitoredFence.FenceValueCPUVirtualAddress = (void *)(uintptr_t)1;
+            p->MonitoredFence.FenceValueGPUVirtualAddress = 1;
+        }
+        return STATUS_INVALID_PARAMETER;
+    }
+    if (mapped_only && (p->hSyncObject || p->MonitoredFence.FenceValueCPUVirtualAddress ||
+                        p->MonitoredFence.FenceValueGPUVirtualAddress)) retry_outputs_clean=false;
+    if (missing_sync_handle) return STATUS_SUCCESS;
+    p->hSyncObject=next_object++;
+    objects[p->hSyncObject]=true;
+    p->MonitoredFence.FenceValueCPUVirtualAddress=missing_cpu_map ? NULL : &values[p->hSyncObject];
+    if (misaligned_cpu_map) p->MonitoredFence.FenceValueCPUVirtualAddress=(void *)((char *)&values[p->hSyncObject]+1);
+    p->MonitoredFence.FenceValueGPUVirtualAddress=p->Flags.NoGPUAccess ? 0 : 0x100000;
+    last_flags=p->Flags.Shared|(p->Flags.NtSecuritySharing<<1);
+    return STATUS_SUCCESS;
+}
 static NTSTATUS mock_ShareObjects(unsigned,const unsigned*,void*,unsigned,HANDLE*);
 static VkResult vk_wddm2_monitored_fence_signal(struct vk_device*d,struct vk_sync*s,uint64_t v){(void)d;(void)s;(void)v;return 0;}
 static VkResult vk_wddm2_monitored_fence_get_value(struct vk_device*d,struct vk_sync*s,uint64_t*v){(void)d;(void)s;(void)v;return 0;}

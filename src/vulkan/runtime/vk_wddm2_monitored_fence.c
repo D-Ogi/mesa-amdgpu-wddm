@@ -25,6 +25,7 @@
 
 #include <assert.h>
 #include <inttypes.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <wchar.h>
 
@@ -67,6 +68,28 @@ typedef struct _OBJECT_ATTRIBUTES {
   PVOID           SecurityDescriptor;
   PVOID           SecurityQualityOfService;
 } OBJECT_ATTRIBUTES;
+
+/* Opt-in diagnostics for shared-fence admission. No object names, handles or
+ * virtual addresses are logged. Keep the input flags distinct from returned
+ * mapping presence, including every failed attempt.
+ */
+static void
+vk_wddm2_fence_trace(const char *operation, NTSTATUS status, uint32_t flags,
+                    uint32_t access, uint32_t affinity, bool cpu, bool gpu)
+{
+   const char *trace = getenv("MESA_WDDM_FENCE_TRACE");
+   if (trace && strcmp(trace, "1") == 0) {
+      unsigned long pid = 0;
+#ifdef _WIN32
+      pid = (unsigned long)GetCurrentProcessId();
+#endif
+      fprintf(stderr, "wddm-fence: pid=%lu op=%s status=0x%08x flags=0x%08x "
+              "access=0x%08x affinity=0x%x cpu-map=%u gpu-map=%u\n",
+              pid, operation, (unsigned)status,
+              flags, access, affinity, cpu, gpu);
+      fflush(stderr);
+   }
+}
 
 
 static struct vk_wddm2_monitored_fence *
@@ -113,7 +136,7 @@ vk_wddm2_monitored_fence_init(struct vk_device *device,
          .Flags = {
             .Shared = shareable,
             .NtSecuritySharing = shareable,
-            /* This gets us 64-bit fences */
+            /* A mapped fence uses the adapter's atomic-width capability. */
             .NoGPUAccess = false,
          },
          .MonitoredFence = {
@@ -122,7 +145,11 @@ vk_wddm2_monitored_fence_init(struct vk_device *device,
          },
       }
    };
+   const uint32_t create_flags = create.Info.Flags.Value;
    status = BC250_WDDM_CALL(&device->bc250_host, CreateSynchronizationObject2, &create);
+   vk_wddm2_fence_trace("create-monitored", status, create_flags, 0, 1,
+                       create.Info.MonitoredFence.FenceValueCPUVirtualAddress != NULL,
+                       create.Info.MonitoredFence.FenceValueGPUVirtualAddress != 0);
    if (unlikely(!NT_SUCCESS(status)))
        return NTSTATUS_to_VkResult(device, status);
 
@@ -132,6 +159,7 @@ vk_wddm2_monitored_fence_init(struct vk_device *device,
    fence->shared_handle = NULL;
    fence->export_access = GENERIC_ALL;
    fence->shared_handle_inheritable = false;
+   fence->shared_handle_imported = false;
 #endif
 
    return VK_SUCCESS;
@@ -154,6 +182,7 @@ vk_wddm2_monitored_fence_finish(struct vk_device *device,
       .hSyncObject = fence->handle,
    };
    ASSERTED NTSTATUS status = BC250_WDDM_CALL(&device->bc250_host, DestroySynchronizationObject, &destroy);
+   vk_wddm2_fence_trace("destroy", status, 0, 0, 0, false, false);
    assert(NT_SUCCESS(status));
 }
 
@@ -369,6 +398,8 @@ vk_wddm2_monitored_fence_set_win32_export_params(struct vk_device *device,
    HANDLE shared_handle = NULL;
    NTSTATUS status = WDDM2_DISPATCH(ShareObjects(
       1, &fence->handle, &oa, access, &shared_handle));
+   vk_wddm2_fence_trace("share-named-or-attributes", status, oa.Attributes,
+                       access, 0, false, false);
    free(object_name.Buffer);
    if (!NT_SUCCESS(status))
       return vk_error(device, status == STATUS_NO_MEMORY ?
@@ -388,7 +419,6 @@ vk_wddm2_monitored_fence_import_opaque_win32_handle(struct vk_device *device,
                                                    const wchar_t *name)
 {
    struct vk_wddm2_monitored_fence *fence = to_wddm2_monitored_fence(sync);
-   bool shared = (sync->flags & VK_SYNC_IS_SHARED) != 0;
    NTSTATUS status;
    
    HANDLE owned_handle = NULL;
@@ -405,10 +435,14 @@ vk_wddm2_monitored_fence_import_opaque_win32_handle(struct vk_device *device,
          .ObjectName = &object_name,
       };
       D3DKMT_OPENSYNCOBJECTNTHANDLEFROMNAME named = {
-         .dwDesiredAccess = D3DDDI_SYNC_OBJECT_ALL_ACCESS,
+         /* Import needs wait and signal, not WRITE_DAC/WRITE_OWNER. */
+         .dwDesiredAccess = SYNCHRONIZE | D3DDDI_SYNC_OBJECT_WAIT |
+                            D3DDDI_SYNC_OBJECT_SIGNAL,
          .pObjAttrib = &oa,
       };
       status = WDDM2_DISPATCH(OpenSyncObjectNtHandleFromName(&named));
+      vk_wddm2_fence_trace("open-name", status, oa.Attributes,
+                          named.dwDesiredAccess, 0, false, false);
       free(object_name.Buffer);
       if (!NT_SUCCESS(status))
          return vk_error(device, status == STATUS_NO_MEMORY ?
@@ -419,34 +453,106 @@ vk_wddm2_monitored_fence_import_opaque_win32_handle(struct vk_device *device,
       if (!DuplicateHandle(process, (HANDLE)handle, process, &owned_handle,
                            0, false, DUPLICATE_SAME_ACCESS)) {
          DWORD error = GetLastError();
+         vk_wddm2_fence_trace("duplicate-import-win32-error", (NTSTATUS)error,
+                             DUPLICATE_SAME_ACCESS, 0, 0, false, false);
          return vk_error(device, error == ERROR_NOT_ENOUGH_MEMORY ||
                          error == ERROR_OUTOFMEMORY ? VK_ERROR_OUT_OF_HOST_MEMORY :
                          VK_ERROR_INVALID_EXTERNAL_HANDLE);
       }
+      vk_wddm2_fence_trace("duplicate-import", STATUS_SUCCESS,
+                          DUPLICATE_SAME_ACCESS, 0, 0, false, false);
    }
 
    D3DKMT_OPENSYNCOBJECTFROMNTHANDLE2 open = {
       .hNtHandle = owned_handle,
       .hDevice = device->wddm2_handle,
       .Flags = {
-         .Shared = shared,
-         .NtSecuritySharing = shared,
-         /* This gets us 64-bit fences */
+         /* Import opens an NT-shared payload even when the old destination
+          * payload was private. vk_sync sets IS_SHARED only after success.
+          */
+         .Shared = true,
+         .NtSecuritySharing = true,
+         /* Packet-only access guarantees a 64-bit CPU value. */
          .NoGPUAccess = true,
       },
    };
 
+   /* A diagnostic control reproduces the pre-fix flags on this exact object
+    * and device. It never installs its payload and is disabled by default.
+    * Enable the trace as well to retain its raw status.
+    */
+   const char *probe_enabled = getenv("MESA_WDDM_FENCE_IMPORT_PROBE");
+   if (probe_enabled && strcmp(probe_enabled, "1") == 0) {
+      D3DKMT_OPENSYNCOBJECTFROMNTHANDLE2 probe = open;
+      probe.Flags.Shared = (sync->flags & VK_SYNC_IS_SHARED) != 0;
+      probe.Flags.NtSecuritySharing = probe.Flags.Shared;
+      const uint32_t probe_flags = probe.Flags.Value;
+      NTSTATUS probe_status = BC250_WDDM_CALL(&device->bc250_host, OpenSyncObjectFromNtHandle2, &probe);
+      vk_wddm2_fence_trace("open-nt-legacy-probe", probe_status, probe_flags, 0, 0,
+                          probe.MonitoredFence.FenceValueCPUVirtualAddress != NULL,
+                          probe.MonitoredFence.FenceValueGPUVirtualAddress != 0);
+      if (NT_SUCCESS(probe_status) && probe.hSyncObject) {
+         const D3DKMT_DESTROYSYNCHRONIZATIONOBJECT destroy = { .hSyncObject = probe.hSyncObject };
+         probe_status = BC250_WDDM_CALL(&device->bc250_host, DestroySynchronizationObject, &destroy);
+         vk_wddm2_fence_trace("destroy-legacy-probe", probe_status, 0, 0, 0, false, false);
+         if (!NT_SUCCESS(probe_status)) {
+            CloseHandle(owned_handle);
+            return NTSTATUS_to_VkResult(device, probe_status);
+         }
+      }
+   }
+
+   const uint32_t packet_flags = open.Flags.Value;
    status = BC250_WDDM_CALL(&device->bc250_host, OpenSyncObjectFromNtHandle2, &open);
+   vk_wddm2_fence_trace("open-nt-packet", status, packet_flags, 0, 0,
+                       open.MonitoredFence.FenceValueCPUVirtualAddress != NULL,
+                       open.MonitoredFence.FenceValueGPUVirtualAddress != 0);
+   if (status == STATUS_INVALID_PARAMETER) {
+      /* Some shared objects cannot be reopened with NoGPUAccess. Windows'
+       * D3D12 runtime retries this refusal with the mapped form too. Do not
+       * retry access failures, invalid handles, OOM or device removal. Clear
+       * the outputs first: a failed attempt is not a valid mapping witness.
+       */
+      open = (D3DKMT_OPENSYNCOBJECTFROMNTHANDLE2) {
+         .hNtHandle = owned_handle,
+         .hDevice = device->wddm2_handle,
+         .Flags = { .Shared = true, .NtSecuritySharing = true },
+      };
+      const uint32_t mapped_flags = open.Flags.Value;
+      status = BC250_WDDM_CALL(&device->bc250_host, OpenSyncObjectFromNtHandle2, &open);
+      vk_wddm2_fence_trace("open-nt-mapped", status, mapped_flags, 0, 0,
+                          open.MonitoredFence.FenceValueCPUVirtualAddress != NULL,
+                          open.MonitoredFence.FenceValueGPUVirtualAddress != 0);
+   }
    if (unlikely(!NT_SUCCESS(status))) {
       CloseHandle(owned_handle);
+      if (status == STATUS_DEVICE_REMOVED)
+         return vk_device_set_lost(device, "Shared monitored fence import lost the device");
       return vk_error(device, status == STATUS_NO_MEMORY ?
                       VK_ERROR_OUT_OF_HOST_MEMORY : VK_ERROR_INVALID_EXTERNAL_HANDLE);
+   }
+
+   /* Legacy non-monitored objects can open successfully without a CPU value.
+    * They cannot implement this sync type. Preserve the old payload on refusal.
+    */
+   if (!open.hSyncObject || !open.MonitoredFence.FenceValueCPUVirtualAddress ||
+       ((uintptr_t)open.MonitoredFence.FenceValueCPUVirtualAddress & 7u)) {
+      const D3DKMT_DESTROYSYNCHRONIZATIONOBJECT destroy = {
+         .hSyncObject = open.hSyncObject,
+      };
+      NTSTATUS cleanup = open.hSyncObject ?
+         BC250_WDDM_CALL(&device->bc250_host, DestroySynchronizationObject, &destroy) :
+         STATUS_INVALID_HANDLE;
+      vk_wddm2_fence_trace("destroy-rejected-import", cleanup, 0, 0, 0, false, false);
+      CloseHandle(owned_handle);
+      return vk_error(device, VK_ERROR_INVALID_EXTERNAL_HANDLE);
    }
 
    vk_wddm2_monitored_fence_finish(device, sync);
 
    fence->handle = open.hSyncObject;
    fence->shared_handle = owned_handle;
+   fence->shared_handle_imported = true;
    fence->value_map = open.MonitoredFence.FenceValueCPUVirtualAddress;
 
    return VK_SUCCESS;
@@ -466,6 +572,8 @@ vk_wddm2_monitored_fence_export_opaque_win32_handle(struct vk_device *device,
       HANDLE exported = NULL;
       NTSTATUS status = WDDM2_DISPATCH(ShareObjects(
          1, &fence->handle, &oa, fence->export_access, &exported));
+      vk_wddm2_fence_trace("share-unnamed", status, 0, fence->export_access,
+                          0, false, false);
       if (!NT_SUCCESS(status))
          return vk_error(device, status == STATUS_NO_MEMORY ?
                          VK_ERROR_OUT_OF_HOST_MEMORY : VK_ERROR_UNKNOWN);
@@ -475,8 +583,10 @@ vk_wddm2_monitored_fence_export_opaque_win32_handle(struct vk_device *device,
 
    HANDLE process = GetCurrentProcess();
    BOOL ok = DuplicateHandle(process, (HANDLE)fence->shared_handle,
-                             process, (HANDLE *)handle, fence->export_access,
-                             fence->shared_handle_inheritable, 0);
+                             process, (HANDLE *)handle,
+                             fence->shared_handle_imported ? 0 : fence->export_access,
+                             fence->shared_handle_inheritable,
+                             fence->shared_handle_imported ? DUPLICATE_SAME_ACCESS : 0);
    if (!ok)
       return vk_errorf(device, VK_ERROR_UNKNOWN, "DuplicateHandle failed");
 

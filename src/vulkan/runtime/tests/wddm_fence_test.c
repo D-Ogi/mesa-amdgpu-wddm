@@ -33,6 +33,7 @@ static NTSTATUS mock_OpenSyncObjectNtHandleFromName(D3DKMT_OPENSYNCOBJECTNTHANDL
     if (oa && oa->ObjectName) {
         CHECK(wcscmp(oa->ObjectName->Buffer, L"\\Sessions\\3\\BaseNamedObjects\\named-import") == 0);
     }
+    if (p->dwDesiredAccess & ~named_allowed) return STATUS_ACCESS_DENIED;
     p->hNtHandle = new_nt(200, p->dwDesiredAccess, false);
     return STATUS_SUCCESS;
 }
@@ -170,6 +171,111 @@ int main(void)
     CHECK(live(a.handle) && live(b.handle));
     if (live(a.handle)) CloseHandle(a.handle);
     if (live(b.handle)) CloseHandle(b.handle);
+    printf("original ownership gate: %u checks, %u failures\n", checks, failures);
+
+    group = "private destination imports a shared packet-only payload";
+    f = make_fence(); f.base.flags = VK_SYNC_IS_TIMELINE;
+    caller = new_nt(201, D3DDDI_SYNC_OBJECT_ALL_ACCESS, false);
+    unsigned opened_before = open_calls;
+    CHECK(vk_sync_import_win32_handle(&device, &f.base, caller, NULL) == VK_SUCCESS);
+    CHECK(open_calls == opened_before + 1);
+    CHECK(last_flags == 3);
+    CHECK(f.value_map != NULL);
+    CHECK(live(caller));
+    f.base.type->finish(&device, &f.base); CloseHandle(caller);
+
+    group = "mapped-only object retries INVALID_PARAMETER once, clears stale outputs";
+    mapped_only = true; dirty_failed_outputs = true;
+    f = make_fence(); caller = new_nt(202, D3DDDI_SYNC_OBJECT_ALL_ACCESS, false);
+    opened_before = open_calls; unsigned packet_before=packet_attempts, mapped_before=mapped_attempts;
+    CHECK(vk_sync_import_win32_handle(&device, &f.base, caller, NULL) == VK_SUCCESS);
+    CHECK(open_calls == opened_before + 2);
+    CHECK(packet_attempts == packet_before + 1 && mapped_attempts == mapped_before + 1);
+    CHECK(retry_outputs_clean);
+    CHECK(last_flags == 3 && f.value_map != NULL);
+    CHECK(live(caller));
+    f.base.type->finish(&device, &f.base); CloseHandle(caller);
+    mapped_only = false; dirty_failed_outputs = false;
+
+    group = "no retry or payload replacement for access, handle, memory or device errors";
+    const NTSTATUS errors[] = {STATUS_ACCESS_DENIED, STATUS_INVALID_HANDLE, STATUS_NO_MEMORY, STATUS_DEVICE_REMOVED};
+    const VkResult results[] = {VK_ERROR_INVALID_EXTERNAL_HANDLE, VK_ERROR_INVALID_EXTERNAL_HANDLE,
+                               VK_ERROR_OUT_OF_HOST_MEMORY, VK_ERROR_DEVICE_LOST};
+    for (unsigned i=0; i<ARRAY_SIZE(errors); i++) {
+        f=make_fence(); caller=new_nt(203, D3DDDI_SYNC_OBJECT_ALL_ACCESS, false);
+        old=f.handle; old_map=f.value_map; opened_before=open_calls; before=closes;
+        open_error=errors[i];
+        CHECK(vk_sync_import_win32_handle(&device, &f.base, caller, NULL) == results[i]);
+        CHECK(open_calls == opened_before + 1);
+        CHECK(f.handle == old && f.value_map == old_map && objects[old]);
+        CHECK(live(caller) && closes == before + 1);
+        open_error=0; f.base.type->finish(&device, &f.base); CloseHandle(caller);
+    }
+
+    group = "persistent invalid parameters get exactly two attempts";
+    f=make_fence(); caller=new_nt(204, D3DDDI_SYNC_OBJECT_ALL_ACCESS, false);
+    old=f.handle; opened_before=open_calls; before=closes; open_error=STATUS_INVALID_PARAMETER;
+    CHECK(vk_sync_import_win32_handle(&device, &f.base, caller, NULL) == VK_ERROR_INVALID_EXTERNAL_HANDLE);
+    CHECK(open_calls == opened_before + 2);
+    CHECK(f.handle == old && objects[old] && live(caller) && closes == before + 1);
+    open_error=0; f.base.type->finish(&device, &f.base); CloseHandle(caller);
+
+    group = "successful KMT open without usable CPU value is rejected transactionally";
+    for (unsigned misaligned=0; misaligned<2; misaligned++) {
+        missing_cpu_map=!misaligned; misaligned_cpu_map=misaligned;
+        f=make_fence(); caller=new_nt(205, D3DDDI_SYNC_OBJECT_ALL_ACCESS, false);
+        old=f.handle; old_map=f.value_map; unsigned destroyed_before=destroyed;
+        before=closes;
+        CHECK(vk_sync_import_win32_handle(&device, &f.base, caller, NULL) == VK_ERROR_INVALID_EXTERNAL_HANDLE);
+        CHECK(f.handle == old && f.value_map == old_map && objects[old]);
+        CHECK(destroyed == destroyed_before + 1);
+        CHECK(live(caller) && closes == before + 1);
+        missing_cpu_map=false; misaligned_cpu_map=false;
+        f.base.type->finish(&device, &f.base); CloseHandle(caller);
+    }
+
+    group = "named import and re-export need no administrative rights";
+    f=make_fence(); named_allowed=SYNCHRONIZE|D3DDDI_SYNC_OBJECT_WAIT|D3DDDI_SYNC_OBJECT_SIGNAL;
+    CHECK(vk_sync_import_win32_handle(&device, &f.base, NULL, L"Local\\named-import") == VK_SUCCESS);
+    CHECK(vk_sync_export_win32_handle(&device, &f.base, &exported) == VK_SUCCESS);
+    CHECK(live(exported));
+    if (live(exported)) {
+        CHECK(nt_handles[(uintptr_t)exported].access == named_allowed);
+        CloseHandle(exported);
+    }
+    f.base.type->finish(&device, &f.base); named_allowed=D3DDDI_SYNC_OBJECT_ALL_ACCESS;
+
+    group = "limited unnamed handle re-export preserves granted access";
+    f=make_fence(); caller=new_nt(206,SYNCHRONIZE|3,false);
+    CHECK(vk_sync_import_win32_handle(&device, &f.base, caller, NULL) == VK_SUCCESS);
+    CHECK(vk_sync_export_win32_handle(&device, &f.base, &exported) == VK_SUCCESS);
+    CHECK(live(exported));
+    if (live(exported)) { CHECK(nt_handles[(uintptr_t)exported].access == (SYNCHRONIZE|3)); CloseHandle(exported); }
+    f.base.type->finish(&device, &f.base); CloseHandle(caller);
+
+    group = "successful open without a local handle preserves the old payload";
+    f=make_fence(); caller=new_nt(207, D3DDDI_SYNC_OBJECT_ALL_ACCESS, false);
+    old=f.handle; unsigned destroyed_before=destroyed;
+    missing_sync_handle=true;
+    CHECK(vk_sync_import_win32_handle(&device, &f.base, caller, NULL) == VK_ERROR_INVALID_EXTERNAL_HANDLE);
+    CHECK(f.handle == old && objects[old] && live(caller));
+    CHECK(destroyed == destroyed_before);
+    missing_sync_handle=false; f.base.type->finish(&device, &f.base); CloseHandle(caller);
+
+    group = "optional legacy control closes its local payload before the real import";
+    diagnostic_probe=true;
+    for (unsigned refusal=0; refusal<2; refusal++) {
+        mapped_only=refusal; f=make_fence(); f.base.flags=VK_SYNC_IS_TIMELINE;
+        caller=new_nt(208,D3DDDI_SYNC_OBJECT_ALL_ACCESS,false);
+        opened_before=open_calls; destroyed_before=destroyed;
+        CHECK(vk_sync_import_win32_handle(&device, &f.base, caller, NULL) == VK_SUCCESS);
+        CHECK(open_calls == opened_before + (refusal ? 3 : 2));
+        CHECK(destroyed == destroyed_before + (refusal ? 1 : 2));
+        CHECK(live(caller) && f.value_map != NULL);
+        f.base.type->finish(&device, &f.base); CloseHandle(caller);
+    }
+    diagnostic_probe=false; mapped_only=false;
+
     printf("%u checks, %u failures; mock graphics boundary, real host threads only\n", checks, failures);
     return failures ? 1 : 0;
 }
