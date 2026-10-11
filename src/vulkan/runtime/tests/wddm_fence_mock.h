@@ -92,6 +92,8 @@ static void lock_mock(void){while(atomic_flag_test_and_set(&mock_lock)) {}}
 static void unlock_mock(void){atomic_flag_clear(&mock_lock);}
 static struct {bool alive;unsigned object;unsigned access;bool inherit;} nt_handles[512];
 static uint64_t values[512];static bool objects[512];
+static unsigned created_flags[512];
+static bool enforce_export_shape;
 static bool fail_duplicate,fail_open,fail_share;
 /* Contract models, not a claim about the untraced lab NTSTATUS. The mapped-only
  * model exercises the bounded retry used by the Windows runtime. */
@@ -122,7 +124,7 @@ static bool live(HANDLE h){unsigned n=(unsigned)(uintptr_t)h;return n<512&&nt_ha
 static HANDLE GetCurrentProcess(void){return (HANDLE)(uintptr_t)-1;}
 static BOOL CloseHandle(HANDLE h){if(!live(h)){bad_closes++;return false;}nt_handles[(uintptr_t)h].alive=false;closes++;return true;}
 static BOOL DuplicateHandle(HANDLE a,HANDLE h,HANDLE b,HANDLE *out,DWORD access,BOOL inherit,DWORD options){(void)a;(void)b;if(fail_duplicate||!live(h))return false;unsigned requested=access==GENERIC_ALL?D3DDDI_SYNC_OBJECT_ALL_ACCESS:access;unsigned available=nt_handles[(uintptr_t)h].access==GENERIC_ALL?D3DDDI_SYNC_OBJECT_ALL_ACCESS:nt_handles[(uintptr_t)h].access;if(!(options&DUPLICATE_SAME_ACCESS)&&(requested&~available))return false;lock_mock();*out=new_nt(nt_handles[(uintptr_t)h].object,(options&DUPLICATE_SAME_ACCESS)?nt_handles[(uintptr_t)h].access:access,inherit);unlock_mock();return true;}
-static NTSTATUS mock_CreateSynchronizationObject2(D3DKMT_CREATESYNCHRONIZATIONOBJECT2 *p){if(p->Info.Type!=D3DDDI_MONITORED_FENCE||(p->Info.Flags.NtSecuritySharing&&!p->Info.Flags.Shared)||p->Info.Flags.Reserved)return STATUS_INVALID_PARAMETER;p->hSyncObject=next_object++;objects[p->hSyncObject]=true;values[p->hSyncObject]=p->Info.MonitoredFence.InitialFenceValue;p->Info.MonitoredFence.FenceValueCPUVirtualAddress=&values[p->hSyncObject];p->Info.MonitoredFence.FenceValueGPUVirtualAddress=p->Info.Flags.NoGPUAccess?0:0x200000;return 0;}
+static NTSTATUS mock_CreateSynchronizationObject2(D3DKMT_CREATESYNCHRONIZATIONOBJECT2 *p){if(p->Info.Type!=D3DDDI_MONITORED_FENCE||(p->Info.Flags.NtSecuritySharing&&!p->Info.Flags.Shared)||p->Info.Flags.Reserved)return STATUS_INVALID_PARAMETER;p->hSyncObject=next_object++;objects[p->hSyncObject]=true;created_flags[p->hSyncObject]=p->Info.Flags.Value;values[p->hSyncObject]=p->Info.MonitoredFence.InitialFenceValue;p->Info.MonitoredFence.FenceValueCPUVirtualAddress=&values[p->hSyncObject];p->Info.MonitoredFence.FenceValueGPUVirtualAddress=p->Info.Flags.NoGPUAccess?0:0x200000;return 0;}
 static NTSTATUS mock_DestroySynchronizationObject(const D3DKMT_DESTROYSYNCHRONIZATIONOBJECT *p){objects[p->hSyncObject]=false;destroyed++;return 0;}
 static NTSTATUS mock_OpenSyncObjectFromNtHandle2(D3DKMT_OPENSYNCOBJECTFROMNTHANDLE2 *p)
 {
@@ -138,6 +140,13 @@ static NTSTATUS mock_OpenSyncObjectFromNtHandle2(D3DKMT_OPENSYNCOBJECTFROMNTHAND
         (SYNCHRONIZE | D3DDDI_SYNC_OBJECT_WAIT | D3DDDI_SYNC_OBJECT_SIGNAL))
         return STATUS_ACCESS_DENIED;
     if (p->Flags.Reserved || p->Flags.NoWait || p->Flags.NoSignal) return STATUS_INVALID_PARAMETER;
+    /* The two measured cell-D/S object shapes. This models the admission
+     * boundary, not a general undocumented rule for all Windows objects. */
+    if (enforce_export_shape) {
+        unsigned object = nt_handles[(uintptr_t)p->hNtHandle].object;
+        if ((created_flags[object] & 0x80u) != (p->Flags.Value & 0x80u))
+            return STATUS_INVALID_PARAMETER;
+    }
     if (mapped_only && p->Flags.NoGPUAccess) {
         if (dirty_failed_outputs) {
             p->hSyncObject = 511;

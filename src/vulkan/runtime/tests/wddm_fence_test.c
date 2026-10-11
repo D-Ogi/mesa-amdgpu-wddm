@@ -48,6 +48,92 @@ static struct vk_wddm2_monitored_fence make_fence(void)
     return f;
 }
 struct export_call { struct vk_sync *sync; HANDLE handle; VkResult result; };
+/* r6/arm-D consumer shape: OpenSharedHandle may succeed while the public
+ * completed value is MAX and queue operations refuse the object. This is a
+ * strict boundary model of the recorded result, not Windows implementation. */
+struct mock_d3d12_fence { bool monitored; unsigned object; };
+static int mock_d3d12_open(HANDLE handle, struct mock_d3d12_fence *result)
+{
+    D3DKMT_OPENSYNCOBJECTFROMNTHANDLE2 open = {
+        .hNtHandle=handle, .hDevice=9, .Flags={.Value=0x83}
+    };
+    NTSTATUS status=mock_OpenSyncObjectFromNtHandle2(&open);
+    result->monitored=NT_SUCCESS(status);
+    if (status==STATUS_INVALID_PARAMETER) {
+        memset(&open,0,sizeof(open));
+        open.hNtHandle=handle; open.hDevice=9; open.Flags.Value=0x3;
+        status=mock_OpenSyncObjectFromNtHandle2(&open);
+    }
+    if (!NT_SUCCESS(status)) return (int)0x80070057;
+    result->object=nt_handles[(uintptr_t)handle].object;
+    D3DKMT_DESTROYSYNCHRONIZATIONOBJECT destroy={.hSyncObject=open.hSyncObject};
+    mock_DestroySynchronizationObject(&destroy);
+    return 0;
+}
+static uint64_t mock_d3d12_completed(const struct mock_d3d12_fence *f)
+{
+    return f->monitored ? values[f->object] : UINT64_MAX;
+}
+static int mock_d3d12_queue_signal(const struct mock_d3d12_fence *f,uint64_t value)
+{
+    if (!f->monitored) return (int)0x80070057;
+    values[f->object]=value;
+    return 0;
+}
+static int mock_d3d12_queue_wait(const struct mock_d3d12_fence *f,uint64_t value)
+{
+    if (!f->monitored) return (int)0x80070057;
+    return values[f->object]>=value ? 0 : 1;
+}
+static void check_packet_export(void)
+{
+    group="shareable export across the r6/arm-D runtime boundary";
+    enforce_export_shape=true;
+    for (unsigned high=0;high<2;high++) {
+        uint64_t initial=high ? 0x100000002ull : 0;
+        struct vk_wddm2_monitored_fence f={0};
+        f.base.type=&vk_wddm2_monitored_fence_type;
+        f.base.flags=VK_SYNC_IS_TIMELINE|VK_SYNC_IS_SHAREABLE;
+        CHECK(f.base.type->init(&device,&f.base,initial)==VK_SUCCESS);
+        HANDLE handle=NULL;
+        CHECK(vk_sync_export_win32_handle(&device,&f.base,&handle)==VK_SUCCESS);
+        CHECK(live(handle));
+        if (live(handle)) {
+            /* Packet-only is the D3D12-created object's measured mode. The
+             * candidate predicts the same mode for its own shared export. */
+            const unsigned flags[]={0x483,0x83,0x3};
+            for (unsigned i=0;i<3;i++) {
+                D3DKMT_OPENSYNCOBJECTFROMNTHANDLE2 o={.hNtHandle=handle,.hDevice=9};
+                o.Flags.Value=flags[i];
+                NTSTATUS status=mock_OpenSyncObjectFromNtHandle2(&o);
+                CHECK(status==(i==1 ? STATUS_SUCCESS : STATUS_INVALID_PARAMETER));
+                if (NT_SUCCESS(status)) {
+                    D3DKMT_DESTROYSYNCHRONIZATIONOBJECT d={.hSyncObject=o.hSyncObject};
+                    mock_DestroySynchronizationObject(&d);
+                }
+            }
+            struct mock_d3d12_fence runtime={0};
+            CHECK(mock_d3d12_open(handle,&runtime)==0);
+            CHECK(mock_d3d12_completed(&runtime)==initial);
+            CHECK(mock_d3d12_queue_signal(&runtime,initial+1)==0);
+            CHECK(*f.value_map==initial+1);
+            *f.value_map=initial+2; /* Model completion of a RADV signal packet. */
+            CHECK(mock_d3d12_queue_wait(&runtime,initial+2)==0);
+            CHECK(mock_d3d12_completed(&runtime)==initial+2);
+            CloseHandle(handle);
+        }
+        f.base.type->finish(&device,&f.base);
+    }
+    enforce_export_shape=false;
+    group="private monitored fence mode is unchanged";
+    struct vk_wddm2_monitored_fence private_fence={0};
+    private_fence.base.type=&vk_wddm2_monitored_fence_type;
+    private_fence.base.flags=VK_SYNC_IS_TIMELINE;
+    CHECK(private_fence.base.type->init(&device,&private_fence.base,7)==VK_SUCCESS);
+    CHECK(created_flags[private_fence.handle]==0);
+    CHECK(*private_fence.value_map==7);
+    private_fence.base.type->finish(&device,&private_fence.base);
+}
 static void export_worker(void *opaque)
 {
     struct export_call *call = opaque;
@@ -310,6 +396,7 @@ int main(void)
     }
     f.base.type->finish(&device, &f.base); CloseHandle(caller);
 
+    check_packet_export();
     printf("%u checks, %u failures; mock graphics boundary, real host threads only\n", checks, failures);
     return failures ? 1 : 0;
 }

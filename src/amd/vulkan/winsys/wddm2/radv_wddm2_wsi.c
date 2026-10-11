@@ -37,6 +37,7 @@
 #include "radv_device_memory.h"
 #include "radv_image.h"
 #include "radv_physical_device.h"
+#include "radv_shared_layout.h"
 #include "util/amdgpu_wddm_stdio.h"
 #include "util/u_win32_library.h"
 #include "vk_dxgi.h"
@@ -341,6 +342,26 @@ radv_wddm2_wsi_check_blit_image(VkDevice _device, VkImage _image, VkDeviceMemory
    const struct radeon_surf *surf = &image->planes[0].surface;
    const uint64_t pitch = (uint64_t)surf->u.gfx9.surf_pitch * surf->bpe;
 
+   /* BD-118: the same comparison the general import refuses with
+    * (src/amd/vulkan/radv_shared_layout.h), so the two paths cannot drift apart. The chain keeps
+    * its own two extra demands: a record must be there at all, and a swapchain image of this route
+    * is linear by construction.
+    */
+   const struct radv_shared_layout chain = {
+      .is_linear = surf->is_linear,
+      .swizzle_mode = surf->u.gfx9.swizzle_mode,
+      .pitch_bytes = pitch,
+      .surf_size = image->size,
+      .memory_size = memory->bo->size,
+   };
+   const struct radv_shared_layout shell = {
+      .is_linear = md.u.gfx9.swizzle_mode == 0,
+      .swizzle_mode = md.u.gfx9.swizzle_mode,
+      .pitch_bytes = md.kmw.pitch_bytes,
+      .surf_size = md.kmw.surf_size,
+   };
+   enum radv_shared_layout_verdict verdict;
+
    if (md.metadata_type != RADEON_METADATA_TYPE_KMW || !md.kmw.pitch_bytes) {
       amdgpu_wddm_log("BC250 WSI: blit image refused: the memory carries no LB7A pitch\n");
       return VK_ERROR_INITIALIZATION_FAILED;
@@ -350,14 +371,14 @@ radv_wddm2_wsi_check_blit_image(VkDevice _device, VkImage _image, VkDeviceMemory
                       (unsigned)surf->u.gfx9.swizzle_mode);
       return VK_ERROR_INITIALIZATION_FAILED;
    }
-   if (pitch != md.kmw.pitch_bytes) {
-      amdgpu_wddm_log("BC250 WSI: blit image refused: pitch %llu, LB7A pitch %u\n",
-                      (unsigned long long)pitch, (unsigned)md.kmw.pitch_bytes);
-      return VK_ERROR_INITIALIZATION_FAILED;
-   }
-   if (image->size > memory->bo->size) {
-      amdgpu_wddm_log("BC250 WSI: blit image refused: image %llu bytes, memory %llu bytes\n",
-                      (unsigned long long)image->size, (unsigned long long)memory->bo->size);
+   verdict = radv_shared_layout_compare(&chain, &shell);
+   if (verdict != RADV_SHARED_LAYOUT_AGREE) {
+      amdgpu_wddm_log("BC250 WSI: blit image refused: %s mismatch: image linear %u swizzle %u pitch "
+                      "%llu size %llu; LB7A linear %u swizzle %u pitch %llu size %llu; memory %llu\n",
+                      radv_shared_layout_verdict_name(verdict), chain.is_linear, chain.swizzle_mode,
+                      (unsigned long long)chain.pitch_bytes, (unsigned long long)chain.surf_size,
+                      shell.is_linear, shell.swizzle_mode, (unsigned long long)shell.pitch_bytes,
+                      (unsigned long long)shell.surf_size, (unsigned long long)memory->bo->size);
       return VK_ERROR_INITIALIZATION_FAILED;
    }
    return VK_SUCCESS;

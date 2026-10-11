@@ -426,6 +426,18 @@ struct radv_image_create_info {
    const struct radeon_bo_metadata *bo_metadata;
 };
 
+/* BD-118. Apply the layout the exporting side recorded for an imported allocation to the image
+ * that aliases it, and refuse the import with VK_ERROR_INVALID_EXTERNAL_HANDLE when the two still
+ * disagree. `memory_offset` is where in that allocation the image is bound (0 for a dedicated
+ * allocation), and `where` names the call site in the log line ("dedicated", "bind"). A refused
+ * import leaves the image as it was. The decision applies to a winsys that shares linear surfaces
+ * (ws->shared_surfaces_are_linear); elsewhere the two layouts are logged and the import is left
+ * alone.
+ */
+VkResult radv_image_apply_shared_layout(struct radv_device *device, struct radv_image *image,
+                                        const struct radeon_bo_metadata *md, uint64_t memory_size,
+                                        uint64_t memory_offset, const char *where);
+
 VkResult radv_image_create_layout(struct radv_device *device, struct radv_image_create_info create_info,
                                   const struct VkImageDrmFormatModifierExplicitCreateInfoEXT *mod_info,
                                   const struct VkVideoProfileListInfoKHR *profile_list, struct radv_image *image);

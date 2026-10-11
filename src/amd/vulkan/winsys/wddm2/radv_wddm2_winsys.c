@@ -895,6 +895,11 @@ radv_wddm2_winsys_create(const struct vk_dx_adapter_info *adapter_info,
    ws->base.query_gpuvm_fault = radv_wddm2_winsys_query_gpuvm_fault;
    ws->base.init_wsi = radv_wddm2_wsi_init;
    ws->base.inline_gfx_preamble = radv_wddm2_inline_gfx_preamble;
+   /* BD-118. On the BC-250 a shared D3D11/D3D12 resource of this stack is a linear surface and the
+    * allocation carries its pitch and size (LB7A, read in radv_wddm2_bo_from_handle). ws->bc250 is
+    * set by radv_wddm2_fill_gpu_info above (line 247), which runs before this.
+    */
+   ws->base.shared_surfaces_are_linear = ws->bc250;
    radv_wddm2_bo_init_functions(ws);
    radv_wddm2_cs_init_functions(ws);
 

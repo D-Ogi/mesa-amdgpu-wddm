@@ -271,6 +271,20 @@ executable(
   build_by_default: with_tools.contains('amd')
 )
 
+# BD-118. The host gate of the cross-API shared-surface layout: it needs no GPU and no device
+# node, so it builds on Windows as well, where the defect was measured. Not built by default: the
+# release recipe asks ninja for the ICD alone, and the gate is built by name.
+executable(
+  'bc250_shared_layout_test',
+  ['tools/bc250_shared_layout_test.c'],
+  link_with: [libamd_common, libamdgpu_addrlib],
+  include_directories : [
+    inc_amd, inc_include, inc_src, include_directories('../vulkan'),
+  ],
+  dependencies : [idep_amd_generated_headers, idep_mesautil, idep_nir_headers],
+  build_by_default: false
+)
+
 if with_tests and not with_platform_windows
   test(
     'ac_surface_modifier_test',

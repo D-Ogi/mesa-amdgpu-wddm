@@ -401,6 +401,13 @@ struct radeon_winsys {
     * emitted inline, the same stream as RADV_DEBUG=noibchaining. NULL means no. */
    VkResult (*buffer_from_hosted)(struct radeon_winsys *, void *, uint32_t, uint64_t, uint64_t, struct radeon_winsys_bo **);
    bool (*inline_gfx_preamble)(struct radeon_winsys *ws);
+
+   /* BD-118. True when a D3D11/D3D12 resource that this stack shares is a linear surface whose
+    * pitch and size the allocation carries (driver/contract/bc250_shared_surface.h, BD-075, and
+    * the LB7A record radv_wddm2_bo_from_handle reads). The WDDM2 winsys sets it on the BC-250;
+    * every other winsys leaves it false and nothing changes there.
+    */
+   bool shared_surfaces_are_linear;
 };
 
 static inline uint64_t

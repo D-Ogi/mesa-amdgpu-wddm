@@ -39,6 +39,7 @@
 #include "wsi_common_entrypoints.h"
 #include "wsi_common_private.h"
 #include "wsi_win32_deadline.h"
+#include "wsi_win32_iflip.h"
 #include "wsi_win32_shared_fence.h"
 
 #include <dxgi1_6.h>
@@ -52,6 +53,21 @@
 #if defined(__GNUC__)
 #pragma GCC diagnostic ignored "-Wint-to-pointer-cast"      // warning: cast to pointer from integer of different size
 #endif
+
+/* wsi_win32_iflip.h carries DXGI's and D3D12's numbers so that the rules compile in a host gate
+ * without any Windows header. Held against the real enumerators here, once.
+ */
+static_assert((unsigned)DXGI_SCALING_STRETCH == WSI_IFLIP_SCALING_STRETCH, "DXGI_SCALING_STRETCH");
+static_assert((unsigned)DXGI_SCALING_NONE == WSI_IFLIP_SCALING_NONE, "DXGI_SCALING_NONE");
+static_assert((unsigned)DXGI_FORMAT_B8G8R8A8_UNORM == WSI_IFLIP_DXGI_B8G8R8A8_UNORM, "BGRA8");
+static_assert((unsigned)DXGI_FORMAT_R8G8B8A8_UNORM == WSI_IFLIP_DXGI_R8G8B8A8_UNORM, "RGBA8");
+static_assert((unsigned)DXGI_FORMAT_R10G10B10A2_UNORM == WSI_IFLIP_DXGI_R10G10B10A2_UNORM,
+              "RGB10A2");
+
+/* The switches are read once per process (definition below, next to the chain's own code). The
+ * surface capabilities need them too, and they are asked for long before a chain exists.
+ */
+static const struct wsi_iflip_knobs *wsi_iflip_knobs_now(void);
 
 struct wsi_win32;
 
@@ -82,9 +98,29 @@ enum wsi_win32_image_state {
    WSI_IMAGE_QUEUED,
 };
 
+/* M15.14. The window's geometry against its monitor's, in screen coordinates, as one read
+ * (wsi_iflip_geometry_of). The client area is what the compositor shows, so that and not the window
+ * rectangle is what has to be the output. The chain keeps the read its plan was made from, so that
+ * the reason and the numbers on its log line always describe one window state: in the arms of this
+ * round the client restyles its window from titled to borderless while it is creating chains, and a
+ * second read taken for the log alone could disagree with the read that decided the plan
+ * (review of r1).
+ */
+struct wsi_iflip_geometry {
+   bool window_known, output_known, covers;
+   uint32_t client_width, client_height, output_width, output_height;
+   uint32_t style, ex_style;
+   int32_t client_left, client_top, output_left, output_top;
+};
+
 struct wsi_win32_image {
    struct wsi_image base;
    enum wsi_win32_image_state state;
+   /* M15.14: the chain's present serial at the moment this image was queued, so that the acquire
+    * fallback can take the OLDEST queued image instead of stepping one place from the current back
+    * buffer. Read only while the state is WSI_IMAGE_QUEUED.
+    */
+   uint64_t queued_serial;
    struct wsi_win32_swapchain *chain;
    /* WHICH value the presenter's D3D12 Signal was accepted for, which is what makes the value in
     * base.blit.timeline_values[this image] the presenter's and not the application's own pending
@@ -96,7 +132,13 @@ struct wsi_win32_image {
       ID3D12Resource *swapchain_res;
       ID3D12Resource *blit_res;
       ID3D12CommandAllocator *cmd_alloc;
-      ID3D12GraphicsCommandList *cmd_list;
+      /* M15.14: one closed copy list per back buffer of the chain, recorded once. The present
+       * picks the list of the buffer DXGI is about to show (IDXGISwapChain3::
+       * GetCurrentBackBufferIndex), so the acquire order and the back-buffer order need not be
+       * the same number any more, which is what lets the chain have more buffers than two.
+       * cmd_lists[b] copies THIS image into back buffer b.
+       */
+      ID3D12GraphicsCommandList *cmd_lists[WSI_IFLIP_BUFFERS_MAX];
    } dxgi;
    struct {
       HBITMAP bmp;
@@ -174,6 +216,25 @@ struct wsi_win32_swapchain {
     * only; NULL unless the variable is set. */
    FILE                      *present_log;
    uint64_t                   present_log_lines;
+   /* M15.14. The plan this chain was created with (wsi_win32_iflip.h), the reason as it stands
+    * after DXGI answered about the buffers, the presents it has queued, and the two one-line
+    * budgets: the WARN of a covering chain that cannot be scanned out, and the frame-statistics
+    * sample. All diagnostic except buffer_count, which is the chain's image count.
+    */
+   struct wsi_iflip_plan      iflip;
+   enum wsi_iflip_reason      iflip_reason;
+   uint32_t                   iflip_presents;
+   bool                       iflip_warned;
+   /* The serial stamped on an image when it is queued (wsi_win32_image::queued_serial). It only
+    * ever grows, and it is read under the same ownership as the image states.
+    */
+   uint64_t                   present_serial;
+   /* One line per chain for the acquire that found every image held by the application: the route
+    * log has no budget of its own, and an application may poll that acquire with timeout 0.
+    */
+   bool                       acquire_empty_logged;
+   /* The one window read the plan was made from, kept for the chain's own log line. */
+   struct wsi_iflip_geometry  iflip_geometry;
    struct wsi_win32_image     images[0];
 };
 
@@ -279,8 +340,24 @@ wsi_win32_surface_get_capabilities(VkIcdSurfaceBase *surf,
       /* DXGI doesn't support random presenting order (images need to
        * be presented in the order they were acquired), so we can't
        * expose more than two image per swapchain.
+       *
+       * M15.14: that holds while the Vulkan image IS back buffer i, which is the case for a
+       * driver that renders straight into the buffer (win32.create_image_memory). This route
+       * copies each image into the back buffer with its own D3D12 list, and it records one list
+       * per (image, back buffer) pair (wsi_win32_iflip.h), so a present out of acquire order
+       * still copies the acquired image into the buffer DXGI is about to show. Such a chain may
+       * have up to WSI_IFLIP_BUFFERS_MAX buffers, which is the count the one configuration
+       * measured to reach independent flip on this part used.
+       *
+       * The maximum follows the switches (wsi_iflip_caps_max_images): a swapchain may never have
+       * fewer images than the application's own minImageCount, so this is the only place where
+       * BC250_WSI_IFLIP=off and BC250_WSI_IFLIP_BUFFERS=2 can make a client ask for two again, and
+       * therefore the only place where the b27 control arm really gets the b27 chain.
        */
-      caps->surfaceCapabilities.minImageCount = caps->surfaceCapabilities.maxImageCount = 2;
+      caps->surfaceCapabilities.minImageCount = 2;
+      caps->surfaceCapabilities.maxImageCount =
+         wsi_iflip_caps_max_images(wsi_iflip_knobs_now(),
+                                   !wsi_device->win32.create_image_memory);
    } else {
       caps->surfaceCapabilities.minImageCount = 1;
       /* Software callbacke, there is no real maximum */
@@ -1002,6 +1079,24 @@ wsi_dxgi_create_d3d12_resource(struct wsi_win32_swapchain *chain,
    return VK_SUCCESS;
 }
 
+/* The copy lists of one image and the allocator they record from. Called on every path that
+ * cannot finish recording them, and by the release of the image's DXGI buffers.
+ */
+static void
+wsi_win32_image_release_dxgi_lists(struct wsi_win32_image *image)
+{
+   for (unsigned buffer = 0; buffer < WSI_IFLIP_BUFFERS_MAX; buffer++) {
+      if (image->dxgi.cmd_lists[buffer]) {
+         image->dxgi.cmd_lists[buffer]->Release();
+         image->dxgi.cmd_lists[buffer] = NULL;
+      }
+   }
+   if (image->dxgi.cmd_alloc) {
+      image->dxgi.cmd_alloc->Release();
+      image->dxgi.cmd_alloc = NULL;
+   }
+}
+
 static VkResult
 wsi_dxgi_create_blit_context(struct wsi_win32_swapchain *chain,
                              struct wsi_win32_image *win32_image)
@@ -1009,8 +1104,14 @@ wsi_dxgi_create_blit_context(struct wsi_win32_swapchain *chain,
    struct wsi_device *wsi_device = chain->wsi->wsi;
    ID3D12Device *d3d12_device;
    ID3D12Resource *src = win32_image->dxgi.blit_res;
-   ID3D12Resource *dst = win32_image->dxgi.swapchain_res;
+   const unsigned buffers = chain->iflip.buffer_count;
    HRESULT hr;
+
+   /* M15.14: the destinations are the chain's back buffers, which are the swapchain_res of the
+    * images, so every image of the chain must exist before this runs (wsi_dxgi_record_blits).
+    */
+   if (!src || !buffers || buffers > WSI_IFLIP_BUFFERS_MAX)
+      return VK_ERROR_INITIALIZATION_FAILED;
 
    d3d12_device = (ID3D12Device *)wsi_device->win32.get_d3d12_device(chain->base.device);
    hr = d3d12_device->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT,
@@ -1021,65 +1122,99 @@ wsi_dxgi_create_blit_context(struct wsi_win32_swapchain *chain,
       return VK_ERROR_OUT_OF_DEVICE_MEMORY;
    }
 
-   hr = d3d12_device->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT,
-                                        win32_image->dxgi.cmd_alloc, NULL,
-                                        IID_PPV_ARGS(&win32_image->dxgi.cmd_list));
-   if (FAILED(hr)) {
-      wsi_win32_route_failed(chain, "ID3D12Device::CreateCommandList", hr,
-                             WSI_WIN32_ROUTE_ERROR_NO_IMAGE);
-      /* The pointer goes with the reference: wsi_win32_image_release_dxgi_buffers releases whatever
-       * is still in the image, so a released allocator left in place would be released twice.
-       */
-      win32_image->dxgi.cmd_alloc->Release();
-      win32_image->dxgi.cmd_alloc = NULL;
-      return VK_ERROR_OUT_OF_DEVICE_MEMORY;
-   }
-
-   ID3D12GraphicsCommandList *cmd_list = win32_image->dxgi.cmd_list;
-   D3D12_RESOURCE_BARRIER barrier = { 0 };
-   barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
-   barrier.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
-
-   barrier.Transition.pResource = dst;
-   barrier.Transition.StateBefore = D3D12_RESOURCE_STATE_PRESENT;
-   barrier.Transition.StateAfter = D3D12_RESOURCE_STATE_COPY_DEST;
-   cmd_list->ResourceBarrier(1, &barrier);
-
-   barrier.Transition.pResource = src;
-   barrier.Transition.StateBefore = D3D12_RESOURCE_STATE_RENDER_TARGET;
-   barrier.Transition.StateAfter = D3D12_RESOURCE_STATE_COPY_SOURCE;
-   cmd_list->ResourceBarrier(1, &barrier);
-
-   cmd_list->CopyResource(dst, src);
-
-   barrier.Transition.pResource = dst;
-   barrier.Transition.StateBefore = D3D12_RESOURCE_STATE_COPY_DEST;
-   barrier.Transition.StateAfter = D3D12_RESOURCE_STATE_PRESENT;
-   cmd_list->ResourceBarrier(1, &barrier);
-
-   barrier.Transition.pResource = src;
-   barrier.Transition.StateBefore = D3D12_RESOURCE_STATE_COPY_SOURCE;
-   barrier.Transition.StateAfter = D3D12_RESOURCE_STATE_RENDER_TARGET;
-   cmd_list->ResourceBarrier(1, &barrier);
-
-   /* V2. Close is where a recording error is reported (local sdk-api
-    * nf-d3d12-id3d12graphicscommandlist-close.md:59-75), and round 4 dropped its HRESULT. A list
-    * that did not close must never be executed: ExecuteCommandLists of an invalid list is one of
-    * the documented reasons the runtime removes the device (:71-79), and that removal would then be
-    * the thing a later timeout could not explain. The chain's creation fails instead, which the
-    * caller turns into CPU images.
+   /* One list per back buffer. They are recorded one after the other and closed, so only one of
+    * them ever records from the allocator at a time, and none is ever reset: a closed list may be
+    * executed again for the life of the chain.
     */
-   hr = cmd_list->Close();
-   if (FAILED(hr)) {
-      wsi_win32_route_failed(chain, "ID3D12GraphicsCommandList::Close", hr,
-                             WSI_WIN32_ROUTE_ERROR_NO_IMAGE);
-      win32_image->dxgi.cmd_list->Release();
-      win32_image->dxgi.cmd_list = NULL;
-      win32_image->dxgi.cmd_alloc->Release();
-      win32_image->dxgi.cmd_alloc = NULL;
-      return VK_ERROR_INITIALIZATION_FAILED;
+   for (unsigned buffer = 0; buffer < buffers; buffer++) {
+      ID3D12Resource *dst = chain->images[buffer].dxgi.swapchain_res;
+
+      if (!dst) {
+         wsi_win32_route_log(chain, "chain %p: back buffer %u absent when the copy of image %u was "
+                             "recorded", (void *)chain, buffer,
+                             (unsigned)(win32_image - chain->images));
+         wsi_win32_image_release_dxgi_lists(win32_image);
+         return VK_ERROR_INITIALIZATION_FAILED;
+      }
+
+      hr = d3d12_device->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT,
+                                           win32_image->dxgi.cmd_alloc, NULL,
+                                           IID_PPV_ARGS(&win32_image->dxgi.cmd_lists[buffer]));
+      if (FAILED(hr)) {
+         wsi_win32_route_failed(chain, "ID3D12Device::CreateCommandList", hr,
+                                WSI_WIN32_ROUTE_ERROR_NO_IMAGE);
+         /* The pointer goes with the reference: wsi_win32_image_release_dxgi_buffers releases
+          * whatever is still in the image, so a released allocator left in place would be released
+          * twice.
+          */
+         win32_image->dxgi.cmd_lists[buffer] = NULL;
+         wsi_win32_image_release_dxgi_lists(win32_image);
+         return VK_ERROR_OUT_OF_DEVICE_MEMORY;
+      }
+
+      ID3D12GraphicsCommandList *cmd_list = win32_image->dxgi.cmd_lists[buffer];
+      D3D12_RESOURCE_BARRIER barrier = { 0 };
+      barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+      barrier.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+
+      barrier.Transition.pResource = dst;
+      barrier.Transition.StateBefore = D3D12_RESOURCE_STATE_PRESENT;
+      barrier.Transition.StateAfter = D3D12_RESOURCE_STATE_COPY_DEST;
+      cmd_list->ResourceBarrier(1, &barrier);
+
+      barrier.Transition.pResource = src;
+      barrier.Transition.StateBefore = D3D12_RESOURCE_STATE_RENDER_TARGET;
+      barrier.Transition.StateAfter = D3D12_RESOURCE_STATE_COPY_SOURCE;
+      cmd_list->ResourceBarrier(1, &barrier);
+
+      cmd_list->CopyResource(dst, src);
+
+      barrier.Transition.pResource = dst;
+      barrier.Transition.StateBefore = D3D12_RESOURCE_STATE_COPY_DEST;
+      barrier.Transition.StateAfter = D3D12_RESOURCE_STATE_PRESENT;
+      cmd_list->ResourceBarrier(1, &barrier);
+
+      barrier.Transition.pResource = src;
+      barrier.Transition.StateBefore = D3D12_RESOURCE_STATE_COPY_SOURCE;
+      barrier.Transition.StateAfter = D3D12_RESOURCE_STATE_RENDER_TARGET;
+      cmd_list->ResourceBarrier(1, &barrier);
+
+      /* V2. Close is where a recording error is reported (local sdk-api
+       * nf-d3d12-id3d12graphicscommandlist-close.md:59-75), and round 4 dropped its HRESULT. A
+       * list that did not close must never be executed: ExecuteCommandLists of an invalid list is
+       * one of the documented reasons the runtime removes the device (:71-79), and that removal
+       * would then be the thing a later timeout could not explain. The chain's creation fails
+       * instead, which the caller turns into CPU images.
+       */
+      hr = cmd_list->Close();
+      if (FAILED(hr)) {
+         wsi_win32_route_failed(chain, "ID3D12GraphicsCommandList::Close", hr,
+                                WSI_WIN32_ROUTE_ERROR_NO_IMAGE);
+         wsi_win32_image_release_dxgi_lists(win32_image);
+         return VK_ERROR_INITIALIZATION_FAILED;
+      }
    }
 
+   return VK_SUCCESS;
+}
+
+/* M15.14: the copies of every image into every back buffer, recorded once the whole chain exists.
+ * Until this runs no image has a copy list, and wsi_dxgi_blit presents without one, so this pass
+ * must come before the chain is handed to the application.
+ */
+static VkResult
+wsi_dxgi_record_blits(struct wsi_win32_swapchain *chain)
+{
+   if (!chain->is_dxgi || chain->base.blit.type == WSI_SWAPCHAIN_NO_BLIT)
+      return VK_SUCCESS;
+
+   for (uint32_t image = 0; image < chain->base.image_count; image++) {
+      if (!chain->images[image].dxgi.blit_res)
+         continue;                   /* a driver that renders into the back buffer: no copy */
+      VkResult result = wsi_dxgi_create_blit_context(chain, &chain->images[image]);
+      if (result != VK_SUCCESS)
+         return result;
+   }
    return VK_SUCCESS;
 }
 
@@ -1087,10 +1222,8 @@ static void
 wsi_dxgi_destroy_blit_context(struct wsi_win32_swapchain *chain,
                               struct wsi_win32_image *win32_image)
 {
-   if (win32_image->dxgi.cmd_list)
-      win32_image->dxgi.cmd_list->Release();
-   if (win32_image->dxgi.cmd_alloc)
-      win32_image->dxgi.cmd_alloc->Release();
+   (void)chain;
+   wsi_win32_image_release_dxgi_lists(win32_image);
 }
 
 static VkResult
@@ -1113,7 +1246,13 @@ wsi_dxgi_finish_create_image(const struct wsi_swapchain *chain,
          return result;
    }
 
-   return wsi_dxgi_create_blit_context(win32_chain, win32_image);
+   /* M15.14: the copy lists are recorded by wsi_dxgi_record_blits, after every image of the chain
+    * has its back buffer. One image's copy now has a destination per back buffer, and the other
+    * images' back buffers do not exist yet at this point.
+    */
+   (void)win32_chain;
+   (void)win32_image;
+   return VK_SUCCESS;
 }
 
 static VkResult
@@ -1157,9 +1296,30 @@ wsi_dxgi_blit(struct wsi_swapchain *drv_chain, uint32_t image_index)
       return VK_ERROR_DEVICE_LOST;
    }
 
+   /* M15.14: the copy goes into the buffer DXGI is about to show, which need not be the image's
+    * own index any more (wsi_win32_iflip.h). GetCurrentBackBufferIndex is the only thing that says
+    * which buffer the next Present1 will show, and the list for that buffer was recorded at
+    * creation. An index outside the chain's buffers would copy into nothing, so it fails the
+    * present instead: the copy that did not happen is a frame of the previous content.
+    */
+   ID3D12GraphicsCommandList *copy = NULL;
+   if (!chain->detached && chain->dxgi) {
+      const UINT buffer = chain->dxgi->GetCurrentBackBufferIndex();
+      const unsigned list = wsi_iflip_list_index(buffer, chain->iflip.buffer_count);
+
+      if (list == WSI_IFLIP_LIST_NONE) {
+         wsi_win32_route_log(chain, "chain %p: back buffer index %u outside the chain's %u buffers",
+                             (void *)chain, (unsigned)buffer, chain->iflip.buffer_count);
+         wsi_win32_route_failed(chain, "IDXGISwapChain3::GetCurrentBackBufferIndex", E_UNEXPECTED,
+                                image_index);
+         return VK_ERROR_DEVICE_LOST;
+      }
+      copy = win32_image->dxgi.cmd_lists[list];
+   }
+
    /* A detached chain gave its DXGI buffers to a newer chain: keep the fence order, skip the copy. */
-   if (!chain->detached && win32_image->dxgi.cmd_list) {
-      ID3D12CommandList *cmd_lists[] = {(ID3D12CommandList *)win32_image->dxgi.cmd_list};
+   if (copy) {
+      ID3D12CommandList *cmd_lists[] = {(ID3D12CommandList *)copy};
       wsi_win32_stage_log(chain, WSI_WIN32_STAGE_EXECUTE);
       queue->ExecuteCommandLists(1, cmd_lists);
       /* ExecuteCommandLists returns void, and an invalid list or state transition is one of the
@@ -1508,14 +1668,7 @@ wsi_win32_flush_d3d12_queue(struct wsi_win32_swapchain *chain)
 static void
 wsi_win32_image_release_dxgi_buffers(struct wsi_win32_image *image)
 {
-   if (image->dxgi.cmd_list) {
-      image->dxgi.cmd_list->Release();
-      image->dxgi.cmd_list = NULL;
-   }
-   if (image->dxgi.cmd_alloc) {
-      image->dxgi.cmd_alloc->Release();
-      image->dxgi.cmd_alloc = NULL;
-   }
+   wsi_win32_image_release_dxgi_lists(image);
    if (image->dxgi.swapchain_res) {
       image->dxgi.swapchain_res->Release();
       image->dxgi.swapchain_res = NULL;
@@ -1759,11 +1912,46 @@ wsi_win32_acquire_next_image(struct wsi_swapchain *drv_chain,
       return VK_SUCCESS;
 
    assert(chain->dxgi);
-   uint32_t index = chain->dxgi->GetCurrentBackBufferIndex();
-   if (chain->images[index].state == WSI_IMAGE_DRAWING) {
-      index = (index + 1) % chain->base.image_count;
-      assert(chain->images[index].state == WSI_IMAGE_QUEUED);
+   /* M15.14: the image to wait for is the OLDEST QUEUED image, and the answer when no image is
+    * queued is "not ready", never an image the application already holds. The b27 rule took
+    * GetCurrentBackBufferIndex as an image index and stepped one place when that image was being
+    * drawn, with an assert that the next one was queued; that step is only provable at two images,
+    * and the shipped build is NDEBUG. With three images and two legally acquired at once the step
+    * could land on a second DRAWING image and hand it out with VK_SUCCESS (review of r1).
+    *
+    * A chain that renders into the back buffers keeps image index == back-buffer index, and for such
+    * a chain the oldest queued image IS the buffer DXGI is about to show, so this rule does not
+    * change that path either.
+    */
+   /* A DXGI chain's image count is its buffer count, which wsi_iflip_buffer_count clamps to
+    * WSI_IFLIP_BUFFERS_MAX, so the bound below is the whole chain; the min() is there so that the
+    * two arrays cannot be overrun if that ever stops being true.
+    */
+   unsigned char states[WSI_IFLIP_BUFFERS_MAX];
+   uint64_t serials[WSI_IFLIP_BUFFERS_MAX];
+   const unsigned count = chain->base.image_count < WSI_IFLIP_BUFFERS_MAX ?
+      chain->base.image_count : WSI_IFLIP_BUFFERS_MAX;
+   for (unsigned i = 0; i < count; i++) {
+      states[i] = (unsigned char)(chain->images[i].state == WSI_IMAGE_QUEUED ?
+                                  WSI_IFLIP_IMAGE_QUEUED :
+                                  chain->images[i].state == WSI_IMAGE_DRAWING ?
+                                  WSI_IFLIP_IMAGE_DRAWING : WSI_IFLIP_IMAGE_IDLE);
+      serials[i] = chain->images[i].queued_serial;
    }
+   const unsigned picked = wsi_iflip_pick_queued(states, serials, count);
+   if (picked == WSI_IFLIP_IMAGE_NONE) {
+      /* Every image is being drawn by the application: there is nothing to wait for, and waiting
+       * for the application itself is not this function's business. VK_NOT_READY is the answer to a
+       * poll, VK_TIMEOUT to a bounded wait.
+       */
+      if (!chain->acquire_empty_logged) {
+         chain->acquire_empty_logged = true;
+         wsi_win32_route_log(chain, "chain %p: acquire with no queued image: %u images, all held by "
+                             "the application (said once)", (void *)chain, count);
+      }
+      return info->timeout ? VK_TIMEOUT : VK_NOT_READY;
+   }
+   uint32_t index = picked;
    /* The wait is bounded while the route has never completed a present: the image becomes free when
     * the D3D12 queue has copied it and signalled the shared fence, so an application that asks for
     * UINT64_MAX would otherwise wait here for ever if that copy never runs (BD-105). On expiry the
@@ -1858,6 +2046,54 @@ wsi_win32_acquire_next_image(struct wsi_swapchain *drv_chain,
    return VK_SUCCESS;
 }
 
+/* M15.14, the running half of the self-check. The present statistics are a record and not a
+ * verdict: DXGI_FRAME_STATISTICS says what the chain and the display did, never whether the
+ * operating system composed the frame, and the verdict stays with the ETW witness
+ * (tools/win/etw/etw-present-mode.py). The WARN is the bounded window the plan asked for: a chain
+ * over the whole output that keeps presenting with a shape this route gave it and the display
+ * cannot read says so once, with the clause that did it.
+ */
+static void
+wsi_iflip_after_present(struct wsi_win32_swapchain *chain)
+{
+   if (!chain->is_dxgi || !chain->hwnd_target || !chain->dxgi)
+      return;
+
+   chain->iflip_presents++;
+
+   if (chain->iflip_presents % WSI_IFLIP_STATS_EVERY == 0) {
+      DXGI_FRAME_STATISTICS stats = {};
+      const HRESULT hr = chain->dxgi->GetFrameStatistics(&stats);
+
+      if (SUCCEEDED(hr))
+         wsi_win32_route_log(chain, "chain %p: iflip stats at %u presents: present %u, present "
+                             "refresh %u, sync refresh %u, qpc %lld", (void *)chain,
+                             chain->iflip_presents, stats.PresentCount,
+                             stats.PresentRefreshCount, stats.SyncRefreshCount,
+                             (long long)stats.SyncQPCTime.QuadPart);
+      else
+         wsi_win32_route_log(chain, "chain %p: iflip stats at %u presents unavailable hr=0x%08lx",
+                             (void *)chain, chain->iflip_presents, (unsigned long)hr);
+   }
+
+   if (!chain->iflip_warned && chain->iflip_presents >= WSI_IFLIP_WARN_PRESENTS &&
+       wsi_iflip_reason_is_ours(chain->iflip_reason)) {
+      chain->iflip_warned = true;
+      /* This line reports a LOCAL eligibility result, not an observed presentation mode: the
+       * reason enum it prints is this route's own verdict on the chain's shape, and nothing here
+       * reads how the operating system presented the frames. Whether the frames were composed or
+       * independently flipped is an ETW and display-counter predicate, measured outside this
+       * process. Do not read this line as that measurement (combined-ICD review, R2).
+       */
+      wsi_win32_route_log(chain, "chain %p: WARN iflip: %u presents of a chain that covers the "
+                          "output, and this route's own eligibility stands down on %s: by this "
+                          "route's reading the chain is not eligible for an independent flip "
+                          "(local verdict; the presentation mode itself is not read here)",
+                          (void *)chain, chain->iflip_presents,
+                          wsi_iflip_reason_text(chain->iflip_reason));
+   }
+}
+
 static VkResult
 wsi_win32_queue_present_dxgi(struct wsi_win32_swapchain *chain,
                              uint32_t image_index,
@@ -1877,9 +2113,12 @@ wsi_win32_queue_present_dxgi(struct wsi_win32_swapchain *chain,
    }
 
    image->state = WSI_IMAGE_QUEUED;
+   /* M15.14: which queued image is the oldest, for the acquire fallback (wsi_iflip_pick_queued). */
+   image->queued_serial = ++chain->present_serial;
    /* FIFO: one present per vertical blank. MAILBOX: interval 0, and the newest frame replaces a
-    * queued one at composition or flip. IMMEDIATE: interval 0 and tearing when the system allows it
-    * (the swap chain was then created with ALLOW_TEARING); without it, IMMEDIATE acts as MAILBOX.
+    * queued one at composition or flip. IMMEDIATE: interval 0, and tearing only when this chain
+    * carries ALLOW_TEARING, which its plan gave it (wsi_win32_set_present_mode); without the flag,
+    * IMMEDIATE acts as MAILBOX.
     */
    UINT sync_interval = chain->base.present_mode == VK_PRESENT_MODE_FIFO_KHR ? 1 : 0;
    UINT present_flags = 0;
@@ -1910,6 +2149,8 @@ wsi_win32_queue_present_dxgi(struct wsi_win32_swapchain *chain,
       chain->wsi->dxgi.dcomp->Commit();
       chain->surface->current_swapchain = chain;
    }
+
+   wsi_iflip_after_present(chain);
 
    /* Present1 took the frame. That is a QUEUED present and nothing more: neither the GPU copy this
     * route asked for before it nor the flip need have run, so the route is not proved here and the
@@ -2109,8 +2350,13 @@ wsi_win32_queue_present(struct wsi_swapchain *drv_chain,
 static void
 wsi_win32_set_present_mode(struct wsi_swapchain *drv_chain, VkPresentModeKHR mode)
 {
-   /* Every DXGI chain is created with ALLOW_TEARING when the system has it, so a switch between
-    * FIFO, MAILBOX and IMMEDIATE only changes the arguments of the next Present1.
+   /* A DXGI chain carries DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING only when its plan gave it the flag,
+    * which is when the chain may actually tear: the create-time present mode is IMMEDIATE, or
+    * IMMEDIATE is one of the compatible present modes of a VK_KHR_swapchain_maintenance1 chain
+    * (wsi_iflip_may_tear). The flag can only be given at creation, so a switch to IMMEDIATE on a
+    * chain that was not created tearing-capable presents without tearing, which is MAILBOX
+    * behaviour: interval 0 and no torn frame. Everything else about a mode switch is still only the
+    * arguments of the next Present1.
     */
    drv_chain->present_mode = mode;
 }
@@ -2287,6 +2533,209 @@ struct wsi_win32_blit_fence_ops {
    }
 };
 
+/* M15.14. The switches, read once per process: a chain created later in the same process gets the
+ * same shape, as every other switch of this route does.
+ */
+static const struct wsi_iflip_knobs *
+wsi_iflip_knobs_now(void)
+{
+   static const struct wsi_iflip_knobs knobs =
+      wsi_iflip_knobs_parse(getenv("BC250_WSI_IFLIP"), getenv("BC250_WSI_IFLIP_SCALING"),
+                            getenv("BC250_WSI_IFLIP_TEARING"), getenv("BC250_WSI_IFLIP_BUFFERS"),
+                            getenv("BC250_WSI_IFLIP_WINDOWHOOK"));
+   return &knobs;
+}
+
+/* Whether this chain may ever tear. The create-time present mode is the first answer; a chain that
+ * the application may switch to IMMEDIATE without recreating it (VK_KHR_swapchain_maintenance1's
+ * compatible present modes) is the second, because ALLOW_TEARING can only be given at creation.
+ * The pNext chain is walked by hand: one sType compare is cheaper to read than a macro that has to
+ * agree with a header's spelling of the same name.
+ */
+static bool
+wsi_iflip_may_tear(const VkSwapchainCreateInfoKHR *create_info, VkPresentModeKHR mode)
+{
+   if (mode == VK_PRESENT_MODE_IMMEDIATE_KHR)
+      return true;
+
+   for (const VkBaseInStructure *ext = (const VkBaseInStructure *)create_info->pNext; ext;
+        ext = ext->pNext) {
+      if (ext->sType != VK_STRUCTURE_TYPE_SWAPCHAIN_PRESENT_MODES_CREATE_INFO_KHR)
+         continue;
+      const VkSwapchainPresentModesCreateInfoKHR *modes =
+         (const VkSwapchainPresentModesCreateInfoKHR *)ext;
+      for (uint32_t i = 0; i < modes->presentModeCount; i++) {
+         if (modes->pPresentModes[i] == VK_PRESENT_MODE_IMMEDIATE_KHR)
+            return true;
+      }
+   }
+   return false;
+}
+
+static struct wsi_iflip_geometry
+wsi_iflip_geometry_of(HWND hwnd)
+{
+   struct wsi_iflip_geometry geometry = {};
+   RECT client = {};
+   POINT origin = { 0, 0 };
+
+   if (!hwnd)
+      return geometry;
+   geometry.style = (uint32_t)GetWindowLongW(hwnd, GWL_STYLE);
+   geometry.ex_style = (uint32_t)GetWindowLongW(hwnd, GWL_EXSTYLE);
+   if (GetClientRect(hwnd, &client) && ClientToScreen(hwnd, &origin)) {
+      geometry.window_known = true;
+      geometry.client_left = origin.x;
+      geometry.client_top = origin.y;
+      geometry.client_width = (uint32_t)(client.right - client.left);
+      geometry.client_height = (uint32_t)(client.bottom - client.top);
+   }
+
+   MONITORINFO monitor = {};
+   monitor.cbSize = sizeof(monitor);
+   HMONITOR handle = MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST);
+   if (handle && GetMonitorInfoW(handle, &monitor)) {
+      geometry.output_known = true;
+      geometry.output_left = monitor.rcMonitor.left;
+      geometry.output_top = monitor.rcMonitor.top;
+      geometry.output_width = (uint32_t)(monitor.rcMonitor.right - monitor.rcMonitor.left);
+      geometry.output_height = (uint32_t)(monitor.rcMonitor.bottom - monitor.rcMonitor.top);
+   }
+
+   if (geometry.window_known && geometry.output_known) {
+      geometry.covers =
+         wsi_iflip_covers(geometry.client_left, geometry.client_top,
+                          geometry.client_left + (int32_t)geometry.client_width,
+                          geometry.client_top + (int32_t)geometry.client_height,
+                          monitor.rcMonitor.left, monitor.rcMonitor.top, monitor.rcMonitor.right,
+                          monitor.rcMonitor.bottom);
+   }
+   return geometry;
+}
+
+/* The inputs of the plan, for a chain that does not exist yet: the call site needs them before it
+ * allocates the chain, because the buffer count is also the image count.
+ */
+static struct wsi_iflip_inputs
+wsi_iflip_inputs_of(const struct wsi_device *wsi_device,
+                    const VkSwapchainCreateInfoKHR *create_info,
+                    const struct wsi_iflip_geometry *geometry_in, bool hwnd_target,
+                    VkPresentModeKHR present_mode, uint32_t dxgi_format, bool system_tearing,
+                    bool own_copy)
+{
+   const struct wsi_iflip_geometry geometry = *geometry_in;
+   struct wsi_iflip_inputs in = {};
+
+   in.hwnd_target = hwnd_target;
+   in.output_known = geometry.output_known;
+   in.covers_output = geometry.covers;
+   in.alpha_ignore = hwnd_target ||
+                     create_info->compositeAlpha == VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR ||
+                     create_info->compositeAlpha == VK_COMPOSITE_ALPHA_INHERIT_BIT_KHR;
+   in.may_tear = wsi_iflip_may_tear(create_info, present_mode);
+   in.system_tearing = system_tearing;
+   /* The route's own copy per present is what decouples the image index from the back-buffer
+    * index. A driver that renders into the back buffer has no copy and keeps two buffers. The
+    * answer comes from the thing that really decides whether the copy lists exist - the chain's
+    * blit type (wsi_dxgi_image_needs_blit) - and not from a proxy that only happens to agree with
+    * it for today's driver (review of r1).
+    */
+   in.own_copy = own_copy;
+   in.dxgi_format = dxgi_format;
+   in.extent_width = create_info->imageExtent.width;
+   in.extent_height = create_info->imageExtent.height;
+   in.client_width = geometry.client_width;
+   in.client_height = geometry.client_height;
+   in.output_width = geometry.output_width;
+   in.output_height = geometry.output_height;
+   in.min_image_count = create_info->minImageCount;
+   return in;
+}
+
+/* Does the system offer tearing at all. Asked before the chain exists, because the answer is one
+ * of the plan's inputs.
+ */
+static bool
+wsi_iflip_system_tearing(IDXGIFactory4 *factory)
+{
+   IDXGIFactory5 *factory5 = NULL;
+   BOOL tearing = FALSE;
+
+   if (!factory || FAILED(factory->QueryInterface(IID_PPV_ARGS(&factory5))))
+      return false;
+   if (FAILED(factory5->CheckFeatureSupport(DXGI_FEATURE_PRESENT_ALLOW_TEARING, &tearing,
+                                            sizeof(tearing))))
+      tearing = FALSE;
+   factory5->Release();
+   return tearing != FALSE;
+}
+
+/* What the output says about hardware composition, which is the OS's own word on whether a plane
+ * can be given to an application at all (IDXGIOutput6::CheckHardwareCompositionSupport). Recorded,
+ * never acted on: this driver has no multiplane-overlay DDI, so the fullscreen and windowed flags
+ * are expected to be clear and a DirectFlip of the whole output does not need them.
+ */
+static unsigned
+wsi_iflip_composition_support(IDXGIFactory4 *factory, HWND hwnd)
+{
+   const HMONITOR monitor = MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST);
+   unsigned flags = 0;
+   bool found = false;
+
+   if (!factory || !monitor)
+      return 0;
+   /* The window's own monitor, wherever it sits: the adapters are walked until the output whose
+    * DXGI_OUTPUT_DESC names that monitor answers.
+    */
+   for (UINT a = 0; !found; a++) {
+      IDXGIAdapter1 *adapter = NULL;
+      if (FAILED(factory->EnumAdapters1(a, &adapter)))
+         break;
+      for (UINT o = 0; !found; o++) {
+         IDXGIOutput *output = NULL;
+         if (FAILED(adapter->EnumOutputs(o, &output)))
+            break;
+         IDXGIOutput6 *output6 = NULL;
+         if (SUCCEEDED(output->QueryInterface(IID_PPV_ARGS(&output6)))) {
+            DXGI_OUTPUT_DESC desc = {};
+            UINT support = 0;
+            if (SUCCEEDED(output6->GetDesc(&desc)) && desc.Monitor == monitor) {
+               found = true;
+               if (SUCCEEDED(output6->CheckHardwareCompositionSupport(&support)))
+                  flags = support;
+            }
+            output6->Release();
+         }
+         output->Release();
+      }
+      adapter->Release();
+   }
+   return flags;
+}
+
+/* Whether DXGI made the chain's back buffers on a heap it may scan out from. This is the API side
+ * of D3D12DDI_HEAP_FLAG_PRIMARY, which is what makes our D3D12 shell ask the kernel driver for a
+ * scan-out primary, and therefore the one input of M15.14 that the WSI can read for itself. A
+ * query that fails says nothing either way, and the line reports that.
+ */
+static bool
+wsi_iflip_buffer_displayable(IDXGISwapChain3 *chain, bool *queried)
+{
+   ID3D12Resource *buffer = NULL;
+   D3D12_HEAP_PROPERTIES properties = {};
+   D3D12_HEAP_FLAGS flags = D3D12_HEAP_FLAG_NONE;
+
+   *queried = false;
+   if (!chain || FAILED(chain->GetBuffer(0, IID_PPV_ARGS(&buffer))))
+      return false;
+   const HRESULT hr = buffer->GetHeapProperties(&properties, &flags);
+   buffer->Release();
+   if (FAILED(hr))
+      return false;
+   *queried = true;
+   return (flags & D3D12_HEAP_FLAG_ALLOW_DISPLAY) != 0;
+}
+
 static VkResult
 wsi_win32_surface_create_swapchain_dxgi(
    wsi_win32_surface *surface,
@@ -2324,19 +2773,17 @@ wsi_win32_surface_create_swapchain_dxgi(
    if (chain->hwnd_target)
       alpha_mode = DXGI_ALPHA_MODE_IGNORE;
 
-   /* ALLOW_TEARING goes on every chain the system allows it on, whatever the present mode: the
-    * mode can change per present (VK_KHR_swapchain_maintenance1), and a chain that takes over the
-    * window's swap chain must keep its flags for ResizeBuffers.
+   /* M15.14. Up to b27 ALLOW_TEARING went on every chain the system allowed it on, whatever the
+    * present mode, so that the mode could change per present (VK_KHR_swapchain_maintenance1) and a
+    * chain that takes over the window's swap chain kept its flags for ResizeBuffers. This part has
+    * no immediate flip, so such a chain asks for a capability the display path does not have, and
+    * the plan gives the flag only to a chain that may actually tear (wsi_win32_iflip.h). The
+    * compatible present modes of a maintenance1 chain are part of that answer, so a mode switch
+    * still needs no new chain.
     */
-   UINT flags = 0;
-   IDXGIFactory5 *factory5 = NULL;
-   if (SUCCEEDED(factory->QueryInterface(IID_PPV_ARGS(&factory5)))) {
-      BOOL tearing = FALSE;
-      if (SUCCEEDED(factory5->CheckFeatureSupport(DXGI_FEATURE_PRESENT_ALLOW_TEARING,
-                                                  &tearing, sizeof(tearing))) && tearing)
-         flags |= DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING;
-      factory5->Release();
-   }
+   const struct wsi_iflip_plan *plan = &chain->iflip;
+   const struct wsi_iflip_knobs *knobs = wsi_iflip_knobs_now();
+   UINT flags = plan->allow_tearing ? (UINT)DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING : 0u;
    chain->swap_chain_flags = flags;
 
    /* The buffers receive a GPU copy and are shown; RENDER_TARGET_OUTPUT is the usage the native
@@ -2355,8 +2802,15 @@ wsi_win32_surface_create_swapchain_dxgi(
    if (vk_swapchain_usage_flags(create_info) &
        (VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_INPUT_ATTACHMENT_BIT))
       desc.BufferUsage |= DXGI_USAGE_SHADER_INPUT;
-   desc.BufferCount = create_info->minImageCount;
-   desc.Scaling = DXGI_SCALING_STRETCH;
+   /* One back buffer per image of the swapchain: GetBuffer(i) is image i's own buffer, and the
+    * copy of each image into each buffer is recorded once (wsi_dxgi_record_blits).
+    */
+   desc.BufferCount = plan->buffer_count;
+   /* M15.14: a buffer that is the size of its presentation target needs no stretch on the way to
+    * the plane, and DXGI_SCALING_NONE is what the one measured-good configuration asked for. A
+    * chain whose buffers are smaller than the window keeps STRETCH, which is what it had.
+    */
+   desc.Scaling = (DXGI_SCALING)plan->scaling;
    desc.SwapEffect = DXGI_SWAP_EFFECT_FLIP_DISCARD;
    desc.AlphaMode = alpha_mode;
    desc.Flags = flags;
@@ -2376,9 +2830,15 @@ wsi_win32_surface_create_swapchain_dxgi(
       return VK_ERROR_INITIALIZATION_FAILED;
    }
    if (stolen) {
+      /* Scaling is part of the test (M15.14, review of r1): ResizeBuffers cannot change it, so a
+       * chain created while the window was a different size would keep DXGI_SCALING_STRETCH while
+       * the new plan asks for NONE, and the chain would then be reported as a shape it does not
+       * have. A plan change therefore forces a new chain.
+       */
       DXGI_SWAP_CHAIN_DESC1 old_desc = {};
       if (SUCCEEDED(stolen->GetDesc1(&old_desc)) && old_desc.Flags == desc.Flags &&
           old_desc.BufferCount == desc.BufferCount && old_desc.AlphaMode == desc.AlphaMode &&
+          old_desc.Scaling == desc.Scaling &&
           old_desc.BufferUsage == desc.BufferUsage && old_desc.SwapEffect == desc.SwapEffect &&
           SUCCEEDED(hr = stolen->ResizeBuffers(desc.BufferCount, desc.Width, desc.Height,
                                                desc.Format, desc.Flags))) {
@@ -2415,8 +2875,18 @@ wsi_win32_surface_create_swapchain_dxgi(
    }
 
    if (chain->hwnd_target) {
-      /* Vulkan owns the window mode: DXGI must not answer Alt+Enter or watch the message queue. */
-      factory->MakeWindowAssociation(hwnd, DXGI_MWA_NO_ALT_ENTER | DXGI_MWA_NO_WINDOW_CHANGES);
+      /* Vulkan owns the window mode, so DXGI must not answer Alt+Enter, on every chain. Whether DXGI
+       * may watch the message queue at all is M15.14's fourth input: up to b27 the route also passed
+       * DXGI_MWA_NO_WINDOW_CHANGES, which the one measured-good configuration did not, and DXGI
+       * learns a window's changes through that queue. The plan drops that flag only for a chain its
+       * own rules found eligible, which is a chain that covers its output and asks for nothing that
+       * forbids a flip; a windowed chain, a composition chain and the chains of a D3D11 or DXVK
+       * front keep it, because the flag exists for an application that handles window changes
+       * itself and a WSI layer under an unknowing application is not that application
+       * (ref/sdk-api-docs nf-dxgi-idxgifactory-makewindowassociation.md:91).
+       */
+      factory->MakeWindowAssociation(hwnd, DXGI_MWA_NO_ALT_ENTER |
+                                     (plan->window_changes ? 0u : DXGI_MWA_NO_WINDOW_CHANGES));
    }
 
    /* The color space is set on every chain, also to sRGB, so that a chain that takes over the
@@ -2454,15 +2924,18 @@ wsi_win32_surface_create_swapchain_dxgi(
    if (!d3d12_device)
       return VK_ERROR_INITIALIZATION_FAILED;
 
+   /* One fence per image, which is the chain's own count and not the application's minimum: the
+    * plan may have given the chain more buffers than the application asked images for (M15.14).
+    */
    chain->d3d12_blit_fences = (ID3D12Fence**)vk_zalloc(&chain->base.alloc,
-         create_info->minImageCount * sizeof(ID3D12Fence *),
+         chain->base.image_count * sizeof(ID3D12Fence *),
          8, VK_SYSTEM_ALLOCATION_SCOPE_OBJECT);
    if (!chain->d3d12_blit_fences)
       return VK_ERROR_OUT_OF_HOST_MEMORY;
    if (!d3d12_device || !wsi->wsi->ImportSemaphoreWin32HandleKHR ||
        !wsi->wsi->GetSemaphoreCounterValue)
       return VK_ERROR_FEATURE_NOT_PRESENT;
-   for (unsigned i = 0; i < create_info->minImageCount; i++) {
+   for (unsigned i = 0; i < chain->base.image_count; i++) {
       wsi_win32_blit_fence_ops ops{chain, wsi->wsi, device, d3d12_device, i};
       VkResult result = wsi_win32_create_shared_fence(ops);
       if (result != VK_SUCCESS)
@@ -2474,6 +2947,87 @@ wsi_win32_surface_create_swapchain_dxgi(
                        chain->hwnd_target ? "window" : "composition", desc.Width, desc.Height,
                        (unsigned)desc.Format, desc.BufferCount, desc.Flags,
                        (unsigned)chain->color_space, reused ? " (taken over from oldSwapchain)" : "");
+
+   /* M15.14, the self-check of the chain: every eligibility input this route controls, what DXGI
+    * answered about the chain it made (GetDesc1, so a reuse through ResizeBuffers is reported as
+    * it stands and not as it was asked for), and whether the back buffers are on a heap the
+    * display can read. Three lines, once per chain, whatever the route log's level: a chain is
+    * created once per mode change, not per frame.
+    */
+   {
+      /* The geometry is the one read the plan was made from, not a second read taken for the log:
+       * the client of this round restyles its window while it creates chains, and two reads could
+       * put the reason of one window state next to the numbers of another (review of r1).
+       */
+      const struct wsi_iflip_geometry geometry = chain->iflip_geometry;
+      DXGI_SWAP_CHAIN_DESC1 got = {};
+      const bool read_back = SUCCEEDED(chain->dxgi->GetDesc1(&got));
+      bool queried = false;
+      const bool displayable = wsi_iflip_buffer_displayable(chain->dxgi, &queried);
+      const unsigned composition = chain->hwnd_target ?
+         wsi_iflip_composition_support(factory, hwnd) : 0u;
+
+      /* The reason comes from the chain as it stands, not from what was asked for. */
+      struct wsi_iflip_got state = {};
+      state.known = read_back;
+      state.scaling = (unsigned)got.Scaling;
+      state.buffer_count = got.BufferCount;
+      state.allow_tearing = (got.Flags & DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING) != 0;
+      state.heap_queried = queried;
+      state.allow_display = displayable;
+      chain->iflip_reason = wsi_iflip_chain_reason(plan, &state);
+
+      wsi_win32_route_log(chain, "chain %p: iflip %s window style 0x%08x/0x%08x client %dx%d at "
+                          "%d,%d output %ux%u at %d,%d covers %u", (void *)chain,
+                          wsi_iflip_reason_text(chain->iflip_reason), geometry.style,
+                          geometry.ex_style, (int)geometry.client_width,
+                          (int)geometry.client_height, (int)geometry.client_left,
+                          (int)geometry.client_top, geometry.output_width, geometry.output_height,
+                          (int)geometry.output_left, (int)geometry.output_top,
+                          geometry.covers ? 1u : 0u);
+      wsi_win32_route_log(chain, "chain %p: iflip asked %ux%u fmt %u buffers %u scaling %u "
+                          "tearing %u alpha %u hook %u; got %ux%u fmt %u buffers %u scaling %u "
+                          "flags 0x%x%s", (void *)chain, desc.Width, desc.Height,
+                          (unsigned)desc.Format, desc.BufferCount, (unsigned)desc.Scaling,
+                          plan->allow_tearing ? 1u : 0u, (unsigned)desc.AlphaMode,
+                          plan->window_changes ? 1u : 0u, got.Width, got.Height,
+                          (unsigned)got.Format, got.BufferCount, (unsigned)got.Scaling, got.Flags,
+                          read_back ? "" : " (GetDesc1 failed)");
+      wsi_win32_route_log(chain, "chain %p: iflip displayable %s, hardware composition 0x%x, "
+                          "switches shape %u scaling %u tearing %u buffers %u hook %u",
+                          (void *)chain,
+                          !queried ? "unknown" : displayable ? "yes (ALLOW_DISPLAY)" : "NO",
+                          composition, knobs->shape ? 1u : 0u, knobs->scaling_none ? 1u : 0u,
+                          knobs->tearing_on_demand ? 1u : 0u, knobs->buffers,
+                          knobs->window_hook ? 1u : 0u);
+
+      /* The one WARN of the creation: the chain covers the output and every input this route
+       * controls is at its scan-out value, and the heap query of back buffer 0 came back without
+       * ALLOW_DISPLAY. The line reports that reading and nothing more: no local reference states
+       * what a flip-model back buffer reports back through GetHeapProperties, and no measurement of
+       * this project has read it on a chain that is known to reach independent flip, so this is not
+       * yet a calibrated verdict on the compositor (review of r1; LAB-PLAN.md section 3 reads the
+       * ETW witness and the kernel driver's counters next to it).
+       */
+      if (chain->iflip_reason == WSI_IFLIP_NOT_DISPLAYABLE) {
+         chain->iflip_warned = true;
+         wsi_win32_route_log(chain, "chain %p: WARN iflip: the chain covers the output and asks "
+                             "for nothing that forbids a flip, and the heap of back buffer 0 reads "
+                             "without ALLOW_DISPLAY (not calibrated: see LAB-PLAN.md section 3)",
+                             (void *)chain);
+      }
+
+      /* The chain has more buffers than the flip model's minimum and no copy list of its own, so
+       * the Vulkan image IS back buffer i and a present out of acquire order would show the wrong
+       * buffer. Unreachable with today's driver (radv asks for blits on every device), and a line
+       * rather than a refusal because the application's own minImageCount may not be shortened.
+       */
+      if (chain->base.blit.type == WSI_SWAPCHAIN_NO_BLIT &&
+          desc.BufferCount > WSI_IFLIP_BUFFERS_MIN)
+         wsi_win32_route_log(chain, "chain %p: WARN iflip: %u buffers and no copy of this route's "
+                             "own: image index is back buffer index, so presents must stay in "
+                             "acquire order", (void *)chain, desc.BufferCount);
+   }
    return VK_SUCCESS;
 }
 
@@ -2492,7 +3046,37 @@ wsi_win32_create_chain(wsi_win32_surface *surface,
    struct wsi_win32 *wsi =
       (struct wsi_win32 *) wsi_device->wsi[VK_ICD_WSI_PLATFORM_WIN32];
 
-   const unsigned num_images = create_info->minImageCount;
+   /* M15.14: the plan is made before the chain is allocated, because the buffer count it decides
+    * is also the number of images this chain has. A GDI chain keeps the application's own count:
+    * there is no DXGI swap chain to have buffers, and nothing of this criterion applies to it.
+    */
+   const bool hwnd_target = use_dxgi && wsi_device->win32.hwnd_target;
+   const struct wsi_iflip_knobs *knobs = wsi_iflip_knobs_now();
+   const struct wsi_win32_format *plan_format = wsi_win32_find_format(create_info->imageFormat);
+   const VkImageUsageFlags2KHR image_usage = vk_swapchain_usage_flags(create_info);
+
+   struct wsi_dxgi_image_params dxgi_image_params = {
+      { WSI_IMAGE_TYPE_DXGI },
+   };
+   dxgi_image_params.storage_image = (image_usage & VK_IMAGE_USAGE_STORAGE_BIT) != 0;
+
+   /* Whether this chain will really have the route's own copy lists, which is what allows more
+    * than two buffers: the blit type decides that (wsi_dxgi_record_blits returns at once for
+    * WSI_SWAPCHAIN_NO_BLIT), and it is computable here, before the chain exists.
+    */
+   const bool own_copy = use_dxgi &&
+      wsi_dxgi_image_needs_blit(wsi_device, &dxgi_image_params, device) != WSI_SWAPCHAIN_NO_BLIT;
+   /* One window read, kept on the chain: the plan, the reason and the log line all come from it. */
+   const struct wsi_iflip_geometry geometry = wsi_iflip_geometry_of(surface->base.hwnd);
+   const struct wsi_iflip_inputs inputs =
+      wsi_iflip_inputs_of(wsi_device, create_info, &geometry, hwnd_target,
+                          wsi_swapchain_get_present_mode(wsi_device, create_info),
+                          plan_format ? (uint32_t)plan_format->buffer : 0u,
+                          use_dxgi ? wsi_iflip_system_tearing(wsi->dxgi.factory) : false,
+                          own_copy);
+   const struct wsi_iflip_plan plan = wsi_iflip_plan_of(knobs, &inputs);
+
+   const unsigned num_images = use_dxgi ? plan.buffer_count : create_info->minImageCount;
    struct wsi_win32_swapchain *chain;
    size_t size = sizeof(*chain) + num_images * sizeof(chain->images[0]);
 
@@ -2515,13 +3099,6 @@ wsi_win32_create_chain(wsi_win32_surface *surface,
       return VK_ERROR_OUT_OF_HOST_MEMORY;
    }
 
-   const VkImageUsageFlags2KHR image_usage = vk_swapchain_usage_flags(create_info);
-
-   struct wsi_dxgi_image_params dxgi_image_params = {
-      { WSI_IMAGE_TYPE_DXGI },
-   };
-   dxgi_image_params.storage_image = (image_usage & VK_IMAGE_USAGE_STORAGE_BIT) != 0;
-
    struct wsi_cpu_image_params cpu_image_params = {
       { WSI_IMAGE_TYPE_CPU },
    };
@@ -2531,7 +3108,19 @@ wsi_win32_create_chain(wsi_win32_surface *surface,
 
    /* Set before wsi_swapchain_init: the image configuration reads them through the chain. */
    chain->is_dxgi = use_dxgi;
-   chain->hwnd_target = use_dxgi && wsi_device->win32.hwnd_target;
+   chain->hwnd_target = hwnd_target;
+   chain->iflip = plan;
+   /* A GDI chain has no back buffers, and its image count is the application's own
+    * (num_images above). buffer_count is the DXGI buffer count and the image count of a DXGI
+    * chain only, so on the GDI path it is zero and can never be read as an image count
+    * (review of r1).
+    */
+   if (!use_dxgi)
+      chain->iflip.buffer_count = 0;
+   chain->iflip_geometry = geometry;
+   chain->iflip_reason = plan.eligible ? WSI_IFLIP_ELIGIBLE : plan.reason;
+   chain->iflip_presents = 0;
+   chain->iflip_warned = false;
    chain->route_reason = route_reason;
    chain->wsi = wsi;
    chain->surface = surface;
@@ -2595,6 +3184,15 @@ wsi_win32_create_chain(wsi_win32_surface *surface,
       result = wsi_win32_image_init(device, chain,
                                     create_info, allocator,
                                     &chain->images[image]);
+      if (result != VK_SUCCESS)
+         goto fail;
+   }
+
+   /* Every image has its back buffer now, so the copies can be recorded: one per (image, back
+    * buffer) pair (M15.14, wsi_win32_iflip.h).
+    */
+   if (use_dxgi) {
+      result = wsi_dxgi_record_blits(chain);
       if (result != VK_SUCCESS)
          goto fail;
    }

@@ -203,6 +203,23 @@ radv_alloc_memory(struct radv_device *device, const VkMemoryAllocateInfo *pAlloc
           * handle. The importing application remains responsible for closing it.
           */
          mem->import_handle_type = win32_import_info->handleType;
+
+         /* BD-118. A dedicated allocation names the image that aliases this resource, so the
+          * layout the exporting side recorded for the allocation can be applied to it here, and
+          * the import refused when the two cannot be made to agree. Without this the image keeps
+          * the tiled layout it chose from VkImageCreateInfo alone while the D3D side shares a
+          * linear surface, and every texel but the first few arrives at the wrong address.
+          */
+         if (mem->image && device->ws->buffer_get_metadata) {
+            struct radeon_bo_metadata md;
+
+            memset(&md, 0, sizeof(md));
+            device->ws->buffer_get_metadata(device->ws, mem->bo, &md);
+            /* A dedicated allocation holds this image alone, so the image starts at offset 0. */
+            result = radv_image_apply_shared_layout(device, mem->image, &md, mem->bo->size, 0, "dedicated");
+            if (result != VK_SUCCESS)
+               goto fail;
+         }
       }
    } else if (host_ptr_info) {
       assert(host_ptr_info->handleType == VK_EXTERNAL_MEMORY_HANDLE_TYPE_HOST_ALLOCATION_BIT_EXT);

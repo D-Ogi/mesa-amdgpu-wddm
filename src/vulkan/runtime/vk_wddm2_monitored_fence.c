@@ -136,8 +136,12 @@ vk_wddm2_monitored_fence_init(struct vk_device *device,
          .Flags = {
             .Shared = shareable,
             .NtSecuritySharing = shareable,
-            /* A mapped fence uses the adapter's atomic-width capability. */
-            .NoGPUAccess = false,
+            /* Shared timelines use scheduler packets on both APIs. This mode
+             * keeps their 64-bit CPU value but needs no GPU VA. In particular,
+             * a D3D12 runtime may first open an exported payload in this mode.
+             * Private queue fences keep their existing mapped allocation.
+             */
+            .NoGPUAccess = shareable,
          },
          .MonitoredFence = {
             .InitialFenceValue = initial_value,

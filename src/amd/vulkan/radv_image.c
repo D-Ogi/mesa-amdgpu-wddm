@@ -22,8 +22,10 @@
 #include "radv_formats.h"
 #include "radv_image_view.h"
 #include "radv_radeon_winsys.h"
+#include "radv_shared_layout.h"
 #include "radv_video.h"
 #include "radv_wsi.h"
+#include "util/amdgpu_wddm_stdio.h"
 #include "vk_debug_utils.h"
 #include "vk_format.h"
 #include "vk_log.h"
@@ -38,6 +40,46 @@ radv_choose_tiling(struct radv_device *device, const struct radv_image *image, V
    if (image->vk.tiling == VK_IMAGE_TILING_LINEAR) {
       assert(image->vk.samples <= 1);
       return RADEON_SURF_MODE_LINEAR_ALIGNED;
+   }
+
+   /* BD-118. An image that will alias a D3D11 or D3D12 shared resource of this driver has the
+    * layout that side gave the allocation, and on this driver a shared D3D resource is a linear
+    * surface (driver/contract/bc250_shared_surface.h, BD-075). Choosing a tiled mode here would
+    * describe the same bytes at different addresses, which is what BD-118 measured. The WSI DXGI
+    * route already asks for a linear image by hand (wsi_dxgi_configure_image,
+    * src/vulkan/wsi/wsi_common_win32.cpp:1319-1349, where linear_blit_image is set for this winsys
+    * by radv_wddm2_wsi.c); this is the same rule for every other importer. The import still applies
+    * and verifies the exporter's own record (radv_image_apply_shared_layout), which stays
+    * authoritative.
+    *
+    * Only the shape the exporter can actually share is taken (radv_shared_shape_is_linear): a
+    * depth, multi-mip, array or oversized image can never alias a surface this driver shares, so it
+    * keeps its tiled layout, and an import of such a description is refused rather than relaid.
+    *
+    * VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_WIN32_BIT is deliberately absent: this winsys cannot
+    * export memory at all (radv_wddm2_bo_get_handle returns false), so no OPAQUE_WIN32 handle to an
+    * LB7A allocation can be produced here, and both of our own backends ask for OPAQUE_WIN32 on a
+    * shared D3D resource (vkd3d-proton libs/vkd3d/resource.c, DXVK d3d11_texture.cpp) without ever
+    * reaching an export. If memory export is implemented one day, an OPAQUE_WIN32 import of an LB7A
+    * allocation is reconciled only by the second layout pass of
+    * radv_image_apply_shared_layout, and this list is where it would be admitted first.
+    */
+   if (device->ws->shared_surfaces_are_linear &&
+       (image->vk.external_handle_types & (VK_EXTERNAL_MEMORY_HANDLE_TYPE_D3D12_RESOURCE_BIT |
+                                           VK_EXTERNAL_MEMORY_HANDLE_TYPE_D3D11_TEXTURE_BIT |
+                                           VK_EXTERNAL_MEMORY_HANDLE_TYPE_D3D11_TEXTURE_KMT_BIT))) {
+      const struct radv_shared_shape shape = {
+         .is_2d = image->vk.image_type == VK_IMAGE_TYPE_2D,
+         .is_depth_or_stencil = vk_format_is_depth_or_stencil(format),
+         .samples = image->vk.samples,
+         .mip_levels = image->vk.mip_levels,
+         .array_layers = image->vk.array_layers,
+         .width = image->vk.extent.width,
+         .height = image->vk.extent.height,
+      };
+
+      if (radv_shared_shape_is_linear(&shape))
+         return RADEON_SURF_MODE_LINEAR_ALIGNED;
    }
 
    if (pdev->info.vcn_ip_version < VCN_2_0_0 &&
@@ -1039,7 +1081,14 @@ radv_get_ac_surf_info(struct radv_device *device, const struct radv_image *image
    return info;
 }
 
-static void
+/* Returns ac_compute_surface's own result: 0 on success, nonzero when addrlib refused the surface.
+ * A refusal must reach the caller. addrlib rejects a linear surface for a multisample or depth
+ * description (gfx10addrlib.cpp, ValidateSwModeParams), and the two asserts that would catch it in
+ * ac_compute_surface's LINEAR_ALIGNED case are compiled out of the shipped ICD (NDEBUG): without
+ * this result the surface comes back unwritten with size 0 and the arithmetic that follows divides
+ * by it (BD-118 review, R1).
+ */
+static int
 radv_surface_init(struct radv_physical_device *pdev, const struct ac_surf_info *surf_info, struct radeon_surf *surf)
 {
    uint32_t type = RADEON_SURF_GET(surf->flags, TYPE);
@@ -1076,7 +1125,7 @@ radv_surface_init(struct radv_physical_device *pdev, const struct ac_surf_info *
       config.gfx6.num_banks = surf->u.legacy.num_banks;
    }
 
-   ac_compute_surface(pdev->addrlib, &pdev->info, &config, mode, surf);
+   return ac_compute_surface(pdev->addrlib, &pdev->info, &config, mode, surf);
 }
 
 /* Return the first mip level which is pipe-misaligned with metadata, UINT32_MAX means no mips are
@@ -1216,7 +1265,18 @@ radv_image_create_layout(struct radv_device *device, struct radv_image_create_in
          image->planes[plane].surface.u.gfx9.swizzle_mode = image->planes[0].surface.u.gfx9.swizzle_mode;
       }
 
-      radv_surface_init(pdev, &info, &image->planes[plane].surface);
+      if (radv_surface_init(pdev, &info, &image->planes[plane].surface)) {
+         /* addrlib refused this description. The surface is unwritten, so nothing below may read
+          * it. An import or relayout driven by the exporter's record is refused as an external
+          * handle this driver cannot honour; an ordinary creation fails as an initialisation.
+          * (BD-118 review, R1.)
+          */
+         amdgpu_wddm_log("BC250 surface: addrlib refused plane %u of a %ux%u %u-sample %u-mip "
+                         "%u-layer image in mode %u; the layout is not applied\n",
+                         plane, info.width, info.height, info.samples, info.levels, info.array_size,
+                         RADEON_SURF_GET(image->planes[plane].surface.flags, MODE));
+         return md ? VK_ERROR_INVALID_EXTERNAL_HANDLE : VK_ERROR_INITIALIZATION_FAILED;
+      }
 
       if (plane == 0) {
          if (!radv_use_dcc_for_image_late(device, image))
@@ -1239,7 +1299,13 @@ radv_image_create_layout(struct radv_device *device, struct radv_image_create_in
 
             surf->tile_swizzle = md->kmw.tile_swizzle;
 
-            if (md->kmw.pitch_bytes && pdev->info.gfx_level >= GFX9) {
+            /* The slice size is the divisor below, and surf->bpe the one above: a surface addrlib
+             * refused would leave both at 0. radv_surface_init's result is checked above, so this
+             * cannot be reached with an unwritten surface; the guard states the requirement where
+             * the division is, rather than relying on a caller two screens away (BD-118 review, R1).
+             */
+            if (md->kmw.pitch_bytes && pdev->info.gfx_level >= GFX9 && surf->bpe &&
+                surf->u.gfx9.surf_slice_size) {
                unsigned pitch = md->kmw.pitch_bytes / surf->bpe;
 
                if (pitch != surf->u.gfx9.surf_pitch) {
@@ -1337,6 +1403,212 @@ radv_image_create_layout(struct radv_device *device, struct radv_image_create_in
           ac_modifier_has_dcc(image->planes[0].surface.modifier) ==
              (pdev->info.gfx_level >= GFX12 ? image->planes[0].surface.u.gfx9.gfx12_enable_dcc
                                             : radv_image_has_dcc(image)));
+   return VK_SUCCESS;
+}
+
+/* BD-118. The two halves of a cross-API shared surface, as the comparison sees them. */
+static struct radv_shared_layout
+radv_image_shared_layout(const struct radv_image *image, uint64_t memory_size, uint64_t memory_offset)
+{
+   const struct radeon_surf *surf = &image->planes[0].surface;
+   const struct radv_shared_layout layout = {
+      .is_linear = surf->is_linear,
+      .swizzle_mode = surf->u.gfx9.swizzle_mode,
+      .pitch_bytes = (uint64_t)surf->u.gfx9.surf_pitch * surf->bpe,
+      .surf_size = image->size,
+      .memory_size = memory_size,
+      .memory_offset = memory_offset,
+   };
+   return layout;
+}
+
+static struct radv_shared_layout
+radv_exporter_shared_layout(const struct radeon_bo_metadata *md)
+{
+   const struct radv_shared_layout layout = {
+      /* radv_wddm2_bo_from_handle records the exporter's mode in u.gfx9.swizzle_mode, where
+       * radv_patch_surface_from_metadata reads it: 0 is linear, anything else is a tiled mode.
+       */
+      .is_linear = md->u.gfx9.swizzle_mode == 0,
+      .swizzle_mode = md->u.gfx9.swizzle_mode,
+      .pitch_bytes = md->kmw.pitch_bytes,
+      .surf_size = md->kmw.surf_size,
+   };
+   return layout;
+}
+
+/* BD-118. Give an imported image the layout the exporting side recorded for the allocation, and
+ * refuse the import when the two still disagree afterwards.
+ *
+ * Why it belongs here and not at vkCreateImage: the image is created before the handle exists (a
+ * dedicated allocation names the image, so the image comes first), so the layout can only be
+ * reconciled once the allocation has been opened and its private driver data read. This is what
+ * radv_import_ahb_memory does for an Android hardware buffer (radv_android.c:425-453): take the
+ * metadata of the opened allocation and run the layout again.
+ *
+ * It never guesses. On a winsys that does not share linear surfaces it says what both sides look
+ * like and accepts whatever that winsys accepted before (the generic WDDM path's record is the
+ * proprietary allocation blob, a different ABI, and nothing here is entitled to refuse it). With no
+ * recorded layout it leaves the image alone and says so. With a recorded layout that the image
+ * cannot be given, it refuses with VK_ERROR_INVALID_EXTERNAL_HANDLE instead of handing the
+ * application an image whose texels are in the wrong places (the BD-118 measurement: 65520 of
+ * 65536 texels of a 256x256 BGRA surface, both directions).
+ *
+ * A refused import leaves the VkImage exactly as it was: radv_image_create_layout resets the
+ * planes before it builds them, so the image is snapshotted first and restored on every outcome
+ * but agreement. An application may bind other memory to that image afterwards.
+ */
+VkResult
+radv_image_apply_shared_layout(struct radv_device *device, struct radv_image *image,
+                               const struct radeon_bo_metadata *md, uint64_t memory_size,
+                               uint64_t memory_offset, const char *where)
+{
+   /* The snapshot of the whole object, planes included. radv_image is allocated as the struct plus
+    * plane_count planes (radv_image_create), and plane_count never exceeds the binding count.
+    */
+   uint8_t saved[sizeof(struct radv_image) + ARRAY_SIZE(image->bindings) * sizeof(image->planes[0])];
+   const struct radv_shared_layout exporter = radv_exporter_shared_layout(md);
+   struct radv_shared_layout importer = radv_image_shared_layout(image, memory_size, memory_offset);
+   enum radv_shared_layout_verdict verdict;
+   size_t saved_bytes;
+
+   /* Another winsys describes its allocations differently (the amdgpu winsys records
+    * RADEON_METADATA_TYPE_UMD, which radv_image_create_layout applies on its own path). There is
+    * nothing of this contract to compare, and nothing to say about it.
+    */
+   if (md->metadata_type != RADEON_METADATA_TYPE_KMW)
+      return VK_SUCCESS;
+
+   /* The contract this function enforces is the BC-250 one: an LB7A record whose pitch is a byte
+    * pitch and whose swizzle mode 0 means linear, published by our own kernel driver
+    * (radv_wddm2_bo_from_handle). The generic WDDM winsys fills the same radeon_bo_metadata fields
+    * from the proprietary allocation blob, where a tiled surface carries a real swizzle mode and
+    * the importing image's own tiled layout is the one that has always been used. Refusing or
+    * re-laying that out here would turn imports that work today into errors, so the decision is
+    * gated on the winsys and only the observation is kept. radv_choose_tiling is gated on the same
+    * flag (ws->shared_surfaces_are_linear, set for ws->bc250 alone in radv_wddm2_winsys.c).
+    */
+   if (!device->ws->shared_surfaces_are_linear) {
+      amdgpu_wddm_log("BC250 shared import (%s): this winsys does not share linear surfaces; the image "
+                      "keeps its own layout (image linear %u swizzle %u pitch %" PRIu64 " size %" PRIu64
+                      "; record linear %u swizzle %u pitch %" PRIu64 " size %" PRIu64 ")\n",
+                      where, importer.is_linear, importer.swizzle_mode, importer.pitch_bytes,
+                      importer.surf_size, exporter.is_linear, exporter.swizzle_mode,
+                      exporter.pitch_bytes, exporter.surf_size);
+      return VK_SUCCESS;
+   }
+
+   if (!exporter.pitch_bytes) {
+      amdgpu_wddm_log("BC250 shared import (%s): the allocation carries no surface layout; the image "
+                      "keeps its own (linear %u swizzle %u pitch %" PRIu64 " size %" PRIu64 ")\n",
+                      where, importer.is_linear, importer.swizzle_mode, importer.pitch_bytes,
+                      importer.surf_size);
+      return VK_SUCCESS;
+   }
+
+   amdgpu_wddm_log("BC250 shared import (%s): image linear %u swizzle %u pitch %" PRIu64 " size %" PRIu64
+                   "; exporter linear %u swizzle %u pitch %" PRIu64 " size %" PRIu64 "; allocation %" PRIu64
+                   " offset %" PRIu64 "\n",
+                   where, importer.is_linear, importer.swizzle_mode, importer.pitch_bytes, importer.surf_size,
+                   exporter.is_linear, exporter.swizzle_mode, exporter.pitch_bytes, exporter.surf_size,
+                   memory_size, memory_offset);
+
+   /* A depth or stencil image is outside the shared shape: this contract carries colour rows only
+    * (radv_shared_shape_is_linear, LB7A's format table), and GFX10 has no linear Z or S surface at
+    * all, so there is no layout to reconcile. Refused, not relaid.
+    */
+   if (image->planes[0].surface.flags & RADEON_SURF_Z_OR_SBUFFER) {
+      amdgpu_wddm_log("BC250 shared import ERROR (%s): the image is a depth or stencil surface, which "
+                      "this contract never shares; the import is refused\n",
+                      where);
+      return VK_ERROR_INVALID_EXTERNAL_HANDLE;
+   }
+
+   /* The whole shared shape, not the depth flag alone (BD-118 review, R1).
+    *
+    * radv_choose_tiling decides the image's first layout with radv_shared_shape_is_linear, so an
+    * image outside that shape is left tiled there and never relaid out. This late entry is reached
+    * with an image whose description the caller did not have to match: a single-sample LB7A record
+    * paired with a multisample, multi-mip, array, non-2D or oversized VkImage arrives here with a
+    * tiled layout, the comparison below reads MODE, and the relayout would then ask addrlib for a
+    * linear surface of a description it refuses. The comment at the head of this file promises such
+    * a description is refused rather than relaid; this is where that promise is kept, with the same
+    * predicate radv_choose_tiling uses, so the two cannot drift apart.
+    */
+   {
+      const struct radv_shared_shape shape = {
+         .is_2d = image->vk.image_type == VK_IMAGE_TYPE_2D,
+         .is_depth_or_stencil = vk_format_is_depth_or_stencil(image->vk.format),
+         .samples = image->vk.samples,
+         .mip_levels = image->vk.mip_levels,
+         .array_layers = image->vk.array_layers,
+         .width = image->vk.extent.width,
+         .height = image->vk.extent.height,
+      };
+
+      if (!radv_shared_shape_is_linear(&shape)) {
+         amdgpu_wddm_log("BC250 shared import ERROR (%s): the image is outside the shared linear shape "
+                         "(type %u, depth/stencil %u, %u samples, %u mips, %u layers, %ux%u); this "
+                         "contract shares a 2D single-sample single-mip single-layer colour surface up "
+                         "to %u on an edge, so there is no layout to reconcile; the import is refused\n",
+                         where, image->vk.image_type, shape.is_depth_or_stencil, shape.samples,
+                         shape.mip_levels, shape.array_layers, shape.width, shape.height,
+                         RADV_SHARED_SURFACE_MAX_EDGE);
+         return VK_ERROR_INVALID_EXTERNAL_HANDLE;
+      }
+   }
+
+   saved_bytes = sizeof(*image) + (size_t)image->plane_count * sizeof(image->planes[0]);
+   if (saved_bytes > sizeof(saved)) {
+      amdgpu_wddm_log("BC250 shared import ERROR (%s): %u planes cannot be reconciled with the "
+                      "exporter's single-plane record; the import is refused\n",
+                      where, image->plane_count);
+      return VK_ERROR_INVALID_EXTERNAL_HANDLE;
+   }
+
+   if (radv_shared_layout_compare(&importer, &exporter) != RADV_SHARED_LAYOUT_AGREE) {
+      /* radv_patch_surface_from_metadata takes the mode from the record, and the KMW branch of
+       * radv_image_create_layout takes the row pitch. The scanout flag of the image survives
+       * because it is read from the surface it was set on, and no metadata plane is claimed: a
+       * shared linear surface of this contract carries no DCC, FMASK or HTILE.
+       */
+      const struct radv_image_create_info create_info = {
+         .bo_metadata = md,
+         .no_metadata_planes = true,
+         .scanout = (image->planes[0].surface.flags & RADEON_SURF_SCANOUT) != 0,
+      };
+      VkResult result;
+
+      memcpy(saved, image, saved_bytes);
+      result = radv_image_create_layout(device, create_info, NULL, NULL, image);
+      if (result != VK_SUCCESS) {
+         memcpy(image, saved, saved_bytes);
+         amdgpu_wddm_log("BC250 shared import ERROR (%s): the exporter's layout could not be applied "
+                         "(0x%x); the image keeps its own layout and the import is refused\n",
+                         where, result);
+         return VK_ERROR_INVALID_EXTERNAL_HANDLE;
+      }
+      importer = radv_image_shared_layout(image, memory_size, memory_offset);
+
+      verdict = radv_shared_layout_compare(&importer, &exporter);
+      if (verdict != RADV_SHARED_LAYOUT_AGREE) {
+         amdgpu_wddm_log("BC250 shared import ERROR (%s): %s mismatch: image linear %u swizzle %u pitch "
+                         "%" PRIu64 " size %" PRIu64 "; exporter linear %u swizzle %u pitch %" PRIu64
+                         " size %" PRIu64 "; allocation %" PRIu64 " offset %" PRIu64
+                         "; the image keeps its own layout and the import is refused\n",
+                         where, radv_shared_layout_verdict_name(verdict), importer.is_linear,
+                         importer.swizzle_mode, importer.pitch_bytes, importer.surf_size,
+                         exporter.is_linear, exporter.swizzle_mode, exporter.pitch_bytes,
+                         exporter.surf_size, memory_size, memory_offset);
+         memcpy(image, saved, saved_bytes);
+         return VK_ERROR_INVALID_EXTERNAL_HANDLE;
+      }
+   }
+
+   amdgpu_wddm_log("BC250 shared import (%s): the layouts agree (linear %u swizzle %u pitch %" PRIu64
+                   " size %" PRIu64 ")\n",
+                   where, importer.is_linear, importer.swizzle_mode, importer.pitch_bytes,
+                   importer.surf_size);
    return VK_SUCCESS;
 }
 
@@ -1859,6 +2131,24 @@ radv_BindImageMemory2(VkDevice _device, uint32_t bindInfoCount, const VkBindImag
          offset = 0;
       }
 #endif
+
+      /* BD-118. An import without a dedicated allocation reaches its image only here. The
+       * dedicated case was settled in radv_alloc_memory, where this returns at once because the
+       * layouts already agree.
+       */
+      if (mem && mem->bo && mem->import_handle_type && !image->disjoint && device->ws->buffer_get_metadata) {
+         struct radeon_bo_metadata md;
+         VkResult result;
+
+         memset(&md, 0, sizeof(md));
+         device->ws->buffer_get_metadata(device->ws, mem->bo, &md);
+         result = radv_image_apply_shared_layout(device, image, &md, mem->bo->size, offset, "bind");
+         if (result != VK_SUCCESS) {
+            if (status)
+               *status->pResult = result;
+            return vk_error(device, result);
+         }
+      }
 
       const VkBindImagePlaneMemoryInfo *plane_info = NULL;
       uint32_t bind_idx = 0;
