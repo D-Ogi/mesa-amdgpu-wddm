@@ -1,0 +1,13 @@
+#version 460
+#extension GL_EXT_buffer_reference : require
+layout(local_size_x=64) in;
+layout(buffer_reference,std430) buffer Output { float data[]; };
+layout(push_constant) uniform Params { Output outbuf; uint count; };
+void main() {
+    uint i = gl_GlobalInvocationID.x;
+    if (i >= count) return;
+    float x = float(i) * 0.001;
+    for (uint n = 0; n < 32; ++n)
+        x = sin(x) + cos(x * 0.75) + float(n) * 0.0001;
+    outbuf.data[i] = x;
+}
