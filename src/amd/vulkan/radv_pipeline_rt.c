@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: MIT
  */
 
+#include "util/u_compile_stack.h"
 #include "nir/nir.h"
 #include "nir/nir_builder.h"
 #include "nir/nir_serialize.h"
@@ -1499,11 +1500,51 @@ radv_destroy_ray_tracing_pipeline(struct radv_device *device, struct radv_ray_tr
       radv_shader_unref(device, pipeline->base.base.shaders[MESA_SHADER_INTERSECTION]);
 }
 
+/* Keep this wrapper small: even the implementation's prologue must run on
+ * the compiler stack, including linked stages and lazy shader variants. */
+struct radv_CreateRayTracingPipelinesKHR_stack_args {
+   VkDevice _device;
+   VkDeferredOperationKHR deferredOperation;
+   VkPipelineCache pipelineCache;
+   uint32_t count;
+   const VkRayTracingPipelineCreateInfoKHR *pCreateInfos;
+   const VkAllocationCallbacks *pAllocator;
+   VkPipeline *pPipelines;
+   VkResult result;
+};
+
+static ATTRIBUTE_NOINLINE VkResult
+radv_CreateRayTracingPipelinesKHR_on_stack(VkDevice _device, VkDeferredOperationKHR deferredOperation, VkPipelineCache pipelineCache, uint32_t count, const VkRayTracingPipelineCreateInfoKHR *pCreateInfos, const VkAllocationCallbacks *pAllocator, VkPipeline *pPipelines);
+
+static void
+radv_CreateRayTracingPipelinesKHR_stack_call(void *data)
+{
+   struct radv_CreateRayTracingPipelinesKHR_stack_args *args = data;
+   args->result = radv_CreateRayTracingPipelinesKHR_on_stack(args->_device, args->deferredOperation, args->pipelineCache, args->count, args->pCreateInfos, args->pAllocator, args->pPipelines);
+}
+
 VKAPI_ATTR VkResult VKAPI_CALL
-radv_CreateRayTracingPipelinesKHR(VkDevice _device, VkDeferredOperationKHR deferredOperation,
-                                  VkPipelineCache pipelineCache, uint32_t count,
-                                  const VkRayTracingPipelineCreateInfoKHR *pCreateInfos,
-                                  const VkAllocationCallbacks *pAllocator, VkPipeline *pPipelines)
+radv_CreateRayTracingPipelinesKHR(VkDevice _device, VkDeferredOperationKHR deferredOperation, VkPipelineCache pipelineCache, uint32_t count, const VkRayTracingPipelineCreateInfoKHR *pCreateInfos, const VkAllocationCallbacks *pAllocator, VkPipeline *pPipelines)
+{
+   struct radv_CreateRayTracingPipelinesKHR_stack_args args = {
+      ._device = _device,
+      .deferredOperation = deferredOperation,
+      .pipelineCache = pipelineCache,
+      .count = count,
+      .pCreateInfos = pCreateInfos,
+      .pAllocator = pAllocator,
+      .pPipelines = pPipelines,
+   };
+   if (!util_call_on_compile_stack("radv_CreateRayTracingPipelinesKHR", radv_CreateRayTracingPipelinesKHR_stack_call, &args)) {
+      for (uint32_t i = 0; i < count; ++i)
+         pPipelines[i] = VK_NULL_HANDLE;
+      return VK_ERROR_OUT_OF_HOST_MEMORY;
+   }
+   return args.result;
+}
+
+static ATTRIBUTE_NOINLINE VkResult
+radv_CreateRayTracingPipelinesKHR_on_stack(VkDevice _device, VkDeferredOperationKHR deferredOperation, VkPipelineCache pipelineCache, uint32_t count, const VkRayTracingPipelineCreateInfoKHR *pCreateInfos, const VkAllocationCallbacks *pAllocator, VkPipeline *pPipelines)
 {
    VkResult result = VK_SUCCESS;
 

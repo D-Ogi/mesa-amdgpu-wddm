@@ -8,6 +8,7 @@
  * SPDX-License-Identifier: MIT
  */
 
+#include "util/u_compile_stack.h"
 #include "radv_shader.h"
 #include "meta/radv_meta.h"
 #include "nir/nir.h"
@@ -3586,8 +3587,37 @@ radv_shader_dump_asm(const struct radv_compiler_info *compiler_info, struct radv
    }
 }
 
+/* Keep this wrapper small: even the implementation's prologue must run on
+ * the compiler stack, including linked stages and lazy shader variants. */
+struct radv_create_trap_handler_shader_stack_args {
+   struct radv_device *device;
+   struct radv_shader * result;
+};
+
+static ATTRIBUTE_NOINLINE struct radv_shader *
+radv_create_trap_handler_shader_on_stack(struct radv_device *device);
+
+static void
+radv_create_trap_handler_shader_stack_call(void *data)
+{
+   struct radv_create_trap_handler_shader_stack_args *args = data;
+   args->result = radv_create_trap_handler_shader_on_stack(args->device);
+}
+
 struct radv_shader *
 radv_create_trap_handler_shader(struct radv_device *device)
+{
+   struct radv_create_trap_handler_shader_stack_args args = {
+      .device = device,
+   };
+   if (!util_call_on_compile_stack("radv_create_trap_handler_shader", radv_create_trap_handler_shader_stack_call, &args)) {
+      return NULL;
+   }
+   return args.result;
+}
+
+static ATTRIBUTE_NOINLINE struct radv_shader *
+radv_create_trap_handler_shader_on_stack(struct radv_device *device)
 {
    const struct radv_physical_device *pdev = radv_device_physical(device);
    const struct radv_instance *instance = radv_physical_device_instance(pdev);
@@ -3715,8 +3745,39 @@ done:
    return prolog;
 }
 
+/* Keep this wrapper small: even the implementation's prologue must run on
+ * the compiler stack, including linked stages and lazy shader variants. */
+struct radv_create_vs_prolog_stack_args {
+   struct radv_device *device;
+   const struct radv_vs_prolog_key *key;
+   struct radv_shader_part * result;
+};
+
+static ATTRIBUTE_NOINLINE struct radv_shader_part *
+radv_create_vs_prolog_on_stack(struct radv_device *device, const struct radv_vs_prolog_key *key);
+
+static void
+radv_create_vs_prolog_stack_call(void *data)
+{
+   struct radv_create_vs_prolog_stack_args *args = data;
+   args->result = radv_create_vs_prolog_on_stack(args->device, args->key);
+}
+
 struct radv_shader_part *
 radv_create_vs_prolog(struct radv_device *device, const struct radv_vs_prolog_key *key)
+{
+   struct radv_create_vs_prolog_stack_args args = {
+      .device = device,
+      .key = key,
+   };
+   if (!util_call_on_compile_stack("radv_create_vs_prolog", radv_create_vs_prolog_stack_call, &args)) {
+      return NULL;
+   }
+   return args.result;
+}
+
+static ATTRIBUTE_NOINLINE struct radv_shader_part *
+radv_create_vs_prolog_on_stack(struct radv_device *device, const struct radv_vs_prolog_key *key)
 {
    const struct radv_compiler_info *compiler_info = &device->compiler_info;
    const struct radv_physical_device *pdev = radv_device_physical(device);
@@ -3785,9 +3846,41 @@ fail:
    return NULL;
 }
 
+/* Keep this wrapper small: even the implementation's prologue must run on
+ * the compiler stack, including linked stages and lazy shader variants. */
+struct radv_create_ps_epilog_stack_args {
+   struct radv_device *device;
+   const struct radv_ps_epilog_key *key;
+   struct radv_shader_part_binary **binary_out;
+   struct radv_shader_part * result;
+};
+
+static ATTRIBUTE_NOINLINE struct radv_shader_part *
+radv_create_ps_epilog_on_stack(struct radv_device *device, const struct radv_ps_epilog_key *key, struct radv_shader_part_binary **binary_out);
+
+static void
+radv_create_ps_epilog_stack_call(void *data)
+{
+   struct radv_create_ps_epilog_stack_args *args = data;
+   args->result = radv_create_ps_epilog_on_stack(args->device, args->key, args->binary_out);
+}
+
 struct radv_shader_part *
-radv_create_ps_epilog(struct radv_device *device, const struct radv_ps_epilog_key *key,
-                      struct radv_shader_part_binary **binary_out)
+radv_create_ps_epilog(struct radv_device *device, const struct radv_ps_epilog_key *key, struct radv_shader_part_binary **binary_out)
+{
+   struct radv_create_ps_epilog_stack_args args = {
+      .device = device,
+      .key = key,
+      .binary_out = binary_out,
+   };
+   if (!util_call_on_compile_stack("radv_create_ps_epilog", radv_create_ps_epilog_stack_call, &args)) {
+      return NULL;
+   }
+   return args.result;
+}
+
+static ATTRIBUTE_NOINLINE struct radv_shader_part *
+radv_create_ps_epilog_on_stack(struct radv_device *device, const struct radv_ps_epilog_key *key, struct radv_shader_part_binary **binary_out)
 {
    const struct radv_compiler_info *compiler_info = &device->compiler_info;
    const struct radv_physical_device *pdev = radv_device_physical(device);
