@@ -160,6 +160,8 @@ files_mesa_util = files(
   'u_mm.c',
   'u_mm.h',
   'u_pack_color.h',
+  'u_compile_stack.c',
+  'u_compile_stack.h',
   'u_debug.c',
   'u_debug.h',
   'u_debug_memory.c',
@@ -457,6 +459,14 @@ if with_any_rust
 endif
 
 if with_tests
+  if host_machine.system() == 'windows' and cc.get_id() == 'msvc'
+    test('compile_stack_win32',
+      executable('compile_stack_win32', 'tests/compile_stack_win32.c',
+        link_args: ['/STACK:1048576'],
+      ),
+      suite: ['util'], timeout: 60,
+    )
+  endif
   # DRI_CONF macros use designated initializers (required for union
   # initializaiton), so we need c++2a since gtest forces us to use c++
   if host_machine.system() != 'windows' and cpp.has_argument('-std=c++2a')
