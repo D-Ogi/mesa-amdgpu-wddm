@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: MIT
  */
 
+#include "util/u_compile_stack.h"
 #include "vk_log.h"
 
 #include "util/blob.h"
@@ -663,9 +664,47 @@ struct stage_idx {
    uint32_t idx;
 };
 
+/* Keep this wrapper small: even the implementation's prologue must run on
+ * the compiler stack, including linked stages and lazy shader variants. */
+struct radv_CreateShadersEXT_stack_args {
+   VkDevice _device;
+   uint32_t createInfoCount;
+   const VkShaderCreateInfoEXT *pCreateInfos;
+   const VkAllocationCallbacks *pAllocator;
+   VkShaderEXT *pShaders;
+   VkResult result;
+};
+
+static ATTRIBUTE_NOINLINE VkResult
+radv_CreateShadersEXT_on_stack(VkDevice _device, uint32_t createInfoCount, const VkShaderCreateInfoEXT *pCreateInfos, const VkAllocationCallbacks *pAllocator, VkShaderEXT *pShaders);
+
+static void
+radv_CreateShadersEXT_stack_call(void *data)
+{
+   struct radv_CreateShadersEXT_stack_args *args = data;
+   args->result = radv_CreateShadersEXT_on_stack(args->_device, args->createInfoCount, args->pCreateInfos, args->pAllocator, args->pShaders);
+}
+
 VKAPI_ATTR VkResult VKAPI_CALL
-radv_CreateShadersEXT(VkDevice _device, uint32_t createInfoCount, const VkShaderCreateInfoEXT *pCreateInfos,
-                      const VkAllocationCallbacks *pAllocator, VkShaderEXT *pShaders)
+radv_CreateShadersEXT(VkDevice _device, uint32_t createInfoCount, const VkShaderCreateInfoEXT *pCreateInfos, const VkAllocationCallbacks *pAllocator, VkShaderEXT *pShaders)
+{
+   struct radv_CreateShadersEXT_stack_args args = {
+      ._device = _device,
+      .createInfoCount = createInfoCount,
+      .pCreateInfos = pCreateInfos,
+      .pAllocator = pAllocator,
+      .pShaders = pShaders,
+   };
+   if (!util_call_on_compile_stack("radv_CreateShadersEXT", radv_CreateShadersEXT_stack_call, &args)) {
+      for (uint32_t i = 0; i < createInfoCount; ++i)
+         pShaders[i] = VK_NULL_HANDLE;
+      return VK_ERROR_OUT_OF_HOST_MEMORY;
+   }
+   return args.result;
+}
+
+static ATTRIBUTE_NOINLINE VkResult
+radv_CreateShadersEXT_on_stack(VkDevice _device, uint32_t createInfoCount, const VkShaderCreateInfoEXT *pCreateInfos, const VkAllocationCallbacks *pAllocator, VkShaderEXT *pShaders)
 {
    VkResult final_result = VK_SUCCESS;
 
