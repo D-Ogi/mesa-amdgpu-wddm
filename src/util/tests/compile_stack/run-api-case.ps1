@@ -42,7 +42,10 @@ try {
   $stdout=$process.StandardOutput.ReadToEndAsync()
   $stderr=$process.StandardError.ReadToEndAsync()
   $timedOut=!$process.WaitForExit($TimeoutSeconds*1000)
-  if ($timedOut) { $process.Kill(); $process.WaitForExit() }
+  if ($timedOut) {
+    $process.Kill()
+    if (!$process.WaitForExit(5000)) { throw "Timed-out process $($process.Id) did not exit after termination" }
+  }
   [IO.File]::WriteAllText((Join-Path $Output 'stdout.txt'),$stdout.GetAwaiter().GetResult())
   [IO.File]::WriteAllText((Join-Path $Output 'stderr.txt'),$stderr.GetAwaiter().GetResult())
   $expected=0
