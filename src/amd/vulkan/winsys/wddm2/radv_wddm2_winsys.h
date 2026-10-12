@@ -46,6 +46,7 @@ struct radv_wddm2_winsys {
 
    uint32_t refcount;
    const void *cache_key;
+   bool cache_hosted;
    struct bc250_host host;
 
    struct radeon_info gpu_info;
