@@ -62,8 +62,22 @@ static unsigned long memdbg_no = 0;
  */
 
 
-static HRESULT
-OpenAdapterCommon(__inout D3D10DDIARG_OPENADAPTER *pOpenData)   // IN
+#include "util/u_compile_stack.h"
+static ATTRIBUTE_NOINLINE HRESULT OpenAdapterCommonOnCompilerStack(D3D10DDIARG_OPENADAPTER *);
+static HRESULT OpenAdapterCommon(D3D10DDIARG_OPENADAPTER *info)
+{
+   struct Args { D3D10DDIARG_OPENADAPTER *info; HRESULT result; } args = {info, E_OUTOFMEMORY};
+   auto call = [](void *opaque) {
+      auto *args = static_cast<Args *>(opaque);
+      args->result = OpenAdapterCommonOnCompilerStack(args->info);
+   };
+   if (!util_call_on_compile_stack("D3D OpenAdapter", call, &args))
+      return E_OUTOFMEMORY;
+   return args.result;
+}
+
+static ATTRIBUTE_NOINLINE HRESULT
+OpenAdapterCommonOnCompilerStack(__inout D3D10DDIARG_OPENADAPTER *pOpenData)   // IN
 {
 #if 0
    if (numAdapters == 0) {
