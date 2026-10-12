@@ -99,13 +99,19 @@
    shader_replacement.h can be generated at build time, or copied
    from an external folder, or any other method.
 */
+#define SHADER_REPLACEMENT_COUNT ARRAY_SIZE(shader_replacements)
 #else
 struct _shader_replacement {
    const char *app;
    const char *blake3;
    mesa_shader_stage stage;
 };
-struct _shader_replacement shader_replacements[0];
+/* There is no replacement list in this build. MSVC rejects an array of
+ * constant size 0 at file scope (C2466), so keep one unused element and an
+ * explicit count of zero: the search loop below then runs zero times, as it
+ * does with a zero-sized array. */
+struct _shader_replacement shader_replacements[1];
+#define SHADER_REPLACEMENT_COUNT 0
 
 static char *try_direct_replace(const char *app, const char *source)
 {
@@ -2026,7 +2032,7 @@ _mesa_read_shader_source(const mesa_shader_stage stage, const char *source,
       if (new_source)
          return new_source;
 
-      for (size_t i = 0; i < ARRAY_SIZE(shader_replacements); i++) {
+      for (size_t i = 0; i < SHADER_REPLACEMENT_COUNT; i++) {
          if (stage != shader_replacements[i].stage)
             continue;
 
