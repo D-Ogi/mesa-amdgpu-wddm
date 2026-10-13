@@ -120,6 +120,9 @@ radv_winsys_cs_get_new_ib(struct radv_winsys_cs *cs, uint32_t ib_size)
    cs->ib_mapped = radv_buffer_map(cs->ws, cs->ib_buffer);
    if (!cs->ib_mapped) {
       cs->ws->buffer_destroy(cs->ws, cs->ib_buffer);
+      /* BD-149: the error path of radv_winsys_cs_init destroys cs->ib_buffer again (a Lock2 that fails after
+       * CreateAllocation2 succeeded, as on a device removed between the two calls). */
+      cs->ib_buffer = NULL;
       return VK_ERROR_OUT_OF_DEVICE_MEMORY;
    }
 
