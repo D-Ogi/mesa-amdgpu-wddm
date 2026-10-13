@@ -75,8 +75,10 @@ CreateEmptyShader(Device *pDevice,
    ureg_END(ureg);
 
    tokens = ureg_get_tokens(ureg, &nr_tokens);
-   if (!tokens)
+   if (!tokens) {
+      ureg_destroy(ureg);
       return NULL;
+   }
 
    ureg_destroy(ureg);
 
@@ -99,8 +101,6 @@ CreateEmptyShader(Device *pDevice,
       handle = NULL;
       assert(0);
    }
-   assert(handle);
-
    ureg_free_tokens(tokens);
 
    return handle;

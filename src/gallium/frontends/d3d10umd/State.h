@@ -89,8 +89,11 @@ Bc250ShadowCharge(UINT width, UINT height)
    return (row * ((height + 3u) & ~3u) + 4095) & ~4095ull;
 }
 
+class Bc250CompileDispatch;
+
 struct Device
 {
+   Bc250CompileDispatch *compile_dispatch;
    UINT64 profileDrawTicks, profileDrawMax, profileDrawCalls, profileLastPresent;
    UINT profilePresents;
    UINT64 profileShadowTicks, profileShadowBytes, profileShadowRefreshes;

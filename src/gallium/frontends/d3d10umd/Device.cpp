@@ -48,49 +48,20 @@
 #include "util/u_framebuffer.h"
 
 
-#include "util/u_compile_stack.h"
+#include "CompileDispatch.h"
 #include <tuple>
 #include <type_traits>
 static Device *Bc250CompilerEntryDevice(D3D10DDI_HDEVICE h) { return CastDevice(h); }
 template <typename A> static Device *Bc250CompilerEntryDevice(A *a) { return CastDevice(a->hDevice); }
-template <auto F, bool Compiler = true> struct Bc250CompilerEntry;
-template <typename R, typename A, typename... Rest, R (APIENTRY *F)(A, Rest...), bool Compiler>
-struct Bc250CompilerEntry<F, Compiler> {
-   struct Arguments {
-      A first;
-      std::tuple<Rest...> rest;
-      std::conditional_t<std::is_void_v<R>, bool, R> result;
-   };
-   static ATTRIBUTE_NOINLINE void OnCompilerStack(void *opaque) {
-      auto *args = static_cast<Arguments *>(opaque);
-      auto invoke = [&](Rest... rest) { return F(args->first, rest...); };
-      if constexpr (std::is_void_v<R>)
-         std::apply(invoke, args->rest);
-      else
-         args->result = std::apply(invoke, args->rest);
-   }
-   static R APIENTRY Call(A a, Rest... rest) {
-      if constexpr (Compiler) {
-         /* Covers D3D bytecode translation, llvmpipe NIR/LLVM and lazy compile
-          * from draw/blit, before any of their implementation frames exist.
-          * Callbacks stay on the invoking OS thread.
-          */
-         Arguments args = {a, std::make_tuple(rest...), {}};
-         if (!util_call_on_compile_stack(__FUNCSIG__, OnCompilerStack, &args)) {
-            Device *device = Bc250CompilerEntryDevice(a);
-            device->UMCallbacks.pfnSetErrorCb(device->hRTCoreLayer, E_OUTOFMEMORY);
-            if constexpr (std::is_same_v<R, HRESULT>)
-               return E_OUTOFMEMORY;
-            else
-               return R();
-         }
-         if constexpr (!std::is_void_v<R>)
-            return args.result;
-      } else {
-         return F(a, rest...);
-      }
-   }
+static void APIENTRY DestroyDevice(D3D10DDI_HDEVICE hDevice);
+struct Bc250CompilerTraits {
+   template<typename A> static Device *device(A a) { return Bc250CompilerEntryDevice(a); }
+   struct Scope { explicit Scope(Device *) {} };
 };
+template<auto F, bool Compiler = true>
+using Bc250CompilerEntry = Bc250DdiEntry<F, Bc250CompilerTraits, Compiler,
+   std::is_same_v<std::integral_constant<decltype(F), F>,
+                  std::integral_constant<decltype(&DestroyDevice), &DestroyDevice>>>;
 
 static void APIENTRY DestroyDevice(D3D10DDI_HDEVICE hDevice);
 static void APIENTRY RelocateDeviceFuncs(D3D10DDI_HDEVICE hDevice,
@@ -137,6 +108,32 @@ CalcPrivateDeviceSize(D3D10DDI_HADAPTER hAdapter,                          // IN
  * ----------------------------------------------------------------------
  */
 
+struct Bc250CreateGuard {
+   Device *device;
+   bool complete = false;
+   explicit Bc250CreateGuard(Device *value) : device(value) {}
+   ~Bc250CreateGuard() {
+      if (complete) return;
+      auto *pipe = device->pipe;
+      if (pipe) {
+         pipe->bind_fs_state(pipe, NULL);
+         pipe->bind_vs_state(pipe, NULL);
+         if (device->cso) {
+            cso_unbind_context(device->cso);
+            cso_destroy_context(device->cso);
+         }
+         if (device->empty_fs) DeleteEmptyShader(device, MESA_SHADER_FRAGMENT, device->empty_fs);
+         if (device->empty_vs) DeleteEmptyShader(device, MESA_SHADER_VERTEX, device->empty_vs);
+         pipe->destroy(pipe);
+      }
+      if (device->hContext) {
+         D3DDDICB_DESTROYCONTEXT destroy = {};
+         destroy.hContext = device->hContext;
+         device->KTCallbacks.pfnDestroyContextCb(device->hDevice, &destroy);
+      }
+   }
+};
+
 static ATTRIBUTE_NOINLINE HRESULT APIENTRY
 CreateDeviceOnCompilerStack(D3D10DDI_HADAPTER hAdapter,                 // IN
              __in D3D10DDIARG_CREATEDEVICE *pCreateData) // IN
@@ -173,6 +170,13 @@ CreateDeviceOnCompilerStack(D3D10DDI_HADAPTER hAdapter,                 // IN
 
    Device *pDevice = CastDevice(pCreateData->hDrvDevice);
    memset(pDevice, 0, sizeof *pDevice);
+   pDevice->compile_dispatch = Bc250CompileDispatch::active;
+   pDevice->hRTCoreLayer = pCreateData->hRTCoreLayer;
+   pDevice->hDevice = (HANDLE)pCreateData->hRTDevice.handle;
+   pDevice->KTCallbacks = *pCreateData->pKTCallbacks;
+   pDevice->UMCallbacks = *pCreateData->pUMCallbacks;
+   pDevice->pDXGIBaseCallbacks = pCreateData->DXGIBaseDDI.pDXGIBaseCallbacks;
+   Bc250CreateGuard createGuard(pDevice);
 
    // E26: DWM requests runtime synchronization while creating its primary,
    // before the first Present. Register a virtual context at device creation
@@ -189,23 +193,21 @@ CreateDeviceOnCompilerStack(D3D10DDI_HADAPTER hAdapter,                 // IN
    struct pipe_screen *screen = pAdapter->screen;
    DebugPrintf("BC250 Renderer: %s\n", screen->get_name(screen));
    struct pipe_context *pipe = screen->context_create(screen, NULL, 0);
+   if (!pipe) return E_OUTOFMEMORY;
    pDevice->pipe = pipe;
    pDevice->cso = cso_create_context(pipe, CSO_NO_VBUF);
+   if (!pDevice->cso) return E_OUTOFMEMORY;
 
    pDevice->empty_vs = CreateEmptyShader(pDevice, MESA_SHADER_VERTEX);
+   if (!pDevice->empty_vs) return E_OUTOFMEMORY;
    pDevice->empty_fs = CreateEmptyShader(pDevice, MESA_SHADER_FRAGMENT);
+   if (!pDevice->empty_fs) return E_OUTOFMEMORY;
 
    pipe->bind_vs_state(pipe, pDevice->empty_vs);
    pipe->bind_fs_state(pipe, pDevice->empty_fs);
 
    pDevice->max_dual_source_render_targets =
          screen->caps.max_dual_source_render_targets;
-
-   pDevice->hRTCoreLayer = pCreateData->hRTCoreLayer;
-   pDevice->hDevice = (HANDLE)pCreateData->hRTDevice.handle;
-   pDevice->KTCallbacks = *pCreateData->pKTCallbacks;
-   pDevice->UMCallbacks = *pCreateData->pUMCallbacks;
-   pDevice->pDXGIBaseCallbacks = pCreateData->DXGIBaseDDI.pDXGIBaseCallbacks;
 
    pDevice->draw_so_target = NULL;
 
@@ -220,11 +222,11 @@ CreateDeviceOnCompilerStack(D3D10DDI_HADAPTER hAdapter,                 // IN
     */
    D3D10DDI_DEVICEFUNCS *pDeviceFuncs = pCreateData->pDeviceFuncs;
    pDeviceFuncs->pfnDefaultConstantBufferUpdateSubresourceUP = Bc250CompilerEntry<ResourceUpdateSubResourceUP>::Call;
-   pDeviceFuncs->pfnVsSetConstantBuffers = VsSetConstantBuffers;
-   pDeviceFuncs->pfnPsSetShaderResources = PsSetShaderResources;
-   pDeviceFuncs->pfnPsSetShader = PsSetShader;
-   pDeviceFuncs->pfnPsSetSamplers = PsSetSamplers;
-   pDeviceFuncs->pfnVsSetShader = VsSetShader;
+   pDeviceFuncs->pfnVsSetConstantBuffers = Bc250CompilerEntry<VsSetConstantBuffers, false>::Call;
+   pDeviceFuncs->pfnPsSetShaderResources = Bc250CompilerEntry<PsSetShaderResources, false>::Call;
+   pDeviceFuncs->pfnPsSetShader = Bc250CompilerEntry<PsSetShader>::Call;
+   pDeviceFuncs->pfnPsSetSamplers = Bc250CompilerEntry<PsSetSamplers, false>::Call;
+   pDeviceFuncs->pfnVsSetShader = Bc250CompilerEntry<VsSetShader>::Call;
    pDeviceFuncs->pfnDrawIndexed = Bc250CompilerEntry<DrawIndexed>::Call;
    pDeviceFuncs->pfnDraw = Bc250CompilerEntry<Draw>::Call;
    pDeviceFuncs->pfnDynamicIABufferMapNoOverwrite = Bc250CompilerEntry<ResourceMap>::Call;
@@ -232,103 +234,103 @@ CreateDeviceOnCompilerStack(D3D10DDI_HADAPTER hAdapter,                 // IN
    pDeviceFuncs->pfnDynamicConstantBufferMapDiscard = Bc250CompilerEntry<ResourceMap>::Call;
    pDeviceFuncs->pfnDynamicIABufferMapDiscard = Bc250CompilerEntry<ResourceMap>::Call;
    pDeviceFuncs->pfnDynamicConstantBufferUnmap = Bc250CompilerEntry<ResourceUnmap>::Call;
-   pDeviceFuncs->pfnPsSetConstantBuffers = PsSetConstantBuffers;
-   pDeviceFuncs->pfnIaSetInputLayout = IaSetInputLayout;
-   pDeviceFuncs->pfnIaSetVertexBuffers = IaSetVertexBuffers;
-   pDeviceFuncs->pfnIaSetIndexBuffer = IaSetIndexBuffer;
+   pDeviceFuncs->pfnPsSetConstantBuffers = Bc250CompilerEntry<PsSetConstantBuffers, false>::Call;
+   pDeviceFuncs->pfnIaSetInputLayout = Bc250CompilerEntry<IaSetInputLayout, false>::Call;
+   pDeviceFuncs->pfnIaSetVertexBuffers = Bc250CompilerEntry<IaSetVertexBuffers, false>::Call;
+   pDeviceFuncs->pfnIaSetIndexBuffer = Bc250CompilerEntry<IaSetIndexBuffer, false>::Call;
    pDeviceFuncs->pfnDrawIndexedInstanced = Bc250CompilerEntry<DrawIndexedInstanced>::Call;
    pDeviceFuncs->pfnDrawInstanced = Bc250CompilerEntry<DrawInstanced>::Call;
    pDeviceFuncs->pfnDynamicResourceMapDiscard = Bc250CompilerEntry<ResourceMap>::Call;
    pDeviceFuncs->pfnDynamicResourceUnmap = Bc250CompilerEntry<ResourceUnmap>::Call;
-   pDeviceFuncs->pfnGsSetConstantBuffers = GsSetConstantBuffers;
-   pDeviceFuncs->pfnGsSetShader = GsSetShader;
-   pDeviceFuncs->pfnIaSetTopology = IaSetTopology;
+   pDeviceFuncs->pfnGsSetConstantBuffers = Bc250CompilerEntry<GsSetConstantBuffers, false>::Call;
+   pDeviceFuncs->pfnGsSetShader = Bc250CompilerEntry<GsSetShader>::Call;
+   pDeviceFuncs->pfnIaSetTopology = Bc250CompilerEntry<IaSetTopology, false>::Call;
    pDeviceFuncs->pfnStagingResourceMap = Bc250CompilerEntry<ResourceMap>::Call;
    pDeviceFuncs->pfnStagingResourceUnmap = Bc250CompilerEntry<ResourceUnmap>::Call;
-   pDeviceFuncs->pfnVsSetShaderResources = VsSetShaderResources;
-   pDeviceFuncs->pfnVsSetSamplers = VsSetSamplers;
-   pDeviceFuncs->pfnGsSetShaderResources = GsSetShaderResources;
-   pDeviceFuncs->pfnGsSetSamplers = GsSetSamplers;
-   pDeviceFuncs->pfnSetRenderTargets = SetRenderTargets;
-   pDeviceFuncs->pfnShaderResourceViewReadAfterWriteHazard = ShaderResourceViewReadAfterWriteHazard;
-   pDeviceFuncs->pfnResourceReadAfterWriteHazard = ResourceReadAfterWriteHazard;
-   pDeviceFuncs->pfnSetBlendState = SetBlendState;
-   pDeviceFuncs->pfnSetDepthStencilState = SetDepthStencilState;
-   pDeviceFuncs->pfnSetRasterizerState = SetRasterizerState;
-   pDeviceFuncs->pfnQueryEnd = QueryEnd;
-   pDeviceFuncs->pfnQueryBegin = QueryBegin;
+   pDeviceFuncs->pfnVsSetShaderResources = Bc250CompilerEntry<VsSetShaderResources, false>::Call;
+   pDeviceFuncs->pfnVsSetSamplers = Bc250CompilerEntry<VsSetSamplers, false>::Call;
+   pDeviceFuncs->pfnGsSetShaderResources = Bc250CompilerEntry<GsSetShaderResources, false>::Call;
+   pDeviceFuncs->pfnGsSetSamplers = Bc250CompilerEntry<GsSetSamplers, false>::Call;
+   pDeviceFuncs->pfnSetRenderTargets = Bc250CompilerEntry<SetRenderTargets, false>::Call;
+   pDeviceFuncs->pfnShaderResourceViewReadAfterWriteHazard = Bc250CompilerEntry<ShaderResourceViewReadAfterWriteHazard, false>::Call;
+   pDeviceFuncs->pfnResourceReadAfterWriteHazard = Bc250CompilerEntry<ResourceReadAfterWriteHazard, false>::Call;
+   pDeviceFuncs->pfnSetBlendState = Bc250CompilerEntry<SetBlendState, false>::Call;
+   pDeviceFuncs->pfnSetDepthStencilState = Bc250CompilerEntry<SetDepthStencilState, false>::Call;
+   pDeviceFuncs->pfnSetRasterizerState = Bc250CompilerEntry<SetRasterizerState, false>::Call;
+   pDeviceFuncs->pfnQueryEnd = Bc250CompilerEntry<QueryEnd, false>::Call;
+   pDeviceFuncs->pfnQueryBegin = Bc250CompilerEntry<QueryBegin, false>::Call;
    pDeviceFuncs->pfnResourceCopyRegion = Bc250CompilerEntry<ResourceCopyRegion>::Call;
    pDeviceFuncs->pfnResourceUpdateSubresourceUP = Bc250CompilerEntry<ResourceUpdateSubResourceUP>::Call;
-   pDeviceFuncs->pfnSoSetTargets = SoSetTargets;
+   pDeviceFuncs->pfnSoSetTargets = Bc250CompilerEntry<SoSetTargets, false>::Call;
    pDeviceFuncs->pfnDrawAuto = Bc250CompilerEntry<DrawAuto>::Call;
-   pDeviceFuncs->pfnSetViewports = SetViewports;
-   pDeviceFuncs->pfnSetScissorRects = SetScissorRects;
+   pDeviceFuncs->pfnSetViewports = Bc250CompilerEntry<SetViewports, false>::Call;
+   pDeviceFuncs->pfnSetScissorRects = Bc250CompilerEntry<SetScissorRects, false>::Call;
    pDeviceFuncs->pfnClearRenderTargetView = Bc250CompilerEntry<ClearRenderTargetView>::Call;
    pDeviceFuncs->pfnClearDepthStencilView = Bc250CompilerEntry<ClearDepthStencilView>::Call;
-   pDeviceFuncs->pfnSetPredication = SetPredication;
-   pDeviceFuncs->pfnQueryGetData = QueryGetData;
+   pDeviceFuncs->pfnSetPredication = Bc250CompilerEntry<SetPredication, false>::Call;
+   pDeviceFuncs->pfnQueryGetData = Bc250CompilerEntry<QueryGetData>::Call;
    pDeviceFuncs->pfnFlush = Bc250CompilerEntry<Flush>::Call;
    pDeviceFuncs->pfnGenMips = Bc250CompilerEntry<GenMips>::Call;
    pDeviceFuncs->pfnResourceCopy = Bc250CompilerEntry<ResourceCopy>::Call;
    pDeviceFuncs->pfnResourceResolveSubresource = Bc250CompilerEntry<ResourceResolveSubResource>::Call;
    pDeviceFuncs->pfnResourceMap = Bc250CompilerEntry<ResourceMap>::Call;
    pDeviceFuncs->pfnResourceUnmap = Bc250CompilerEntry<ResourceUnmap>::Call;
-   pDeviceFuncs->pfnResourceIsStagingBusy = ResourceIsStagingBusy;
-   pDeviceFuncs->pfnRelocateDeviceFuncs = RelocateDeviceFuncs;
-   pDeviceFuncs->pfnCalcPrivateResourceSize = CalcPrivateResourceSize;
-   pDeviceFuncs->pfnCalcPrivateOpenedResourceSize = CalcPrivateOpenedResourceSize;
+   pDeviceFuncs->pfnResourceIsStagingBusy = Bc250CompilerEntry<ResourceIsStagingBusy, false>::Call;
+   pDeviceFuncs->pfnRelocateDeviceFuncs = Bc250CompilerEntry<RelocateDeviceFuncs, false>::Call;
+   pDeviceFuncs->pfnCalcPrivateResourceSize = Bc250CompilerEntry<CalcPrivateResourceSize, false>::Call;
+   pDeviceFuncs->pfnCalcPrivateOpenedResourceSize = Bc250CompilerEntry<CalcPrivateOpenedResourceSize, false>::Call;
    pDeviceFuncs->pfnCreateResource = Bc250CompilerEntry<CreateResource>::Call;
    pDeviceFuncs->pfnOpenResource = Bc250CompilerEntry<OpenResource>::Call;
-   pDeviceFuncs->pfnDestroyResource = DestroyResource;
-   pDeviceFuncs->pfnCalcPrivateShaderResourceViewSize = CalcPrivateShaderResourceViewSize;
-   pDeviceFuncs->pfnCreateShaderResourceView = CreateShaderResourceView;
-   pDeviceFuncs->pfnDestroyShaderResourceView = DestroyShaderResourceView;
-   pDeviceFuncs->pfnCalcPrivateRenderTargetViewSize = CalcPrivateRenderTargetViewSize;
-   pDeviceFuncs->pfnCreateRenderTargetView = CreateRenderTargetView;
-   pDeviceFuncs->pfnDestroyRenderTargetView = DestroyRenderTargetView;
-   pDeviceFuncs->pfnCalcPrivateDepthStencilViewSize = CalcPrivateDepthStencilViewSize;
-   pDeviceFuncs->pfnCreateDepthStencilView = CreateDepthStencilView;
-   pDeviceFuncs->pfnDestroyDepthStencilView = DestroyDepthStencilView;
-   pDeviceFuncs->pfnCalcPrivateElementLayoutSize = CalcPrivateElementLayoutSize;
-   pDeviceFuncs->pfnCreateElementLayout = CreateElementLayout;
-   pDeviceFuncs->pfnDestroyElementLayout = DestroyElementLayout;
-   pDeviceFuncs->pfnCalcPrivateBlendStateSize = CalcPrivateBlendStateSize;
-   pDeviceFuncs->pfnCreateBlendState = CreateBlendState;
-   pDeviceFuncs->pfnDestroyBlendState = DestroyBlendState;
-   pDeviceFuncs->pfnCalcPrivateDepthStencilStateSize = CalcPrivateDepthStencilStateSize;
-   pDeviceFuncs->pfnCreateDepthStencilState = CreateDepthStencilState;
-   pDeviceFuncs->pfnDestroyDepthStencilState = DestroyDepthStencilState;
-   pDeviceFuncs->pfnCalcPrivateRasterizerStateSize = CalcPrivateRasterizerStateSize;
-   pDeviceFuncs->pfnCreateRasterizerState = CreateRasterizerState;
-   pDeviceFuncs->pfnDestroyRasterizerState = DestroyRasterizerState;
-   pDeviceFuncs->pfnCalcPrivateShaderSize = CalcPrivateShaderSize;
+   pDeviceFuncs->pfnDestroyResource = Bc250CompilerEntry<DestroyResource, false>::Call;
+   pDeviceFuncs->pfnCalcPrivateShaderResourceViewSize = Bc250CompilerEntry<CalcPrivateShaderResourceViewSize, false>::Call;
+   pDeviceFuncs->pfnCreateShaderResourceView = Bc250CompilerEntry<CreateShaderResourceView, false>::Call;
+   pDeviceFuncs->pfnDestroyShaderResourceView = Bc250CompilerEntry<DestroyShaderResourceView, false>::Call;
+   pDeviceFuncs->pfnCalcPrivateRenderTargetViewSize = Bc250CompilerEntry<CalcPrivateRenderTargetViewSize, false>::Call;
+   pDeviceFuncs->pfnCreateRenderTargetView = Bc250CompilerEntry<CreateRenderTargetView, false>::Call;
+   pDeviceFuncs->pfnDestroyRenderTargetView = Bc250CompilerEntry<DestroyRenderTargetView, false>::Call;
+   pDeviceFuncs->pfnCalcPrivateDepthStencilViewSize = Bc250CompilerEntry<CalcPrivateDepthStencilViewSize, false>::Call;
+   pDeviceFuncs->pfnCreateDepthStencilView = Bc250CompilerEntry<CreateDepthStencilView, false>::Call;
+   pDeviceFuncs->pfnDestroyDepthStencilView = Bc250CompilerEntry<DestroyDepthStencilView, false>::Call;
+   pDeviceFuncs->pfnCalcPrivateElementLayoutSize = Bc250CompilerEntry<CalcPrivateElementLayoutSize, false>::Call;
+   pDeviceFuncs->pfnCreateElementLayout = Bc250CompilerEntry<CreateElementLayout, false>::Call;
+   pDeviceFuncs->pfnDestroyElementLayout = Bc250CompilerEntry<DestroyElementLayout, false>::Call;
+   pDeviceFuncs->pfnCalcPrivateBlendStateSize = Bc250CompilerEntry<CalcPrivateBlendStateSize, false>::Call;
+   pDeviceFuncs->pfnCreateBlendState = Bc250CompilerEntry<CreateBlendState, false>::Call;
+   pDeviceFuncs->pfnDestroyBlendState = Bc250CompilerEntry<DestroyBlendState, false>::Call;
+   pDeviceFuncs->pfnCalcPrivateDepthStencilStateSize = Bc250CompilerEntry<CalcPrivateDepthStencilStateSize, false>::Call;
+   pDeviceFuncs->pfnCreateDepthStencilState = Bc250CompilerEntry<CreateDepthStencilState, false>::Call;
+   pDeviceFuncs->pfnDestroyDepthStencilState = Bc250CompilerEntry<DestroyDepthStencilState, false>::Call;
+   pDeviceFuncs->pfnCalcPrivateRasterizerStateSize = Bc250CompilerEntry<CalcPrivateRasterizerStateSize, false>::Call;
+   pDeviceFuncs->pfnCreateRasterizerState = Bc250CompilerEntry<CreateRasterizerState, false>::Call;
+   pDeviceFuncs->pfnDestroyRasterizerState = Bc250CompilerEntry<DestroyRasterizerState, false>::Call;
+   pDeviceFuncs->pfnCalcPrivateShaderSize = Bc250CompilerEntry<CalcPrivateShaderSize, false>::Call;
    pDeviceFuncs->pfnCreateVertexShader = Bc250CompilerEntry<CreateVertexShader>::Call;
    pDeviceFuncs->pfnCreateGeometryShader = Bc250CompilerEntry<CreateGeometryShader>::Call;
    pDeviceFuncs->pfnCreatePixelShader = Bc250CompilerEntry<CreatePixelShader>::Call;
-   pDeviceFuncs->pfnCalcPrivateGeometryShaderWithStreamOutput = CalcPrivateGeometryShaderWithStreamOutput;
+   pDeviceFuncs->pfnCalcPrivateGeometryShaderWithStreamOutput = Bc250CompilerEntry<CalcPrivateGeometryShaderWithStreamOutput, false>::Call;
    pDeviceFuncs->pfnCreateGeometryShaderWithStreamOutput = Bc250CompilerEntry<CreateGeometryShaderWithStreamOutput>::Call;
-   pDeviceFuncs->pfnDestroyShader = DestroyShader;
-   pDeviceFuncs->pfnCalcPrivateSamplerSize = CalcPrivateSamplerSize;
-   pDeviceFuncs->pfnCreateSampler = CreateSampler;
-   pDeviceFuncs->pfnDestroySampler = DestroySampler;
-   pDeviceFuncs->pfnCalcPrivateQuerySize = CalcPrivateQuerySize;
-   pDeviceFuncs->pfnCreateQuery = CreateQuery;
-   pDeviceFuncs->pfnDestroyQuery = DestroyQuery;
-   pDeviceFuncs->pfnCheckFormatSupport = CheckFormatSupport;
-   pDeviceFuncs->pfnCheckMultisampleQualityLevels = CheckMultisampleQualityLevels;
-   pDeviceFuncs->pfnCheckCounterInfo = CheckCounterInfo;
-   pDeviceFuncs->pfnCheckCounter = CheckCounter;
+   pDeviceFuncs->pfnDestroyShader = Bc250CompilerEntry<DestroyShader, false>::Call;
+   pDeviceFuncs->pfnCalcPrivateSamplerSize = Bc250CompilerEntry<CalcPrivateSamplerSize, false>::Call;
+   pDeviceFuncs->pfnCreateSampler = Bc250CompilerEntry<CreateSampler, false>::Call;
+   pDeviceFuncs->pfnDestroySampler = Bc250CompilerEntry<DestroySampler, false>::Call;
+   pDeviceFuncs->pfnCalcPrivateQuerySize = Bc250CompilerEntry<CalcPrivateQuerySize, false>::Call;
+   pDeviceFuncs->pfnCreateQuery = Bc250CompilerEntry<CreateQuery, false>::Call;
+   pDeviceFuncs->pfnDestroyQuery = Bc250CompilerEntry<DestroyQuery, false>::Call;
+   pDeviceFuncs->pfnCheckFormatSupport = Bc250CompilerEntry<CheckFormatSupport, false>::Call;
+   pDeviceFuncs->pfnCheckMultisampleQualityLevels = Bc250CompilerEntry<CheckMultisampleQualityLevels, false>::Call;
+   pDeviceFuncs->pfnCheckCounterInfo = Bc250CompilerEntry<CheckCounterInfo, false>::Call;
+   pDeviceFuncs->pfnCheckCounter = Bc250CompilerEntry<CheckCounter, false>::Call;
    pDeviceFuncs->pfnDestroyDevice = Bc250CompilerEntry<DestroyDevice>::Call;
-   pDeviceFuncs->pfnSetTextFilterSize = SetTextFilterSize;
+   pDeviceFuncs->pfnSetTextFilterSize = Bc250CompilerEntry<SetTextFilterSize, false>::Call;
    if (pCreateData->Interface == D3D10_1_DDI_INTERFACE_VERSION ||
        pCreateData->Interface == D3D10_1_x_DDI_INTERFACE_VERSION ||
        pCreateData->Interface == D3D10_1_7_DDI_INTERFACE_VERSION) {
       D3D10_1DDI_DEVICEFUNCS *p10_1DeviceFuncs = pCreateData->p10_1DeviceFuncs;
-      p10_1DeviceFuncs->pfnRelocateDeviceFuncs = RelocateDeviceFuncs1;
-      p10_1DeviceFuncs->pfnCalcPrivateShaderResourceViewSize = CalcPrivateShaderResourceViewSize1;
-      p10_1DeviceFuncs->pfnCreateShaderResourceView = CreateShaderResourceView1;
-      p10_1DeviceFuncs->pfnCalcPrivateBlendStateSize = CalcPrivateBlendStateSize1;
-      p10_1DeviceFuncs->pfnCreateBlendState = CreateBlendState1;
+      p10_1DeviceFuncs->pfnRelocateDeviceFuncs = Bc250CompilerEntry<RelocateDeviceFuncs1, false>::Call;
+      p10_1DeviceFuncs->pfnCalcPrivateShaderResourceViewSize = Bc250CompilerEntry<CalcPrivateShaderResourceViewSize1, false>::Call;
+      p10_1DeviceFuncs->pfnCreateShaderResourceView = Bc250CompilerEntry<CreateShaderResourceView1, false>::Call;
+      p10_1DeviceFuncs->pfnCalcPrivateBlendStateSize = Bc250CompilerEntry<CalcPrivateBlendStateSize1, false>::Call;
+      p10_1DeviceFuncs->pfnCreateBlendState = Bc250CompilerEntry<CreateBlendState1, false>::Call;
       p10_1DeviceFuncs->pfnResourceConvert = Bc250CompilerEntry<ResourceCopy>::Call;
       p10_1DeviceFuncs->pfnResourceConvertRegion = Bc250CompilerEntry<ResourceCopyRegion>::Call;
    }
@@ -339,19 +341,20 @@ CreateDeviceOnCompilerStack(D3D10DDI_HADAPTER hAdapter,                 // IN
    pCreateData->DXGIBaseDDI.pDXGIDDIBaseFunctions->pfnPresent =
       Bc250CompilerEntry<_Present>::Call;
    pCreateData->DXGIBaseDDI.pDXGIDDIBaseFunctions->pfnGetGammaCaps =
-      _GetGammaCaps;
+      Bc250CompilerEntry<_GetGammaCaps, false>::Call;
    pCreateData->DXGIBaseDDI.pDXGIDDIBaseFunctions->pfnSetDisplayMode =
-      _SetDisplayMode;
+      Bc250CompilerEntry<_SetDisplayMode, false>::Call;
    pCreateData->DXGIBaseDDI.pDXGIDDIBaseFunctions->pfnSetResourcePriority =
-      _SetResourcePriority;
+      Bc250CompilerEntry<_SetResourcePriority, false>::Call;
    pCreateData->DXGIBaseDDI.pDXGIDDIBaseFunctions->pfnQueryResourceResidency =
-      _QueryResourceResidency;
+      Bc250CompilerEntry<_QueryResourceResidency, false>::Call;
    pCreateData->DXGIBaseDDI.pDXGIDDIBaseFunctions->pfnRotateResourceIdentities =
-      _RotateResourceIdentities;
+      Bc250CompilerEntry<_RotateResourceIdentities, false>::Call;
    pCreateData->DXGIBaseDDI.pDXGIDDIBaseFunctions->pfnBlt =
       Bc250CompilerEntry<_Blt>::Call;
 
    // E26: the linear shared-resource path is implemented for the tested formats.
+   createGuard.complete = true;
    return S_OK;
 }
 
@@ -607,16 +610,5 @@ SetTextFilterSize(D3D10DDI_HDEVICE hDevice,  // IN
 HRESULT APIENTRY
 CreateDevice(D3D10DDI_HADAPTER adapter, D3D10DDIARG_CREATEDEVICE *info)
 {
-   struct Args {
-      D3D10DDI_HADAPTER adapter;
-      D3D10DDIARG_CREATEDEVICE *info;
-      HRESULT result;
-   } args = {adapter, info, E_OUTOFMEMORY};
-   auto call = [](void *opaque) {
-      auto *args = static_cast<Args *>(opaque);
-      args->result = CreateDeviceOnCompilerStack(args->adapter, args->info);
-   };
-   if (!util_call_on_compile_stack("d3d10umd CreateDevice", call, &args))
-      return E_OUTOFMEMORY;
-   return args.result;
+   return Bc250CreateDeviceEntry<CreateDeviceOnCompilerStack>::Call(adapter, info);
 }
