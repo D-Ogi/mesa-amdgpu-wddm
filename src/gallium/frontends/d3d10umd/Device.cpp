@@ -50,7 +50,7 @@
 #include "util/bc250_host_bootstrap.h"
 #include "util/u_sampler.h"
 #include "util/u_framebuffer.h"
-#include "util/u_compile_stack.h"
+#include "CompileDispatch.h"
 
 
 extern "C" struct pipe_screen *d3d10_create_screen(void);
@@ -89,45 +89,20 @@ struct Bc250DdiTrace {
       if (sequence) BC250_DIAG("BC250 DDI end seq=%ld tid=%lu\n",sequence,GetCurrentThreadId());
    }
 };
-template <auto F, bool Compiler = false> struct Bc250Entry;
-template <typename R, typename A, typename... Rest, R (APIENTRY *F)(A, Rest...), bool Compiler>
+static void APIENTRY DestroyDevice(D3D10DDI_HDEVICE hDevice);
+struct Bc250EntryTraits {
+   template<typename A> static Device *device(A a) { return Bc250EntryDevice(a); }
+   using Scope = Bc250RuntimeScope;
+};
+template<auto F, bool Compiler = false> struct Bc250Entry;
+template<typename R, typename A, typename... Rest, R(APIENTRY *F)(A, Rest...), bool Compiler>
 struct Bc250Entry<F, Compiler> {
-   struct Arguments {
-      A first;
-      std::tuple<Rest...> rest;
-      std::conditional_t<std::is_void_v<R>, bool, R> result;
-   };
-   static ATTRIBUTE_NOINLINE void OnCompilerStack(void *opaque) {
-      auto *args = static_cast<Arguments *>(opaque);
-      auto invoke = [&](Rest... rest) { return F(args->first, rest...); };
-      if constexpr (std::is_void_v<R>)
-         std::apply(invoke, args->rest);
-      else
-         args->result = std::apply(invoke, args->rest);
-   }
    static R APIENTRY Call(A a, Rest... rest) {
-      Bc250RuntimeScope scope(Bc250EntryDevice(a));
       static LONG entryCount;
-      Bc250DdiTrace trace(__FUNCSIG__,InterlockedIncrement(&entryCount)<=8);
-      if constexpr (Compiler) {
-         /* Covers D3D bytecode translation, Zink NIR/SPIR-V and lazy compile
-          * from draw/blit, before any of their implementation frames exist.
-          * Runtime-device TLS and callbacks stay on the invoking OS thread.
-          */
-         Arguments args = {a, std::make_tuple(rest...), {}};
-         if (!util_call_on_compile_stack(__FUNCSIG__, OnCompilerStack, &args)) {
-            Device *device = Bc250EntryDevice(a);
-            device->UMCallbacks.pfnSetErrorCb(device->hRTCoreLayer, E_OUTOFMEMORY);
-            if constexpr (std::is_same_v<R, HRESULT>)
-               return E_OUTOFMEMORY;
-            else
-               return R();
-         }
-         if constexpr (!std::is_void_v<R>)
-            return args.result;
-      } else {
-         return F(a, rest...);
-      }
+      Bc250DdiTrace trace(__FUNCSIG__, InterlockedIncrement(&entryCount) <= 8);
+      return Bc250DdiEntry<F, Bc250EntryTraits, Compiler,
+         std::is_same_v<std::integral_constant<decltype(F), F>,
+                        std::integral_constant<decltype(&DestroyDevice), &DestroyDevice>>>::Call(a, rest...);
    }
 };
 
@@ -718,6 +693,7 @@ CreateDeviceOnCompilerStack(D3D10DDI_HADAPTER hAdapter,                 // IN
 
    Device *pDevice = CastDevice(pCreateData->hDrvDevice);
    memset(pDevice, 0, sizeof *pDevice);
+   pDevice->compile_dispatch = Bc250CompileDispatch::active;
    Bc250RuntimeScope runtimeScope(pDevice);
    pDevice->hRTCoreLayer = pCreateData->hRTCoreLayer;
    pDevice->hDevice = (HANDLE)pCreateData->hRTDevice.handle;
@@ -1275,16 +1251,5 @@ SetTextFilterSize(D3D10DDI_HDEVICE hDevice,  // IN
 HRESULT APIENTRY
 CreateDevice(D3D10DDI_HADAPTER adapter, D3D10DDIARG_CREATEDEVICE *info)
 {
-   struct Args {
-      D3D10DDI_HADAPTER adapter;
-      D3D10DDIARG_CREATEDEVICE *info;
-      HRESULT result;
-   } args = {adapter, info, E_OUTOFMEMORY};
-   auto call = [](void *opaque) {
-      auto *args = static_cast<Args *>(opaque);
-      args->result = CreateDeviceOnCompilerStack(args->adapter, args->info);
-   };
-   if (!util_call_on_compile_stack("d3d10umd CreateDevice", call, &args))
-      return E_OUTOFMEMORY;
-   return args.result;
+   return Bc250CreateDeviceEntry<CreateDeviceOnCompilerStack>::Call(adapter, info);
 }

@@ -4,7 +4,11 @@ Windows callers can enter the driver on a 64 or 128 KiB stack. Compiler work mus
 reserved stack before its first large frame. `util_call_on_compile_stack` uses a synchronous Win32 fiber
 on the calling OS thread, with an 8 MiB reserve, 64 KiB initial commit and a runtime check for at least
 6 MiB available. Nested calls reuse sufficient space. A failed allocation returns false without calling
-the compiler; the driver reports out-of-memory. Mesa worker threads also request an explicit 8 MiB reserve.
+the compiler; Vulkan reports out-of-memory. Mesa worker threads also request an explicit 8 MiB reserve.
+
+The D3D10 frontend uses a device-owned worker instead of this per-call allocation. Some D3D DDIs cannot
+report out-of-memory. Its reserved stack and runtime callback marshalling are described in
+`src/gallium/frontends/d3d10umd/CompileDispatch.md`, with an allocation-failure regression for the DDI wrappers.
 
 Ordinary TLS and thread identity are unchanged. Floating-point environment is copied in and restored on
 return. FLS belongs to the fiber: caller FLS is restored afterward, but callbacks executed by the compiler

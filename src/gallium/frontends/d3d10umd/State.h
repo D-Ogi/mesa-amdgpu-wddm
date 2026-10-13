@@ -71,8 +71,11 @@ struct ElementLayout;
 struct RenderTargetView;
 struct ShaderResourceView;
 
+class Bc250CompileDispatch;
+
 struct Device
 {
+   Bc250CompileDispatch *compile_dispatch;
    UINT64 profileDrawTicks, profileDrawMax, profileDrawCalls, profileLastPresent;
    UINT profilePresents;
    RenderTargetView *renderTargetViews;

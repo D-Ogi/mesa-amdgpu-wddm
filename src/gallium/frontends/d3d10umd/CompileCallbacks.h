@@ -1,0 +1,213 @@
+/* SPDX-License-Identifier: MIT */
+/* Callback member names and version guards: WDK 10.0.26100.0, d3dumddi.h and d3d10umddi.h. */
+inline void Bc250CompileDispatch::bind(const D3D10DDIARG_CREATEDEVICE &info)
+{
+   kt_original = *info.pKTCallbacks; kt = kt_original;
+   um_original = *info.pUMCallbacks; um = um_original;
+   /* Only the base Present callback is available on every negotiated DXGI DDI. */
+   dxgi_original.pfnPresentCb = info.DXGIBaseDDI.pDXGIBaseCallbacks->pfnPresentCb;
+   dxgi.pfnPresentCb = dxgi_original.pfnPresentCb ?
+      &Bc250Callback<&DXGI_DDI_BASE_CALLBACKS::pfnPresentCb, decltype(dxgi.pfnPresentCb)>::call : nullptr;
+   kt.pfnAllocateCb = kt_original.pfnAllocateCb ?
+      &Bc250Callback<&D3DDDI_DEVICECALLBACKS::pfnAllocateCb, decltype(kt.pfnAllocateCb)>::call : nullptr;
+   kt.pfnDeallocateCb = kt_original.pfnDeallocateCb ?
+      &Bc250Callback<&D3DDDI_DEVICECALLBACKS::pfnDeallocateCb, decltype(kt.pfnDeallocateCb)>::call : nullptr;
+   kt.pfnSetPriorityCb = kt_original.pfnSetPriorityCb ?
+      &Bc250Callback<&D3DDDI_DEVICECALLBACKS::pfnSetPriorityCb, decltype(kt.pfnSetPriorityCb)>::call : nullptr;
+   kt.pfnQueryResidencyCb = kt_original.pfnQueryResidencyCb ?
+      &Bc250Callback<&D3DDDI_DEVICECALLBACKS::pfnQueryResidencyCb, decltype(kt.pfnQueryResidencyCb)>::call : nullptr;
+   kt.pfnSetDisplayModeCb = kt_original.pfnSetDisplayModeCb ?
+      &Bc250Callback<&D3DDDI_DEVICECALLBACKS::pfnSetDisplayModeCb, decltype(kt.pfnSetDisplayModeCb)>::call : nullptr;
+   kt.pfnPresentCb = kt_original.pfnPresentCb ?
+      &Bc250Callback<&D3DDDI_DEVICECALLBACKS::pfnPresentCb, decltype(kt.pfnPresentCb)>::call : nullptr;
+   kt.pfnRenderCb = kt_original.pfnRenderCb ?
+      &Bc250Callback<&D3DDDI_DEVICECALLBACKS::pfnRenderCb, decltype(kt.pfnRenderCb)>::call : nullptr;
+   kt.pfnLockCb = kt_original.pfnLockCb ?
+      &Bc250Callback<&D3DDDI_DEVICECALLBACKS::pfnLockCb, decltype(kt.pfnLockCb)>::call : nullptr;
+   kt.pfnUnlockCb = kt_original.pfnUnlockCb ?
+      &Bc250Callback<&D3DDDI_DEVICECALLBACKS::pfnUnlockCb, decltype(kt.pfnUnlockCb)>::call : nullptr;
+   kt.pfnEscapeCb = kt_original.pfnEscapeCb ?
+      &Bc250Callback<&D3DDDI_DEVICECALLBACKS::pfnEscapeCb, decltype(kt.pfnEscapeCb)>::call : nullptr;
+   kt.pfnCreateOverlayCb = kt_original.pfnCreateOverlayCb ?
+      &Bc250Callback<&D3DDDI_DEVICECALLBACKS::pfnCreateOverlayCb, decltype(kt.pfnCreateOverlayCb)>::call : nullptr;
+   kt.pfnUpdateOverlayCb = kt_original.pfnUpdateOverlayCb ?
+      &Bc250Callback<&D3DDDI_DEVICECALLBACKS::pfnUpdateOverlayCb, decltype(kt.pfnUpdateOverlayCb)>::call : nullptr;
+   kt.pfnFlipOverlayCb = kt_original.pfnFlipOverlayCb ?
+      &Bc250Callback<&D3DDDI_DEVICECALLBACKS::pfnFlipOverlayCb, decltype(kt.pfnFlipOverlayCb)>::call : nullptr;
+   kt.pfnDestroyOverlayCb = kt_original.pfnDestroyOverlayCb ?
+      &Bc250Callback<&D3DDDI_DEVICECALLBACKS::pfnDestroyOverlayCb, decltype(kt.pfnDestroyOverlayCb)>::call : nullptr;
+   kt.pfnCreateContextCb = kt_original.pfnCreateContextCb ?
+      &Bc250Callback<&D3DDDI_DEVICECALLBACKS::pfnCreateContextCb, decltype(kt.pfnCreateContextCb)>::call : nullptr;
+   kt.pfnDestroyContextCb = kt_original.pfnDestroyContextCb ?
+      &Bc250Callback<&D3DDDI_DEVICECALLBACKS::pfnDestroyContextCb, decltype(kt.pfnDestroyContextCb)>::call : nullptr;
+   kt.pfnCreateSynchronizationObjectCb = kt_original.pfnCreateSynchronizationObjectCb ?
+      &Bc250Callback<&D3DDDI_DEVICECALLBACKS::pfnCreateSynchronizationObjectCb, decltype(kt.pfnCreateSynchronizationObjectCb)>::call : nullptr;
+   kt.pfnDestroySynchronizationObjectCb = kt_original.pfnDestroySynchronizationObjectCb ?
+      &Bc250Callback<&D3DDDI_DEVICECALLBACKS::pfnDestroySynchronizationObjectCb, decltype(kt.pfnDestroySynchronizationObjectCb)>::call : nullptr;
+   kt.pfnWaitForSynchronizationObjectCb = kt_original.pfnWaitForSynchronizationObjectCb ?
+      &Bc250Callback<&D3DDDI_DEVICECALLBACKS::pfnWaitForSynchronizationObjectCb, decltype(kt.pfnWaitForSynchronizationObjectCb)>::call : nullptr;
+   kt.pfnSignalSynchronizationObjectCb = kt_original.pfnSignalSynchronizationObjectCb ?
+      &Bc250Callback<&D3DDDI_DEVICECALLBACKS::pfnSignalSynchronizationObjectCb, decltype(kt.pfnSignalSynchronizationObjectCb)>::call : nullptr;
+   kt.pfnSetAsyncCallbacksCb = kt_original.pfnSetAsyncCallbacksCb ?
+      &Bc250Callback<&D3DDDI_DEVICECALLBACKS::pfnSetAsyncCallbacksCb, decltype(kt.pfnSetAsyncCallbacksCb)>::call : nullptr;
+   kt.pfnSetDisplayPrivateDriverFormatCb = kt_original.pfnSetDisplayPrivateDriverFormatCb ?
+      &Bc250Callback<&D3DDDI_DEVICECALLBACKS::pfnSetDisplayPrivateDriverFormatCb, decltype(kt.pfnSetDisplayPrivateDriverFormatCb)>::call : nullptr;
+#if (D3D_UMD_INTERFACE_VERSION >= D3D_UMD_INTERFACE_VERSION_WIN8)
+   kt.pfnOfferAllocationsCb = kt_original.pfnOfferAllocationsCb ?
+      &Bc250Callback<&D3DDDI_DEVICECALLBACKS::pfnOfferAllocationsCb, decltype(kt.pfnOfferAllocationsCb)>::call : nullptr;
+   kt.pfnReclaimAllocationsCb = kt_original.pfnReclaimAllocationsCb ?
+      &Bc250Callback<&D3DDDI_DEVICECALLBACKS::pfnReclaimAllocationsCb, decltype(kt.pfnReclaimAllocationsCb)>::call : nullptr;
+   kt.pfnCreateSynchronizationObject2Cb = kt_original.pfnCreateSynchronizationObject2Cb ?
+      &Bc250Callback<&D3DDDI_DEVICECALLBACKS::pfnCreateSynchronizationObject2Cb, decltype(kt.pfnCreateSynchronizationObject2Cb)>::call : nullptr;
+   kt.pfnWaitForSynchronizationObject2Cb = kt_original.pfnWaitForSynchronizationObject2Cb ?
+      &Bc250Callback<&D3DDDI_DEVICECALLBACKS::pfnWaitForSynchronizationObject2Cb, decltype(kt.pfnWaitForSynchronizationObject2Cb)>::call : nullptr;
+   kt.pfnSignalSynchronizationObject2Cb = kt_original.pfnSignalSynchronizationObject2Cb ?
+      &Bc250Callback<&D3DDDI_DEVICECALLBACKS::pfnSignalSynchronizationObject2Cb, decltype(kt.pfnSignalSynchronizationObject2Cb)>::call : nullptr;
+   kt.pfnPresentMultiPlaneOverlayCb = kt_original.pfnPresentMultiPlaneOverlayCb ?
+      &Bc250Callback<&D3DDDI_DEVICECALLBACKS::pfnPresentMultiPlaneOverlayCb, decltype(kt.pfnPresentMultiPlaneOverlayCb)>::call : nullptr;
+#endif // (D3D_UMD_INTERFACE_VERSION >= D3D_UMD_INTERFACE_VERSION_WIN8)
+#if (D3D_UMD_INTERFACE_VERSION >= D3D_UMD_INTERFACE_VERSION_WDDM1_3) // MP
+   kt.pfnLogUMDMarkerCb = kt_original.pfnLogUMDMarkerCb ?
+      &Bc250Callback<&D3DDDI_DEVICECALLBACKS::pfnLogUMDMarkerCb, decltype(kt.pfnLogUMDMarkerCb)>::call : nullptr;
+#endif // D3D_UMD_INTERFACE_VERSION
+#if (D3D_UMD_INTERFACE_VERSION >= D3D_UMD_INTERFACE_VERSION_WDDM2_0)
+   kt.pfnMakeResidentCb = kt_original.pfnMakeResidentCb ?
+      &Bc250Callback<&D3DDDI_DEVICECALLBACKS::pfnMakeResidentCb, decltype(kt.pfnMakeResidentCb)>::call : nullptr;
+   kt.pfnEvictCb = kt_original.pfnEvictCb ?
+      &Bc250Callback<&D3DDDI_DEVICECALLBACKS::pfnEvictCb, decltype(kt.pfnEvictCb)>::call : nullptr;
+   kt.pfnWaitForSynchronizationObjectFromCpuCb = kt_original.pfnWaitForSynchronizationObjectFromCpuCb ?
+      &Bc250Callback<&D3DDDI_DEVICECALLBACKS::pfnWaitForSynchronizationObjectFromCpuCb, decltype(kt.pfnWaitForSynchronizationObjectFromCpuCb)>::call : nullptr;
+   kt.pfnSignalSynchronizationObjectFromCpuCb = kt_original.pfnSignalSynchronizationObjectFromCpuCb ?
+      &Bc250Callback<&D3DDDI_DEVICECALLBACKS::pfnSignalSynchronizationObjectFromCpuCb, decltype(kt.pfnSignalSynchronizationObjectFromCpuCb)>::call : nullptr;
+   kt.pfnWaitForSynchronizationObjectFromGpuCb = kt_original.pfnWaitForSynchronizationObjectFromGpuCb ?
+      &Bc250Callback<&D3DDDI_DEVICECALLBACKS::pfnWaitForSynchronizationObjectFromGpuCb, decltype(kt.pfnWaitForSynchronizationObjectFromGpuCb)>::call : nullptr;
+   kt.pfnSignalSynchronizationObjectFromGpuCb = kt_original.pfnSignalSynchronizationObjectFromGpuCb ?
+      &Bc250Callback<&D3DDDI_DEVICECALLBACKS::pfnSignalSynchronizationObjectFromGpuCb, decltype(kt.pfnSignalSynchronizationObjectFromGpuCb)>::call : nullptr;
+   kt.pfnCreatePagingQueueCb = kt_original.pfnCreatePagingQueueCb ?
+      &Bc250Callback<&D3DDDI_DEVICECALLBACKS::pfnCreatePagingQueueCb, decltype(kt.pfnCreatePagingQueueCb)>::call : nullptr;
+   kt.pfnDestroyPagingQueueCb = kt_original.pfnDestroyPagingQueueCb ?
+      &Bc250Callback<&D3DDDI_DEVICECALLBACKS::pfnDestroyPagingQueueCb, decltype(kt.pfnDestroyPagingQueueCb)>::call : nullptr;
+   kt.pfnLock2Cb = kt_original.pfnLock2Cb ?
+      &Bc250Callback<&D3DDDI_DEVICECALLBACKS::pfnLock2Cb, decltype(kt.pfnLock2Cb)>::call : nullptr;
+   kt.pfnUnlock2Cb = kt_original.pfnUnlock2Cb ?
+      &Bc250Callback<&D3DDDI_DEVICECALLBACKS::pfnUnlock2Cb, decltype(kt.pfnUnlock2Cb)>::call : nullptr;
+   kt.pfnInvalidateCacheCb = kt_original.pfnInvalidateCacheCb ?
+      &Bc250Callback<&D3DDDI_DEVICECALLBACKS::pfnInvalidateCacheCb, decltype(kt.pfnInvalidateCacheCb)>::call : nullptr;
+   kt.pfnReserveGpuVirtualAddressCb = kt_original.pfnReserveGpuVirtualAddressCb ?
+      &Bc250Callback<&D3DDDI_DEVICECALLBACKS::pfnReserveGpuVirtualAddressCb, decltype(kt.pfnReserveGpuVirtualAddressCb)>::call : nullptr;
+   kt.pfnMapGpuVirtualAddressCb = kt_original.pfnMapGpuVirtualAddressCb ?
+      &Bc250Callback<&D3DDDI_DEVICECALLBACKS::pfnMapGpuVirtualAddressCb, decltype(kt.pfnMapGpuVirtualAddressCb)>::call : nullptr;
+   kt.pfnFreeGpuVirtualAddressCb = kt_original.pfnFreeGpuVirtualAddressCb ?
+      &Bc250Callback<&D3DDDI_DEVICECALLBACKS::pfnFreeGpuVirtualAddressCb, decltype(kt.pfnFreeGpuVirtualAddressCb)>::call : nullptr;
+   kt.pfnUpdateGpuVirtualAddressCb = kt_original.pfnUpdateGpuVirtualAddressCb ?
+      &Bc250Callback<&D3DDDI_DEVICECALLBACKS::pfnUpdateGpuVirtualAddressCb, decltype(kt.pfnUpdateGpuVirtualAddressCb)>::call : nullptr;
+   kt.pfnCreateContextVirtualCb = kt_original.pfnCreateContextVirtualCb ?
+      &Bc250Callback<&D3DDDI_DEVICECALLBACKS::pfnCreateContextVirtualCb, decltype(kt.pfnCreateContextVirtualCb)>::call : nullptr;
+   kt.pfnSubmitCommandCb = kt_original.pfnSubmitCommandCb ?
+      &Bc250Callback<&D3DDDI_DEVICECALLBACKS::pfnSubmitCommandCb, decltype(kt.pfnSubmitCommandCb)>::call : nullptr;
+   kt.pfnDeallocate2Cb = kt_original.pfnDeallocate2Cb ?
+      &Bc250Callback<&D3DDDI_DEVICECALLBACKS::pfnDeallocate2Cb, decltype(kt.pfnDeallocate2Cb)>::call : nullptr;
+   kt.pfnSignalSynchronizationObjectFromGpu2Cb = kt_original.pfnSignalSynchronizationObjectFromGpu2Cb ?
+      &Bc250Callback<&D3DDDI_DEVICECALLBACKS::pfnSignalSynchronizationObjectFromGpu2Cb, decltype(kt.pfnSignalSynchronizationObjectFromGpu2Cb)>::call : nullptr;
+   kt.pfnReclaimAllocations2Cb = kt_original.pfnReclaimAllocations2Cb ?
+      &Bc250Callback<&D3DDDI_DEVICECALLBACKS::pfnReclaimAllocations2Cb, decltype(kt.pfnReclaimAllocations2Cb)>::call : nullptr;
+   kt.pfnGetResourcePresentPrivateDriverDataCb = kt_original.pfnGetResourcePresentPrivateDriverDataCb ?
+      &Bc250Callback<&D3DDDI_DEVICECALLBACKS::pfnGetResourcePresentPrivateDriverDataCb, decltype(kt.pfnGetResourcePresentPrivateDriverDataCb)>::call : nullptr;
+#endif // D3D_UMD_INTERFACE_VERSION >= D3D_UMD_INTERFACE_VERSION_WDDM2_0
+#if (D3D_UMD_INTERFACE_VERSION >= D3D_UMD_INTERFACE_VERSION_WDDM2_1_1)
+   kt.pfnUpdateAllocationPropertyCb = kt_original.pfnUpdateAllocationPropertyCb ?
+      &Bc250Callback<&D3DDDI_DEVICECALLBACKS::pfnUpdateAllocationPropertyCb, decltype(kt.pfnUpdateAllocationPropertyCb)>::call : nullptr;
+   kt.pfnOfferAllocations2Cb = kt_original.pfnOfferAllocations2Cb ?
+      &Bc250Callback<&D3DDDI_DEVICECALLBACKS::pfnOfferAllocations2Cb, decltype(kt.pfnOfferAllocations2Cb)>::call : nullptr;
+#endif // D3D_UMD_INTERFACE_VERSION
+#if (D3D_UMD_INTERFACE_VERSION >= D3D_UMD_INTERFACE_VERSION_WDDM2_1_2)
+   kt.pfnReclaimAllocations3Cb = kt_original.pfnReclaimAllocations3Cb ?
+      &Bc250Callback<&D3DDDI_DEVICECALLBACKS::pfnReclaimAllocations3Cb, decltype(kt.pfnReclaimAllocations3Cb)>::call : nullptr;
+   kt.pfnAcquireResourceCb = kt_original.pfnAcquireResourceCb ?
+      &Bc250Callback<&D3DDDI_DEVICECALLBACKS::pfnAcquireResourceCb, decltype(kt.pfnAcquireResourceCb)>::call : nullptr;
+#endif // D3D_UMD_INTERFACE_VERSION
+#if (D3D_UMD_INTERFACE_VERSION >= D3D_UMD_INTERFACE_VERSION_WDDM2_1_3)
+   kt.pfnReleaseResourceCb = kt_original.pfnReleaseResourceCb ?
+      &Bc250Callback<&D3DDDI_DEVICECALLBACKS::pfnReleaseResourceCb, decltype(kt.pfnReleaseResourceCb)>::call : nullptr;
+#endif // D3D_UMD_INTERFACE_VERSION
+#if (D3D_UMD_INTERFACE_VERSION >= D3D_UMD_INTERFACE_VERSION_WDDM2_2_1)
+   kt.pfnCreateHwContextCb = kt_original.pfnCreateHwContextCb ?
+      &Bc250Callback<&D3DDDI_DEVICECALLBACKS::pfnCreateHwContextCb, decltype(kt.pfnCreateHwContextCb)>::call : nullptr;
+   kt.pfnDestroyHwContextCb = kt_original.pfnDestroyHwContextCb ?
+      &Bc250Callback<&D3DDDI_DEVICECALLBACKS::pfnDestroyHwContextCb, decltype(kt.pfnDestroyHwContextCb)>::call : nullptr;
+   kt.pfnCreateHwQueueCb = kt_original.pfnCreateHwQueueCb ?
+      &Bc250Callback<&D3DDDI_DEVICECALLBACKS::pfnCreateHwQueueCb, decltype(kt.pfnCreateHwQueueCb)>::call : nullptr;
+   kt.pfnDestroyHwQueueCb = kt_original.pfnDestroyHwQueueCb ?
+      &Bc250Callback<&D3DDDI_DEVICECALLBACKS::pfnDestroyHwQueueCb, decltype(kt.pfnDestroyHwQueueCb)>::call : nullptr;
+   kt.pfnSubmitCommandToHwQueueCb = kt_original.pfnSubmitCommandToHwQueueCb ?
+      &Bc250Callback<&D3DDDI_DEVICECALLBACKS::pfnSubmitCommandToHwQueueCb, decltype(kt.pfnSubmitCommandToHwQueueCb)>::call : nullptr;
+   kt.pfnSubmitWaitForSyncObjectsToHwQueueCb = kt_original.pfnSubmitWaitForSyncObjectsToHwQueueCb ?
+      &Bc250Callback<&D3DDDI_DEVICECALLBACKS::pfnSubmitWaitForSyncObjectsToHwQueueCb, decltype(kt.pfnSubmitWaitForSyncObjectsToHwQueueCb)>::call : nullptr;
+   kt.pfnSubmitSignalSyncObjectsToHwQueueCb = kt_original.pfnSubmitSignalSyncObjectsToHwQueueCb ?
+      &Bc250Callback<&D3DDDI_DEVICECALLBACKS::pfnSubmitSignalSyncObjectsToHwQueueCb, decltype(kt.pfnSubmitSignalSyncObjectsToHwQueueCb)>::call : nullptr;
+#endif // D3D_UMD_INTERFACE_VERSION
+#if (D3D_UMD_INTERFACE_VERSION >= D3D_UMD_INTERFACE_VERSION_WDDM2_4_2)
+   kt.pfnSubmitPresentBltToHwQueueCb = kt_original.pfnSubmitPresentBltToHwQueueCb ?
+      &Bc250Callback<&D3DDDI_DEVICECALLBACKS::pfnSubmitPresentBltToHwQueueCb, decltype(kt.pfnSubmitPresentBltToHwQueueCb)>::call : nullptr;
+#endif // D3D_UMD_INTERFACE_VERSION
+#if (D3D_UMD_INTERFACE_VERSION >= D3D_UMD_INTERFACE_VERSION_WDDM2_5_2)
+   kt.pfnSubmitPresentToHwQueueCb = kt_original.pfnSubmitPresentToHwQueueCb ?
+      &Bc250Callback<&D3DDDI_DEVICECALLBACKS::pfnSubmitPresentToHwQueueCb, decltype(kt.pfnSubmitPresentToHwQueueCb)>::call : nullptr;
+#endif // D3D_UMD_INTERFACE_VERSION
+#if (D3D_UMD_INTERFACE_VERSION >= D3D_UMD_INTERFACE_VERSION_WDDM2_6_4)
+   kt.pfnSubmitHistorySequenceCb = kt_original.pfnSubmitHistorySequenceCb ?
+      &Bc250Callback<&D3DDDI_DEVICECALLBACKS::pfnSubmitHistorySequenceCb, decltype(kt.pfnSubmitHistorySequenceCb)>::call : nullptr;
+#endif // D3D_UMD_INTERFACE_VERSION
+   um.pfnSetErrorCb = um_original.pfnSetErrorCb ?
+      &Bc250Callback<&D3D10DDI_CORELAYER_DEVICECALLBACKS::pfnSetErrorCb, decltype(um.pfnSetErrorCb)>::call : nullptr;
+   um.pfnStateVsConstBufCb = um_original.pfnStateVsConstBufCb ?
+      &Bc250Callback<&D3D10DDI_CORELAYER_DEVICECALLBACKS::pfnStateVsConstBufCb, decltype(um.pfnStateVsConstBufCb)>::call : nullptr;
+   um.pfnStatePsSrvCb = um_original.pfnStatePsSrvCb ?
+      &Bc250Callback<&D3D10DDI_CORELAYER_DEVICECALLBACKS::pfnStatePsSrvCb, decltype(um.pfnStatePsSrvCb)>::call : nullptr;
+   um.pfnStatePsShaderCb = um_original.pfnStatePsShaderCb ?
+      &Bc250Callback<&D3D10DDI_CORELAYER_DEVICECALLBACKS::pfnStatePsShaderCb, decltype(um.pfnStatePsShaderCb)>::call : nullptr;
+   um.pfnStatePsSamplerCb = um_original.pfnStatePsSamplerCb ?
+      &Bc250Callback<&D3D10DDI_CORELAYER_DEVICECALLBACKS::pfnStatePsSamplerCb, decltype(um.pfnStatePsSamplerCb)>::call : nullptr;
+   um.pfnStateVsShaderCb = um_original.pfnStateVsShaderCb ?
+      &Bc250Callback<&D3D10DDI_CORELAYER_DEVICECALLBACKS::pfnStateVsShaderCb, decltype(um.pfnStateVsShaderCb)>::call : nullptr;
+   um.pfnStatePsConstBufCb = um_original.pfnStatePsConstBufCb ?
+      &Bc250Callback<&D3D10DDI_CORELAYER_DEVICECALLBACKS::pfnStatePsConstBufCb, decltype(um.pfnStatePsConstBufCb)>::call : nullptr;
+   um.pfnStateIaInputLayoutCb = um_original.pfnStateIaInputLayoutCb ?
+      &Bc250Callback<&D3D10DDI_CORELAYER_DEVICECALLBACKS::pfnStateIaInputLayoutCb, decltype(um.pfnStateIaInputLayoutCb)>::call : nullptr;
+   um.pfnStateIaVertexBufCb = um_original.pfnStateIaVertexBufCb ?
+      &Bc250Callback<&D3D10DDI_CORELAYER_DEVICECALLBACKS::pfnStateIaVertexBufCb, decltype(um.pfnStateIaVertexBufCb)>::call : nullptr;
+   um.pfnStateIaIndexBufCb = um_original.pfnStateIaIndexBufCb ?
+      &Bc250Callback<&D3D10DDI_CORELAYER_DEVICECALLBACKS::pfnStateIaIndexBufCb, decltype(um.pfnStateIaIndexBufCb)>::call : nullptr;
+   um.pfnStateGsConstBufCb = um_original.pfnStateGsConstBufCb ?
+      &Bc250Callback<&D3D10DDI_CORELAYER_DEVICECALLBACKS::pfnStateGsConstBufCb, decltype(um.pfnStateGsConstBufCb)>::call : nullptr;
+   um.pfnStateGsShaderCb = um_original.pfnStateGsShaderCb ?
+      &Bc250Callback<&D3D10DDI_CORELAYER_DEVICECALLBACKS::pfnStateGsShaderCb, decltype(um.pfnStateGsShaderCb)>::call : nullptr;
+   um.pfnStateIaPrimitiveTopologyCb = um_original.pfnStateIaPrimitiveTopologyCb ?
+      &Bc250Callback<&D3D10DDI_CORELAYER_DEVICECALLBACKS::pfnStateIaPrimitiveTopologyCb, decltype(um.pfnStateIaPrimitiveTopologyCb)>::call : nullptr;
+   um.pfnStateVsSrvCb = um_original.pfnStateVsSrvCb ?
+      &Bc250Callback<&D3D10DDI_CORELAYER_DEVICECALLBACKS::pfnStateVsSrvCb, decltype(um.pfnStateVsSrvCb)>::call : nullptr;
+   um.pfnStateVsSamplerCb = um_original.pfnStateVsSamplerCb ?
+      &Bc250Callback<&D3D10DDI_CORELAYER_DEVICECALLBACKS::pfnStateVsSamplerCb, decltype(um.pfnStateVsSamplerCb)>::call : nullptr;
+   um.pfnStateGsSrvCb = um_original.pfnStateGsSrvCb ?
+      &Bc250Callback<&D3D10DDI_CORELAYER_DEVICECALLBACKS::pfnStateGsSrvCb, decltype(um.pfnStateGsSrvCb)>::call : nullptr;
+   um.pfnStateGsSamplerCb = um_original.pfnStateGsSamplerCb ?
+      &Bc250Callback<&D3D10DDI_CORELAYER_DEVICECALLBACKS::pfnStateGsSamplerCb, decltype(um.pfnStateGsSamplerCb)>::call : nullptr;
+   um.pfnStateOmRenderTargetsCb = um_original.pfnStateOmRenderTargetsCb ?
+      &Bc250Callback<&D3D10DDI_CORELAYER_DEVICECALLBACKS::pfnStateOmRenderTargetsCb, decltype(um.pfnStateOmRenderTargetsCb)>::call : nullptr;
+   um.pfnStateOmBlendStateCb = um_original.pfnStateOmBlendStateCb ?
+      &Bc250Callback<&D3D10DDI_CORELAYER_DEVICECALLBACKS::pfnStateOmBlendStateCb, decltype(um.pfnStateOmBlendStateCb)>::call : nullptr;
+   um.pfnStateOmDepthStateCb = um_original.pfnStateOmDepthStateCb ?
+      &Bc250Callback<&D3D10DDI_CORELAYER_DEVICECALLBACKS::pfnStateOmDepthStateCb, decltype(um.pfnStateOmDepthStateCb)>::call : nullptr;
+   um.pfnStateRsRastStateCb = um_original.pfnStateRsRastStateCb ?
+      &Bc250Callback<&D3D10DDI_CORELAYER_DEVICECALLBACKS::pfnStateRsRastStateCb, decltype(um.pfnStateRsRastStateCb)>::call : nullptr;
+   um.pfnStateSoTargetsCb = um_original.pfnStateSoTargetsCb ?
+      &Bc250Callback<&D3D10DDI_CORELAYER_DEVICECALLBACKS::pfnStateSoTargetsCb, decltype(um.pfnStateSoTargetsCb)>::call : nullptr;
+   um.pfnStateRsViewportsCb = um_original.pfnStateRsViewportsCb ?
+      &Bc250Callback<&D3D10DDI_CORELAYER_DEVICECALLBACKS::pfnStateRsViewportsCb, decltype(um.pfnStateRsViewportsCb)>::call : nullptr;
+   um.pfnStateRsScissorCb = um_original.pfnStateRsScissorCb ?
+      &Bc250Callback<&D3D10DDI_CORELAYER_DEVICECALLBACKS::pfnStateRsScissorCb, decltype(um.pfnStateRsScissorCb)>::call : nullptr;
+   um.pfnDisableDeferredStagingResourceDestruction = um_original.pfnDisableDeferredStagingResourceDestruction ?
+      &Bc250Callback<&D3D10DDI_CORELAYER_DEVICECALLBACKS::pfnDisableDeferredStagingResourceDestruction, decltype(um.pfnDisableDeferredStagingResourceDestruction)>::call : nullptr;
+   um.pfnStateTextFilterSizeCb = um_original.pfnStateTextFilterSizeCb ?
+      &Bc250Callback<&D3D10DDI_CORELAYER_DEVICECALLBACKS::pfnStateTextFilterSizeCb, decltype(um.pfnStateTextFilterSizeCb)>::call : nullptr;
+}
