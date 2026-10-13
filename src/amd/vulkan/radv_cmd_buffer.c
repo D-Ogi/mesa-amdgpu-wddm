@@ -1333,8 +1333,11 @@ radv_destroy_cmd_buffer(struct vk_command_buffer *vk_cmd_buffer)
 
       radv_destroy_msrtss_transients(cmd_buffer);
 
-      radv_rra_accel_struct_buffers_unref(device, cmd_buffer->accel_struct_buffers);
-      _mesa_set_destroy(cmd_buffer->accel_struct_buffers, NULL);
+      /* NULL only when radv_create_cmd_buffer could not create the set. */
+      if (cmd_buffer->accel_struct_buffers) {
+         radv_rra_accel_struct_buffers_unref(device, cmd_buffer->accel_struct_buffers);
+         _mesa_set_destroy(cmd_buffer->accel_struct_buffers, NULL);
+      }
 
       list_for_each_entry_safe (struct radv_cmd_buffer_upload, up, &cmd_buffer->upload.list, list) {
          radv_rmv_log_command_buffer_bo_destroy(device, up->upload_bo);
@@ -1408,22 +1411,32 @@ radv_create_cmd_buffer(struct vk_command_pool *pool, VkCommandBufferLevel level,
 
    if (cmd_buffer->qf != RADV_QUEUE_SPARSE) {
       const enum amd_ip_type ip = radv_queue_family_to_ring(pdev, cmd_buffer->qf);
+
+      /* BD-149: radv_destroy_cmd_buffer walks each of these members, so each one is initialized before the
+       * first call that can fail. The command stream fails when its IB allocation fails, for example on a
+       * removed device (pfnAllocateCb returns D3DDDIERR_DEVICEREMOVED after a PnP stop or a TDR). That destroy
+       * used to read a zeroed msrtss_transients head (an access violation at address 8) and would then have
+       * walked a NULL accel_struct_buffers set. */
       list_inithead(&cmd_buffer->upload.list);
+      list_inithead(&cmd_buffer->msrtss_transients);
+      cmd_buffer->ray_history = UTIL_DYNARRAY_INIT;
+      for (unsigned i = 0; i < MAX_BIND_POINTS; i++)
+         vk_object_base_init(&device->vk, &cmd_buffer->descriptors[i].push_set.set.base, VK_OBJECT_TYPE_DESCRIPTOR_SET);
 
       radv_cmd_buffer_init_shader_part_cache(device, cmd_buffer);
+
+      cmd_buffer->accel_struct_buffers = _mesa_pointer_set_create(NULL);
+      if (!cmd_buffer->accel_struct_buffers) {
+         radv_destroy_cmd_buffer(&cmd_buffer->vk);
+         return vk_error(device, VK_ERROR_OUT_OF_HOST_MEMORY);
+      }
+
       result =
          radv_create_cmd_stream(device, ip, cmd_buffer->vk.level == VK_COMMAND_BUFFER_LEVEL_SECONDARY, &cmd_buffer->cs);
       if (result != VK_SUCCESS) {
          radv_destroy_cmd_buffer(&cmd_buffer->vk);
          return vk_error(device, VK_ERROR_OUT_OF_DEVICE_MEMORY);
       }
-
-      for (unsigned i = 0; i < MAX_BIND_POINTS; i++)
-         vk_object_base_init(&device->vk, &cmd_buffer->descriptors[i].push_set.set.base, VK_OBJECT_TYPE_DESCRIPTOR_SET);
-
-      cmd_buffer->accel_struct_buffers = _mesa_pointer_set_create(NULL);
-      cmd_buffer->ray_history = UTIL_DYNARRAY_INIT;
-      list_inithead(&cmd_buffer->msrtss_transients);
    }
 
    if (device->utrace.context) {

@@ -4643,6 +4643,52 @@ test_wait_bound(void)
    contract();
 }
 
+/* BD-149: a stream whose first IB cannot be had. After a PnP stop or a TDR every call of the IB's allocation
+ * fails (pfnAllocateCb returns D3DDDIERR_DEVICEREMOVED, and so do the calls after it), and radv_create_cmd_buffer
+ * gets a NULL stream. cs_create must return NULL, leave no allocation behind and destroy each allocation once.
+ * A Lock2 that failed after the allocation succeeded destroyed the IB BO twice: in radv_winsys_cs_get_new_ib and
+ * again in the error path of radv_winsys_cs_init. The other two steps are the controls. */
+static void
+test_cs_create_failure(void)
+{
+   static const struct {
+      uint32_t op;
+      const char *name;
+      unsigned created;
+   } steps[] = {
+      {BC250_HOST_CreateAllocation2, "CreateAllocation2", 0},
+      {BC250_HOST_MapGpuVirtualAddress, "MapGpuVirtualAddress", 1},
+      {BC250_HOST_Lock2, "Lock2", 1},
+   };
+
+   clear_ib_env();
+   for (unsigned i = 0; i < ARRAY_SIZE(steps); i++) {
+      struct radv_wddm2_winsys *ws = make_ib_ws();
+      h.fail_op = steps[i].op;
+      h.fail_nth = 1;
+      struct ac_cmdbuf *cs = ws->base.cs_create(&ws->base, AMD_IP_GFX, false);
+      h.fail_op = 0;
+      check(h.fail_seen == 1 && !cs, "a failed %s fails the stream (%u failed calls, stream %p)", steps[i].name,
+            h.fail_seen, (void *)cs);
+      const unsigned destroys = count_op(0, BC250_HOST_DestroyAllocation2);
+      check(h.n_allocs == steps[i].created && destroys == steps[i].created && !live(h.allocs, h.n_allocs, false),
+            "after a failed %s: %u allocations made, %u destroyed, none left (made %u, %u destroy calls)",
+            steps[i].name, steps[i].created, steps[i].created, h.n_allocs, destroys);
+      contract();
+      if (cs)
+         ws->base.cs_destroy(cs);
+   }
+
+   /* Control: a fresh winsys makes its stream when the host answers. */
+   struct radv_wddm2_winsys *ws = make_ib_ws();
+   struct ac_cmdbuf *cs = ws->base.cs_create(&ws->base, AMD_IP_GFX, false);
+   check(cs && h.n_allocs == 1 && live(h.allocs, h.n_allocs, false) == 1, "without a failure the stream has its IB");
+   if (cs)
+      ws->base.cs_destroy(cs);
+   check(!live(h.allocs, h.n_allocs, false), "and its destroy releases it");
+   contract();
+}
+
 static const struct {
    const char *name;
    void (*run)(void);
@@ -4689,6 +4735,7 @@ static const struct {
    {"progress_gpu_cost", test_progress_gpu_cost},
    {"cs_add_buffer", test_cs_add_buffer},
    {"draw_stats", test_draw_stats},
+   {"cs_create_failure", test_cs_create_failure},
 };
 
 int
