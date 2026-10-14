@@ -60,6 +60,7 @@ FORBIDDEN = (
     'MESA_LOG_FILE_AUTO',            # writes the Mesa log to a file of its own (not compiled on Windows)
     'GALLIUM_LOG_FILE',              # writes the gallium log to a file (debug builds only)
     'D3D_ALWAYS_SOFTWARE',           # makes zink pick a software Vulkan device in place of the GPU
+    'BC250_UMD_VERBOSE',             # traces every entry point
 )
 SCAN = ('src',)
 EXTENSIONS = ('.c', '.cc', '.cpp', '.h', '.hpp')

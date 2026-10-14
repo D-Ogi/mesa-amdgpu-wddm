@@ -29,11 +29,15 @@ DebugPrintf(const char *format, ...)
     // Per-entrypoint disk I/O and OutputDebugString exceptions can dominate
     // CPU composition. Full tracing is explicit; errors and sampled frame
     // timings remain available without enabling it. Read once per process.
+#if defined(AMDGPU_WDDM_LAB_FLAVOUR)
     static const bool verbose = []() {
        char value[8] = {};
        DWORD n = GetEnvironmentVariableA("BC250_UMD_VERBOSE", value, sizeof value);
        return n == 1 && value[0] == '1';
     }();
+#else
+    const bool verbose = false; // full tracing is a lab build's (BD-167): as with the variable unset
+#endif
     const bool retained = strstr(format, "BC250 SetError") ||
        strstr(format, "BC250 Renderer") || strstr(format, "BC250 Perf") ||
        strstr(format, "Assertion") || strstr(format, "0x%08lX");
