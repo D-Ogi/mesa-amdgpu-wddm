@@ -20,6 +20,9 @@
 static INIT_ONCE bc250_config_once = INIT_ONCE_STATIC_INIT;
 static struct Bc250Config bc250_config;
 
+/* The trial environment is read only by a lab build (BD-167). The release flavour reads none of its variables
+ * and behaves as with every one unset; its configuration is the registry's. */
+#if defined(AMDGPU_WDDM_LAB_FLAVOUR)
 /* A present environment variable that fits the buffer. */
 static bool
 EnvValue(const char *name, char *out, DWORD size)
@@ -42,6 +45,7 @@ EnvSaysOff(const char *name)
    char value[8] = {};
    return EnvValue(name, value, sizeof value) && !strcmp(value, "0");
 }
+#endif
 
 static bool
 RegistryDword(const wchar_t *name, DWORD *value)
@@ -97,8 +101,9 @@ static void
 ResolveIcd(struct Bc250Config *c)
 {
    wchar_t path[MAX_PATH] = {};
-   char env[MAX_PATH] = {};
    c->icd_status = E_FAIL;
+#if defined(AMDGPU_WDDM_LAB_FLAVOUR)
+   char env[MAX_PATH] = {};
    if (EnvValue("BC250_HOSTED_ICD", env, sizeof env) && env[0]) {
       /* Trial tooling names the ICD in ANSI already, as DWM050's router did. */
       c->icd_source = "environment";
@@ -107,7 +112,9 @@ ResolveIcd(struct Bc250Config *c)
          c->icd_status = HRESULT_FROM_WIN32(ERROR_NO_UNICODE_TRANSLATION);
          return;
       }
-   } else if (RegistryString(L"IcdPath", path, MAX_PATH)) {
+   } else
+#endif
+   if (RegistryString(L"IcdPath", path, MAX_PATH)) {
       c->icd_source = "registry";
       c->icd_status = AnsiPath(path, c->icd_path, sizeof c->icd_path);
       if (FAILED(c->icd_status)) return;
@@ -137,8 +144,12 @@ static void
 OpenDiagnosticsLog(struct Bc250Config *c)
 {
    wchar_t directory[MAX_PATH] = {};
-   if (!EnvValueW(L"BC250_UMD_DIAG_DIR", directory, MAX_PATH) &&
-       !RegistryString(L"DiagnosticsDirectory", directory, MAX_PATH)) {
+#if defined(AMDGPU_WDDM_LAB_FLAVOUR)
+   const bool fromEnvironment = EnvValueW(L"BC250_UMD_DIAG_DIR", directory, MAX_PATH);
+#else
+   const bool fromEnvironment = false;
+#endif
+   if (!fromEnvironment && !RegistryString(L"DiagnosticsDirectory", directory, MAX_PATH)) {
       if (!c->module_directory[0] ||
           _snwprintf_s(directory, MAX_PATH, _TRUNCATE, L"%ls\\logs", c->module_directory) < 0)
          return;
@@ -165,20 +176,30 @@ static BOOL CALLBACK
 ResolveConfig(PINIT_ONCE, PVOID, PVOID *)
 {
    struct Bc250Config *c = &bc250_config;
+#if defined(AMDGPU_WDDM_LAB_FLAVOUR)
    c->hosted_render = !EnvSaysOff("BC250_HOSTED_RENDER");
    c->runtime_probe = !EnvSaysOff("BC250_D3D_RUNTIME_PROBE");
+#else
+   c->hosted_render = true;
+   c->runtime_probe = true;
+#endif
    if (!ModuleDirectory(c->module_directory, MAX_PATH))
       c->module_directory[0] = 0;
 
-   char env[8] = {};
    DWORD registry = 0;
+#if defined(AMDGPU_WDDM_LAB_FLAVOUR)
+   char env[8] = {};
    if (EnvValue("BC250_UMD_DIAG", env, sizeof env))
       c->diagnostics = !strcmp(env, "1");
-   else if (RegistryDword(L"Diagnostics", &registry))
+   else
+#endif
+   if (RegistryDword(L"Diagnostics", &registry))
       c->diagnostics = registry != 0;
+#if defined(AMDGPU_WDDM_LAB_FLAVOUR)
    /* Full entrypoint tracing implies diagnostics: without them it would have nowhere to go. */
    if (EnvValue("BC250_UMD_VERBOSE", env, sizeof env) && !strcmp(env, "1"))
       c->diagnostics = true;
+#endif
 
    bc250_diag_enabled = c->diagnostics;
    if (c->diagnostics)
@@ -204,6 +225,7 @@ Bc250GetConfig(void)
 int
 Bc250UmdVerbose(void)
 {
+#if defined(AMDGPU_WDDM_LAB_FLAVOUR)
    /* Benign race: every thread computes the same value. */
    static volatile LONG verbose = -1;
    if (verbose < 0) {
@@ -212,8 +234,12 @@ Bc250UmdVerbose(void)
                 !strcmp(value, "1");
    }
    return verbose;
+#else
+   return 0; /* entry-point tracing is a lab build's (BD-167) */
+#endif
 }
 
+#if defined(AMDGPU_WDDM_LAB_FLAVOUR)
 /* Strict 1-16 hex digits, nonzero. */
 static bool
 ParseLuid(const char *text, UINT64 *luid)
@@ -230,6 +256,7 @@ ParseLuid(const char *text, UINT64 *luid)
    *luid = _strtoui64(text, NULL, 16);
    return !errno && *luid;
 }
+#endif
 
 HRESULT
 Bc250QueryAdapterLuid(const void *args, UINT64 *luid)
@@ -265,6 +292,7 @@ Bc250QueryAdapterLuid(const void *args, UINT64 *luid)
       }
    }
 
+#if defined(AMDGPU_WDDM_LAB_FLAVOUR)
    char text[32] = {};
    UINT64 environment = 0;
    const bool haveEnvironment = EnvValue("BC250_D3D_ZINK_LUID", text, sizeof text);
@@ -272,20 +300,22 @@ Bc250QueryAdapterLuid(const void *args, UINT64 *luid)
       BC250_ERROR("BC250 hosted UMD: invalid BC250_D3D_ZINK_LUID\n");
       return E_INVALIDARG;
    }
-   if (identity) {
-      if (haveEnvironment && environment != identity) {
-         BC250_ERROR("BC250 hosted UMD: BC250_D3D_ZINK_LUID %llx is not the adapter %llx\n",
-                     (unsigned long long)environment, (unsigned long long)identity);
-         return E_INVALIDARG;
-      }
-      *luid = identity;
-      BC250_DIAG("BC250 hosted UMD adapter luid=%016llx source=identity\n", (unsigned long long)identity);
-      return S_OK;
+   if (identity && haveEnvironment && environment != identity) {
+      BC250_ERROR("BC250 hosted UMD: BC250_D3D_ZINK_LUID %llx is not the adapter %llx\n",
+                  (unsigned long long)environment, (unsigned long long)identity);
+      return E_INVALIDARG;
    }
-   if (haveEnvironment) {
+   if (!identity && haveEnvironment) {
       *luid = environment;
       BC250_DIAG("BC250 hosted UMD adapter luid=%016llx source=environment identity_status=%08lx\n",
                  (unsigned long long)environment, (unsigned long)status);
+      return S_OK;
+   }
+#endif
+   /* The release flavour takes no LUID from the environment (BD-167): the adapter's identity or nothing. */
+   if (identity) {
+      *luid = identity;
+      BC250_DIAG("BC250 hosted UMD adapter luid=%016llx source=identity\n", (unsigned long long)identity);
       return S_OK;
    }
    BC250_ERROR("BC250 hosted UMD: no adapter identity (status %08lx)\n", (unsigned long)status);

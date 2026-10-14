@@ -601,7 +601,9 @@ zink_create_sampler_state(struct pipe_context *pctx,
       return NULL;
 
    VkResult result = VKSCR(CreateSampler)(screen->dev, &sci, NULL, &sampler->sampler);
+#if defined(AMDGPU_WDDM_LAB_FLAVOUR)
    if (getenv("BC250_HOST_TRACE_SAMPLER")) fprintf(stderr,"BC250 sampler create handle=%p u=%u border=%u\n",(void*)sampler->sampler,sci.addressModeU,sci.borderColor);
+#endif
    if (result != VK_SUCCESS) {
       mesa_loge("ZINK: vkCreateSampler failed (%s)", vk_Result_to_str(result));
       FREE(sampler);
@@ -5862,7 +5864,11 @@ zink_context_create(struct pipe_screen *pscreen, void *priv, unsigned flags)
    if (!ctx)
       goto fail;
 
+#if defined(AMDGPU_WDDM_LAB_FLAVOUR)
    ctx->bc250_audit = debug_get_bool_option("BC250_HOST_AUDIT", false);
+#else
+   ctx->bc250_audit = false; /* the audit is a lab build's (BD-167) */
+#endif
    if (ctx->bc250_audit)
       simple_mtx_init(&ctx->bc250_audit_lock, mtx_plain);
    ctx->flags = flags;

@@ -52,7 +52,11 @@ public:
    Bc250DdiMapAudit(const char *origin, struct pipe_context *pipe,
                    struct pipe_resource *resource, unsigned level,
                    unsigned usage, const struct pipe_box &box) {
+#if defined(AMDGPU_WDDM_LAB_FLAVOUR)
       static const bool active = bc250_diag_enabled && debug_get_bool_option("BC250_HOST_AUDIT", false);
+#else
+      const bool active = false; /* the audit is a lab build's (BD-167) */
+#endif
       enabled = active;
       id = 0;
       if (!enabled)
@@ -368,7 +372,11 @@ CreateResource(D3D10DDI_HDEVICE hDevice,                                // IN
    // E34 diagnostic import only: the app owns this NT handle. This bypasses
    // runtime allocation creation and cannot establish the DWM sharing contract.
    char probeHandle[32] = {};
+#if defined(AMDGPU_WDDM_LAB_FLAVOUR)
    DWORD probeLength = GetEnvironmentVariableA("BC250_D3D_IMPORT_PROBE_HANDLE", probeHandle, sizeof(probeHandle));
+#else
+   const DWORD probeLength = 0; /* a release build imports no handle that the environment names (BD-167) */
+#endif
    if (probeLength && probeLength < sizeof(probeHandle) && (templat.bind & PIPE_BIND_RENDER_TARGET)) {
       struct winsys_handle handle = {};
       handle.type = WINSYS_HANDLE_TYPE_WIN32_HANDLE;
@@ -398,10 +406,15 @@ CreateResource(D3D10DDI_HDEVICE hDevice,                                // IN
    pResource->transfers = (struct pipe_transfer **)calloc(pResource->NumSubResources,
                                                           sizeof *pResource->transfers);
 
-   if (GetEnvironmentVariableA("BC250_D3D_RUNTIME_INVENTORY", NULL, 0))
+#if defined(AMDGPU_WDDM_LAB_FLAVOUR)
+   const bool inventory = GetEnvironmentVariableA("BC250_D3D_RUNTIME_INVENTORY", NULL, 0) != 0;
+#else
+   const bool inventory = false; /* a lab build's inventory switch (BD-167) */
+#endif
+   if (inventory)
       BC250_DIAG("BC250 runtime resource misc=%x bind=%x primary=%u\n",
               pCreateResource->MiscFlags, pCreateResource->BindFlags, pResource->primary);
-   if (GetEnvironmentVariableA("BC250_D3D_RUNTIME_INVENTORY", NULL, 0) ||
+   if (inventory ||
        pResource->primary || (pCreateResource->BindFlags & D3D10_DDI_BIND_PRESENT) ||
        (pCreateResource->MiscFlags & D3D10_DDI_RESOURCE_MISC_SHARED)) {
       HRESULT hr = Bc250EnsureSurface(CastDevice(hDevice), pResource);

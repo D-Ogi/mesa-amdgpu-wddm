@@ -126,6 +126,7 @@ HRESULT Bc250EnsureSurface(Device *device, Resource *resource)
       resource->allocation = info.hAllocation;
       resource->surfacePitch = pitch;
       resource->surfaceBytes = bytes;
+#if defined(AMDGPU_WDDM_LAB_FLAVOUR) /* a lab build's inventory switch (BD-167): off in a release build */
       if (GetEnvironmentVariableA("BC250_D3D_RUNTIME_INVENTORY", NULL, 0)) {
          // Inventory only: do not claim this unimported resource is presentable.
          auto share = (decltype(&D3DKMTShareObjects))GetProcAddress(GetModuleHandleA("gdi32.dll"), "D3DKMTShareObjects");
@@ -137,6 +138,7 @@ HRESULT Bc250EnsureSurface(Device *device, Resource *resource)
          if (nt) CloseHandle(nt);
          return S_OK;
       }
+#endif
    }
    resource->gpuBytes = (data.size + 4095) & ~UINT64(4095);
    // A failed step below leaves presentReady false, and the next Present or
@@ -282,7 +284,11 @@ _Present(DXGI_DDI_ARG_PRESENT *pPresentData)
    hr = device->pDXGIBaseCallbacks->pfnPresentCb(device->hDevice, &present);
    if (device->hosted_state && SUCCEEDED(hr)) hr=Bc250SignalPresent(device);
    QueryPerformanceCounter(&presentEnd);QueryPerformanceFrequency(&frequency);
+#if defined(AMDGPU_WDDM_LAB_FLAVOUR)
    static const bool auditPresent = bc250_diag_enabled && GetEnvironmentVariableA("BC250_HOST_AUDIT", NULL, 0) != 0;
+#else
+   const bool auditPresent = false; /* the audit is a lab build's (BD-167) */
+#endif
    if (auditPresent && device->hosted_state) {
       BC250_DIAG("BC250 audit present event=complete pid=%lu device=%p present=%u time_ns=%llu context=%p src=%p src_allocation=%x dst=%p dst_allocation=%x width=%u height=%u format=%u primary=%u flags=%x hr=%08lx\n",
               GetCurrentProcessId(), device->hDevice, device->profilePresents+1,

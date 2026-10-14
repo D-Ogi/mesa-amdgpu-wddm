@@ -4330,7 +4330,9 @@ get_texture_load(struct ntv_context *ctx, SpvId sampler_id, nir_tex_instr *tex,
       if (nir_tex_instr_need_sampler(tex) && sampler_src >= 0) {
          nir_variable *sampler_var = nir_deref_instr_get_variable(nir_src_as_deref(tex->src[sampler_src].src));
          if (sampler_var && glsl_type_is_bare_sampler(glsl_without_array(sampler_var->type))) {
+#if defined(AMDGPU_WDDM_LAB_FLAVOUR)
             if (getenv("BC250_HOST_TRACE_SAMPLER")) fprintf(stderr,"BC250 SPIRV separate sampler binding=%u texture=%u\n",sampler_var->data.binding,var->data.binding);
+#endif
             SpvId image = spirv_builder_emit_image(&ctx->builder, image_type, combined);
             SpvId sampler = spirv_builder_emit_load(&ctx->builder,
                spirv_builder_type_sampler(&ctx->builder), cl_sampler, false);

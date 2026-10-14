@@ -1166,8 +1166,10 @@ update_separable(struct zink_context *ctx, struct zink_program *pg)
             for (unsigned k = 0; k < zs->precompile.bindings[i].descriptorCount; k++) {
                /* VkDescriptorDataEXT is a union of pointers; the member doesn't matter */
                info.data.pSampler = (void*)(((uint8_t*)ctx) + zs->precompile.db_template[i].offset + k * zs->precompile.db_template[i].stride);
+#if defined(AMDGPU_WDDM_LAB_FLAVOUR)
                if (getenv("BC250_HOST_TRACE_SAMPLER") && info.type == VK_DESCRIPTOR_TYPE_SAMPLER)
                   fprintf(stderr,"BC250 sampler descriptor binding=%u handle=%p\n",zs->precompile.bindings[i].binding,(void*)*info.data.pSampler);
+#endif
                bc250_descriptor_get(screen, bs->dd.db_xfer, &info, zs->precompile.db_template[i].db_size, bs->dd.db_map + desc_offset + k * zs->precompile.db_template[i].db_size, __func__);
             }
          } else {

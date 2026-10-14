@@ -77,6 +77,9 @@ static LONG Bc250TraceCount;
 struct Bc250DdiTrace {
    LONG sequence;
    explicit Bc250DdiTrace(const char *name, bool selected) : sequence(0) {
+      /* The trial switches of this file are read only by a lab build (BD-167); a release build behaves as with
+       * every one unset. */
+#if defined(AMDGPU_WDDM_LAB_FLAVOUR)
       if (selected && bc250_diag_enabled && GetEnvironmentVariableA("BC250_HOST_TRACE_DDI",NULL,0)) {
          LONG n=InterlockedIncrement(&Bc250TraceCount);
          if (n<=2048) {
@@ -84,6 +87,9 @@ struct Bc250DdiTrace {
             BC250_DIAG("BC250 DDI begin seq=%ld tid=%lu name=%s\n",sequence,GetCurrentThreadId(),name);
          }
       }
+#else
+      (void)name; (void)selected;
+#endif
    }
    ~Bc250DdiTrace() {
       if (sequence) BC250_DIAG("BC250 DDI end seq=%ld tid=%lu\n",sequence,GetCurrentThreadId());
@@ -384,7 +390,9 @@ static int32_t Bc250HostDispatch(void *userdata, uint32_t operation, void *argum
       BC250_ERROR("BC250 hosted wrong-thread op=%u\n",operation);
       return (int32_t)0xc000000d;
    }
+#if defined(AMDGPU_WDDM_LAB_FLAVOUR)
    if (operation<64 && s->calls[operation]<2 && bc250_diag_enabled && GetEnvironmentVariableA("BC250_HOST_TRACE_DDI",NULL,0)) BC250_DIAG("BC250 callback begin op=%u tid=%lu\n",operation,GetCurrentThreadId());
+#endif
    HRESULT hr=Bc250HostOperation(s,operation,argument);
    if (Bc250DeviceLostResult(hr)) {
       Bc250HostLost(s,BC250_LOST_CALLBACK_RESULT,operation,hr);
@@ -405,7 +413,11 @@ static int32_t Bc250HostDispatch(void *userdata, uint32_t operation, void *argum
 
 void Bc250AuditPresent(Device *device)
 {
+#if defined(AMDGPU_WDDM_LAB_FLAVOUR)
    static const bool enabled = bc250_diag_enabled && GetEnvironmentVariableA("BC250_HOST_AUDIT", NULL, 0) != 0;
+#else
+   const bool enabled = false;
+#endif
    auto *s = (Bc250HostProbeState *)device->hosted_state;
    if (!enabled || !s || (device->profilePresents > 8 && device->profilePresents % 60)) return;
    for (const auto &p : s->progress) {
@@ -447,7 +459,11 @@ HRESULT Bc250QueuePresentWait(Device *device)
    wait.hContext=device->hContext; wait.ObjectCount=count;
    wait.ObjectHandleArray=objects; wait.MonitoredFenceValueArray=values;
    HRESULT hr=count ? device->KTCallbacks.pfnWaitForSynchronizationObjectFromGpuCb(device->hDevice,&wait) : S_OK;
+#if defined(AMDGPU_WDDM_LAB_FLAVOUR)
    static const bool auditWait = bc250_diag_enabled && GetEnvironmentVariableA("BC250_HOST_AUDIT", NULL, 0) != 0;
+#else
+   const bool auditWait = false;
+#endif
    if (auditWait) {
       BC250_DIAG("BC250 audit present event=wait device=%p present=%u context=%p count=%u hr=%08lx\n",
               device->hDevice, device->profilePresents+1, device->hContext, count, hr);
@@ -475,7 +491,11 @@ HRESULT Bc250SignalPresent(Device *device)
    HRESULT hr=device->KTCallbacks.pfnSignalSynchronizationObjectFromGpu2Cb(device->hDevice,&signal);
    if (SUCCEEDED(hr)) s->present_value=value;
    else s->submission_failed=true;
+#if defined(AMDGPU_WDDM_LAB_FLAVOUR)
    static const bool auditSignal = bc250_diag_enabled && GetEnvironmentVariableA("BC250_HOST_AUDIT", NULL, 0) != 0;
+#else
+   const bool auditSignal = false;
+#endif
    if (auditSignal)
       BC250_DIAG("BC250 audit present event=signal device=%p present=%u context=%p sync=%x value=%llu hr=%08lx\n",
               device->hDevice, device->profilePresents+1, device->hContext,
@@ -646,6 +666,7 @@ struct Bc250CreateGuard {
 static bool
 Bc250FailCreate(const char *stage)
 {
+#if defined(AMDGPU_WDDM_LAB_FLAVOUR)
    char requested[32] = {};
    const struct Bc250Config *config = Bc250GetConfig();
    if (!config->runtime_probe || !config->hosted_render)
@@ -655,6 +676,10 @@ Bc250FailCreate(const char *stage)
       return false;
    BC250_ERROR("BC250 injected create failure stage=%s\n", stage);
    return true;
+#else
+   (void)stage;
+   return false; /* fault injection is a lab build's (BD-167) */
+#endif
 }
 
 static ATTRIBUTE_NOINLINE HRESULT APIENTRY
@@ -729,6 +754,7 @@ CreateDeviceOnCompilerStack(D3D10DDI_HADAPTER hAdapter,                 // IN
    // be inherited from a different D3D device. The adapter only carries the
    // LUID the ICD must match (OpenAdapterCommon).
    const bool hostedRender=config->hosted_render;
+#if defined(AMDGPU_WDDM_LAB_FLAVOUR)
    if (!hostedRender && GetEnvironmentVariableA("BC250_HOSTED_ICD", NULL, 0)) {
       Bc250HostProbeState state = {pDevice, GetCurrentThreadId()};
       bc250_host host = {};
@@ -737,16 +763,19 @@ CreateDeviceOnCompilerStack(D3D10DDI_HADAPTER hAdapter,                 // IN
       host.userdata = &state; host.dispatch = Bc250HostDispatch;
       if (!d3d10_hosted_bootstrap(&host)) return E_FAIL;
    }
+#endif
    if (hostedRender) {
       auto *state=new (std::nothrow) Bc250HostProbeState;
       if (!state) return E_OUTOFMEMORY;
       memset(state, 0, sizeof(*state));
       state->device=pDevice;
       state->thread=GetCurrentThreadId();
+#if defined(AMDGPU_WDDM_LAB_FLAVOUR)
       char testLoss[16]={};
       if (config->runtime_probe &&
           GetEnvironmentVariableA("BC250_HOST_TEST_LOSS",testLoss,sizeof(testLoss)))
          state->test_loss=!strcmp(testLoss,"submit") ? 1 : !strcmp(testLoss,"fence") ? 2 : 0;
+#endif
       pDevice->hosted_state=state;
       bc250_host host={};
       host.sType=BC250_HOST_STYPE; host.version=BC250_HOST_VERSION;

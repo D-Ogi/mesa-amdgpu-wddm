@@ -73,8 +73,14 @@
 
 #define ZINK_EXTERNAL_MEMORY_HANDLE 999
 
+#if defined(AMDGPU_WDDM_LAB_FLAVOUR)
 DEBUG_GET_ONCE_BOOL_OPTION(bc250_map_lifetime, "BC250_HOST_AUDIT", false)
 DEBUG_GET_ONCE_OPTION(bc250_audit_marker, "BC250_AUDIT_MARKER", NULL)
+#else
+/* The audit and its marker file are a lab build's (BD-167): off, as with the variables unset. */
+static bool debug_get_option_bc250_map_lifetime(void) { return false; }
+static const char *debug_get_option_bc250_audit_marker(void) { return NULL; }
+#endif
 static uint64_t bc250_audit_next_id;
 static simple_mtx_t bc250_audit_lifetime_lock = SIMPLE_MTX_INITIALIZER;
 static uint64_t bc250_audit_event_sequence;

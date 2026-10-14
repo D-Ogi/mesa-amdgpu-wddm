@@ -49,9 +49,13 @@
 
 extern struct pipe_screen *d3d10_create_screen(void);
 
+/* The legacy loader path (Bc250Config.hosted_render off) and the enumeration-only bootstrap take the adapter LUID
+ * and the ICD from the trial environment: a lab build's (BD-167). A release build renders through
+ * d3d10_create_hosted_screen only, and its hosted_render is always on. */
 struct pipe_screen *
 d3d10_create_screen(void)
 {
+#if defined(AMDGPU_WDDM_LAB_FLAVOUR)
    const char *value = debug_get_option("BC250_D3D_ZINK_LUID", "");
    char *end;
    errno = 0;
@@ -65,8 +69,12 @@ d3d10_create_screen(void)
       return NULL;
    debug_printf("BC250 D3D renderer: %s\n", screen->get_name(screen));
    return debug_screen_wrap(screen);
+#else
+   return NULL;
+#endif
 }
 
+#if defined(AMDGPU_WDDM_LAB_FLAVOUR)
 static bool
 bc250_hosted_content(PFN_vkGetInstanceProcAddr gipa, VkInstance instance, VkPhysicalDevice physical)
 {
@@ -185,6 +193,7 @@ d3d10_hosted_bootstrap(struct bc250_host *host)
    util_dl_close(lib);
    return ok;
 }
+#endif
 
 /* The registered UMD's rendering screen. The frontend resolves both inputs without the process environment
  * (frontends/d3d10umd/Bc250Config.cpp): host->adapter_luid from the runtime adapter's identity trailer and

@@ -93,7 +93,11 @@ u_upload_create(struct pipe_context *pipe, unsigned default_size,
    if (!upload)
       return NULL;
 
+#if defined(AMDGPU_WDDM_LAB_FLAVOUR)
    upload->bc250_audit = debug_get_bool_option("BC250_UPLOAD_AUDIT", false);
+#else
+   upload->bc250_audit = false; /* the audit is a lab build's (BD-167) */
+#endif
    if (upload->bc250_audit)
       upload->bc250_created_ns = os_time_get_nano();
    upload->pipe = pipe;

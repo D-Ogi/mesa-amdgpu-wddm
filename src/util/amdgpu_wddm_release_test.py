@@ -60,6 +60,24 @@ FORBIDDEN = (
     'MESA_LOG_FILE_AUTO',            # writes the Mesa log to a file of its own (not compiled on Windows)
     'GALLIUM_LOG_FILE',              # writes the gallium log to a file (debug builds only)
     'D3D_ALWAYS_SOFTWARE',           # makes zink pick a software Vulkan device in place of the GPU
+    # The hosted D3D UMD (frontends/d3d10umd, targets/d3d10umd) and its zink: trial, audit and fault injection
+    # switches. The release flavour takes the value of an unset variable; its configuration is the registry's.
+    'BC250_HOSTED_ICD',              # loads the ICD from a path the environment names
+    'BC250_UMD_DIAG_DIR',            # writes the diagnostics log to a directory the environment names
+    'BC250_HOSTED_RENDER',           # turns the hosted rendering off (the legacy loader path)
+    'BC250_D3D_RUNTIME_PROBE',       # turns the runtime probe off
+    'BC250_UMD_DIAG',                # turns the diagnostics log on or off over the registry
+    'BC250_UMD_VERBOSE',             # traces every entry point
+    'BC250_D3D_ZINK_LUID',           # names the adapter LUID in place of the adapter's identity
+    'BC250_HOST_TRACE_DDI',          # traces the DDI calls and host callbacks
+    'BC250_HOST_AUDIT',              # the present, map and lifetime audit
+    'BC250_HOST_TEST_CREATE',        # injects a device creation failure
+    'BC250_HOST_TEST_LOSS',          # injects a device loss
+    'BC250_D3D_RUNTIME_INVENTORY',   # shares every primary allocation and logs every resource
+    'BC250_D3D_IMPORT_PROBE_HANDLE', # imports a render target from an NT handle the environment names
+    'BC250_HOST_TRACE_SAMPLER',      # traces sampler creation and descriptors
+    'BC250_AUDIT_MARKER',            # reads the audit marker from a file the environment names
+    'BC250_UPLOAD_AUDIT',            # the upload manager's audit
 )
 SCAN = ('src',)
 EXTENSIONS = ('.c', '.cc', '.cpp', '.h', '.hpp')
