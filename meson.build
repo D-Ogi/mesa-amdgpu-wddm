@@ -156,6 +156,12 @@ pre_args += '-DHAVE_OPENGL=@0@'.format(with_opengl.to_int())
 pre_args += '-DHAVE_OPENGL_ES_1=@0@'.format(with_gles1.to_int())
 pre_args += '-DHAVE_OPENGL_ES_2=@0@'.format(with_gles2.to_int())
 
+# amdgpu-wddm (BD-167): the lab flavour keeps the diagnostic variables and statistics. The default build is
+# the release flavour, which leaves them out of the binary.
+if get_option('amdgpu-wddm-lab-flavour')
+  pre_args += '-DAMDGPU_WDDM_LAB_FLAVOUR=1'
+endif
+
 with_any_opengl = with_opengl or with_gles1 or with_gles2
 
 system_has_kms_drm = ['openbsd', 'netbsd', 'freebsd', 'gnu/kfreebsd', 'dragonfly', 'linux', 'sunos', 'android', 'managarm'].contains(host_machine.system())
