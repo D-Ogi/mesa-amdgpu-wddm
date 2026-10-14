@@ -29,6 +29,9 @@ FORBIDDEN = (
     'MESA_SHADER_CAPTURE_PATH',      # writes the source of every linked GL program to a directory
     'MESA_LOADER_DRIVER_OVERRIDE',   # names another driver than the built-in choice
     'GALLIUM_DRIVER',                # selects the gallium driver in place of the built-in choice
+    'RADV_DEBUG',                    # RADV debug flags: code generation, caching, synchronisation, dumps
+    'RADV_PERFTEST',                 # RADV experimental code paths
+    'ACO_DEBUG',                     # ACO compiler debug flags: validation, optimisation, scheduling
 )
 SCAN = ('src',)
 EXTENSIONS = ('.c', '.cc', '.cpp', '.h', '.hpp')

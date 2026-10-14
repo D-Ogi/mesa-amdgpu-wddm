@@ -44,7 +44,9 @@ static once_flag init_once_flag = ONCE_FLAG_INIT;
 static void
 init_once()
 {
+#ifdef AMDGPU_WDDM_LAB_FLAVOUR
    debug_flags = parse_debug_string(os_get_option("ACO_DEBUG"), aco_debug_options);
+#endif
 
 #ifndef NDEBUG
    /* enable some flags by default on debug builds */

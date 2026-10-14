@@ -274,8 +274,13 @@ radv_CreateInstance(const VkInstanceCreateInfo *pCreateInfo, const VkAllocationC
 
    simple_mtx_init(&instance->shader_dump_mtx, mtx_plain);
 
+#ifdef AMDGPU_WDDM_LAB_FLAVOUR
    parse_debug_bitset(os_get_option("RADV_DEBUG"), radv_debug_options, instance->debug_flags);
    instance->perftest_flags = parse_debug_string(os_get_option("RADV_PERFTEST"), radv_perftest_options);
+#else
+   /* amdgpu-wddm BD-167: no RADV debug or perftest flags from the environment in the release flavour. */
+   instance->perftest_flags = 0;
+#endif
    instance->experimental_flags = parse_debug_string(os_get_option("RADV_EXPERIMENTAL"), radv_experimental_options);
    instance->trap_excp_flags = parse_debug_string(os_get_option("RADV_TRAP_HANDLER_EXCP"), radv_trap_excp_options);
    instance->profile_pstate = radv_parse_pstate(debug_get_option("RADV_PROFILE_PSTATE", "peak"));
