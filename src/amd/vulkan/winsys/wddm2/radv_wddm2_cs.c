@@ -88,6 +88,21 @@ radv_wddm2_debugger_lines(void)
    return mode == 1;
 }
 
+/* amdgpu-wddm: the private driver data of a submission, as hex, on the amdgpu-wddm log stream, only with
+ * AMDGPU_WDDM_LOG_PDD=1. Only the submission path of a device without the BC-250 caps blob (ws->bc250 false) builds
+ * that data. There, without the gate, any AMDGPU_WDDM_LOG file, the control app's timed game log among them, took a
+ * line per 32 bytes of it on every submission. */
+static bool
+radv_wddm2_pdd_lines(void)
+{
+   static int mode = -1; /* benign race: every thread computes the same value */
+   if (mode < 0) {
+      const char *value = getenv("AMDGPU_WDDM_LOG_PDD");
+      mode = value && !strcmp(value, "1");
+   }
+   return mode == 1;
+}
+
 static int32_t radv_wddm2_invariant_budget = 256;
 
 static void
@@ -1858,8 +1873,11 @@ radv_wddm2_cs_submit(struct radeon_winsys_ctx *_ctx,
       }
       submit_pdd_writer_finalize(&pdd);
 
-      if (amdgpu_wddm_log_stream())
-         print_hex_data(amdgpu_wddm_log_stream(), pdd.buffer, pdd.offset);
+      if (radv_wddm2_pdd_lines()) {
+         FILE *pdd_log = amdgpu_wddm_log_stream();
+         if (pdd_log)
+            print_hex_data(pdd_log, pdd.buffer, pdd.offset);
+      }
 
       if (queue->handle) {
          static uint32_t submit_count = 0;
