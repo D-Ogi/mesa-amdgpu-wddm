@@ -1444,7 +1444,11 @@ trace_screen_create(struct pipe_screen *screen)
    struct trace_screen *tr_scr;
 
    /* if zink+lavapipe is enabled, ensure that only one driver is traced */
+#ifdef AMDGPU_WDDM_LAB_FLAVOUR
    const char *driver = debug_get_option("MESA_LOADER_DRIVER_OVERRIDE", NULL);
+#else
+   const char *driver = NULL;   /* amdgpu-wddm BD-167: no driver override in the release flavour */
+#endif
    if (driver && !strcmp(driver, "zink")) {
       /* the user wants zink: check whether they want to trace zink or lavapipe */
       bool trace_lavapipe = debug_get_bool_option("ZINK_TRACE_LAVAPIPE", false);
