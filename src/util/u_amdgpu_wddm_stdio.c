@@ -484,10 +484,11 @@ amdgpu_wddm_stdio_resolve(PINIT_ONCE once, PVOID parameter, PVOID *context)
     * RADV_DEBUG (psocachestats and the rest), MESA_SHADER_CACHE_SHOW_STATS, MESA_LOG and the compiler dumps. Only
     * the file sink takes precedence. */
    static const char *const explicit_debug[] = {
-#ifdef AMDGPU_WDDM_LAB_FLAVOUR   /* BD-167: only the lab flavour reads these two */
-      "RADV_DEBUG", "ACO_DEBUG",
+#ifdef AMDGPU_WDDM_LAB_FLAVOUR   /* BD-167: only the lab flavour reads these three. NIR_DEBUG has no reader in a
+                                 * build with NDEBUG, and where it has one it is lab only (nir.c). */
+      "RADV_DEBUG", "ACO_DEBUG", "NIR_DEBUG",
 #endif
-      "NIR_DEBUG", "MESA_DEBUG", "MESA_LOG", "MESA_SHADER_CACHE_SHOW_STATS",
+      "MESA_DEBUG", "MESA_LOG", "MESA_SHADER_CACHE_SHOW_STATS",
    };
    for (unsigned i = 0; !amdgpu_wddm_stdio_sink && i < sizeof(explicit_debug) / sizeof(explicit_debug[0]); i++) {
       if (GetEnvironmentVariableA(explicit_debug[i], NULL, 0))
