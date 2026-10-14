@@ -787,7 +787,11 @@ loader_get_driver_for_fd(int fd)
     * and may be useful for some touch testing of i915 on an i965 host.
     */
    if (__normal_user()) {
+#ifdef AMDGPU_WDDM_LAB_FLAVOUR
       const char *override = os_get_option("MESA_LOADER_DRIVER_OVERRIDE");
+#else
+      const char *override = NULL;   /* amdgpu-wddm BD-167: no driver override in the release flavour */
+#endif
       if (override && strlen(override))
          return strdup(override);
    }
