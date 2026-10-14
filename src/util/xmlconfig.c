@@ -1385,9 +1385,12 @@ driParseConfigFiles(driOptionCache *cache, const driOptionCache *info,
    userData.shaderOptionCallbackData = params->shaderOptionCallbackData;
 
 #if WITH_XMLCONFIG
+#ifdef AMDGPU_WDDM_LAB_FLAVOUR
    const char *configdir;
+#endif
    const char *home;
 
+#ifdef AMDGPU_WDDM_LAB_FLAVOUR
    /* parse from either $DRIRC_CONFIGDIR or $datadir/drirc.d */
    if ((configdir = os_get_option("DRIRC_CONFIGDIR"))) {
       for (size_t len; len = strcspn(configdir, ":"), *configdir; configdir += MAX2(1, len)) {
@@ -1402,6 +1405,11 @@ driParseConfigFiles(driOptionCache *cache, const driOptionCache *info,
       parseConfigDir(&userData, DATADIR "/drirc.d");
       parseOneConfigFile(&userData, SYSCONFDIR "/drirc");
    }
+#else
+   /* amdgpu-wddm BD-167: no configuration directory from the environment in the release flavour. */
+   parseConfigDir(&userData, DATADIR "/drirc.d");
+   parseOneConfigFile(&userData, SYSCONFDIR "/drirc");
+#endif
 
    if ((home = os_get_option("HOME"))) {
       char filename[PATH_MAX];

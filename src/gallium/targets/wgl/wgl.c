@@ -114,7 +114,11 @@ static struct pipe_screen *
 wgl_screen_create(HDC hDC)
 {
    struct sw_winsys *winsys;
+#ifdef AMDGPU_WDDM_LAB_FLAVOUR
    UNUSED bool sw_only = debug_get_bool_option("LIBGL_ALWAYS_SOFTWARE", false);
+#else
+   UNUSED bool sw_only = false;   /* amdgpu-wddm BD-167: no software override in the release flavour */
+#endif
 
    winsys = gdi_create_sw_winsys(gdi_sw_acquire_hdc_by_value, gdi_sw_release_hdc_by_value);
    if (!winsys)
