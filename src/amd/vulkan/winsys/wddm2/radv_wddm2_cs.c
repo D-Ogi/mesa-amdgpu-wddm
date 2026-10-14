@@ -1101,12 +1101,17 @@ radv_wddm2_bc250_submit(struct radv_wddm2_ctx *ctx, struct radv_wddm2_queue *que
 static bool
 radv_wddm2_pdd_lines(void)
 {
+#if defined(AMDGPU_WDDM_LAB_FLAVOUR)
    static int mode = -1; /* benign race: every thread computes the same value */
    if (mode < 0) {
       const char *value = getenv("AMDGPU_WDDM_LOG_PDD");
       mode = value && !strcmp(value, "1");
    }
    return mode == 1;
+#else
+   /* The release flavour reads no diagnostic variable (BD-167): no dump, as with it unset. */
+   return false;
+#endif
 }
 
 static VkResult

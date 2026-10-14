@@ -71,6 +71,7 @@ FORBIDDEN = (
     'BC250_WSI_IFLIP_BUFFERS',       # the buffer count of an independent flip chain
     'BC250_WSI_IFLIP_WINDOWHOOK',    # turns the window hook of an independent flip chain off
     'BC250_WSI_PRESENT_LOG',         # writes a present log to a file the environment names
+    'AMDGPU_WDDM_LOG_PDD',           # dumps the private driver data of every submission as hex
 )
 SCAN = ('src',)
 EXTENSIONS = ('.c', '.cc', '.cpp', '.h', '.hpp')
