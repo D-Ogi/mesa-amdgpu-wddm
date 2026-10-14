@@ -192,7 +192,12 @@ const char *radv_get_perftest_option_name(int id);
 static const char *
 radv_bvh_stats_file()
 {
+#ifdef AMDGPU_WDDM_LAB_FLAVOUR
    return os_get_option_secure("RADV_BVH_STATS_FILE");
+#else
+   /* amdgpu-wddm BD-167: the release flavour writes no BVH statistics file that the environment names. */
+   return NULL;
+#endif
 }
 
 static bool
