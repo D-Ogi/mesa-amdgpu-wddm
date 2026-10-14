@@ -7916,7 +7916,11 @@ spirv_to_nir(const uint32_t *words, size_t word_count,
       vtn_dump_shader(b, dump_path, blake3_str);
    }
 
+#ifdef AMDGPU_WDDM_LAB_FLAVOUR
    const char *read_path = os_get_option_secure("MESA_SPIRV_READ_PATH");
+#else
+   const char *read_path = NULL;   /* amdgpu-wddm BD-167: no SPIR-V replacement directory in the release flavour */
+#endif
    if (!options->ignore_replacement && read_path) {
       struct spirv_to_nir_options replace_options = *options;
       replace_options.ignore_replacement = true;
