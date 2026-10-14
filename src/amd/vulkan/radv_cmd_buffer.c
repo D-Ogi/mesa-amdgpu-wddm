@@ -2583,32 +2583,6 @@ radv_emit_sample_locations_state(struct radv_cmd_buffer *cmd_buffer)
    radeon_end();
 }
 
-static void
-radv_emit_inline_push_consts(const struct radv_device *device, struct radv_cmd_stream *cs,
-                             const struct radv_shader *shader, int idx, const uint32_t *values)
-{
-   const struct radv_physical_device *pdev = radv_device_physical(device);
-   const struct radv_userdata_info *loc = &shader->info.user_sgprs_locs.shader_data[idx];
-   const uint32_t base_reg = shader->info.user_data_0;
-   const uint32_t sh_offset = base_reg + loc->sgpr_idx * 4;
-
-   if (loc->sgpr_idx == -1)
-      return;
-
-   radeon_check_space(device->ws, cs->b, 2 + loc->num_sgprs);
-
-   radeon_begin(cs);
-   if (pdev->info.gfx_level >= GFX12) {
-      for (uint32_t i = 0; i < loc->num_sgprs; i++) {
-         gfx12_push_sh_reg(sh_offset + i * 4, values[i]);
-      }
-   } else {
-      radeon_set_sh_reg_seq(sh_offset, loc->num_sgprs);
-      radeon_emit_array(values, loc->num_sgprs);
-   }
-   radeon_end();
-}
-
 struct radv_bin_size_entry {
    unsigned bpp;
    VkExtent2D extent;
@@ -6997,37 +6971,38 @@ radv_emit_push_constants_per_stage(const struct radv_device *device, struct radv
                                    const struct radv_shader *shader, uint32_t *values, uint64_t push_constants_va)
 {
    const struct radv_physical_device *pdev = radv_device_physical(device);
-   const uint32_t push_constants_offset = radv_get_user_sgpr_loc(shader, AC_UD_PUSH_CONSTANTS);
-   const uint64_t inline_push_const_mask = shader->info.inline_push_constant_mask;
+   /* bc250: the registers and dwords come from the shader's precomputed block (radv_shader_push_const_regs). */
+   const struct radv_shader_push_const_regs *pc = &shader->push_const_regs;
+   const uint32_t inline_count = pc->inline_count;
+
+   if (!inline_count && !pc->ptr_reg)
+      return;
+
+   radeon_check_space(device->ws, cs->b, 2 + inline_count + 3);
+   radeon_begin(cs);
 
    /* Emit inlined push constants. */
-   if (inline_push_const_mask) {
-      const uint8_t base = ffsll(inline_push_const_mask) - 1;
-
-      if (inline_push_const_mask == u_bit_consecutive64(base, util_last_bit64(inline_push_const_mask) - base)) {
-         /* consecutive inline push constants */
-         radv_emit_inline_push_consts(device, cs, shader, AC_UD_INLINE_PUSH_CONSTANTS, values + base);
+   if (inline_count) {
+      if (pdev->info.gfx_level >= GFX12) {
+         for (uint32_t i = 0; i < inline_count; i++)
+            gfx12_push_sh_reg(pc->inline_reg + i * 4, values[pc->inline_dwords[i]]);
       } else {
-         /* sparse inline push constants */
-         uint32_t consts[AC_MAX_INLINE_PUSH_CONSTS];
-         unsigned num_consts = 0;
-         u_foreach_bit64 (idx, inline_push_const_mask)
-            consts[num_consts++] = values[idx];
-         radv_emit_inline_push_consts(device, cs, shader, AC_UD_INLINE_PUSH_CONSTANTS, consts);
+         radeon_set_sh_reg_seq(pc->inline_reg, inline_count);
+         for (uint32_t i = 0; i < inline_count; i++)
+            radeon_emit(values[pc->inline_dwords[i]]);
       }
    }
 
    /* Emit the push constants upload pointer. */
-   if (push_constants_offset) {
-      radeon_check_space(device->ws, cs->b, 3);
-      radeon_begin(cs);
+   if (pc->ptr_reg) {
       if (pdev->info.gfx_level >= GFX12) {
-         gfx12_push_32bit_pointer(push_constants_offset, push_constants_va, &pdev->info);
+         gfx12_push_32bit_pointer(pc->ptr_reg, push_constants_va, &pdev->info);
       } else {
-         radeon_emit_32bit_pointer(push_constants_offset, push_constants_va, &pdev->info);
+         radeon_emit_32bit_pointer(pc->ptr_reg, push_constants_va, &pdev->info);
       }
-      radeon_end();
    }
+
+   radeon_end();
 }
 
 static void
