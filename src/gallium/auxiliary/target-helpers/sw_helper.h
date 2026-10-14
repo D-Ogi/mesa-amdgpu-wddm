@@ -74,7 +74,11 @@ sw_screen_create_vk(struct sw_winsys *winsys, const struct pipe_screen_config *c
 {
    UNUSED bool only_sw = debug_get_bool_option("LIBGL_ALWAYS_SOFTWARE", false);
    const char *drivers[] = {
+#ifdef AMDGPU_WDDM_LAB_FLAVOUR
       (sw_vk ? "" : debug_get_option("GALLIUM_DRIVER", "")),
+#else
+      "",   /* amdgpu-wddm BD-167: no gallium driver override in the release flavour */
+#endif
 #if defined(GALLIUM_D3D12)
       (sw_vk || only_sw) ? "" : "d3d12",
 #endif
