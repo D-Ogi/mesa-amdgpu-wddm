@@ -43,6 +43,10 @@
 uint32_t nir_debug = 0;
 bool nir_debug_print_shader[MESA_SHADER_KERNEL + 1] = { 0 };
 
+/* amdgpu-wddm BD-167: NIR_DEBUG turns validation off or round-trips every shader through clone and serialize, so a
+ * build without NDEBUG reads it only in the lab flavour. The release flavour keeps nir_debug at 0: the default
+ * validation of such a build, and no shader dump. */
+#ifdef AMDGPU_WDDM_LAB_FLAVOUR
 static const struct debug_named_value nir_debug_control[] = {
    { "clone", NIR_DEBUG_CLONE,
      "Test cloning a shader at each successful lowering/optimization call" },
@@ -102,11 +106,14 @@ static const struct debug_named_value nir_debug_control[] = {
 };
 
 DEBUG_GET_ONCE_FLAGS_OPTION(nir_debug, "NIR_DEBUG", nir_debug_control, 0)
+#endif
 
 static void
 nir_process_debug_variable_once(void)
 {
+#ifdef AMDGPU_WDDM_LAB_FLAVOUR
    nir_debug = debug_get_option_nir_debug();
+#endif
 
    /* clang-format off */
    nir_debug_print_shader[MESA_SHADER_VERTEX]       = NIR_DEBUG(PRINT_VS);
