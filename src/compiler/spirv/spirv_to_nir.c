@@ -405,7 +405,11 @@ _vtn_fail(struct vtn_builder *b, const char *file, unsigned line,
                file, line, fmt, args);
    va_end(args);
 
+#ifdef AMDGPU_WDDM_LAB_FLAVOUR
    const char *dump_path = os_get_option_secure("MESA_SPIRV_FAIL_DUMP_PATH");
+#else
+   const char *dump_path = NULL;   /* amdgpu-wddm BD-167: no dump directory in the release flavour */
+#endif
    if (dump_path)
       vtn_dump_shader(b, dump_path, "fail");
 
@@ -7909,7 +7913,11 @@ spirv_to_nir(const uint32_t *words, size_t word_count,
 
    _mesa_blake3_compute(words, word_count * sizeof(uint32_t), b->shader->info.source_blake3);
 
+#ifdef AMDGPU_WDDM_LAB_FLAVOUR
    const char *dump_path = os_get_option_secure("MESA_SPIRV_DUMP_PATH");
+#else
+   const char *dump_path = NULL;   /* amdgpu-wddm BD-167: no SPIR-V dump directory in the release flavour */
+#endif
    if (dump_path) {
       char blake3_str[BLAKE3_HEX_LEN];
       _mesa_blake3_format(blake3_str, b->shader->info.source_blake3);

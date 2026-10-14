@@ -69,7 +69,11 @@ sw_screen_create_named(struct sw_winsys *winsys, const char *driver)
 static inline struct pipe_screen *
 sw_screen_create_vk(struct sw_winsys *winsys, bool sw_vk)
 {
+#ifdef AMDGPU_WDDM_LAB_FLAVOUR
    UNUSED bool only_sw = debug_get_bool_option("LIBGL_ALWAYS_SOFTWARE", false);
+#else
+   UNUSED bool only_sw = false;   /* amdgpu-wddm BD-167: no software override in the release flavour */
+#endif
    const char *drivers[] = {
 #ifdef AMDGPU_WDDM_LAB_FLAVOUR
       (sw_vk ? "" : debug_get_option("GALLIUM_DRIVER", "")),
