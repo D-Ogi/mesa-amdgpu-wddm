@@ -371,7 +371,12 @@ radv_parse_vrs_rates(const char *str)
 static const char *
 radv_get_force_vrs_config_file(void)
 {
+#ifdef AMDGPU_WDDM_LAB_FLAVOUR
    return os_get_option("RADV_FORCE_VRS_CONFIG_FILE");
+#else
+   /* amdgpu-wddm BD-167: the release flavour reads no VRS configuration file that the environment names. */
+   return NULL;
+#endif
 }
 
 static enum radv_force_vrs
@@ -1533,7 +1538,7 @@ radv_CreateDevice(VkPhysicalDevice physicalDevice, const VkDeviceCreateInfo *pCr
     */
    if (pdev->info.gfx_level >= GFX10_3) {
       if (pdev->info.gfx_level == GFX10_3 && !pdev->info.has_dedicated_vram &&
-          os_get_option("RADV_FORCE_VRS_CONFIG_FILE")) {
+          radv_get_force_vrs_config_file()) {
          const char *file = radv_get_force_vrs_config_file();
 
          device->force_vrs = radv_parse_force_vrs_config_file(file);
@@ -1541,7 +1546,7 @@ radv_CreateDevice(VkPhysicalDevice physicalDevice, const VkDeviceCreateInfo *pCr
          if (radv_device_init_notifier(device)) {
             device->force_vrs_enabled = true;
          } else {
-            fprintf(stderr, "radv: Failed to initialize the notifier for RADV_FORCE_VRS_CONFIG_FILE!\n");
+            fprintf(stderr, "radv: Failed to initialize the notifier for the VRS configuration file!\n");
          }
       } else if (os_get_option("RADV_FORCE_VRS")) {
          const char *vrs_rates = os_get_option("RADV_FORCE_VRS");

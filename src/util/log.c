@@ -146,6 +146,8 @@ mesa_log_init_once(void)
    if (__normal_user()) {
       FILE *fp = NULL;
 
+      /* amdgpu-wddm BD-167: only a lab build lets the environment name a log file or ask for one. */
+#ifdef AMDGPU_WDDM_LAB_FLAVOUR
       if (os_get_option("MESA_LOG_FILE_AUTO")) {
          char log_file[512];
          int fd;
@@ -160,6 +162,7 @@ mesa_log_init_once(void)
          if (log_file)
             fp = fopen(log_file, "w");
       }
+#endif
 
       if (fp) {
          mesa_log_file = fp;

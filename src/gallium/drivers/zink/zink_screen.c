@@ -1827,8 +1827,9 @@ choose_pdev(struct zink_screen *screen, int64_t dev_major, int64_t dev_minor, ui
    bool cpu = debug_get_bool_option("LIBGL_ALWAYS_SOFTWARE", false) ||
               debug_get_bool_option("D3D_ALWAYS_SOFTWARE", false);
 #else
-   /* amdgpu-wddm BD-167: no GL software override in the release flavour. */
-   bool cpu = debug_get_bool_option("D3D_ALWAYS_SOFTWARE", false);
+   /* amdgpu-wddm BD-167: no software override (LIBGL_ALWAYS_SOFTWARE, D3D_ALWAYS_SOFTWARE) in the release
+    * flavour. Rendering on the CPU is the router's route to the CPU UMD, not a zink device. */
+   bool cpu = false;
 #endif
 
    if (cpu || zink_picks_device(dev_major, adapter_luid)) {
