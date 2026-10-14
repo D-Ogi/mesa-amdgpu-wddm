@@ -159,8 +159,9 @@ amdgpu_wddm_game_log_switch(void)
    return status == ERROR_SUCCESS && type == REG_QWORD && bytes == sizeof(until) ? until : 0;
 }
 
-/* The marker: one to ten decimal digits, ';', exactly 16 hex digits of either case, and nothing after them. Any
- * other shape is refused and counts as no marker. */
+/* The marker: one to ten decimal digits that fit in 32 bits, ';', exactly 16 hex digits of either case, and nothing
+ * after them. Any other shape is refused and counts as no marker: a larger number would name this process once cut
+ * to the 32 bits of a process id. */
 static bool
 amdgpu_wddm_game_log_parse_marker(const char *value, unsigned long *pid, ULONGLONG *until)
 {
@@ -172,7 +173,7 @@ amdgpu_wddm_game_log_parse_marker(const char *value, unsigned long *pid, ULONGLO
          return false;
       id = id * 10 + (unsigned)(*p - '0');
    }
-   if (!digits || *p != ';')
+   if (!digits || *p != ';' || id > 0xffffffffu)
       return false;
    for (p++; *p; p++, hex++) {
       unsigned nibble;
