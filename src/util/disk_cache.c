@@ -147,8 +147,12 @@ disk_cache_type_create(const char *gpu_name,
          goto path_fail;
    }
 
+#ifdef AMDGPU_WDDM_LAB_FLAVOUR
    if (!os_get_option("MESA_SHADER_CACHE_DIR") && !os_get_option("MESA_GLSL_CACHE_DIR"))
       disk_cache_touch_cache_user_marker(cache->path);
+#else
+   disk_cache_touch_cache_user_marker(cache->path);   /* amdgpu-wddm BD-167: no directory override */
+#endif
 
    cache->type = cache_type;
 
@@ -230,8 +234,12 @@ disk_cache_create(const char *gpu_name, const char *driver_id,
       /* Since switching the default cache to <mesa_shader_cache_db>, remove the
        * old cache folder if it hasn't been modified for more than 7 days.
        */
+#ifdef AMDGPU_WDDM_LAB_FLAVOUR
       if (!os_get_option("MESA_SHADER_CACHE_DIR") && !os_get_option("MESA_GLSL_CACHE_DIR") &&
           disk_cache_enabled())
+#else
+      if (disk_cache_enabled())   /* amdgpu-wddm BD-167: no directory override */
+#endif
          disk_cache_delete_old_cache();
    } else if (debug_get_bool_option("MESA_DISK_CACHE_MULTI_FILE", true)) {
       cache_type = DISK_CACHE_MULTI_FILE;

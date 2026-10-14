@@ -530,13 +530,21 @@ foz_prepare(struct foz_db *foz_db, char *cache_path)
          goto fail;
    }
 
+#ifdef AMDGPU_WDDM_LAB_FLAVOUR
    const char *foz_dbs_ro = os_get_option("MESA_DISK_CACHE_READ_ONLY_FOZ_DBS");
+#else
+   const char *foz_dbs_ro = NULL;   /* amdgpu-wddm BD-167: no read-only databases from the environment */
+#endif
    if (foz_dbs_ro)
       load_foz_dbs_ro(foz_db, foz_dbs_ro);
 
 #ifdef FOZ_DB_UTIL_DYNAMIC_LIST
+#ifdef AMDGPU_WDDM_LAB_FLAVOUR
    const char *foz_dbs_list =
       os_get_option("MESA_DISK_CACHE_READ_ONLY_FOZ_DBS_DYNAMIC_LIST");
+#else
+   const char *foz_dbs_list = NULL;   /* amdgpu-wddm BD-167: no database list from the environment */
+#endif
    if (foz_dbs_list)
       foz_dbs_list_updater_init(foz_db, foz_dbs_list);
 #endif

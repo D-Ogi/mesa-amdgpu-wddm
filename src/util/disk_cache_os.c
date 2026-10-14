@@ -963,6 +963,7 @@ disk_cache_generate_cache_dir(void *mem_ctx, const char *gpu_name,
          cache_dir_name = CACHE_DIR_NAME_DB;
    }
 
+#ifdef AMDGPU_WDDM_LAB_FLAVOUR
    const char *path = os_get_option_secure("MESA_SHADER_CACHE_DIR");
 
    if (!path) {
@@ -972,6 +973,11 @@ disk_cache_generate_cache_dir(void *mem_ctx, const char *gpu_name,
                  "*** MESA_GLSL_CACHE_DIR is deprecated; "
                  "use MESA_SHADER_CACHE_DIR instead ***\n");
    }
+#else
+   /* amdgpu-wddm BD-167: no cache directory from the environment in the release flavour; the cache
+    * takes its built-in place. */
+   const char *path = NULL;
+#endif
 
    if (path) {
       path = concatenate_and_mkdir(mem_ctx, path, cache_dir_name, mkdir);
@@ -979,6 +985,7 @@ disk_cache_generate_cache_dir(void *mem_ctx, const char *gpu_name,
          return NULL;
    }
 
+#ifdef AMDGPU_WDDM_LAB_FLAVOUR
    if (path == NULL) {
       const char *xdg_cache_home = os_get_option_secure("XDG_CACHE_HOME");
 
@@ -989,6 +996,7 @@ disk_cache_generate_cache_dir(void *mem_ctx, const char *gpu_name,
             return NULL;
       }
    }
+#endif
 
    if (!path) {
       const char *home = os_get_option("HOME");

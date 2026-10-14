@@ -81,7 +81,11 @@ choose_dxgi_adapter(IDXGIFactory4 *factory, LUID *adapter)
       debug_printf("D3D12: requested adapter missing, falling back to auto-detection...\n");
    }
 
+#ifdef AMDGPU_WDDM_LAB_FLAVOUR
    bool want_warp = debug_get_bool_option("LIBGL_ALWAYS_SOFTWARE", false);
+#else
+   bool want_warp = false;   /* amdgpu-wddm BD-167: no software override in the release flavour */
+#endif
    if (want_warp) {
       if (SUCCEEDED(factory->EnumWarpAdapter(IID_PPV_ARGS(&ret))))
          return ret;
