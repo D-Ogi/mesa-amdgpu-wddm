@@ -32,6 +32,7 @@ FORBIDDEN = (
     'RADV_DEBUG',                    # RADV debug flags: code generation, caching, synchronisation, dumps
     'RADV_PERFTEST',                 # RADV experimental code paths
     'ACO_DEBUG',                     # ACO compiler debug flags: validation, optimisation, scheduling
+    'ZINK_DEBUG',                    # zink debug flags: validation, optimisation, synchronisation, dumps
 )
 SCAN = ('src',)
 EXTENSIONS = ('.c', '.cc', '.cpp', '.h', '.hpp')
