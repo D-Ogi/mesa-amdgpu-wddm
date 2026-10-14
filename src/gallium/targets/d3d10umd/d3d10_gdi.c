@@ -73,7 +73,11 @@ d3d10_create_screen(void)
    default_driver = "softpipe";
 #endif
 
+#ifdef AMDGPU_WDDM_LAB_FLAVOUR
    driver = debug_get_option("GALLIUM_DRIVER", default_driver);
+#else
+   driver = default_driver;   /* amdgpu-wddm BD-167: no gallium driver override in the release flavour */
+#endif
 
 #ifdef GALLIUM_LLVMPIPE
    if (strcmp(driver, "llvmpipe") == 0) {
