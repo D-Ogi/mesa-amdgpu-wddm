@@ -1445,12 +1445,17 @@ struct radv_wddm2_deferred_bo {
 static bool
 radv_wddm2_deferred_debugger_lines(void)
 {
+#if defined(AMDGPU_WDDM_LAB_FLAVOUR)
    static int mode = -1; /* benign race: every thread computes the same value */
    if (mode < 0) {
       const char *value = getenv("AMDGPU_WDDM_DDI_TRACE");
       mode = value && !strcmp(value, "2");
    }
    return mode == 1;
+#else
+   /* The release flavour reads no diagnostic variable (BD-167): no debugger lines, as with it unset. */
+   return false;
+#endif
 }
 
 static int32_t radv_wddm2_deferred_line_budget = 256;
@@ -1562,7 +1567,9 @@ radv_wddm2_deferred_line(const char *format, ...)
  * version 2); for every knob the host did not name, the environment is read, so a bisect needs no new
  * binary. The machine-wide file C:\BC250\tmp\amdgpu_wddm_radv.cfg is gone: every process that loaded
  * this ICD read it, dwm.exe on the GPU desktop route included, and no trial ever recorded its contents,
- * so it could change a measured run invisibly. */
+ * so it could change a measured run invisibly. The release flavour reads no knob (BD-167): each one keeps
+ * its default, as with the variable unset, and only the host policy can change it. */
+#if defined(AMDGPU_WDDM_LAB_FLAVOUR)
 static const char *
 radv_wddm2_knob(const char *key, const char **source)
 {
@@ -1574,6 +1581,7 @@ radv_wddm2_knob(const char *key, const char **source)
    *source = "default";
    return NULL;
 }
+#endif
 
 /* The witness's classes: which RADV owner the creation looks like (radv_radeon_winsys.h priorities). */
 enum radv_wddm2_bo_class {
@@ -2787,11 +2795,14 @@ radv_wddm2_bo_init_functions(struct radv_wddm2_winsys *ws)
 
    /* Only the bc250 path has per-queue progress fences to wait on. */
    const struct bc250_host_policy_values *policy = &ws->bc250_policy;
-   const char *destroy_from, *witness_from, *cap_from, *log_from;
-   const char *destroy = radv_wddm2_knob("BC250_DEFERRED_DESTROY", &destroy_from);
-   const char *witness = radv_wddm2_knob("BC250_DEFERRED_WITNESS", &witness_from);
-   const char *cap = radv_wddm2_knob("BC250_DEFERRED_CAP_MB", &cap_from);
-   const char *log_path = radv_wddm2_knob("BC250_DEFERRED_LOG", &log_from);
+   const char *destroy_from = "default", *witness_from = "default", *cap_from = "default", *log_from = "default";
+   const char *destroy = NULL, *witness = NULL, *cap = NULL, *log_path = NULL;
+#if defined(AMDGPU_WDDM_LAB_FLAVOUR)
+   destroy = radv_wddm2_knob("BC250_DEFERRED_DESTROY", &destroy_from);
+   witness = radv_wddm2_knob("BC250_DEFERRED_WITNESS", &witness_from);
+   cap = radv_wddm2_knob("BC250_DEFERRED_CAP_MB", &cap_from);
+   log_path = radv_wddm2_knob("BC250_DEFERRED_LOG", &log_from);
+#endif
    if (bc250_host_policy_has(policy, BC250_HOST_POLICY_HAS_DEFERRED_DESTROY)) {
       ws->deferred.enabled = ws->bc250 && policy->deferred_destroy != 0;
       destroy_from = "host";
@@ -2815,11 +2826,15 @@ radv_wddm2_bo_init_functions(struct radv_wddm2_winsys *ws)
 
    /* The periodic summary: 30 s is about 900 frames at the lab's 30 fps, 14 periods (up to two lines
     * each) in a 7-minute session. */
-   const char *summary_from, *coalesce_from, *slots_from, *progress_from;
-   const char *summary = radv_wddm2_knob("BC250_DEFERRED_SUMMARY_S", &summary_from);
-   const char *coalesce = radv_wddm2_knob("BC250_SUBMIT_COALESCE", &coalesce_from);
-   const char *slots = radv_wddm2_knob("BC250_GATHER_SLOTS", &slots_from);
-   const char *progress = radv_wddm2_knob("BC250_PROGRESS_FENCE", &progress_from);
+   const char *summary_from = "default", *coalesce_from = "default", *slots_from = "default";
+   const char *progress_from = "default";
+   const char *summary = NULL, *coalesce = NULL, *slots = NULL, *progress = NULL;
+#if defined(AMDGPU_WDDM_LAB_FLAVOUR)
+   summary = radv_wddm2_knob("BC250_DEFERRED_SUMMARY_S", &summary_from);
+   coalesce = radv_wddm2_knob("BC250_SUBMIT_COALESCE", &coalesce_from);
+   slots = radv_wddm2_knob("BC250_GATHER_SLOTS", &slots_from);
+   progress = radv_wddm2_knob("BC250_PROGRESS_FENCE", &progress_from);
+#endif
    uint64_t summary_s = 30;
    if (summary) {
       char *end = NULL;

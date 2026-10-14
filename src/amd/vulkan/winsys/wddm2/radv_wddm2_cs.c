@@ -80,12 +80,17 @@ struct bc250_submit_ib {
 static bool
 radv_wddm2_debugger_lines(void)
 {
+#if defined(AMDGPU_WDDM_LAB_FLAVOUR)
    static int mode = -1; /* benign race: every thread computes the same value */
    if (mode < 0) {
       const char *value = getenv("AMDGPU_WDDM_DDI_TRACE");
       mode = value && !strcmp(value, "2");
    }
    return mode == 1;
+#else
+   /* The release flavour reads no diagnostic variable (BD-167): no debugger lines, as with it unset. */
+   return false;
+#endif
 }
 
 /* amdgpu-wddm: the private driver data of a submission, as hex, on the amdgpu-wddm log stream, only with
@@ -415,8 +420,8 @@ radv_wddm2_progress_gpu_va(struct radv_wddm2_winsys *ws, uint32_t context, uint6
    const char *why;
    if (!ws->bc250_progress_gpu)
       return 0;
-   if (ws->bc250_ib_dwords_cap)
-      why = "BC250_IB_DWORDS may cut the write off";
+   if (ws->bc250_ib_dwords_cap) /* BC250_IB_DWORDS: only a lab build sets it */
+      why = "the IB dword cap may cut the write off";
    else if (!va)
       why = "no FenceValueGPUVirtualAddress";
    else if (va & 7)
@@ -1991,6 +1996,7 @@ void
 radv_wddm2_cs_init_functions(struct radv_wddm2_winsys *ws)
 {
    if (ws->bc250) {
+#if defined(AMDGPU_WDDM_LAB_FLAVOUR)
       const char *nocopy = getenv("BC250_IB_NOCOPY");
       const char *cap = getenv("BC250_IB_DWORDS");
       ws->bc250_ib_dwords_cap = cap && cap[0] ? strtoul(cap, NULL, 0) : 0;
@@ -2004,6 +2010,13 @@ radv_wddm2_cs_init_functions(struct radv_wddm2_winsys *ws)
             radv_wddm2_notice("IB submission fallback: every IB copied into the gather slot (BC250_IB_DWORDS=%lu"
                               " clamps the copied stream)", ws->bc250_ib_dwords_cap);
       }
+#else
+      /* The release flavour reads no diagnostic variable (BD-167): IB2 calls and no cap, as with both unset. */
+      ws->bc250_ib_dwords_cap = 0;
+      ws->bc250_gather_copy = false;
+      if (!ws->adapter_query)
+         radv_wddm2_notice("IB submission: IB2 calls from the gather slot");
+#endif
    }
 
    ws->base.ctx_create = radv_wddm2_ctx_create;

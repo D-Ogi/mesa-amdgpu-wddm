@@ -188,6 +188,42 @@ check(bool ok, const char *fmt, ...)
    printf("\n");
 }
 
+/* BD-167: the release flavour reads no BC250_* knob and writes no deferred destroy log (BC250_DEFERRED_LOG).
+ * A check on that log counts only in a lab-flavour build; a release build prints it as SKIP, and
+ * radv-queue-tests.py counts the skips. A test that needs a knob starts with LAB_FLAVOUR_ONLY(). */
+static unsigned skipped;
+
+static void
+check_log(bool ok, const char *fmt, ...)
+{
+   va_list ap;
+#if defined(AMDGPU_WDDM_LAB_FLAVOUR)
+   checks++;
+   if (!ok)
+      failures++;
+   printf("%s %-16s ", ok ? "PASS" : "FAIL", current);
+#else
+   (void)ok;
+   skipped++;
+   printf("SKIP %-16s release flavour, no deferred destroy log: ", current);
+#endif
+   va_start(ap, fmt);
+   vprintf(fmt, ap);
+   va_end(ap);
+   printf("\n");
+}
+
+#if defined(AMDGPU_WDDM_LAB_FLAVOUR)
+#define LAB_FLAVOUR_ONLY() ((void)0)
+#else
+#define LAB_FLAVOUR_ONLY()                                                                                         \
+   do {                                                                                                             \
+      skipped++;                                                                                                    \
+      printf("SKIP %-16s release flavour: the test sets a BC250_* knob, which only a lab build reads\n", current); \
+      return;                                                                                                      \
+   } while (0)
+#endif
+
 static struct obj *
 find(struct obj *arr, unsigned n, uint32_t handle)
 {
@@ -925,6 +961,7 @@ test_second_queue(void)
 static void
 test_signal_wait(void)
 {
+   LAB_FLAVOUR_ONLY();
    void *const cookie_a = (void *)(uintptr_t)0xA0, *const cookie_b = (void *)(uintptr_t)0xB0;
    _putenv_s("BC250_SUBMIT_COALESCE", "0");
    struct radv_wddm2_winsys *ws = make_ws();
@@ -1621,6 +1658,7 @@ test_deferred_destroy(void)
          live(h.contexts, h.n_contexts, false), live(h.allocs, h.n_allocs, false));
    contract();
 
+#if defined(AMDGPU_WDDM_LAB_FLAVOUR)
    /* BC250_DEFERRED_DESTROY=0: destroyed at once, as before. */
    _putenv_s("BC250_DEFERRED_DESTROY", "0");
    ws = make_ws();
@@ -1639,6 +1677,7 @@ test_deferred_destroy(void)
    unbind(ws, c, cookie_a);
    ws->base.ctx_destroy(c);
    contract();
+#endif
 }
 
 /* A bc250 submission of several IBs (radv_wddm2_bc250_submit): the KMD runs one IB1, which by
@@ -1874,6 +1913,7 @@ test_ib2_calls(void)
 static void
 test_ib2_fallback(void)
 {
+   LAB_FLAVOUR_ONLY();
    void *const cookie = (void *)(uintptr_t)0xE0;
    struct radv_wddm2_winsys *ws;
 
@@ -2049,10 +2089,10 @@ test_deferred_cap(void)
    void *const cookie_a = (void *)(uintptr_t)0xA0, *const cookie_b = (void *)(uintptr_t)0xB0;
    const uint64_t half = 512 * 1024, three_quarters = 768 * 1024;
    clear_deferred_env();
-   _putenv_s("BC250_DEFERRED_CAP_MB", "1");
    struct radv_wddm2_winsys *ws = make_ws();
-   clear_deferred_env();
-   check(ws->deferred.enabled && ws->deferred.cap_bytes == 1ull << 20, "BC250_DEFERRED_CAP_MB=1: a 1 MiB cap");
+   /* A 1 MiB cap, as BC250_DEFERRED_CAP_MB=1 gives one in a lab build (test_deferred_policy reads the knob). */
+   ws->deferred.cap_bytes = 1ull << 20;
+   check(ws->deferred.enabled, "deferred destruction on, a 1 MiB cap");
    struct radeon_winsys_ctx *a = new_ctx(ws), *b = new_ctx(ws);
    bind(ws, a, cookie_a);
    const uint32_t a_progress = gfx(a)->bc250_progress.handle;
@@ -2100,10 +2140,10 @@ test_deferred_cap(void)
          "the oldest is released after the wait; 1 MiB held again");
    check(ws->allocated_gtt == gtt - half, "its bytes leave the accounting at the release");
    char line[4096];
-   check(ws->deferred.cap_waits == 1 && !ws->deferred.cap_failed &&
-            log_lines(lm, "deferred destroy: cap: 1 MiB held over the 1 MiB cap", line, sizeof(line)) == 1 &&
-            has(line, "released it"),
-         "one cap wait, counted and logged: %.120s", line);
+   check(ws->deferred.cap_waits == 1 && !ws->deferred.cap_failed, "one cap wait, counted");
+   check_log(log_lines(lm, "deferred destroy: cap: 1 MiB held over the 1 MiB cap", line, sizeof(line)) == 1 &&
+                has(line, "released it"),
+             "and logged: %.120s", line);
    retire(a_progress, 4);
    radv_wddm2_deferred_drain(ws);
    check(!ws->deferred.count && !ws->deferred.bytes, "A's progress 4: nothing held");
@@ -2135,9 +2175,9 @@ test_deferred_cap(void)
    fail_calls(BC250_HOST_WaitForSynchronizationObjectFromCpu, 1);
    ws->base.buffer_destroy(&ws->base, d2);
    no_failures();
-   check(alloc_live(d1_h) && alloc_live(d2_h) && ws->deferred.count == 2 && ws->deferred.cap_failed == 1 &&
-            log_lines(lm, "failed or released nothing", NULL, 0) == 1,
-         "a failed cap wait: both stay held, one failure counted and logged");
+   check(alloc_live(d1_h) && alloc_live(d2_h) && ws->deferred.count == 2 && ws->deferred.cap_failed == 1,
+         "a failed cap wait: both stay held, one failure counted");
+   check_log(log_lines(lm, "failed or released nothing", NULL, 0) == 1, "and logged");
    retire(a_progress, 6);
    retire(b_progress, 1);
    radv_wddm2_deferred_drain(ws);
@@ -2183,10 +2223,10 @@ test_deferred_oom(void)
          "wait for A's 1, release the oldest, fail again, wait for A's 2, release the other (%d %d %d %d)", w1, d0, w2,
          d1);
    char line[4096];
-   check(ws->deferred.retries == 1 && ws->deferred.oom_waits == 2 && !ws->deferred.count &&
-            log_lines(lm, "allocation failed with 2 BOs", line, sizeof(line)) == 1 && has(line, "2 CPU waits") &&
-            has(line, "the retry succeeded"),
-         "counted and logged: %.160s", line);
+   check(ws->deferred.retries == 1 && ws->deferred.oom_waits == 2 && !ws->deferred.count, "counted");
+   check_log(log_lines(lm, "allocation failed with 2 BOs", line, sizeof(line)) == 1 && has(line, "2 CPU waits") &&
+                has(line, "the retry succeeded"),
+             "and logged: %.160s", line);
 
    /* Nothing held: the failure is returned at once, with no wait. */
    fail_calls(BC250_HOST_CreateAllocation2, 1);
@@ -2237,10 +2277,10 @@ test_deferred_teardown(void)
             !ws->deferred.count && !ws->deferred.forced,
          "each released after its wait, none destroyed unretired");
    char line[4096];
-   check(log_lines(lm, "summary: 2 BOs held", line, sizeof(line)) == 1 && has(line, "teardown: 2 CPU waits"),
-         "the summary line: %.200s", line);
-   check(log_lines(lm, "witness finish destroys=2 ", line, sizeof(line)) == 1, "the witness's finish line: %.200s",
-         line);
+   check_log(log_lines(lm, "summary: 2 BOs held", line, sizeof(line)) == 1 && has(line, "teardown: 2 CPU waits"),
+             "the summary line: %.200s", line);
+   check_log(log_lines(lm, "witness finish destroys=2 ", line, sizeof(line)) == 1, "the witness's finish line: %.200s",
+             line);
 
    /* A failed wait: what is left is destroyed anyway, counted. */
    submit_one(ws, a); /* A's 3 */
@@ -2249,9 +2289,10 @@ test_deferred_teardown(void)
    fail_calls(BC250_HOST_WaitForSynchronizationObjectFromCpu, 1);
    radv_wddm2_deferred_finish(ws);
    no_failures();
-   check(!alloc_live(t3_h) && !ws->deferred.count && ws->deferred.forced == 1 &&
-            log_lines(lm, "still held after 0 CPU waits", line, sizeof(line)) == 1 && has(line, "a wait failed"),
-         "a failed teardown wait: destroyed anyway, one forced: %.160s", line);
+   check(!alloc_live(t3_h) && !ws->deferred.count && ws->deferred.forced == 1,
+         "a failed teardown wait: destroyed anyway, one forced");
+   check_log(log_lines(lm, "still held after 0 CPU waits", line, sizeof(line)) == 1 && has(line, "a wait failed"),
+             "and logged: %.160s", line);
    retire(a_progress, 3);
    check(unbind(ws, a, cookie_a) == VK_SUCCESS && unbind(ws, b, cookie_b) == VK_SUCCESS, "both queues unbind");
    ws->base.ctx_destroy(a);
@@ -2263,6 +2304,7 @@ test_deferred_teardown(void)
 static void
 test_deferred_witness(void)
 {
+   LAB_FLAVOUR_ONLY();
    void *const cookie_a = (void *)(uintptr_t)0xA0, *const cookie_b = (void *)(uintptr_t)0xB0;
    clear_ib_env();
    clear_deferred_env();
@@ -2425,6 +2467,7 @@ test_deferred_witness(void)
 static void
 test_deferred_policy(void)
 {
+   LAB_FLAVOUR_ONLY();
    char line[4096];
    clear_deferred_env();
 
@@ -2536,6 +2579,7 @@ test_deferred_policy(void)
 static void
 test_deferred_cost(void)
 {
+   LAB_FLAVOUR_ONLY();
    void *const cookie = (void *)(uintptr_t)0xA0;
    LARGE_INTEGER frequency, t0, t1;
    QueryPerformanceFrequency(&frequency);
@@ -2817,6 +2861,7 @@ test_submit_coalesce(void)
    ws->base.ctx_destroy(b);
    contract();
 
+#if defined(AMDGPU_WDDM_LAB_FLAVOUR)
    /* "signals" merges the progress value and queues every wait; "waits" the other way round. */
    static const char *const modes[2] = {"signals", "waits"};
    for (unsigned m = 0; m < 2; m++) {
@@ -2843,6 +2888,7 @@ test_submit_coalesce(void)
       ws->base.ctx_destroy(c);
       contract();
    }
+#endif
 }
 
 /* Deferred destruction behind a merged progress value: a held BO waits for the value the application's
@@ -2856,11 +2902,9 @@ test_coalesce_hold(void)
    const uint32_t CPU_WAIT = BC250_HOST_WaitForSynchronizationObjectFromCpu;
    clear_ib_env();
    clear_deferred_env();
-   _putenv_s("BC250_DEFERRED_CAP_MB", "1");
    struct radv_wddm2_winsys *ws = make_ws();
-   clear_deferred_env();
-   check(ws->bc250_merge_signals && ws->deferred.enabled && ws->deferred.cap_bytes == 1ull << 20,
-         "coalescing on, deferred destruction on, a 1 MiB cap");
+   ws->deferred.cap_bytes = 1ull << 20; /* as BC250_DEFERRED_CAP_MB=1 in a lab build */
+   check(ws->bc250_merge_signals && ws->deferred.enabled, "coalescing on, deferred destruction on, a 1 MiB cap");
    struct radeon_winsys_ctx *a = new_ctx(ws);
    bind(ws, a, cookie_a);
    struct radv_wddm2_queue *qa = gfx(a);
@@ -2984,6 +3028,7 @@ test_coalesce_hold(void)
 static void
 test_gather_slots(void)
 {
+   LAB_FLAVOUR_ONLY();
    void *const cookie = (void *)(uintptr_t)0xA0;
    const uint32_t CPU_WAIT = BC250_HOST_WaitForSynchronizationObjectFromCpu;
    static const char *const values[3] = {"4", "", "32"};
@@ -3039,6 +3084,7 @@ test_gather_slots(void)
 static void
 test_summary(void)
 {
+   LAB_FLAVOUR_ONLY();
    void *const cookie = (void *)(uintptr_t)0xA0;
    clear_ib_env();
    clear_deferred_env();
@@ -3159,6 +3205,7 @@ test_summary(void)
 static void
 test_submit_cost(void)
 {
+   LAB_FLAVOUR_ONLY();
    void *const cookie = (void *)(uintptr_t)0xA0;
    LARGE_INTEGER frequency, t0, t1;
    QueryPerformanceFrequency(&frequency);
@@ -3461,10 +3508,10 @@ test_progress_gpu(void)
    cs[0] = fake_cs(&fa, bo[0], bo[0]->va, 16);
    submit(ws, c, 1, cs, 0, NULL, 0, NULL);
    char line[4096];
-   check(log_lines(lm, "submit: submits=7 progress_separate=0 progress_merged=0 signal_calls=3 signal_objects=35 ", line,
-                   sizeof(line)) == 1 &&
-            has(line, " coalesce=on progress_fence=gpu progress_gpu=7 kernel_queues=0"),
-         "the summary's submit line: %.400s", line);
+   check_log(log_lines(lm, "submit: submits=7 progress_separate=0 progress_merged=0 signal_calls=3 signal_objects=35 ",
+                       line, sizeof(line)) == 1 &&
+                has(line, " coalesce=on progress_fence=gpu progress_gpu=7 kernel_queues=0"),
+             "the summary's submit line: %.400s", line);
 
    gpu_run(64);
    check(unbind(ws, c, cookie) == VK_SUCCESS, "the queue unbinds, its work retired");
@@ -3475,6 +3522,7 @@ test_progress_gpu(void)
          "nothing left");
    contract();
 
+#if defined(AMDGPU_WDDM_LAB_FLAVOUR)
    /* BC250_IB_NOCOPY=0: the IB1 copies the streams, the write after them. */
    _putenv_s("BC250_IB_NOCOPY", "0");
    ws = make_gpu_ws(1);
@@ -3506,6 +3554,7 @@ test_progress_gpu(void)
    for (unsigned i = 0; i < 2; i++)
       ws->base.buffer_destroy(&ws->base, bo[i]);
    contract();
+#endif
 }
 
 /* The waits that use the progress value with the GPU writing it: a held BO, the cap, teardown, a gather slot's
@@ -3518,11 +3567,9 @@ test_progress_gpu_hold(void)
    const uint32_t CPU_WAIT = BC250_HOST_WaitForSynchronizationObjectFromCpu;
    clear_ib_env();
    clear_deferred_env();
-   _putenv_s("BC250_DEFERRED_CAP_MB", "1");
    struct radv_wddm2_winsys *ws = make_gpu_ws(1);
-   clear_deferred_env();
-   check(ws->bc250_progress_gpu && ws->deferred.enabled && ws->deferred.cap_bytes == 1ull << 20,
-         "the GPU write, deferred destruction, a 1 MiB cap");
+   ws->deferred.cap_bytes = 1ull << 20; /* as BC250_DEFERRED_CAP_MB=1 in a lab build */
+   check(ws->bc250_progress_gpu && ws->deferred.enabled, "the GPU write, deferred destruction, a 1 MiB cap");
    struct radeon_winsys_ctx *a = new_ctx(ws);
    bind(ws, a, cookie_a);
    struct radv_wddm2_queue *qa = gfx(a);
@@ -3684,16 +3731,19 @@ test_progress_gpu_fallback(void)
    uint32_t *map[2];
    clear_ib_env();
    clear_deferred_env();
+   struct radv_wddm2_winsys *ws;
+   struct radeon_winsys_ctx *c;
 
+#if defined(AMDGPU_WDDM_LAB_FLAVOUR)
    /* BC250_PROGRESS_FENCE=kernel: the kernel signals the fence, as version 2 did, though the host gives an
     * address; a choice of the knob is not a fallback. */
    _putenv_s("BC250_PROGRESS_FENCE", "kernel");
    long lm = log_mark();
-   struct radv_wddm2_winsys *ws = make_gpu_ws(1);
+   ws = make_gpu_ws(1);
    clear_deferred_env();
    check(!ws->bc250_progress_gpu && log_lines(lm, " progress_fence=kernel(env)", NULL, 0) == 1,
          "BC250_PROGRESS_FENCE=kernel, and the header says so");
-   struct radeon_winsys_ctx *c = new_ctx(ws);
+   c = new_ctx(ws);
    bind(ws, c, cookie);
    watch(gfx(c));
    check(!gfx(c)->bc250_progress_va && fence_va(gfx(c)->bc250_progress.handle) && !ws->submit_stats.kernel_queues,
@@ -3711,6 +3761,7 @@ test_progress_gpu_fallback(void)
    for (unsigned i = 0; i < 2; i++)
       ws->base.buffer_destroy(&ws->base, bo[i]);
    contract();
+#endif
 
    /* No usable address, or BC250_IB_DWORDS (it may cut the write off): that queue keeps the kernel signal for
     * its life, counted as a fallback. */
@@ -3722,7 +3773,9 @@ test_progress_gpu_fallback(void)
       {0, NULL, "no FenceValueGPUVirtualAddress"},
       {2, NULL, "an address off its 8-byte alignment"},
       {3, NULL, "an address beyond 48 bits"},
+#if defined(AMDGPU_WDDM_LAB_FLAVOUR)
       {1, "4096", "BC250_IB_DWORDS=4096"},
+#endif
    };
    for (unsigned k = 0; k < ARRAY_SIZE(cases); k++) {
       clear_ib_env();
@@ -3937,6 +3990,7 @@ test_progress_gpu_loss(void)
 static void
 test_progress_gpu_cost(void)
 {
+   LAB_FLAVOUR_ONLY();
    void *const cookie = (void *)(uintptr_t)0xA0;
    LARGE_INTEGER frequency, t0, t1;
    QueryPerformanceFrequency(&frequency);
@@ -4215,8 +4269,8 @@ test_barrier_track(void)
    _putenv_s("BC250_BARRIER_TRACK", "0");
    long lm = log_mark();
    struct radv_wddm2_winsys *ws = make_ws();
-   check(ws->base.barrier_track && log_lines(lm, "barrier tracking on (default)", NULL, 0) == 1,
-         "release flavour: =0 does not turn the tracking off, the line says default");
+   check(ws->base.barrier_track, "release flavour: =0 does not turn the tracking off");
+   check_log(log_lines(lm, "barrier tracking on (default)", NULL, 0) == 1, "the line says default");
    _putenv_s("BC250_BARRIER_TRACK", "");
    contract();
 }
@@ -4308,7 +4362,7 @@ test_lock_kept(void)
    check(alloc_live(bo_h) && find(h.allocs, h.n_allocs, bo_h)->locked && ws->allocated_gtt == charged &&
             ws->deferred.locked_count == 1,
          "the BO is kept: allocation live and locked, still charged, one kept (%u)", ws->deferred.locked_count);
-   check(log_lines(log, "kept: its allocation stays CPU-locked", NULL, 0) == 1, "one log line says so");
+   check_log(log_lines(log, "kept: its allocation stays CPU-locked", NULL, 0) == 1, "one log line says so");
 
    /* Within the interval a drain makes no host call. */
    mark = h.n_ev;
@@ -4323,7 +4377,7 @@ test_lock_kept(void)
    check(count_op(mark, BC250_HOST_Unlock2) == 1 && !count_op(mark, BC250_HOST_DestroyAllocation2) &&
             alloc_live(bo_h) && ws->deferred.locked_count == 1,
          "the drain retries the Unlock2 once; it fails, the BO stays kept");
-   check(log_lines(log, "kept: its allocation stays CPU-locked", NULL, 0) == 1, "still one log line");
+   check_log(log_lines(log, "kept: its allocation stays CPU-locked", NULL, 0) == 1, "still one log line");
 
    /* Once the host unlocks, the next drain releases everything. */
    h.fail_op = 0;
@@ -4349,7 +4403,7 @@ test_lock_kept(void)
    check(count_op(mark, BC250_HOST_Unlock2) == 1 && !count_op(mark, BC250_HOST_DestroyAllocation2) && alloc_live(left_h) &&
             ws->deferred.locked_count == 0,
          "teardown tries the unlock once more, whatever the interval, and destroys nothing");
-   check(log_lines(log, "still CPU-locked at teardown", NULL, 0) == 1, "and says what it left to the host");
+   check_log(log_lines(log, "still CPU-locked at teardown", NULL, 0) == 1, "and says what it left to the host");
    h.fail_op = 0;
    find(h.allocs, h.n_allocs, left_h)->locked = false; /* the host releases it with the device */
    contract();
@@ -4774,6 +4828,41 @@ test_cs_create_failure(void)
    contract();
 }
 
+/* BD-167: an installed driver runs with the values of an unset environment. A lab build reads the knobs, so it
+ * makes the winsys with every knob unset; a release build reads none, so it makes it with every knob set to a
+ * value other than its default. Both must give the same winsys: the defaults. */
+static void
+test_flavour_defaults(void)
+{
+   static const char *const knobs[][2] = {
+      {"BC250_DEFERRED_DESTROY", "0"}, {"BC250_DEFERRED_WITNESS", "0"}, {"BC250_DEFERRED_CAP_MB", "1"},
+      {"BC250_DEFERRED_SUMMARY_S", "0"}, {"BC250_SUBMIT_COALESCE", "0"}, {"BC250_GATHER_SLOTS", "4"},
+      {"BC250_PROGRESS_FENCE", "kernel"}, {"BC250_IB_NOCOPY", "0"}, {"BC250_IB_DWORDS", "4096"},
+      {"BC250_DRAW_STATS", "1"}, {"BC250_BARRIER_TRACK", "0"},
+   };
+#if defined(AMDGPU_WDDM_LAB_FLAVOUR)
+   const char *const how = "lab flavour, every knob unset";
+   const bool set = false;
+#else
+   const char *const how = "release flavour, every knob set";
+   const bool set = true;
+#endif
+   for (unsigned i = 0; i < ARRAY_SIZE(knobs); i++)
+      _putenv_s(knobs[i][0], set ? knobs[i][1] : "");
+   struct radv_wddm2_winsys *ws = make_ib_ws();
+   for (unsigned i = 0; i < ARRAY_SIZE(knobs); i++)
+      _putenv_s(knobs[i][0], "");
+   check(ws->deferred.enabled && ws->deferred.witness && ws->deferred.cap_bytes == 512ull << 20,
+         "%s: deferred destruction on, its witness on, a 512 MiB cap", how);
+   check(ws->summary.interval_ns == 30ull * 1000000000ull && ws->summary.next_ns, "%s: a summary every 30 s", how);
+   check(ws->bc250_merge_signals && ws->bc250_drop_waits, "%s: coalescing on", how);
+   check(ws->bc250_gather_slots == BC250_GATHER_SLOTS_DEFAULT, "%s: %u gather slots", how, ws->bc250_gather_slots);
+   check(ws->bc250_progress_gpu, "%s: the GPU writes the progress value", how);
+   check(!ws->bc250_gather_copy && !ws->bc250_ib_dwords_cap, "%s: IB2 calls, no IB cap", how);
+   check(!ws->base.draw_stats_add && ws->base.barrier_track, "%s: no draw counting, barrier tracking on", how);
+   contract();
+}
+
 static const struct {
    const char *name;
    void (*run)(void);
@@ -4822,6 +4911,7 @@ static const struct {
    {"draw_stats", test_draw_stats},
    {"barrier_track", test_barrier_track},
    {"cs_create_failure", test_cs_create_failure},
+   {"flavour_defaults", test_flavour_defaults},
 };
 
 int
@@ -4840,6 +4930,6 @@ main(int argc, char **argv)
       fprintf(stderr, "unknown test %s\n", argv[1]);
       return 2;
    }
-   printf("tests=%u checks=%u failures=%u\n", run, checks, failures);
+   printf("tests=%u checks=%u failures=%u skipped=%u\n", run, checks, failures, skipped);
    return failures ? 1 : 0;
 }

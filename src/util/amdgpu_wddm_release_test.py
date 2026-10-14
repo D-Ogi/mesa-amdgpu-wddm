@@ -60,6 +60,23 @@ FORBIDDEN = (
     'MESA_LOG_FILE_AUTO',            # writes the Mesa log to a file of its own (not compiled on Windows)
     'GALLIUM_LOG_FILE',              # writes the gallium log to a file (debug builds only)
     'D3D_ALWAYS_SOFTWARE',           # makes zink pick a software Vulkan device in place of the GPU
+    # The amdgpu-wddm winsys (src/amd/vulkan/winsys/wddm2): bisect and diagnostic switches. The release flavour
+    # takes the value of an unset variable; a knob the host policy names is still the host's.
+    'AMDGPU_WDDM_DDI_TRACE',         # sends the winsys's failure and witness lines to the debugger
+    'BC250_DEFERRED_DESTROY',        # turns the retire-deferred destroy off
+    'BC250_DEFERRED_WITNESS',        # turns the deferred destroy witness off
+    'BC250_DEFERRED_CAP_MB',         # the bytes the deferred destroy may hold
+    'BC250_DEFERRED_LOG',            # writes the deferred destroy log to a file the environment names
+    'BC250_DEFERRED_SUMMARY_S',      # the period of the summary lines
+    'BC250_SUBMIT_COALESCE',         # turns the merged progress signal and the dropped waits off
+    'BC250_GATHER_SLOTS',            # the submissions of a queue in flight
+    'BC250_PROGRESS_FENCE',          # the kernel in place of the GPU signals the progress fence
+    'BC250_IB_NOCOPY',               # copies every IB into the gather slot in place of the IB2 calls
+    'BC250_IB_DWORDS',               # cuts the copied IB short
+    'BC250_TRACE_SUBMITS',           # writes a line for every submission
+    'BC250_MAKERESIDENT_LEGACY',     # the MakeResident flags of before the overflow policy
+    'BC250_DRAW_STATS',              # counts what the application records, for the summary
+    'BC250_BARRIER_TRACK',           # turns the barrier tracking off
 )
 SCAN = ('src',)
 EXTENSIONS = ('.c', '.cc', '.cpp', '.h', '.hpp')

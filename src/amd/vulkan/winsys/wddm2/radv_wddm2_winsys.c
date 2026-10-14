@@ -110,8 +110,13 @@ radv_wddm2_read_mem_overflow(unsigned *out_internal)
    }
    const char *reg = radv_wddm2_read_hklm_sz(RADV_WDDM2_VK_KEY, RADV_WDDM2_MEM_OVERFLOW_VALUE, reg_buf,
                                              sizeof(reg_buf));
+#if defined(AMDGPU_WDDM_LAB_FLAVOUR)
+   const char *legacy = getenv("BC250_MAKERESIDENT_LEGACY");
+#else
+   const char *legacy = NULL; /* a bisect switch, which the release flavour does not read (BD-167): unset */
+#endif
    const struct radv_wddm2_mem_overflow_choice choice = radv_wddm2_mem_overflow_choose(
-      getenv("BC250_MAKERESIDENT_LEGACY"), getenv("AMDGPU_WDDM_VK_MEM_OVERFLOW"), app, reg);
+      legacy, getenv("AMDGPU_WDDM_VK_MEM_OVERFLOW"), app, reg);
    const struct radv_wddm2_make_resident_bits bits = radv_wddm2_mem_overflow_bits(choice.policy);
    const struct radv_wddm2_make_resident_bits internal = radv_wddm2_mem_overflow_bits_internal(choice.policy);
    D3DDDI_MAKERESIDENT_FLAGS flags = {0}, internal_flags = {0};
@@ -914,8 +919,12 @@ radv_wddm2_winsys_create(const struct vk_dx_adapter_info *adapter_info,
    ws->debug_all_bos = !!(BITSET_TEST(debug_flags, RADV_DEBUG_ALL_BOS));
    ws->debug_log_bos = BITSET_TEST(debug_flags, RADV_DEBUG_HANG);
    ws->dump_ibs = !!(BITSET_TEST(debug_flags, RADV_DEBUG_DUMP_IBS));
+#if defined(AMDGPU_WDDM_LAB_FLAVOUR)
    const char *trace_submits = getenv("BC250_TRACE_SUBMITS");
    ws->bc250_trace_submits = trace_submits && strcmp(trace_submits, "1") == 0;
+#else
+   ws->bc250_trace_submits = false; /* the release flavour reads no diagnostic variable (BD-167) */
+#endif
    ws->make_resident_flags = radv_wddm2_read_mem_overflow(&ws->make_resident_flags_internal);
    radv_winsys_bo_list_init(&ws->global_bo_list);
    radv_winsys_bo_log_init(&ws->bo_log, debug_flags);
