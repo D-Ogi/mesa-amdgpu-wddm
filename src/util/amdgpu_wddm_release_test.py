@@ -77,6 +77,7 @@ FORBIDDEN = (
     'BC250_MAKERESIDENT_LEGACY',     # the MakeResident flags of before the overflow policy
     'BC250_DRAW_STATS',              # counts what the application records, for the summary
     'BC250_BARRIER_TRACK',           # turns the barrier tracking off
+    'AMDGPU_WDDM_LOG_PDD',           # dumps the private driver data of every submission as hex
 )
 SCAN = ('src',)
 EXTENSIONS = ('.c', '.cc', '.cpp', '.h', '.hpp')
