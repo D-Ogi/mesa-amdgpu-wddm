@@ -5,8 +5,9 @@
 The release flavour is the default build. Only a named lab build passes -Damdgpu-wddm-lab-flavour=true, which
 adds -DAMDGPU_WDDM_LAB_FLAVOUR=1 to pre_args (every C and C++ unit), so a build that forgets the switch is the
 release flavour. A release driver must not let an environment variable replace, capture or dump shader code,
-move the cache of compiled shader code, read configuration from another directory, pick another driver, or
-switch on debug code paths, and the criterion is that the variable's name is absent from the binary: a lookup
+move or add to the cache of compiled shader code, read configuration from another directory, pick another or a
+software driver, write driver traces, or switch on debug or experimental code paths, and the criterion is that
+the variable's name is absent from the binary: a lookup
 that is compiled out passes, a lookup that is only ignored at run time does not.
 
 The test reads every C and C++ file under src/ except the trees no amdgpu-wddm build compiles (SKIP), blanks the
@@ -33,6 +34,21 @@ FORBIDDEN = (
     'RADV_PERFTEST',                 # RADV experimental code paths
     'ACO_DEBUG',                     # ACO compiler debug flags: validation, optimisation, scheduling
     'ZINK_DEBUG',                    # zink debug flags: validation, optimisation, synchronisation, dumps
+    'MESA_SPIRV_DUMP_PATH',          # writes every SPIR-V module to a directory
+    'MESA_SPIRV_FAIL_DUMP_PATH',     # writes each SPIR-V module the compiler refused to a directory
+    'MESA_SHADER_DUMP_PATH',         # writes the source of every GLSL shader to a directory
+    'MESA_SHADER_CACHE_DIR',         # moves the disk cache of compiled shader code to a directory
+    'MESA_GLSL_CACHE_DIR',           # the deprecated name of MESA_SHADER_CACHE_DIR
+    'DRIRC_CONFIGDIR',               # reads driver configuration files from a directory in place of the built-in one
+    'XDG_CACHE_HOME',                # moves the disk cache of compiled shader code under another home directory
+    'MESA_DISK_CACHE_READ_ONLY_FOZ_DBS', # loads compiled shader code from read-only cache databases
+    'MESA_DISK_CACHE_READ_ONLY_FOZ_DBS_DYNAMIC_LIST', # a file that names more read-only cache databases
+    'RADV_EXPERIMENTAL',             # RADV experimental features: sparse binding, video, emulated ray tracing, ELF
+    'MESA_VK_TRACE',                 # driver traces (RGP, RRA, RMV, context rolls) written to files
+    'MESA_VK_TRACE_PER_SUBMIT',      # a driver trace per queue submission
+    'MESA_VK_TRACE_FRAME',           # the frame a driver trace starts at
+    'MESA_VK_TRACE_TRIGGER',         # a file whose existence starts a driver trace
+    'LIBGL_ALWAYS_SOFTWARE',         # selects a software renderer in place of the GPU
 )
 SCAN = ('src',)
 EXTENSIONS = ('.c', '.cc', '.cpp', '.h', '.hpp')
