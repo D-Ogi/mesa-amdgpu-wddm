@@ -375,7 +375,14 @@ radv_CreateInstance(const VkInstanceCreateInfo *pCreateInfo, const VkAllocationC
    /* amdgpu-wddm BD-167: no RADV debug or perftest flags from the environment in the release flavour. */
    instance->perftest_flags = 0;
 #endif
+#ifdef AMDGPU_WDDM_LAB_FLAVOUR
    instance->experimental_flags = parse_debug_string(os_get_option("RADV_EXPERIMENTAL"), radv_experimental_options);
+#else
+   /* amdgpu-wddm BD-167: no experimental features from the environment in the release flavour; a host
+    * policy still decides on sparse binding below. */
+   (void)radv_experimental_options;
+   instance->experimental_flags = 0;
+#endif
    /* A host with a policy decides on sparse binding for its instance; the other bits stay the environment's. */
    {
       const int sparse = bc250_host_policy_sparse_bit(instance->bc250_policy_values.present,

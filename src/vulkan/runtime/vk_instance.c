@@ -204,12 +204,21 @@ vk_instance_init(struct vk_instance *instance,
       return vk_error(instance, VK_ERROR_INITIALIZATION_FAILED);
    }
 
+#ifdef AMDGPU_WDDM_LAB_FLAVOUR
    instance->trace_mode = parse_debug_string(os_get_option("MESA_VK_TRACE"), trace_options);
    instance->trace_per_submit = debug_get_bool_option("MESA_VK_TRACE_PER_SUBMIT", false);
    if (!instance->trace_per_submit) {
       instance->trace_frame = (uint32_t)debug_get_num_option("MESA_VK_TRACE_FRAME", 0xFFFFFFFF);
       instance->trace_trigger_file = os_get_option_secure("MESA_VK_TRACE_TRIGGER");
    }
+#else
+   /* amdgpu-wddm BD-167: no driver trace from the environment in the release flavour. */
+   (void)trace_options;
+   instance->trace_mode = 0;
+   instance->trace_per_submit = false;
+   instance->trace_frame = 0xFFFFFFFF;
+   instance->trace_trigger_file = NULL;
+#endif
 
 #if HAVE_RENDERDOC_INTEGRATION
    simple_mtx_init(&instance->renderdoc_mtx, mtx_plain);
@@ -408,7 +417,12 @@ void
 vk_instance_add_driver_trace_modes(struct vk_instance *instance,
                                    const struct debug_control *modes)
 {
+#ifdef AMDGPU_WDDM_LAB_FLAVOUR
    instance->trace_mode |= parse_debug_string(os_get_option("MESA_VK_TRACE"), modes);
+#else
+   (void)instance;   /* amdgpu-wddm BD-167: no driver trace modes in the release flavour */
+   (void)modes;
+#endif
 }
 
 static VkResult

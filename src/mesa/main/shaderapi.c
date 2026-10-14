@@ -1982,7 +1982,11 @@ _mesa_dump_shader_source(const mesa_shader_stage stage, const char *source,
    if (!path_exists)
       return;
 
+#ifdef AMDGPU_WDDM_LAB_FLAVOUR
    dump_path = os_get_option_secure("MESA_SHADER_DUMP_PATH");
+#else
+   dump_path = NULL;   /* amdgpu-wddm BD-167: no GLSL dump directory in the release flavour */
+#endif
    if (!dump_path) {
       path_exists = false;
       return;
