@@ -60,6 +60,17 @@ FORBIDDEN = (
     'MESA_LOG_FILE_AUTO',            # writes the Mesa log to a file of its own (not compiled on Windows)
     'GALLIUM_LOG_FILE',              # writes the gallium log to a file (debug builds only)
     'D3D_ALWAYS_SOFTWARE',           # makes zink pick a software Vulkan device in place of the GPU
+    # The amdgpu-wddm winsys, runtime and WSI of the system ICD: bisect and diagnostic switches. The release
+    # flavour takes the value of an unset variable.
+    'BC250_IB_DWORDS',               # cuts the IB the CP executes
+    'BC250_TRACE_SUBMITS',           # writes a line for every submission
+    'BC250_BVH_BUILD',               # forces the LBVH builder for acceleration structures
+    'BC250_WSI_IFLIP',               # turns the independent flip shape of a swap chain off
+    'BC250_WSI_IFLIP_SCALING',       # the scaling of an independent flip chain
+    'BC250_WSI_IFLIP_TEARING',       # creates every independent flip chain with tearing
+    'BC250_WSI_IFLIP_BUFFERS',       # the buffer count of an independent flip chain
+    'BC250_WSI_IFLIP_WINDOWHOOK',    # turns the window hook of an independent flip chain off
+    'BC250_WSI_PRESENT_LOG',         # writes a present log to a file the environment names
 )
 SCAN = ('src',)
 EXTENSIONS = ('.c', '.cc', '.cpp', '.h', '.hpp')

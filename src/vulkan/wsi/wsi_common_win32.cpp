@@ -2539,10 +2539,15 @@ struct wsi_win32_blit_fence_ops {
 static const struct wsi_iflip_knobs *
 wsi_iflip_knobs_now(void)
 {
+#if defined(AMDGPU_WDDM_LAB_FLAVOUR)
    static const struct wsi_iflip_knobs knobs =
       wsi_iflip_knobs_parse(getenv("BC250_WSI_IFLIP"), getenv("BC250_WSI_IFLIP_SCALING"),
                             getenv("BC250_WSI_IFLIP_TEARING"), getenv("BC250_WSI_IFLIP_BUFFERS"),
                             getenv("BC250_WSI_IFLIP_WINDOWHOOK"));
+#else
+   /* The release flavour reads no diagnostic variable (BD-167): the shape of an unset environment. */
+   static const struct wsi_iflip_knobs knobs = wsi_iflip_knobs_parse(NULL, NULL, NULL, NULL, NULL);
+#endif
    return &knobs;
 }
 
@@ -3141,7 +3146,11 @@ wsi_win32_create_chain(wsi_win32_surface *surface,
    chain->pending_present_image = 0;
    chain->pending_present_value = 0;
    chain->stage_log_bits = 0;
+#if defined(AMDGPU_WDDM_LAB_FLAVOUR)
    const char *present_log_path = getenv("BC250_WSI_PRESENT_LOG");
+#else
+   const char *present_log_path = NULL; /* no file that the environment names in a release build (BD-167) */
+#endif
    if (present_log_path && present_log_path[0]) {
       chain->present_log = fopen(present_log_path, "a");
       if (chain->present_log) {

@@ -64,11 +64,16 @@ static bool bc250_bvh_force_lbvh;
 static void
 bc250_bvh_build_option_read(void)
 {
+#if defined(AMDGPU_WDDM_LAB_FLAVOUR)
    const char *opt = os_get_option("BC250_BVH_BUILD");
 
    bc250_bvh_force_lbvh = opt && !strcmp(opt, "lbvh");
    if (bc250_bvh_force_lbvh)
       fprintf(stderr, "bc250: BVH build forced to LBVH\n");
+#else
+   /* A bisect switch, which the release flavour does not read (BD-167): upstream behaviour. */
+   bc250_bvh_force_lbvh = false;
+#endif
 }
 
 bool
