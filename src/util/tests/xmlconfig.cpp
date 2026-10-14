@@ -289,6 +289,8 @@ TEST_F(xmlconfig_test, drirc_exec_regexp)
    driDestroyOptionCache(&cache);
 }
 
+/* amdgpu-wddm BD-167: a release build has no lookup of the override. */
+#ifdef AMDGPU_WDDM_LAB_FLAVOUR
 TEST_F(xmlconfig_test, drirc_exec_override)
 {
    os_set_option("MESA_DRICONF_EXECUTABLE_OVERRIDE", "app1", true);
@@ -299,4 +301,5 @@ TEST_F(xmlconfig_test, drirc_exec_override)
    EXPECT_EQ(driQueryOptioni(&cache, "mesa_drirc_option"), 1);
    driDestroyOptionCache(&cache);
 }
+#endif
 #endif
