@@ -1833,8 +1833,13 @@ zink_match_adapter_luid(const struct zink_screen *screen, uint32_t pdev_count, c
 static void
 choose_pdev(struct zink_screen *screen, int64_t dev_major, int64_t dev_minor, uint64_t adapter_luid)
 {
+#ifdef AMDGPU_WDDM_LAB_FLAVOUR
    bool cpu = debug_get_bool_option("LIBGL_ALWAYS_SOFTWARE", false) ||
               debug_get_bool_option("D3D_ALWAYS_SOFTWARE", false);
+#else
+   /* amdgpu-wddm BD-167: no GL software override in the release flavour. */
+   bool cpu = debug_get_bool_option("D3D_ALWAYS_SOFTWARE", false);
+#endif
 
    if (cpu || zink_picks_device(dev_major, adapter_luid)) {
       uint32_t pdev_count;
@@ -3475,7 +3480,11 @@ static struct zink_screen *
 zink_internal_create_screen(const struct pipe_screen_config *config, int64_t dev_major, int64_t dev_minor, uint64_t adapter_luid, bool owned_instance, const struct bc250_host *host, const char *loader_path)
 {
    if (os_get_option("ZINK_USE_LAVAPIPE")) {
+#ifdef AMDGPU_WDDM_LAB_FLAVOUR
       mesa_loge("ZINK_USE_LAVAPIPE is obsolete. Use LIBGL_ALWAYS_SOFTWARE\n");
+#else
+      mesa_loge("ZINK_USE_LAVAPIPE is obsolete\n");
+#endif
       return NULL;
    }
 

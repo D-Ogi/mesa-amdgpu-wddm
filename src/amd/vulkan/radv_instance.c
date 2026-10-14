@@ -281,7 +281,14 @@ radv_CreateInstance(const VkInstanceCreateInfo *pCreateInfo, const VkAllocationC
    /* amdgpu-wddm BD-167: no RADV debug or perftest flags from the environment in the release flavour. */
    instance->perftest_flags = 0;
 #endif
+#ifdef AMDGPU_WDDM_LAB_FLAVOUR
    instance->experimental_flags = parse_debug_string(os_get_option("RADV_EXPERIMENTAL"), radv_experimental_options);
+#else
+   /* amdgpu-wddm BD-167: no experimental features from the environment in the release flavour; a host
+    * policy still decides on sparse binding below. */
+   (void)radv_experimental_options;
+   instance->experimental_flags = 0;
+#endif
    instance->trap_excp_flags = parse_debug_string(os_get_option("RADV_TRAP_HANDLER_EXCP"), radv_trap_excp_options);
    instance->profile_pstate = radv_parse_pstate(debug_get_option("RADV_PROFILE_PSTATE", "peak"));
    instance->queue_disable_flags = parse_debug_string(os_get_option("RADV_QUEUE_DISABLE"), radv_queue_disable_options);
