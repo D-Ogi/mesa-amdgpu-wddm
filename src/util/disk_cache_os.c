@@ -1597,7 +1597,8 @@ disk_cache_account_has_default_dir(const void *sid)
  * accounts: a default directory for one of them would hold a cache shared by
  * unrelated system processes, in a profile that is the system's or none at
  * all, and the desktop compositor would write to it. They run without a disk
- * cache unless MESA_SHADER_CACHE_DIR or XDG_CACHE_HOME names one.
+ * cache unless, in a lab build, MESA_SHADER_CACHE_DIR or XDG_CACHE_HOME names
+ * one.
  */
 static bool
 process_has_default_cache_dir(void)
@@ -1614,8 +1615,8 @@ process_has_default_cache_dir(void)
 
 /* Determine path for cache based on the first defined name as follows:
  *
- *   $MESA_SHADER_CACHE_DIR/mesa_shader_cache
- *   $XDG_CACHE_HOME/mesa_shader_cache
+ *   $MESA_SHADER_CACHE_DIR/mesa_shader_cache, in a lab build only
+ *   $XDG_CACHE_HOME/mesa_shader_cache, in a lab build only
  *   %LOCALAPPDATA%/mesa_shader_cache, for a user account only
  *
  * If none applies, the cache stays off. Only the multi-file cache has a
