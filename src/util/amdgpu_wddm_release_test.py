@@ -27,6 +27,8 @@ FORBIDDEN = (
     'MESA_SPIRV_READ_PATH',          # replaces each SPIR-V module with a file of the same hash from a directory
     'MESA_SHADER_READ_PATH',         # replaces GLSL source with a file of the same hash from a directory
     'MESA_SHADER_CAPTURE_PATH',      # writes the source of every linked GL program to a directory
+    'MESA_LOADER_DRIVER_OVERRIDE',   # names another driver than the built-in choice
+    'GALLIUM_DRIVER',                # selects the gallium driver in place of the built-in choice
 )
 SCAN = ('src',)
 EXTENSIONS = ('.c', '.cc', '.cpp', '.h', '.hpp')

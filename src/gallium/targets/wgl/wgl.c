@@ -121,7 +121,11 @@ wgl_screen_create(HDC hDC)
       return NULL;
 
    const char *const drivers[] = {
+#ifdef AMDGPU_WDDM_LAB_FLAVOUR
       debug_get_option("GALLIUM_DRIVER", ""),
+#else
+      "",   /* amdgpu-wddm BD-167: no gallium driver override in the release flavour */
+#endif
 #ifdef GALLIUM_D3D12
       sw_only ? "" : "d3d12",
 #endif
