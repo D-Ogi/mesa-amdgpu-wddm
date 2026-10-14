@@ -6,7 +6,8 @@ The release flavour is the default build. Only a named lab build passes -Damdgpu
 adds -DAMDGPU_WDDM_LAB_FLAVOUR=1 to pre_args (every C and C++ unit), so a build that forgets the switch is the
 release flavour. A release driver must not let an environment variable replace, capture or dump shader code,
 move or add to the cache of compiled shader code, read configuration from another directory, pick another or a
-software driver, write driver traces, or switch on debug or experimental code paths, and the criterion is that
+software driver, write driver traces or log files, or switch on debug, test or experimental code paths, and the
+criterion is that
 the variable's name is absent from the binary: a lookup
 that is compiled out passes, a lookup that is only ignored at run time does not.
 
@@ -50,6 +51,15 @@ FORBIDDEN = (
     'MESA_VK_TRACE_TRIGGER',         # a file whose existence starts a driver trace
     'LIBGL_ALWAYS_SOFTWARE',         # selects a software renderer in place of the GPU
     'MESA_DRICONF_EXECUTABLE_OVERRIDE',  # applies the driver configuration of another executable
+    'RADV_TRAP_HANDLER_EXCP',        # arms the shader trap handler for memory and float exceptions
+    'RADV_PROFILE_PSTATE',           # the power state RADV asks for while a profiler runs
+    'RADV_QUEUE_DISABLE',            # hides graphics, compute, video, transfer or sparse queues
+    'RADV_FORCE_VRS_CONFIG_FILE',    # reads the forced shading rate from a file
+    'RADV_BVH_STATS_FILE',           # writes acceleration structure statistics to a file
+    'MESA_LOG_FILE',                 # writes the Mesa log to a file (not compiled on Windows)
+    'MESA_LOG_FILE_AUTO',            # writes the Mesa log to a file of its own (not compiled on Windows)
+    'GALLIUM_LOG_FILE',              # writes the gallium log to a file (debug builds only)
+    'D3D_ALWAYS_SOFTWARE',           # makes zink pick a software Vulkan device in place of the GPU
 )
 SCAN = ('src',)
 EXTENSIONS = ('.c', '.cc', '.cpp', '.h', '.hpp')

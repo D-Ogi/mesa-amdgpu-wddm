@@ -96,6 +96,8 @@ os_log_message(const char *message)
 
    if (!fout) {
 #if MESA_DEBUG
+      /* amdgpu-wddm BD-167: only a lab build lets the environment name the log file. */
+#ifdef AMDGPU_WDDM_LAB_FLAVOUR
       /* one-time init */
       const char *filename = os_get_option("GALLIUM_LOG_FILE");
       if (filename) {
@@ -113,6 +115,7 @@ os_log_message(const char *message)
             fout = fopen(filename, mode);
          }
       }
+#endif
 #endif
       if (!fout)
          fout = stderr;

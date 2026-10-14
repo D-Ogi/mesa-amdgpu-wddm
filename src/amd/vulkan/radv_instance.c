@@ -392,9 +392,19 @@ radv_CreateInstance(const VkInstanceCreateInfo *pCreateInfo, const VkAllocationC
       if (sparse)
          instance->experimental_flags |= RADV_EXPERIMENTAL_SPARSE;
    }
+#ifdef AMDGPU_WDDM_LAB_FLAVOUR
    instance->trap_excp_flags = parse_debug_string(os_get_option("RADV_TRAP_HANDLER_EXCP"), radv_trap_excp_options);
    instance->profile_pstate = radv_parse_pstate(debug_get_option("RADV_PROFILE_PSTATE", "peak"));
    instance->queue_disable_flags = parse_debug_string(os_get_option("RADV_QUEUE_DISABLE"), radv_queue_disable_options);
+#else
+   /* amdgpu-wddm BD-167: no trap handler exceptions, profiling power state or disabled queues from the
+    * environment in the release flavour; these are the values of an unset variable. */
+   (void)radv_trap_excp_options;
+   (void)radv_queue_disable_options;
+   instance->trap_excp_flags = 0;
+   instance->profile_pstate = radv_parse_pstate("peak");
+   instance->queue_disable_flags = 0;
+#endif
 
    const bool has_shader_stage_flags =
       RADV_DEBUG(instance, DUMP_VS) || RADV_DEBUG(instance, DUMP_TCS) || RADV_DEBUG(instance, DUMP_TES) ||
