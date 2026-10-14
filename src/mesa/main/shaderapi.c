@@ -182,7 +182,9 @@ _mesa_get_shader_capture_path(void)
    static const char *path = NULL;
 
    if (!read_env_var) {
+#ifdef AMDGPU_WDDM_LAB_FLAVOUR
       path = os_get_option_secure("MESA_SHADER_CAPTURE_PATH");
+#endif
       read_env_var = true;
 
 #if ANDROID_SHADER_CAPTURE
@@ -2051,7 +2053,11 @@ _mesa_read_shader_source(const mesa_shader_stage stage, const char *source,
    if (!path_exists)
       return NULL;
 
+#ifdef AMDGPU_WDDM_LAB_FLAVOUR
    read_path = os_get_option("MESA_SHADER_READ_PATH");
+#else
+   read_path = NULL;   /* amdgpu-wddm BD-167: no GLSL replacement directory in the release flavour */
+#endif
    if (!read_path) {
       path_exists = false;
       return NULL;
