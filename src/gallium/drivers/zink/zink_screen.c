@@ -125,7 +125,16 @@ zink_debug_options[] = {
    DEBUG_NAMED_VALUE_END
 };
 
+#ifdef AMDGPU_WDDM_LAB_FLAVOUR
 DEBUG_GET_ONCE_FLAGS_OPTION(zink_debug, "ZINK_DEBUG", zink_debug_options, 0)
+#else
+/* amdgpu-wddm BD-167: no zink debug flags from the environment in the release flavour. */
+static uint64_t
+debug_get_option_zink_debug(void)
+{
+   return 0;
+}
+#endif
 
 uint32_t
 zink_debug;
@@ -3147,7 +3156,11 @@ init_driver_workarounds(struct zink_screen *screen)
    /* once more testing has been done, use the #if 0 block */
    unsigned illegal = ZINK_DEBUG_RP | ZINK_DEBUG_NORP;
    if ((zink_debug & illegal) == illegal) {
+#ifdef AMDGPU_WDDM_LAB_FLAVOUR
       mesa_loge("Cannot specify ZINK_DEBUG=rp and ZINK_DEBUG=norp");
+#else
+      mesa_loge("Cannot specify the rp and norp debug flags together");
+#endif
       abort();
    }
 
