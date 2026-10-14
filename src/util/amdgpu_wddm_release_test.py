@@ -56,6 +56,8 @@ FORBIDDEN = (
     'RADV_QUEUE_DISABLE',            # hides graphics, compute, video, transfer or sparse queues
     'RADV_FORCE_VRS_CONFIG_FILE',    # reads the forced shading rate from a file
     'RADV_BVH_STATS_FILE',           # writes acceleration structure statistics to a file
+    'RADV_FORCE_VRS',                # forces a variable shading rate on every draw (upstream: for testing)
+    'RADV_TEX_ANISO',                # forces an anisotropy filter on every sampler; no release consumer
     'MESA_LOG_FILE',                 # writes the Mesa log to a file (not compiled on Windows)
     'MESA_LOG_FILE_AUTO',            # writes the Mesa log to a file of its own (not compiled on Windows)
     'GALLIUM_LOG_FILE',              # writes the gallium log to a file (debug builds only)
