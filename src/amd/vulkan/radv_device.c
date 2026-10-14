@@ -636,7 +636,11 @@ radv_device_init_device_fault_detection(struct radv_device *device)
       return VK_ERROR_INITIALIZATION_FAILED;
 
    fprintf(stderr, "*****************************************************************************\n");
+#ifdef AMDGPU_WDDM_LAB_FLAVOUR
    fprintf(stderr, "* WARNING: RADV_DEBUG=hang is costly and should only be used for debugging! *\n");
+#else
+   fprintf(stderr, "* WARNING: hang debugging is costly and should only be used for debugging!  *\n");
+#endif
    fprintf(stderr, "*****************************************************************************\n");
 
    /* Wait for idle after every draw/dispatch to identify the
