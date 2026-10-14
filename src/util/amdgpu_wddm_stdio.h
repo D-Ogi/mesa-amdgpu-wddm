@@ -10,11 +10,17 @@
  * build. A rebase of this line onto the D3D ICD line drops this file for that one.
  *
  * AMDGPU_WDDM_LOG decides where amdgpu_wddm_log() writes, with the values the D3D12 shell and the vkd3d-proton
- * engine read too:
- *   unset, empty, "0" or any other value: nothing is written.
+ * engine read too, after the timed switch's marker AMDGPU_WDDM_GAMELOG=<pid>;<16 hex digits> (u_amdgpu_wddm_stdio.c):
+ *   a marker that names this process: another module opened the timed switch's file. Appended to the
+ *     AMDGPU_WDDM_LOG "file:<path>" under the marker's bounds; any other value, or none, writes nothing.
+ *   a marker that names another process: both variables were inherited and are ignored, as if both were unset.
+ *   unset or empty: the control app's timed switch decides (HKLM\SOFTWARE\amdgpu-wddm\Diagnostics GameLogUntil).
+ *     While it runs, a new file of this process in %ProgramData%\amdgpu-wddm\logs\games, bounded in time and size,
+ *     and both variables are set for the modules this process loads later; otherwise nothing is written.
+ *   "0" or any other value: nothing is written.
  *   "stderr": the process's own stderr.
- *   "file:<path>": appended to <path>, opened for append only and shared, so the shell, the engine and other
- *     processes may write to the same file and each line stays whole.
+ *   "file:<path>": appended to <path> with no bounds, opened for append only and shared, so the shell, the engine
+ *     and other processes may write to the same file and each line stays whole.
  * An executable built from this tree keeps its stderr, because the policy is for a DLL in a foreign process.
  * Outside an MSVC build amdgpu_wddm_log() is plain fprintf(stderr).
  */
@@ -29,7 +35,8 @@
 extern "C" {
 #endif
 
-/* The stream of the amdgpu-wddm lines: the process's stderr, the AMDGPU_WDDM_LOG file, or NULL (no output). */
+/* The stream of the amdgpu-wddm lines: the process's stderr, the AMDGPU_WDDM_LOG file, the timed switch's file, or
+ * NULL (no output). Once the timed switch's bounds stop that file, the same stream writes to NUL. */
 FILE *amdgpu_wddm_log_stream(void);
 int amdgpu_wddm_log(const char *format, ...);
 

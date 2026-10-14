@@ -1091,6 +1091,21 @@ radv_wddm2_bc250_submit(struct radv_wddm2_ctx *ctx, struct radv_wddm2_queue *que
    return status;
 }
 
+/* amdgpu-wddm: the private driver data of a submission, as hex, on stderr, only with AMDGPU_WDDM_LOG_PDD=1, the
+ * variable of the triplet line's dump. Only the submission path of a device without the BC-250 caps blob
+ * (ws->bc250 false) builds that data. There, without the gate, every submission formatted a line per 32 bytes of it,
+ * for a stderr that a game does not read. */
+static bool
+radv_wddm2_pdd_lines(void)
+{
+   static int mode = -1; /* benign race: every thread computes the same value */
+   if (mode < 0) {
+      const char *value = getenv("AMDGPU_WDDM_LOG_PDD");
+      mode = value && !strcmp(value, "1");
+   }
+   return mode == 1;
+}
+
 static VkResult
 radv_wddm2_cs_submit(struct radeon_winsys_ctx *_ctx,
                      const struct radv_winsys_submit_info *submit,
@@ -1208,7 +1223,8 @@ radv_wddm2_cs_submit(struct radeon_winsys_ctx *_ctx,
       }
       submit_pdd_writer_finalize(&pdd);
 
-      print_hex_data(stderr, pdd.buffer, pdd.offset);
+      if (radv_wddm2_pdd_lines())
+         print_hex_data(stderr, pdd.buffer, pdd.offset);
 
       if (queue->handle) {
          static uint32_t submit_count = 0;
