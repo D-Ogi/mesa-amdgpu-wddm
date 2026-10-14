@@ -1531,7 +1531,11 @@ radv_wddm2_dump_bo_ranges(struct radeon_winsys *_ws, FILE *file)
    if (ws->debug_all_bos)
       radv_winsys_dump_bo_ranges(&ws->global_bo_list, file);
    else
+#ifdef AMDGPU_WDDM_LAB_FLAVOUR
       fprintf(file, "  To get BO VA ranges, please specify RADV_DEBUG=allbos\n");
+#else
+      fprintf(file, "  BO VA ranges are recorded only by a lab build (allbos)\n");
+#endif
 }
 
 static VkResult
