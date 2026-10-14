@@ -372,6 +372,18 @@ radv_get_force_vrs_config_file(void)
 #endif
 }
 
+static const char *
+radv_get_force_vrs(void)
+{
+#ifdef AMDGPU_WDDM_LAB_FLAVOUR
+   return os_get_option("RADV_FORCE_VRS");
+#else
+   /* amdgpu-wddm BD-167: the release flavour forces no shading rate. Upstream calls the variable a test switch,
+    * and no setting of the control application asks for one. */
+   return NULL;
+#endif
+}
+
 static enum radv_force_vrs
 radv_parse_force_vrs_config_file(const char *config_file)
 {
@@ -1544,15 +1556,21 @@ radv_CreateDevice(VkPhysicalDevice physicalDevice, const VkDeviceCreateInfo *pCr
          } else {
             fprintf(stderr, "radv: Failed to initialize the notifier for the VRS configuration file!\n");
          }
-      } else if (os_get_option("RADV_FORCE_VRS")) {
-         const char *vrs_rates = os_get_option("RADV_FORCE_VRS");
+      } else if (radv_get_force_vrs()) {
+         const char *vrs_rates = radv_get_force_vrs();
 
          device->force_vrs = radv_parse_vrs_rates(vrs_rates);
          device->force_vrs_enabled = device->force_vrs != RADV_FORCE_VRS_1x1;
       }
    }
 
+#ifdef AMDGPU_WDDM_LAB_FLAVOUR
    device->force_aniso = MIN2(16, (int)debug_get_num_option("RADV_TEX_ANISO", -1));
+#else
+   /* amdgpu-wddm BD-167: the release flavour forces no anisotropy filter. The control application's Anisotropy
+    * setting reaches the D3D11 and D3D12 engines through their own options, never through this variable. */
+   device->force_aniso = -1;
+#endif
    if (device->force_aniso >= 0) {
       fprintf(stderr, "radv: Forcing anisotropy filter to %ix\n", 1 << util_logbase2(device->force_aniso));
    }
