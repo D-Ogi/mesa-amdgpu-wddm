@@ -758,11 +758,22 @@ radv_meta_buffer_cache_put(struct radv_meta_buffer_pipeline_cache *cache,
    cache->next = slot + 1;
 }
 
+/* bc250: whether this recording counts at all (BC250_DRAW_STATS). The release flavour of the driver compiles no
+ * counters: this is false at compile time there, so every counted site is a branch on a constant and the compiler
+ * removes it together with the counting behind it. The lab flavour (AMDGPU_WDDM_LAB_FLAVOUR, the default of this
+ * tree) counts as before. The barrier tracking of radv_barrier_track is NOT part of this: it changes what a
+ * barrier emits and belongs to both flavours. */
+#if defined(AMDGPU_WDDM_LAB_FLAVOUR)
+#define radv_draw_stats_recording(cmd_buffer) unlikely((cmd_buffer)->draw_stats.on)
+#else
+#define radv_draw_stats_recording(cmd_buffer) (((void)(cmd_buffer)), false)
+#endif
+
 /* An application command counts; one that RADV records for its own meta operation does not. */
 static inline bool
 radv_draw_stats_on(const struct radv_cmd_buffer *cmd_buffer)
 {
-   return unlikely(cmd_buffer->draw_stats.on) && !cmd_buffer->state.meta.inside_meta_op;
+   return radv_draw_stats_recording(cmd_buffer) && !cmd_buffer->state.meta.inside_meta_op;
 }
 
 void radv_draw_stats_command(struct radv_cmd_buffer *cmd_buffer, enum radv_draw_stat stat, uint32_t kind);
@@ -807,7 +818,7 @@ radv_draw_stats_va_range(uint64_t va, uint64_t size)
 }
 
 #define RADV_DRAW_STATS_TRANSFER(cmd_buffer, w, r)                                                               \
-   (unlikely((cmd_buffer)->draw_stats.on) ? radv_draw_stats_transfer(cmd_buffer, w, r)                         \
+   (radv_draw_stats_recording(cmd_buffer) ? radv_draw_stats_transfer(cmd_buffer, w, r)                         \
                                           : (struct radv_draw_stats_op){0})
 
 static inline void
@@ -830,7 +841,7 @@ radv_draw_stats_transfer_end(struct radv_cmd_buffer *cmd_buffer, struct radv_dra
 /* n more of stat, in RADV's meta operations too (the synchronization counters). */
 #define RADV_DRAW_STATS_ADD(cmd_buffer, stat, n)                                                                 \
    do {                                                                                                         \
-      if (unlikely((cmd_buffer)->draw_stats.on))                                                                \
+      if (radv_draw_stats_recording(cmd_buffer))                                                              \
          (cmd_buffer)->draw_stats.counts[RADV_DRAW_STAT_##stat] += (n);                                         \
    } while (0)
 

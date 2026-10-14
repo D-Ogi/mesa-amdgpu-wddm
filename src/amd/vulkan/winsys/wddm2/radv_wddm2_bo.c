@@ -2114,6 +2114,8 @@ _Static_assert(sizeof(struct radv_wddm2_summary_deferred) <= sizeof(((struct rad
 _Static_assert(sizeof(struct radv_wddm2_summary_submit) <= sizeof(((struct radv_wddm2_winsys *)0)->summary.submit_snapshot),
               "the submit snapshot fits");
 
+#if defined(AMDGPU_WDDM_LAB_FLAVOUR)
+
 /* BC250_DRAW_STATS: radeon_winsys::draw_stats_add, called at the end of every command buffer the
  * application records. */
 static void
@@ -2126,11 +2128,16 @@ radv_wddm2_draw_stats_add(struct radeon_winsys *_ws, const uint32_t counts[RADV_
    }
 }
 
+/* The counter names of the draw:, sync: and track: lines. The release flavour of the driver has no counters, so
+ * this table, the knob that turns them on and the lines themselves are not compiled there and none of these names
+ * is in its binary. */
 static const char *const radv_wddm2_draw_stat_names[RADV_DRAW_STAT_COUNT] = {
 #define RADV_DRAW_STAT_NAME(name) #name,
    RADV_DRAW_STATS(RADV_DRAW_STAT_NAME)
 #undef RADV_DRAW_STAT_NAME
 };
+
+#endif /* AMDGPU_WDDM_LAB_FLAVOUR */
 
 static const char *
 radv_wddm2_coalesce_name(const struct radv_wddm2_winsys *ws)
@@ -2184,19 +2191,26 @@ radv_wddm2_summary_write(struct radv_wddm2_winsys *ws, uint64_t now, uint64_t du
       .kernel_queues = p_atomic_read(&ws->submit_stats.kernel_queues),
    };
 
+#if defined(AMDGPU_WDDM_LAB_FLAVOUR)
    uint64_t draw[RADV_DRAW_STAT_COUNT];
    for (unsigned i = 0; i < RADV_DRAW_STAT_COUNT; i++)
       draw[i] = p_atomic_read(&ws->draw_stats.totals[i]);
 
+   static const uint64_t no_draw[RADV_DRAW_STAT_COUNT];
+#endif
+
    static const struct radv_wddm2_summary_deferred no_deferred;
    static const struct radv_wddm2_summary_submit no_submit;
-   static const uint64_t no_draw[RADV_DRAW_STAT_COUNT];
    simple_mtx_lock(&ws->summary.lock);
    /* Teardown writes what was ever counted; a period, what changed since its last line. */
    const bool write_d = memcmp(&d, final ? (const void *)&no_deferred : ws->summary.deferred_snapshot, sizeof(d)) != 0;
    const bool write_s = memcmp(&s, final ? (const void *)&no_submit : ws->summary.submit_snapshot, sizeof(s)) != 0;
+#if defined(AMDGPU_WDDM_LAB_FLAVOUR)
    const bool write_draw = ws->base.draw_stats_add &&
                            memcmp(draw, final ? no_draw : ws->draw_stats.snapshot, sizeof(draw)) != 0;
+#else
+   const bool write_draw = false;
+#endif
    if (write_d || write_s || write_draw) {
       char tag[32];
       if (final)
@@ -2237,6 +2251,7 @@ radv_wddm2_summary_write(struct radv_wddm2_winsys *ws, uint64_t now, uint64_t du
                                   ws->bc250_progress_gpu ? "gpu" : "kernel", s.progress_gpu, s.kernel_queues);
          memcpy(ws->summary.submit_snapshot, &s, sizeof(s));
       }
+#if defined(AMDGPU_WDDM_LAB_FLAVOUR)
       if (write_draw) {
          /* Three lines, draw:, sync: (RADV_DRAW_STATS_SYNC) and track: (RADV_DRAW_STATS_TRACK), each within what
           * radv_wddm2_deferred_line keeps. */
@@ -2261,6 +2276,7 @@ radv_wddm2_summary_write(struct radv_wddm2_winsys *ws, uint64_t now, uint64_t du
          }
          memcpy(ws->draw_stats.snapshot, draw, sizeof(draw));
       }
+#endif /* AMDGPU_WDDM_LAB_FLAVOUR */
    }
    simple_mtx_unlock(&ws->summary.lock);
 }
@@ -2861,28 +2877,33 @@ radv_wddm2_bo_init_functions(struct radv_wddm2_winsys *ws)
       else if (strcmp(progress, "gpu"))
          progress_from = "invalid, default";
    }
+#if defined(AMDGPU_WDDM_LAB_FLAVOUR)
    /* BC250_DRAW_STATS=1: RADV counts what the application records in its command buffers
     * (RADV_DRAW_STATS, radv_cmd_buffer.c) for a third and a fourth summary line (draw: and sync:). Off by
     * default; when off, a command buffer pays one branch per counted command and the log is unchanged. */
-   char draw_buf[64];
    const char *draw_from;
    const char *draw = radv_wddm2_knob("BC250_DRAW_STATS", &draw_from);
    if (ws->bc250 && draw && !strcmp(draw, "1"))
       ws->base.draw_stats_add = radv_wddm2_draw_stats_add;
+#endif /* AMDGPU_WDDM_LAB_FLAVOUR */
 
    /* BC250_BARRIER_TRACK: 1 (the default) lets RADV track what an application barrier without an image must
     * flush (radv_barrier_track, radv_cmd_buffer.c): the L2 write-back only while CB or DB writes to a
     * pipe-misaligned attachment are pending, the CB and DB flush for transfer writes only after transfers that
     * may have reached them; 0 flushes as RADV upstream does. */
+   ws->base.barrier_track = ws->bc250;
+#if defined(AMDGPU_WDDM_LAB_FLAVOUR)
+   /* Only the lab flavour looks the knob up: the release flavour of the driver reads no diagnostic
+    * variable (BD-167) and takes the default above. */
    const char *track_from;
    const char *track = radv_wddm2_knob("BC250_BARRIER_TRACK", &track_from);
-   ws->base.barrier_track = ws->bc250;
    if (track) {
       if (!strcmp(track, "0"))
          ws->base.barrier_track = false;
       else if (strcmp(track, "1"))
          track_from = "invalid, default";
    }
+#endif /* AMDGPU_WDDM_LAB_FLAVOUR */
 
    ws->deferred.report_count = 256;
    ws->deferred.report_bytes = 256ull << 20;
@@ -2905,10 +2926,16 @@ radv_wddm2_bo_init_functions(struct radv_wddm2_winsys *ws)
                                radv_wddm2_deferred_log_path(), log_from, summary_s,
                                summary_from, radv_wddm2_coalesce_name(ws), coalesce_from, ws->bc250_gather_slots,
                                slots_from, ws->bc250_progress_gpu ? "gpu" : "kernel", progress_from);
+#if defined(AMDGPU_WDDM_LAB_FLAVOUR)
       if (ws->base.draw_stats_add)
          radv_wddm2_deferred_line("draw stats on (%s): counters of every application command buffer, in the "
                                   "summary's draw line", draw_from);
+#endif /* AMDGPU_WDDM_LAB_FLAVOUR */
+#if defined(AMDGPU_WDDM_LAB_FLAVOUR)
       radv_wddm2_deferred_line("barrier tracking %s (%s)", ws->base.barrier_track ? "on" : "off", track_from);
+#else
+      radv_wddm2_deferred_line("barrier tracking %s (default)", ws->base.barrier_track ? "on" : "off");
+#endif
    }
    ws->base.buffer_from_hosted=radv_wddm2_bo_from_hosted;
    ws->base.buffer_create = radv_wddm2_bo_create;

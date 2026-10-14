@@ -4078,6 +4078,8 @@ test_cs_add_buffer(void)
    contract();
 }
 
+#if defined(AMDGPU_WDDM_LAB_FLAVOUR)
+
 /* BC250_DRAW_STATS: off by default (no draw_stats_add, no line); with =1, every command buffer's counters add
  * up and the summary writes them as its draw, sync and track lines (RADV_DRAW_STATS_DRAW, RADV_DRAW_STATS_SYNC,
  * RADV_DRAW_STATS_TRACK), by name in RADV_DRAW_STATS order, only when they changed, and again at teardown. */
@@ -4154,6 +4156,27 @@ test_draw_stats(void)
          "teardown writes them again, final");
    contract();
 }
+#else /* !AMDGPU_WDDM_LAB_FLAVOUR */
+
+/* The release flavour compiles no counters at all, so BC250_DRAW_STATS can turn nothing on: the winsys
+ * offers no draw_stats_add hook and the summary writes no line about counting. */
+static void
+test_draw_stats(void)
+{
+   clear_ib_env();
+   clear_deferred_env();
+   _putenv_s("BC250_DRAW_STATS", "1");
+   long lm = log_mark();
+   struct radv_wddm2_winsys *ws = make_ws();
+   check(!ws->base.draw_stats_add && !log_lines(lm, "draw stats on", NULL, 0),
+         "release flavour: =1 turns on no counting and writes no line");
+   _putenv_s("BC250_DRAW_STATS", "");
+   contract();
+}
+
+#endif /* AMDGPU_WDDM_LAB_FLAVOUR */
+
+#if defined(AMDGPU_WDDM_LAB_FLAVOUR)
 
 /* BC250_BARRIER_TRACK: on unless 0 (anything else keeps the default), and one log line says which. */
 static void
@@ -4180,6 +4203,25 @@ test_barrier_track(void)
    _putenv_s("BC250_BARRIER_TRACK", "");
    contract();
 }
+#else /* !AMDGPU_WDDM_LAB_FLAVOUR */
+
+/* The release flavour reads no diagnostic variable: the tracking is on, BC250_BARRIER_TRACK cannot turn it
+ * off, and the summary line says the value is the default. */
+static void
+test_barrier_track(void)
+{
+   clear_ib_env();
+   clear_deferred_env();
+   _putenv_s("BC250_BARRIER_TRACK", "0");
+   long lm = log_mark();
+   struct radv_wddm2_winsys *ws = make_ws();
+   check(ws->base.barrier_track && log_lines(lm, "barrier tracking on (default)", NULL, 0) == 1,
+         "release flavour: =0 does not turn the tracking off, the line says default");
+   _putenv_s("BC250_BARRIER_TRACK", "");
+   contract();
+}
+
+#endif /* AMDGPU_WDDM_LAB_FLAVOUR */
 
 /* BD-045: a CPU lock belongs to whoever releases the allocation. The fake host keeps one lock per allocation
  * (a second Lock2 or an Unlock2 without one is unexpected) and refuses to destroy a locked allocation, as the

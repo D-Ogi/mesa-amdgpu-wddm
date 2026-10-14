@@ -2126,7 +2126,7 @@ radv_cmd_buffer_after_draw(struct radv_cmd_buffer *cmd_buffer, enum ac_barrier_f
    const struct radv_instance *instance = radv_physical_device_instance(pdev);
    struct radv_cmd_stream *cs = radv_get_pm4_cs(cmd_buffer);
 
-   if (unlikely(cmd_buffer->draw_stats.on))
+   if (radv_draw_stats_recording(cmd_buffer))
       radv_draw_stats_work(cmd_buffer, flags);
 
    if (RADV_DEBUG(instance, SYNC_SHADERS) || RADV_DEBUG(instance, FULL_SYNC)) {
@@ -7492,7 +7492,7 @@ radv_flush_vertex_descriptors(struct radv_cmd_buffer *cmd_buffer)
     * bound again over the state its descriptors were uploaded for points at those (radv_cmd_state::vb_desc_vs);
     * the upload buffers of a recording live until its reset. Off while BC250_DRAW_STATS counts, which checks it
     * instead (radv_write_vertex_descriptors_counted), and with fault detection, which saves every upload. */
-   if (vs == cmd_buffer->state.vb_desc_vs && !cmd_buffer->draw_stats.on &&
+   if (vs == cmd_buffer->state.vb_desc_vs && !radv_draw_stats_recording(cmd_buffer) &&
        !radv_device_fault_detection_enabled(device)) {
       radv_emit_userdata_address(device, cs, vs, AC_UD_VS_VERTEX_BUFFERS, cmd_buffer->state.vb_desc_va);
       return;
@@ -7512,7 +7512,7 @@ radv_flush_vertex_descriptors(struct radv_cmd_buffer *cmd_buffer)
    if (!radv_cmd_buffer_upload_alloc(cmd_buffer, vb_desc_alloc_size, &vb_offset, &vb_ptr))
       return;
 
-   if (unlikely(cmd_buffer->draw_stats.on))
+   if (radv_draw_stats_recording(cmd_buffer))
       radv_write_vertex_descriptors_counted(cmd_buffer, vs, uses_dynamic_inputs, vb_ptr, vb_desc_alloc_size);
    else if (uses_dynamic_inputs)
       radv_write_vertex_descriptors_dynamic(cmd_buffer, vs, NULL, vb_ptr);
@@ -10122,7 +10122,7 @@ radv_EndCommandBuffer(VkCommandBuffer commandBuffer)
    if (cmd_buffer->qf == RADV_QUEUE_SPARSE)
       return vk_command_buffer_end(&cmd_buffer->vk);
 
-   if (unlikely(cmd_buffer->draw_stats.on)) {
+   if (radv_draw_stats_recording(cmd_buffer)) {
       radv_draw_stats_after_end(cmd_buffer, RADV_DRAW_STAT_end_close);
       cmd_buffer->draw_stats.counts[RADV_DRAW_STAT_cmdbufs]++;
    }
@@ -10182,7 +10182,7 @@ radv_EndCommandBuffer(VkCommandBuffer commandBuffer)
    }
 
    /* After the closing flush, which the synchronization counters count. */
-   if (unlikely(cmd_buffer->draw_stats.on))
+   if (radv_draw_stats_recording(cmd_buffer))
       device->ws->draw_stats_add(device->ws, cmd_buffer->draw_stats.counts);
 
    radv_describe_end_cmd_buffer(cmd_buffer);
@@ -17685,7 +17685,7 @@ radv_emit_cache_flush(struct radv_cmd_buffer *cmd_buffer, bool pws_defer_allowed
    if (pws_acquire_point == AC_PWS_ACQUIRE_POINT_PRE_DEPTH && !pws_defer_allowed)
       pws_acquire_point = AC_PWS_ACQUIRE_POINT_ME;
 
-   if (unlikely(cmd_buffer->draw_stats.on))
+   if (radv_draw_stats_recording(cmd_buffer))
       radv_draw_stats_cache_flush(cmd_buffer, cmd_buffer->state.flush_bits);
 
    radv_cs_emit_cache_flush(device->ws, cs, pdev->info.gfx_level, &cmd_buffer->eop_fence_idx, cmd_buffer->eop_fence_va,
