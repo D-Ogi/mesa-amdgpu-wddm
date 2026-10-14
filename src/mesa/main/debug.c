@@ -164,6 +164,11 @@ _mesa_init_debug( struct gl_context *ctx )
 
    set_debug_flags(mesa_debug);
    set_verbose_flags(os_get_option("MESA_VERBOSE"));
+   /* amdgpu-wddm BD-167: this keyword changes how a texture is allocated, so only the lab flavour reads it. With
+    * NDEBUG, as this ICD is built, set_debug_flags and set_verbose_flags are empty and the rest of MESA_DEBUG
+    * only chooses which messages are printed (errors.c, util/log.c, util/xmlconfig.c). */
+#ifdef AMDGPU_WDDM_LAB_FLAVOUR
    ctx->Const.AllowGLTextureLinearTiling =
       mesa_debug && strstr(mesa_debug, "api-tiling-linear");
+#endif
 }
