@@ -3106,8 +3106,10 @@ wsi_select_host_memory_type(const struct wsi_device *wsi,
 {
    VkMemoryPropertyFlags req_props = VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
 
-   if (wsi->sw)
-      req_props |= VK_MEMORY_PROPERTY_HOST_CACHED_BIT;
+   /* Only CPU images take this path, and the CPU reads them at present: prefer cached memory (with
+    * a coherent fallback) on a GPU device that falls back to CPU images as well.
+    */
+   req_props |= VK_MEMORY_PROPERTY_HOST_CACHED_BIT;
 
    return wsi_select_memory_type(wsi, req_props, 0 /* deny_props */, type_bits);
 }
