@@ -17,7 +17,7 @@ so a name behind it still counts) and collects the string literals that hold a f
   - lab (the macro defined): every forbidden name is still found, which shows that the scan reaches its lookup
     and that the lab build keeps it;
   - the option exists, is boolean with the value false, and meson.build adds -DAMDGPU_WDDM_LAB_FLAVOUR=1 for it.
-The bc250-win gate tools/quality/release_flavour.py checks the same names in the built DLLs.
+The bc250-win gate tools/quality/flavour_gate.py checks the same names in the built DLLs.
 """
 import argparse
 import os
@@ -49,6 +49,7 @@ FORBIDDEN = (
     'MESA_VK_TRACE_FRAME',           # the frame a driver trace starts at
     'MESA_VK_TRACE_TRIGGER',         # a file whose existence starts a driver trace
     'LIBGL_ALWAYS_SOFTWARE',         # selects a software renderer in place of the GPU
+    'MESA_DRICONF_EXECUTABLE_OVERRIDE',  # applies the driver configuration of another executable
 )
 SCAN = ('src',)
 EXTENSIONS = ('.c', '.cc', '.cpp', '.h', '.hpp')
