@@ -1478,8 +1478,12 @@ driParseConfigFiles(driOptionCache *cache, const driOptionCache *info,
    initOptionCache(cache, info);
    struct OptConfData userData = {0};
 
+   /* amdgpu-wddm BD-167: only a lab build lets the environment name another executable, which would
+    * apply another application's driver configuration to this process. */
+#ifdef AMDGPU_WDDM_LAB_FLAVOUR
    if (!execname)
       execname = os_get_option("MESA_DRICONF_EXECUTABLE_OVERRIDE");
+#endif
    if (!execname)
       execname = util_get_process_name();
 
