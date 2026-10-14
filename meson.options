@@ -916,6 +916,8 @@ option(
   description : 'use experimental virtio backend for intel driver',
 )
 
+option('amdgpu-wddm-lab-flavour', type : 'boolean', value : false, description : 'BD-167 lab flavour: keep the diagnostic environment variables and statistics (true only in a named lab build)')
+
 option(
   'panfrost-rust',
   type : 'boolean',
