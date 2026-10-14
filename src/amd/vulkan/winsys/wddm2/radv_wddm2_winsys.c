@@ -810,8 +810,12 @@ radv_wddm2_winsys_create(const struct vk_dx_adapter_info *adapter_info,
    ws->debug_all_bos = !!(BITSET_TEST(debug_flags, RADV_DEBUG_ALL_BOS));
    ws->debug_log_bos = BITSET_TEST(debug_flags, RADV_DEBUG_HANG);
    ws->dump_ibs = !!(BITSET_TEST(debug_flags, RADV_DEBUG_DUMP_IBS));
+#if defined(AMDGPU_WDDM_LAB_FLAVOUR)
    const char *trace_submits = getenv("BC250_TRACE_SUBMITS");
    ws->bc250_trace_submits = trace_submits && strcmp(trace_submits, "1") == 0;
+#else
+   ws->bc250_trace_submits = false; /* the release flavour reads no diagnostic variable (BD-167) */
+#endif
    radv_winsys_bo_list_init(&ws->global_bo_list);
    radv_winsys_bo_log_init(&ws->bo_log, debug_flags);
 

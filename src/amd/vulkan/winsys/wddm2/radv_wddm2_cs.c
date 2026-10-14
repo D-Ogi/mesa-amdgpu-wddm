@@ -1160,7 +1160,9 @@ radv_wddm2_bc250_submit(struct radv_wddm2_ctx *ctx, struct radv_wddm2_queue *que
 
    /* BC250_IB_DWORDS cuts the IB the CP executes. 5 is CONTEXT_CONTROL plus
     * CLEAR_STATE, a packet boundary. The ring fence still follows the IB, so a
-    * timeout here means the CP did not finish that prefix. Unset, the whole IB runs. */
+    * timeout here means the CP did not finish that prefix. Unset, the whole IB runs. Only a lab build
+    * reads it (BD-167): in the release flavour the whole IB runs. */
+#if defined(AMDGPU_WDDM_LAB_FLAVOUR)
    {
       const char *cap_env = getenv("BC250_IB_DWORDS");
       if (cap_env && cap_env[0]) {
@@ -1171,6 +1173,7 @@ radv_wddm2_bc250_submit(struct radv_wddm2_ctx *ctx, struct radv_wddm2_queue *que
          }
       }
    }
+#endif
 
    memset(&blob, 0, sizeof(blob));
    _Static_assert(offsetof(struct bc250_submit_blob, ib) == 40, "BC2S prefix is 40 bytes");
