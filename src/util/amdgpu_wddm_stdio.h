@@ -15,6 +15,9 @@
  *   "stderr": the process's own stderr.
  *   "file:<path>": appended to <path>, opened for append only and shared, so the shell, the engine and other
  *     processes may write to the same file and each line stays whole.
+ * That list is the lab flavour's (AMDGPU_WDDM_LAB_FLAVOUR, BD-167). The release flavour has AMDGPU_WDDM_LOG only as
+ * the carrier of the control app's timed switch, which this line does not take, so it reads no value: nothing is
+ * written, as with the variable unset.
  * An executable built from this tree keeps its stderr, because the policy is for a DLL in a foreign process.
  * Outside an MSVC build amdgpu_wddm_log() is plain fprintf(stderr).
  */

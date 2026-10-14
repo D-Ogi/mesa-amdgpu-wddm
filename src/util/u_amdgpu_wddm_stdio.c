@@ -16,6 +16,8 @@ static INIT_ONCE amdgpu_wddm_log_once = INIT_ONCE_STATIC_INIT;
 /* Null means no output. Otherwise the C runtime's stderr or the AMDGPU_WDDM_LOG file. */
 static FILE *amdgpu_wddm_log_sink;
 
+#if defined(AMDGPU_WDDM_LAB_FLAVOUR)
+/* The lab flavour only (BD-167): the release flavour opens no file that AMDGPU_WDDM_LOG names. */
 static FILE *
 amdgpu_wddm_log_open_append(const char *path)
 {
@@ -38,6 +40,7 @@ amdgpu_wddm_log_open_append(const char *path)
    setvbuf(file, NULL, _IONBF, 0);
    return file;
 }
+#endif
 
 static BOOL CALLBACK
 amdgpu_wddm_log_resolve(PINIT_ONCE once, PVOID parameter, PVOID *context)
@@ -56,6 +59,7 @@ amdgpu_wddm_log_resolve(PINIT_ONCE once, PVOID parameter, PVOID *context)
       return TRUE;
    }
 
+#if defined(AMDGPU_WDDM_LAB_FLAVOUR)
    char value[MAX_PATH + 8];
    DWORD length = GetEnvironmentVariableA("AMDGPU_WDDM_LOG", value, sizeof(value));
    if (!length || length >= sizeof(value))
@@ -67,6 +71,10 @@ amdgpu_wddm_log_resolve(PINIT_ONCE once, PVOID parameter, PVOID *context)
    /* A file that cannot be opened means no output, as in the shell and the engine. */
    if (!strncmp(value, "file:", 5) && value[5])
       amdgpu_wddm_log_sink = amdgpu_wddm_log_open_append(value + 5);
+#else
+   /* The release flavour: this line carries no timed switch ("Record game logs"), the only use of AMDGPU_WDDM_LOG
+    * the release flavour has, so the variable is not read and nothing is written, as with it unset (BD-167). */
+#endif
    return TRUE;
 }
 
