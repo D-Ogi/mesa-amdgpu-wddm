@@ -21,6 +21,11 @@
  *     (RADV_DEBUG, ACO_DEBUG, NIR_DEBUG, MESA_DEBUG, MESA_LOG, MESA_SHADER_CACHE_SHOW_STATS): then as upstream.
  *   "stderr": the process's own stdout and stderr, as upstream.
  *   "file:<path>": both streams are appended to <path> with no bounds, opened for append only and shared.
+ * That list is the lab flavour's (AMDGPU_WDDM_LAB_FLAVOUR, BD-167). The release flavour reads AMDGPU_WDDM_LOG only as
+ * the carrier of the timed switch: beside a marker that names this process, and only as "file:" and a plain file
+ * name in the switch's folder, a file that already exists. Without such a marker the switch decides, as with the
+ * variable unset; "stderr", every other value and every other path give no output of their own (both streams go to
+ * NUL, unless an explicit Mesa debug variable is set).
  * So mesa_log's default info and warn lines and the error-only messages (the shader cache's "Failed to create ...")
  * print only when asked; the debug options print where their variable expects them.
  * An executable built from this tree (a test or a tool) keeps its streams. The C runtime is linked statically into

@@ -33,7 +33,9 @@ static FILE *amdgpu_wddm_log_sink;
  *     marker's instant and the size cap, with no second reading of the registry; without "file:<path>", no output.
  *   the marker names another process: both variables were inherited from the parent and say nothing about this
  *     one. Both are ignored and the switch decides again, for a file of this process with its own marker.
- *   no marker and AMDGPU_WDDM_LOG set: the process asked for the lines itself, and nothing bounds them.
+ *   no marker and AMDGPU_WDDM_LOG set: in the lab flavour the process asked for the lines itself, and nothing
+ *     bounds them; in the release flavour the switch decides, as with the variable unset (BD-167).
+ * The release flavour joins only a file that already exists directly in the switch's folder.
  * A marker of any other shape, or one longer than its buffer, counts as absent.
  *
  * Three bounds hold a switch somebody forgets: every line checks the instant, the file stops at
@@ -125,6 +127,8 @@ amdgpu_wddm_log_print(FILE *out, const char *format, ...)
    return written;
 }
 
+#if defined(AMDGPU_WDDM_LAB_FLAVOUR)
+/* The lab flavour only (BD-167): the release flavour opens no file that AMDGPU_WDDM_LOG names by itself. */
 static FILE *
 amdgpu_wddm_stdio_open_append(const char *path)
 {
@@ -136,6 +140,7 @@ amdgpu_wddm_stdio_open_append(const char *path)
       return NULL;
    return amdgpu_wddm_stdio_from_handle(handle);
 }
+#endif
 
 static ULONGLONG
 amdgpu_wddm_game_log_now(void)
@@ -321,12 +326,65 @@ amdgpu_wddm_game_log_open(void)
 /* Another module of this process opened the timed switch's file and marked the process: append to the file that
  * AMDGPU_WDDM_LOG names, under the marker's instant. GetFileSizeEx needs no access right beyond FILE_APPEND_DATA, so
  * the size bound works on this handle too. An instant of 0 lies in 1601: that recording is over. */
+#if !defined(AMDGPU_WDDM_LAB_FLAVOUR)
+/* Whether path names a file directly in folder: the folder, one backslash and a plain file name, with no directory
+ * part, no stream and neither "." nor "..". The folder is compared without regard to case, as Windows compares it. */
+static bool
+amdgpu_wddm_game_log_member(const char *path, const char *folder)
+{
+   size_t length = strlen(folder);
+   if (!length || _strnicmp(path, folder, length) || path[length] != '\\')
+      return false;
+   const char *name = path + length + 1;
+   if (!*name || !strcmp(name, ".") || !strcmp(name, ".."))
+      return false;
+   for (const char *p = name; *p; p++) {
+      if (*p == '\\' || *p == '/' || *p == ':')
+         return false;
+   }
+   return true;
+}
+
+/* The release flavour joins only the switch's file (BD-167): a file that already exists directly in
+ * %ProgramData%\amdgpu-wddm\logs\games, opened OPEN_EXISTING, so a join never creates a name, with the check of
+ * open_new, and refused unless it is a plain file on a disk with one name, so a device name, a reparse point or a
+ * second link cannot send the lines anywhere else. */
+static FILE *
+amdgpu_wddm_game_log_open_joined(const char *path)
+{
+   char root[MAX_PATH], folder[MAX_PATH];
+   DWORD length = GetEnvironmentVariableA("ProgramData", root, sizeof(root));
+   if (!length || length >= sizeof(root))
+      return NULL;
+   int n = snprintf(folder, sizeof(folder), "%s\\%s", root, AMDGPU_WDDM_GAME_LOG_FOLDER);
+   if (n < 0 || n >= (int)sizeof(folder) || !amdgpu_wddm_game_log_member(path, folder))
+      return NULL;
+   HANDLE handle = CreateFileA(path, FILE_APPEND_DATA | FILE_READ_ATTRIBUTES,
+                               FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, NULL, OPEN_EXISTING,
+                               FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OPEN_REPARSE_POINT, NULL);
+   if (handle == INVALID_HANDLE_VALUE)
+      return NULL;
+   BY_HANDLE_FILE_INFORMATION info;
+   if (GetFileType(handle) != FILE_TYPE_DISK || !GetFileInformationByHandle(handle, &info) ||
+       (info.dwFileAttributes & (FILE_ATTRIBUTE_REPARSE_POINT | FILE_ATTRIBUTE_DIRECTORY)) ||
+       info.nNumberOfLinks != 1) {
+      CloseHandle(handle);
+      return NULL;
+   }
+   return amdgpu_wddm_stdio_from_handle(handle);
+}
+#endif
+
 static FILE *
 amdgpu_wddm_game_log_join(const char *value, ULONGLONG until)
 {
    if (!until || strncmp(value, "file:", 5) || !value[5])
       return NULL;
+#if defined(AMDGPU_WDDM_LAB_FLAVOUR)
    FILE *file = amdgpu_wddm_stdio_open_append(value + 5);
+#else
+   FILE *file = amdgpu_wddm_game_log_open_joined(value + 5);
+#endif
    if (file)
       amdgpu_wddm_game_log_until = until;
    return file;
@@ -390,13 +448,14 @@ amdgpu_wddm_stdio_resolve(PINIT_ONCE once, PVOID parameter, PVOID *context)
    DWORD marked = GetEnvironmentVariableA(AMDGPU_WDDM_GAME_LOG_MARKER, mark, sizeof(mark));
    unsigned long pid = 0;
    ULONGLONG until = 0;
-   /* A value of AMDGPU_WDDM_LOG too long for the buffer is still a value: no file, whatever the marker says. With
-    * the marker: this process marked it, so the marker is the file, joined or nothing; another process marked it,
-    * so both variables were inherited and the switch decides again. Without the marker: a value the process carries
-    * wins, with no bounds, and no AMDGPU_WDDM_LOG at all leaves it to the switch. The timed switch's file takes
-    * precedence over the Mesa debug variables below, as any file sink does. */
-   if (length < sizeof(value) && marked && marked < sizeof(mark) &&
-       amdgpu_wddm_game_log_parse_marker(mark, &pid, &until)) {
+   /* The lab flavour: a value of AMDGPU_WDDM_LOG too long for the buffer is still a value: no file, whatever the
+    * marker says. With the marker: this process marked it, so the marker is the file, joined or nothing; another
+    * process marked it, so both variables were inherited and the switch decides again. Without the marker: a value
+    * the process carries wins, with no bounds, and no AMDGPU_WDDM_LOG at all leaves it to the switch. The timed
+    * switch's file takes precedence over the Mesa debug variables below, as any file sink does. */
+   bool marker = marked && marked < sizeof(mark) && amdgpu_wddm_game_log_parse_marker(mark, &pid, &until);
+#if defined(AMDGPU_WDDM_LAB_FLAVOUR)
+   if (length < sizeof(value) && marker) {
       if (pid != GetCurrentProcessId())
          amdgpu_wddm_stdio_sink = amdgpu_wddm_log_sink = amdgpu_wddm_game_log_open();
       else if (valid)
@@ -409,6 +468,17 @@ amdgpu_wddm_stdio_resolve(PINIT_ONCE once, PVOID parameter, PVOID *context)
    } else if (!length) {
       amdgpu_wddm_stdio_sink = amdgpu_wddm_log_sink = amdgpu_wddm_game_log_open();
    }
+#else
+   /* The release flavour reads AMDGPU_WDDM_LOG only beside a marker of this process, as the switch's file to join.
+    * Without one, or with an inherited one, the variable is as if it were unset, whatever it holds, and the timed
+    * switch decides (BD-167). */
+   if (marker && pid == GetCurrentProcessId()) {
+      if (valid)
+         amdgpu_wddm_stdio_sink = amdgpu_wddm_log_sink = amdgpu_wddm_game_log_join(value, until);
+   } else {
+      amdgpu_wddm_stdio_sink = amdgpu_wddm_log_sink = amdgpu_wddm_game_log_open();
+   }
+#endif
    /* An explicit Mesa debug variable asks for its output on stderr, as an explicit VKD3D_DEBUG does in the engine:
     * RADV_DEBUG (psocachestats and the rest), MESA_SHADER_CACHE_SHOW_STATS, MESA_LOG and the compiler dumps. Only
     * the file sink takes precedence. */
