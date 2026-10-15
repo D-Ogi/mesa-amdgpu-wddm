@@ -913,6 +913,9 @@ radv_device_check_status(struct vk_device *_device)
 {
    struct radv_device *device = container_of(_device, struct radv_device, vk);
 
+   if (device->ws->device_is_lost && device->ws->device_is_lost(device->ws))
+      return vk_device_set_lost(&device->vk, "Winsys allocation observed device removal");
+
    if (bc250_host_check_status(&device->vk.bc250_host)<0)
       return vk_device_set_lost(&device->vk,"Hosted runtime reports device loss");
 

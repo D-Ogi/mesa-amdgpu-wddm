@@ -59,6 +59,11 @@ struct radv_wddm2_winsys {
    struct bc250_host host;
    bool adapter_query;
 
+   /* Atomic, sticky for this KMT device/host identity, never for another winsys.
+    * Allocation entrypoints cannot return VK_ERROR_DEVICE_LOST, so the device
+    * status hook consumes this observation independently of their VkResult. */
+   int allocation_device_removed;
+
    struct radeon_info gpu_info;
 
    bool debug_all_bos;

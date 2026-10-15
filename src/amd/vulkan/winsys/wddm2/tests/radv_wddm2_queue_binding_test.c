@@ -130,6 +130,8 @@ static struct {
    /* The fail_nth call of fail_op fails, and the fail_more calls after it. */
    uint32_t fail_op;
    unsigned fail_nth, fail_seen, fail_more;
+   int32_t fail_status; /* zero keeps HOST_FAIL for the existing cases */
+   bool remove_on_destroy; /* a second failure while cleaning up a failed create */
 
    /* The event log starts over when full (the cost loops) instead of aborting. */
    bool recycle;
@@ -378,9 +380,13 @@ fake_dispatch(void *userdata, uint32_t op, void *arg)
    (void)userdata;
    if (GetCurrentThreadId() != h.thread)
       h.wrong_thread++;
+   if (h.remove_on_destroy && op == BC250_HOST_DestroyAllocation2) {
+      record(op, 0, 0, 0, NULL);
+      return STATUS_DEVICE_REMOVED;
+   }
    if (h.fail_op == op && ++h.fail_seen >= h.fail_nth && h.fail_seen <= h.fail_nth + h.fail_more) {
       record(op, 0, 0, 0, NULL);
-      return HOST_FAIL;
+      return h.fail_status ? h.fail_status : HOST_FAIL;
    }
 
    switch (op) {
@@ -2009,6 +2015,8 @@ no_failures(void)
 {
    h.fail_op = 0;
    h.fail_more = 0;
+   h.fail_status = 0;
+   h.remove_on_destroy = false;
 }
 
 static bool
@@ -2243,6 +2251,123 @@ test_deferred_oom(void)
    ws->base.ctx_destroy(a);
    check(!live(h.allocs, h.n_allocs, false), "no allocation left");
    contract();
+}
+
+/* The real allocation path must distinguish a removed KMT device from memory
+ * pressure before deferred BOs are waited for. The raw status is injected by
+ * the host, not by replacing the mapping or the retry loop under test. */
+static void
+test_allocation_status(void)
+{
+   const uint32_t ops[] = {BC250_HOST_CreateAllocation2, BC250_HOST_MapGpuVirtualAddress,
+                          BC250_HOST_MakeResident, BC250_HOST_WaitForSynchronizationObjectFromCpu};
+   const int32_t statuses[] = {STATUS_DEVICE_REMOVED, STATUS_NO_MEMORY, HOST_FAIL};
+   for (unsigned op = 0; op < ARRAY_SIZE(ops); op++) {
+      for (unsigned st = 0; st < ARRAY_SIZE(statuses); st++) {
+         clear_deferred_env();
+         struct radv_wddm2_winsys *ws = make_ws();
+         fail_calls(ops[op], 1);
+         h.fail_status = statuses[st];
+         struct radeon_winsys_bo *bo = (void *)(uintptr_t)1;
+         const VkResult result = ws->base.buffer_create(&ws->base, 4096, 4096,
+            RADEON_DOMAIN_GTT, PLAIN_FLAGS, 0, 0, NULL, &bo);
+         no_failures();
+         const bool removed = statuses[st] == STATUS_DEVICE_REMOVED;
+         check(result == (removed ? VK_ERROR_UNKNOWN : VK_ERROR_OUT_OF_DEVICE_MEMORY) && !bo,
+               "op %u status 0x%x returns admitted create failure %d, no BO", ops[op], statuses[st], result);
+         check(ws->base.device_is_lost(&ws->base) == removed,
+               "only exact removed status latches loss (op %u status 0x%x)", ops[op], statuses[st]);
+         check(!live(h.allocs, h.n_allocs, false), "failed creation releases its allocation (op %u)", ops[op]);
+         const unsigned mark = h.n_ev;
+         const VkResult next = ws->base.buffer_create(&ws->base, 4096, 4096,
+            RADEON_DOMAIN_GTT, PLAIN_FLAGS, 0, 0, NULL, &bo);
+         check(removed ? next == VK_ERROR_UNKNOWN && !bo && h.n_ev == mark : next == VK_SUCCESS && bo,
+               "loss stays terminal; nonterminal failure permits next allocation");
+         if (bo)
+            ws->base.buffer_destroy(&ws->base, bo);
+         contract();
+         radv_wddm2_deferred_finish(ws);
+         radv_wddm2_bo_pool_finish(ws);
+         free(ws);
+      }
+   }
+}
+
+static void
+test_allocation_cleanup_removed(void)
+{
+   clear_deferred_env();
+   struct radv_wddm2_winsys *ws = make_ws();
+   fail_calls(BC250_HOST_MapGpuVirtualAddress, 1);
+   h.remove_on_destroy = true;
+   struct radeon_winsys_bo *bo = (void *)(uintptr_t)1;
+   const unsigned mark = h.n_ev;
+   const VkResult result = ws->base.buffer_create(&ws->base, 4096, 4096,
+      RADEON_DOMAIN_GTT, PLAIN_FLAGS, 0, 0, NULL, &bo);
+   no_failures();
+   check(result == VK_ERROR_UNKNOWN && !bo && ws->base.device_is_lost(&ws->base),
+         "removal first reported in cleanup is terminal, not the earlier OOM result");
+   check(count_op(mark, BC250_HOST_DestroyAllocation2) == 1 &&
+            live(h.allocs, h.n_allocs, false) == 1,
+         "failed destruction is attempted once, never treated as a released allocation");
+   const unsigned next_mark = h.n_ev;
+   check(ws->base.buffer_create(&ws->base, 4096, 4096, RADEON_DOMAIN_GTT,
+                               PLAIN_FLAGS, 0, 0, NULL, &bo) == VK_ERROR_UNKNOWN &&
+            !bo && h.n_ev == next_mark && !ws->deferred.retries,
+         "no allocation or deferred retry after cleanup observed removal");
+   contract();
+   radv_wddm2_deferred_finish(ws);
+   radv_wddm2_bo_pool_finish(ws);
+   free(ws);
+   /* The failed KMT destroy left that host allocation to device teardown.
+    * A following make_ws resets the fake device; do not invent a release. */
+}
+
+static void
+test_deferred_removed(void)
+{
+   void *const cookie = (void *)(uintptr_t)0xA0;
+   clear_deferred_env();
+   struct radv_wddm2_winsys *ws = make_ws();
+   struct radeon_winsys_ctx *a = new_ctx(ws);
+   bind(ws, a, cookie);
+   struct radeon_winsys_bo *held = sized_bo(ws, 65536, PLAIN_FLAGS, 0);
+   submit_one(ws, a);
+   ws->base.buffer_destroy(&ws->base, held);
+   check(ws->deferred.count == 1, "one unretired BO held before allocation");
+   fail_calls(BC250_HOST_CreateAllocation2, 1);
+   h.fail_status = STATUS_DEVICE_REMOVED;
+   unsigned mark = h.n_ev;
+   struct radeon_winsys_bo *bo = NULL;
+   VkResult result = ws->base.buffer_create(&ws->base, 4096, 4096,
+      RADEON_DOMAIN_GTT, PLAIN_FLAGS, 0, 0, NULL, &bo);
+   no_failures();
+   check(result == VK_ERROR_UNKNOWN && !bo && ws->base.device_is_lost(&ws->base),
+         "removal is a terminal create error, with loss preserved");
+   check(count_op(mark, BC250_HOST_CreateAllocation2) == 1 &&
+            !count_op(mark, BC250_HOST_WaitForSynchronizationObjectFromCpu) &&
+            !ws->deferred.retries && !ws->deferred.oom_waits && ws->deferred.count == 1,
+         "removed device does not wait, retry or retire the held BO");
+   mark = h.n_ev;
+   result = ws->base.buffer_create(&ws->base, 4096, 4096,
+      RADEON_DOMAIN_GTT, PLAIN_FLAGS, 0, 0, NULL, &bo);
+   check(result == VK_ERROR_UNKNOWN && !bo && h.n_ev == mark,
+         "later allocation cannot clear the first loss or call KMT");
+   retire(gfx(a)->bc250_progress.handle, 1);
+   radv_wddm2_deferred_drain(ws);
+   check(unbind(ws, a, cookie) == VK_SUCCESS, "teardown can still unbind");
+   ws->base.ctx_destroy(a);
+   check(!live(h.allocs, h.n_allocs, false), "the held allocation is released after actual retirement");
+   contract();
+   struct radv_wddm2_winsys *other = make_ws();
+   check(ws->base.device_is_lost(&ws->base) && !other->base.device_is_lost(&other->base),
+         "loss belongs to one winsys, not a process-global state");
+   radv_wddm2_deferred_finish(ws);
+   radv_wddm2_bo_pool_finish(ws);
+   free(ws);
+   radv_wddm2_deferred_finish(other);
+   radv_wddm2_bo_pool_finish(other);
+   free(other);
 }
 
 static void
@@ -4893,6 +5018,9 @@ static const struct {
    {"ib2_fallback", test_ib2_fallback},
    {"deferred_cap", test_deferred_cap},
    {"deferred_oom", test_deferred_oom},
+   {"allocation_status", test_allocation_status},
+   {"allocation_cleanup_removed", test_allocation_cleanup_removed},
+   {"deferred_removed", test_deferred_removed},
    {"deferred_teardown", test_deferred_teardown},
    {"deferred_witness", test_deferred_witness},
    {"deferred_policy", test_deferred_policy},
