@@ -49,6 +49,10 @@ struct radv_wddm2_winsys {
    bool cache_hosted;
    struct bc250_host host;
 
+   /* Atomic and sticky for this KMT device/host identity. Creation errors
+    * cannot return DEVICE_LOST; the device status hook consumes this. */
+   int allocation_device_removed;
+
    struct radeon_info gpu_info;
 
    bool debug_all_bos;

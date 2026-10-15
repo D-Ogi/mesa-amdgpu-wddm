@@ -57,6 +57,26 @@
 
 static const bool all_resident = true;
 
+static bool
+radv_wddm2_device_is_lost(struct radeon_winsys *rws)
+{
+   return p_atomic_read(&radv_wddm2_winsys(rws)->allocation_device_removed) != 0;
+}
+
+/* Only the exact terminal status changes the existing allocation mapping.
+ * vkAllocateMemory and pipeline creation do not admit VK_ERROR_DEVICE_LOST.
+ * Keep the loss for radv_device_check_status and return a non-retry create
+ * failure. Unknown KMT failures retain their existing allocation result. */
+static VkResult
+radv_wddm2_allocation_error(struct radv_wddm2_winsys *ws, NTSTATUS status)
+{
+   if (status == STATUS_DEVICE_REMOVED) {
+      p_atomic_set(&ws->allocation_device_removed, 1);
+      return VK_ERROR_UNKNOWN;
+   }
+   return VK_ERROR_OUT_OF_DEVICE_MEMORY;
+}
+
 static struct util_vma_heap *
 radv_wddm2_bo_heap(struct radv_wddm2_winsys *ws, enum radeon_bo_flag flags)
 {
@@ -603,6 +623,9 @@ radv_wddm2_bo_create_internal(struct radeon_winsys *_ws, uint64_t size, unsigned
    /* Courtesy for users using NULL to check if they need to destroy the BO. */
    *out_bo = NULL;
 
+   if (radv_wddm2_device_is_lost(_ws))
+      return VK_ERROR_UNKNOWN;
+
    /* The contract has no userptr allocation. A normal BO would be the wrong object. */
    if (ws->bc250 && cpu_ptr)
       return VK_ERROR_FEATURE_NOT_PRESENT;
@@ -714,7 +737,7 @@ radv_wddm2_bo_create_internal(struct radeon_winsys *_ws, uint64_t size, unsigned
    status = BC250_WDDM_CALL(&ws->host, CreateAllocation2, &create);
    if (!NT_SUCCESS(status)) {
       fprintf(stderr, "CreateAllocation2 failed 0x%X\n", status);
-      result = VK_ERROR_OUT_OF_DEVICE_MEMORY;
+      result = radv_wddm2_allocation_error(ws, status);
       goto error_ptr_alloc;
    }
 
@@ -749,7 +772,7 @@ radv_wddm2_bo_create_internal(struct radeon_winsys *_ws, uint64_t size, unsigned
    status = BC250_WDDM_CALL(&ws->host, MapGpuVirtualAddress, &map);
    if (!NT_SUCCESS(status)) {
       fprintf(stderr, "mapping 0x%" PRIx64 " failed: 0x%X\n", bo->base.va, status);
-      result = VK_ERROR_OUT_OF_DEVICE_MEMORY;
+      result = radv_wddm2_allocation_error(ws, status);
       goto error_va_alloc;
    }
    bo->base.va = map.VirtualAddress;
@@ -778,8 +801,8 @@ radv_wddm2_bo_create_internal(struct radeon_winsys *_ws, uint64_t size, unsigned
       };
       status = BC250_WDDM_CALL(&ws->host, MakeResident, &make_resident);
       if (!NT_SUCCESS(status)) {
-         fprintf(stderr, "MakeResident failed\n");
-         result = VK_ERROR_OUT_OF_DEVICE_MEMORY;
+         fprintf(stderr, "MakeResident failed 0x%X\n", status);
+         result = radv_wddm2_allocation_error(ws, status);
          goto error_va_alloc;
       }
 
@@ -799,8 +822,8 @@ radv_wddm2_bo_create_internal(struct radeon_winsys *_ws, uint64_t size, unsigned
    /* Device paging queues return zero for an already completed operation. */
    status = paging_fence_value ? BC250_WDDM_CALL(&ws->host, WaitForSynchronizationObjectFromCpu, &wait) : STATUS_SUCCESS;
    if (!NT_SUCCESS(status)) {
-      fprintf(stderr, "WaitForSynchronizationObjectFromCpu failed\n");
-      result = VK_ERROR_OUT_OF_DEVICE_MEMORY;
+      fprintf(stderr, "WaitForSynchronizationObjectFromCpu failed 0x%X\n", status);
+      result = radv_wddm2_allocation_error(ws, status);
       goto error_va_alloc;
    }
 
@@ -817,7 +840,14 @@ error_va_alloc:
 
    fprintf(stderr, "destroy allocation\n");
    status = BC250_WDDM_CALL(&ws->host, DestroyAllocation2, &destroy);
-   assert(NT_SUCCESS(status));
+   if (status == STATUS_DEVICE_REMOVED) {
+      /* No BO was published or CPU-mapped. Any remaining allocation
+       * belongs to the removed KMT device until its teardown. */
+      fprintf(stderr, "DestroyAllocation2 after failed create: device removed\n");
+      result = radv_wddm2_allocation_error(ws, status);
+   } else {
+      assert(NT_SUCCESS(status));
+   }
 
 error_ptr_alloc:
    fprintf(stderr, "free va\n");
@@ -831,6 +861,10 @@ radv_wddm2_bo_create(struct radeon_winsys *_ws, uint64_t size, unsigned alignmen
                      unsigned priority, uint64_t address, struct radv_image *image,
                      struct radeon_winsys_bo **out_bo)
 {
+   if (radv_wddm2_device_is_lost(_ws)) {
+      *out_bo = NULL;
+      return VK_ERROR_UNKNOWN;
+   }
    if (flags & RADEON_FLAG_VIRTUAL)
       return radv_wddm2_virtual_bo_create(_ws, size, alignment, initial_domain, flags,
                                           priority, address, out_bo);
@@ -1543,6 +1577,7 @@ radv_wddm2_bo_init_functions(struct radv_wddm2_winsys *ws)
 {
    ws->base.buffer_from_hosted=radv_wddm2_bo_from_hosted;
    ws->base.buffer_create = radv_wddm2_bo_create;
+   ws->base.device_is_lost = radv_wddm2_device_is_lost;
    ws->base.buffer_destroy = radv_wddm2_bo_destroy;
    ws->base.buffer_map = radv_wddm2_bo_map;
    ws->base.buffer_unmap = radv_wddm2_bo_unmap;
