@@ -278,6 +278,9 @@ struct radeon_winsys {
 
    bool (*query_gpuvm_fault)(struct radeon_winsys *ws, struct radv_winsys_gpuvm_fault_info *fault_info);
 
+   /* Optional: a terminal failure already observed on the winsys's device. */
+   bool (*device_is_lost)(struct radeon_winsys *ws);
+
    VkResult (*buffer_create)(struct radeon_winsys *ws, uint64_t size, unsigned alignment, enum radeon_bo_domain domain,
                              enum radeon_bo_flag flags, unsigned priority, uint64_t address, struct radv_image *image,
                              struct radeon_winsys_bo **out_bo);
