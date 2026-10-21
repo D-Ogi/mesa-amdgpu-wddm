@@ -39,9 +39,14 @@
  * lines still reached a 3DMark helper's stderr with the switch unset, 234 bytes from radv_wddm2_winsys_create; the
  * gate does not depend on why.
  * Outside MSVC builds amdgpu_wddm_log() is plain fprintf(stderr).
+ *
+ * clang-cl also preprocesses the GNU assembler sources (blake3_*_windows_gnu.S) with the forced include, and a C
+ * declaration is no assembler: such a file gets nothing of this header (__ASSEMBLER__).
  */
 #ifndef AMDGPU_WDDM_STDIO_H
 #define AMDGPU_WDDM_STDIO_H
+
+#ifndef __ASSEMBLER__
 
 #include <stdio.h>
 
@@ -78,5 +83,7 @@ int amdgpu_wddm_log(const char *format, ...);
 #define amdgpu_wddm_log(...) fprintf(stderr, __VA_ARGS__)
 
 #endif /* _MSC_VER */
+
+#endif /* __ASSEMBLER__ */
 
 #endif /* AMDGPU_WDDM_STDIO_H */
