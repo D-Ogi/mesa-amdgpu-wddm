@@ -69,8 +69,16 @@ struct radv_wddm2_bo {
    uint8_t priority;          /* the RADV priority at creation, for the witness's class */
    bool destroyed;            /* buffer_destroy ran: the struct is held or waits in the pool */
    bool lock_kept;            /* destroy_now kept it: Unlock2 failed on it at least once (BD-045) */
+   /* R2/R5: this BO owns a GPU VA range (radv_wddm2_bo_owns_va) that was given up without being freed,
+    * because no proof of retirement was ever established for it (teardown, or no entry at the destroy).
+    * ws->deferred.leaked_ranges counts it. */
+   bool va_leaked;
+   /* The range is no longer this driver's to free: freed already, or leaked. A destroy retried after a
+    * refused DestroyAllocation2 must not free it twice. */
+   bool va_gone;
    struct list_head pool_link; /* ws->deferred.pool, once the struct waits for reuse; ws->deferred.locked
-                                * while its CPU lock is kept */
+                                * while its CPU lock is kept; ws->deferred.refused while a refused
+                                * DestroyAllocation2 waits for a retry */
 };
 
 static inline struct radv_wddm2_bo *
@@ -96,6 +104,14 @@ struct radv_wddm2_tracker {
    uint32_t serial;             /* unique in the winsys, never 0: the witness's stamp names the queue by it */
    uint32_t context;            /* for the lines only */
    bool attached;
+   /* BD-212: the queue went while a value it published had not retired. The tracker stays listed with
+    * its fence and value page (the queue that could not retire keeps both), holds the reference the
+    * queue had, and is reaped at a drain point once the value retires. A destroy between the two still
+    * finds it and records a wait for it, which is the point. */
+   bool abandoned;
+   /* R4: every value this queue published was proved complete before its value page went. The tracker
+    * answers every later question from this alone; it is set nowhere else. */
+   bool retired_done;
 };
 
 struct radv_wddm2_tracker *radv_wddm2_tracker_attach(struct radv_wddm2_winsys *ws, uint32_t fence,
