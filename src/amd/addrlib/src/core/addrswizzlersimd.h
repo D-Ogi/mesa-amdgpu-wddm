@@ -22,12 +22,12 @@
 // Disabled
 #define ADDR_HAS_AVX2 0
 #define AVX2_FUNC
-#elif defined(_MSC_VER) && (defined(_M_X64) || defined(_M_IX86))
+#elif defined(_MSC_VER) && !defined(__clang__) && (defined(_M_X64) || defined(_M_IX86))
 // x86 visual studio builds
 #define ADDR_HAS_AVX2 1
 #define AVX2_FUNC
 #elif defined(__x86_64__) || defined(__i386__)
-// x86 GCC/Clang builds
+// x86 GCC/Clang builds, clang-cl too: it refuses AVX2 intrinsics outside a function whose target has AVX2
 #define ADDR_HAS_AVX2 1
 #define AVX2_FUNC [[gnu::target("avx2")]]
 #else
@@ -61,7 +61,7 @@
 #include <immintrin.h>
 
 // Certain compiler versions lack this intrinsic.
-#if (defined(__GNUC__) && !defined(__clang__) && __GNUC__ < 8) || (_MSC_VER && !defined(_mm256_set_m128i))
+#if (defined(__GNUC__) && !defined(__clang__) && __GNUC__ < 8) || (_MSC_VER && !defined(__clang__) && !defined(_mm256_set_m128i))
 #define _mm256_set_m128i(hi, lo) _mm256_inserti128_si256(_mm256_castsi128_si256(lo), (hi), 1)
 #endif
 #endif
