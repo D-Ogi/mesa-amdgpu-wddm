@@ -29,6 +29,7 @@
 
 #include "util/cnd_monotonic.h"
 #include "util/timespec.h"
+#include "util/u_cpu_detect.h"
 #include "util/u_thread.h"
 #include "util/os_time.h"
 #include <inttypes.h>
@@ -38,6 +39,7 @@
 #include "vk_util.h"
 #include "wsi_common_entrypoints.h"
 #include "wsi_common_private.h"
+#include "wsi_win32_cpu_copy.h"
 #include "wsi_win32_deadline.h"
 #include "wsi_win32_formats.h"
 #include "wsi_win32_iflip.h"
@@ -2259,22 +2261,14 @@ wsi_win32_queue_present(struct wsi_swapchain *drv_chain,
       return wsi_win32_complete_present(chain, present_id, result);
    }
 
-   const uint8_t *ptr = (const uint8_t *)image->base.cpu_map;
-   uint8_t *dptr = (uint8_t *)image->sw.ppvBits;
-   for (unsigned h = 0; h < chain->extent.height; h++) {
-      if (chain->format == VK_FORMAT_R8G8B8A8_UNORM) {
-         for (unsigned x = 0; x < chain->extent.width; x++) {
-            dptr[x * 4 + 0] = ptr[x * 4 + 2];
-            dptr[x * 4 + 1] = ptr[x * 4 + 1];
-            dptr[x * 4 + 2] = ptr[x * 4 + 0];
-            dptr[x * 4 + 3] = ptr[x * 4 + 3];
-         }
-      } else {
-         memcpy(dptr, ptr, chain->extent.width * 4);
-      }
-      dptr += image->sw.bmp_row_pitch;
-      ptr += image->base.row_pitches[0];
-   }
+   /* cpu_map is the blit buffer in host-cached memory (wsi_select_host_memory_type), so the copy
+    * reads at cached speed; an RGBA8 chain swaps R and B with SSSE3 where the CPU has it.
+    */
+   wsi_win32_copy_frame((uint8_t *)image->sw.ppvBits, (size_t)image->sw.bmp_row_pitch,
+                        (const uint8_t *)image->base.cpu_map, image->base.row_pitches[0],
+                        chain->extent.width, chain->extent.height,
+                        wsi_win32_format_is_rgba8(chain->format),
+                        util_get_cpu_caps()->has_ssse3);
 
    const uint64_t t_copy = chain->present_log ? os_time_get_nano() : 0;
    HDC window_dc = GetDC(chain->wnd);
