@@ -119,6 +119,27 @@
 #include <intrin.h>
 #include <assert.h>
 
+#if defined(__clang__)
+/* MSVC's intrin.h declares the lower-case _interlocked* forms for every
+ * target; clang-cl's intrin.h has only the _Interlocked* intrinsics. Map the
+ * forms used below onto those, which are full barriers like the MSVC ones.
+ */
+static __forceinline long _interlockedadd(long volatile * _Addend, long _Value)
+{
+   return _InterlockedExchangeAdd(_Addend, _Value) + _Value;
+}
+
+static __forceinline __int64 _interlockedadd64(__int64 volatile * _Addend, __int64 _Value)
+{
+   return _InterlockedExchangeAdd64(_Addend, _Value) + _Value;
+}
+
+#define _interlockedexchangeadd64 _InterlockedExchangeAdd64
+#define _interlockedexchange64 _InterlockedExchange64
+#define _interlockedincrement64 _InterlockedIncrement64
+#define _interlockeddecrement64 _InterlockedDecrement64
+#endif
+
 __forceinline char _interlockedadd8(char volatile * _Addend, char _Value)
 {
    return _InterlockedExchangeAdd8(_Addend, _Value) + _Value;

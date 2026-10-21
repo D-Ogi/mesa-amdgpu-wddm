@@ -17,6 +17,7 @@
 
 struct radv_device;
 struct radv_device_memory;
+struct radv_image;
 struct radv_queue;
 
 struct radv_buffer {
