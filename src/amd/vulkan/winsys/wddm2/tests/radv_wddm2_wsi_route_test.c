@@ -56,15 +56,19 @@ test_choose(void)
 {
    struct radv_wddm2_wsi_route_choice c;
 
-   /* Nothing set: the default is GDI while the DXGI route has never completed a present on the lab
-    * (BD-105). An application reaches the DXGI route only by asking for it.
+   /* Nothing set: the default is DXGI (the owner's decision of 2026-10-07, back since the BD-197 lab
+    * arm presented through it). An application reaches GDI by asking for it, or by a DXGI failure.
     */
    c = radv_wddm2_wsi_route_choose(NULL, NULL);
-   CHECK(c.route == RADV_WDDM2_WSI_ROUTE_GDI && c.source == RADV_WDDM2_WSI_SOURCE_DEFAULT &&
+   CHECK(c.route == RADV_WDDM2_WSI_ROUTE_DXGI && c.source == RADV_WDDM2_WSI_SOURCE_DEFAULT &&
          !c.invalid);
-   CHECK(RADV_WDDM2_WSI_ROUTE_DEFAULT == RADV_WDDM2_WSI_ROUTE_GDI);
+   CHECK(RADV_WDDM2_WSI_ROUTE_DEFAULT == RADV_WDDM2_WSI_ROUTE_DXGI);
    c = radv_wddm2_wsi_route_choose("", "");
-   CHECK(c.route == RADV_WDDM2_WSI_ROUTE_GDI && c.source == RADV_WDDM2_WSI_SOURCE_DEFAULT);
+   CHECK(c.route == RADV_WDDM2_WSI_ROUTE_DXGI && c.source == RADV_WDDM2_WSI_SOURCE_DEFAULT);
+   /* A stored rollback stays the rollback under the new default. */
+   c = radv_wddm2_wsi_route_choose("", "gdi");
+   CHECK(c.route == RADV_WDDM2_WSI_ROUTE_GDI && c.source == RADV_WDDM2_WSI_SOURCE_REGISTRY &&
+         !c.invalid);
 
    /* "gdi" is the rollback, from either source, and the environment overrides the registry. */
    c = radv_wddm2_wsi_route_choose("gdi", NULL);

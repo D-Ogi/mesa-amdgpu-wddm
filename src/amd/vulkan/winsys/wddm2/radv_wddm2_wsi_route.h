@@ -10,8 +10,7 @@
  *                     It is the explicit rollback ("gdi") and the automatic fallback of the DXGI routes.
  *   DXGI              a D3D12 device on the same adapter (our D3D12 shell), a flip-model swap chain for the
  *                     window (CreateSwapChainForHwnd), one GPU copy per present on the D3D12 queue, Present1.
- *                     This is the shape the native D3D12 games present through. It is opt-in while
- *                     its first present has not completed on the lab (BD-105); GDI is the default.
+ *                     This is the shape the native D3D12 games present through, and the default.
  *   DXGI_COMPOSITION  the same, but the swap chain is created for composition and bound to the window
  *                     through a DirectComposition visual (upstream Mesa's shape).
  *
@@ -38,20 +37,23 @@ enum radv_wddm2_wsi_route {
    RADV_WDDM2_WSI_ROUTE_DXGI_COMPOSITION = 2,
 };
 
-/* The default route. It was DXGI (owner decision 2026-10-07: a GPU route that has to be switched on
- * gets forgotten), until the first lab trial of that route froze every client before its first
- * present (BD-105, 2026-10-09: Quake II RTX and vkcube, GPU idle, no TDR). While the first present
- * of this route has never completed on the lab, the default is GDI and DXGI is what a trial asks
- * for: a route that hangs is a dead game, and a route nobody reaches by accident is an experiment.
- * The default goes back to DXGI in the train whose lab arm presents a frame through it.
+/* The default route is DXGI: the owner's decision of 2026-10-07, because a GPU route that has to be
+ * switched on gets forgotten. From BD-105 (2026-10-09: the first lab trial of this route froze every
+ * client before its first present, GPU idle, no TDR) the default was GDI, until a lab arm presented
+ * through DXGI. BD-197 did, on the release KMD 22BA3CDB (2026-10-21, block D2, the route asked for
+ * by the environment and by the registry): Quake II RTX 1.8.1 at 1920x1200 borderless at 103-104
+ * frames per second with independent flip on 629 of 631 presents, where GDI gave 52-55; vkcube with
+ * independent flip on 1472 of 1482; a 1280x720 window composed by DWM at 209 frames per second
+ * (docs/design/vulkan-wsi-dxgi.md in bc250-win, section "The switch and the fallback").
  *
- * A real failure of the DXGI route still ends on GDI for that swapchain: no DXGI factory, no D3D12
+ * GDI stays the rollback that a person asks for ("gdi" in the environment or in the registry), and
+ * a real failure of the DXGI route still ends on GDI for that swapchain: no DXGI factory, no D3D12
  * device or queue, a D3D12 device that a replacement runtime implements, a fence or resource import
- * that fails, a swap chain that cannot be made, and now a wait of the route that expires before the
- * first present (wsi_win32_deadline.h; docs/design/vulkan-wsi-dxgi.md in bc250-win, section "The
- * switch and the fallback").
+ * that fails, a swap chain that cannot be made, and a wait of the route that expires before the
+ * first present (wsi_win32_deadline.h, reason "route-deadline"). A value that is not a route still
+ * selects GDI, not the default: a hand edit that went wrong must not reach the GPU route.
  */
-#define RADV_WDDM2_WSI_ROUTE_DEFAULT RADV_WDDM2_WSI_ROUTE_GDI
+#define RADV_WDDM2_WSI_ROUTE_DEFAULT RADV_WDDM2_WSI_ROUTE_DXGI
 
 enum radv_wddm2_wsi_route_source {
    RADV_WDDM2_WSI_SOURCE_DEFAULT = 0,
