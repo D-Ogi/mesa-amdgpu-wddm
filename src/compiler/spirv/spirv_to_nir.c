@@ -18,7 +18,6 @@
 #include "util/u_string.h"
 #include "util/u_debug.h"
 #include "util/u_printf.h"
-#include "util/memstream.h"
 #include "util/mesa-blake3.h"
 #include "util/bfloat.h"
 #include "util/float8.h"
@@ -7840,37 +7839,35 @@ static void
 create_shader_name(struct vtn_builder *b)
 {
    struct nir_spirv_specialization *spec = b->specialization;
-   char *stream_data = NULL;
-   size_t stream_size = 0;
-   struct u_memstream mem;
-   if (spec && u_memstream_open(&mem, &stream_data, &stream_size)) {
-      FILE *const stream = u_memstream_get(&mem);
+   /* A ralloc string rather than a u_memstream: this runs for every shader with specialization constants, and on
+    * Windows a memstream is a temporary file.
+    */
+   char *str = spec ? ralloc_strdup(b->shader, "") : NULL;
+   if (str) {
+      size_t len = 0;
       for (unsigned i = 0; i < spec->num_entries; i++) {
          struct nir_spirv_specialization_entry *entry = &spec->entries[i];
-         fprintf(stream, "spec[%u] =", entry->id);
+         ralloc_asprintf_rewrite_tail(&str, &len, "spec[%u] =", entry->id);
          for (unsigned j = 0; j < entry->size;) {
             if (entry->size - j >= 4) {
                uint32_t v;
                memcpy(&v, entry->data + j, 4);
-               fprintf(stream, " 0x%.8"PRIx32, v);
+               ralloc_asprintf_rewrite_tail(&str, &len, " 0x%.8"PRIx32, v);
                j += 4;
             } else if (entry->size - j >= 2) {
                uint16_t v;
                memcpy(&v, entry->data + j, 2);
-               fprintf(stream, " 0x%.4"PRIx16, v);
+               ralloc_asprintf_rewrite_tail(&str, &len, " 0x%.4"PRIx16, v);
                j += 2;
             } else {
-               fprintf(stream, " 0x%"PRIx8, entry->data[j]);
+               ralloc_asprintf_rewrite_tail(&str, &len, " 0x%"PRIx8, entry->data[j]);
                j++;
             }
          }
-         fprintf(stream, "\n");
+         ralloc_asprintf_rewrite_tail(&str, &len, "\n");
       }
-      fputc(0, stream);
-      u_memstream_close(&mem);
 
-      b->shader->info.spec = ralloc_strdup(b->shader, stream_data);
-      free(stream_data);
+      b->shader->info.spec = str;
    }
 
    b->shader->info.name = ralloc_strdup(b->shader, b->source_file);
