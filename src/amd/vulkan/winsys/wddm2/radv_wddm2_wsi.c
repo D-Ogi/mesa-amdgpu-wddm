@@ -319,6 +319,20 @@ radv_wddm2_wsi_route_allowed(VkPhysicalDevice _pdevice, const char **reason)
    return true;
 }
 
+/* The private adapter caps, into the buffer radv_wddm2_scanout_planes_read zeroed for this reading. */
+static bool
+radv_wddm2_wsi_query_scanout_caps(void *ctx, void *caps, size_t size)
+{
+   struct radv_wddm2_winsys *ws = (struct radv_wddm2_winsys *)ctx;
+   D3DKMT_QUERYADAPTERINFO query = {
+      .hAdapter = ws->adapter_h,
+      .Type = KMTQAITYPE_UMDRIVERPRIVATE,
+      .pPrivateDriverData = caps,
+      .PrivateDriverDataSize = (UINT)size,
+   };
+   return NT_SUCCESS(WDDM2_DISPATCH(QueryAdapterInfo(&query)));
+}
+
 /* BD-197: does the scan-out plane of this start take RGBA8 as well as BGRA8. The trailer is read at
  * every call, as the D3D12 shell reads it for every primary: the start that answers is the one the
  * chain will be presented on. A device that is not ours, or a failed query, reads UNKNOWN, which
@@ -329,20 +343,10 @@ radv_wddm2_wsi_scanout_plane_formats(VkPhysicalDevice _pdevice, const char **rea
 {
    VK_FROM_HANDLE(radv_physical_device, pdev, _pdevice);
    struct radv_wddm2_winsys *ws = radv_wddm2_winsys(pdev->ws);
-   unsigned char caps[RADV_WDDM2_SCANOUT_CAPS_TOTAL];
    enum radv_wddm2_scanout_planes planes = RADV_WDDM2_SCANOUT_PLANES_UNKNOWN;
 
-   if (ws->bc250) {
-      memset(caps, 0, sizeof(caps));
-      D3DKMT_QUERYADAPTERINFO query = {
-         .hAdapter = ws->adapter_h,
-         .Type = KMTQAITYPE_UMDRIVERPRIVATE,
-         .pPrivateDriverData = caps,
-         .PrivateDriverDataSize = sizeof(caps),
-      };
-      const NTSTATUS status = WDDM2_DISPATCH(QueryAdapterInfo(&query));
-      planes = radv_wddm2_scanout_planes_of(caps, sizeof(caps), NT_SUCCESS(status));
-   }
+   if (ws->bc250)
+      planes = radv_wddm2_scanout_planes_read(radv_wddm2_wsi_query_scanout_caps, ws);
    if (reason)
       *reason = radv_wddm2_scanout_planes_name(planes);
    return radv_wddm2_scanout_lists_rgba8(planes);

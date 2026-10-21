@@ -299,6 +299,65 @@ test_scanout_planes(void)
    CHECK(RADV_WDDM2_SCANOUT_CAPS_MAGIC == ('B' | 'S' << 16 | 'F' << 24 | '2' << 8));
 }
 
+/* The fake kernel driver of test_scanout_planes_read: the trailer it answers with now. */
+struct fake_trailer {
+   bool written;     /* false: the query succeeds and writes nothing (no trailer) */
+   bool ok;          /* the query's own result */
+   uint32_t flags;
+   unsigned queries;
+   size_t size;      /* the buffer size the last query was given */
+};
+
+static bool
+fake_trailer_query(void *ctx, void *caps, size_t size)
+{
+   struct fake_trailer *t = (struct fake_trailer *)ctx;
+   t->queries++;
+   t->size = size;
+   if (t->written && size >= RADV_WDDM2_SCANOUT_CAPS_TOTAL) {
+      unsigned char *p = (unsigned char *)caps;
+      const uint32_t word[4] = {RADV_WDDM2_SCANOUT_CAPS_MAGIC, 1u, 24u, t->flags};
+      for (unsigned i = 0; i < 4; i++)
+         for (unsigned b = 0; b < 4; b++)
+            p[RADV_WDDM2_SCANOUT_CAPS_OFFSET + 4 * i + b] = (unsigned char)(word[i] >> (8 * b));
+   }
+   return t->ok;
+}
+
+/* BD-197: the trailer is read again at each reading, never kept. Two queries with two trailer
+ * states give two answers, in both orders, and a later query that finds no trailer reads UNKNOWN
+ * rather than the earlier answer (the buffer is zeroed for each reading). The WSI asks this at
+ * every surface-format listing and once per swapchain, so each listing and each chain gets the
+ * trailer as it stands then.
+ */
+static void
+test_scanout_planes_read(void)
+{
+   struct fake_trailer t = {true, true, 0x1u, 0u, 0u};
+
+   CHECK(radv_wddm2_scanout_planes_read(fake_trailer_query, &t) == RADV_WDDM2_SCANOUT_PLANES_BGRA8);
+   CHECK(t.queries == 1 && t.size == RADV_WDDM2_SCANOUT_CAPS_TOTAL);
+   t.flags = 0x3u;   /* the kernel driver now publishes PLANE_FORMATS (a runtime change) */
+   CHECK(radv_wddm2_scanout_planes_read(fake_trailer_query, &t) == RADV_WDDM2_SCANOUT_PLANES_ALL);
+   CHECK(t.queries == 2);
+   t.flags = 0x1u;   /* and withdraws it again */
+   CHECK(radv_wddm2_scanout_planes_read(fake_trailer_query, &t) == RADV_WDDM2_SCANOUT_PLANES_BGRA8);
+   CHECK(t.queries == 3);
+
+   /* No trailer after one: UNKNOWN, not the BGRA8 of the reading before. */
+   t.written = false;
+   CHECK(radv_wddm2_scanout_planes_read(fake_trailer_query, &t) == RADV_WDDM2_SCANOUT_PLANES_UNKNOWN);
+   CHECK(t.queries == 4);
+   /* A query that writes the trailer and then fails is not believed. */
+   t.written = true;
+   t.ok = false;
+   CHECK(radv_wddm2_scanout_planes_read(fake_trailer_query, &t) == RADV_WDDM2_SCANOUT_PLANES_UNKNOWN);
+   CHECK(t.queries == 5);
+   /* No query function: UNKNOWN, which keeps the formats listed. */
+   CHECK(radv_wddm2_scanout_planes_read(NULL, &t) == RADV_WDDM2_SCANOUT_PLANES_UNKNOWN);
+   CHECK(t.queries == 5);
+}
+
 /* The deadlines of the DXGI route (wsi_win32_deadline.h). The rule under test is the one the route
  * broke on 2026-10-09: no CPU wait it owns may be unbounded, whatever the application asks for.
  */
@@ -1224,6 +1283,7 @@ static const struct {
    {"d3d12_impl", test_d3d12_impl},
    {"lb7a", test_lb7a},
    {"scanout_planes", test_scanout_planes},
+   {"scanout_planes_read", test_scanout_planes_read},
    {"deadline", test_deadline},
    {"present_completion", test_present_completion},
    {"presenter_state", test_presenter_state},

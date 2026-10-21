@@ -42,9 +42,17 @@
  *
  *   1. Scaling          DXGI_SCALING_STRETCH, not NONE.
  *   2. Flags            DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING on every chain, whatever the present
- *                       mode. This driver declares neither FlipImmediateMmIo nor FlipInterval, so
- *                       it has no immediate flip; a tearing chain asks for a capability the
- *                       display path does not have.
+ *                       mode, so a FIFO chain was made tearing-capable without asking. The flag
+ *                       does NOT keep a chain from an independent flip, and this header no longer
+ *                       treats it as a refusal (BD-197): arm A5g (2026-10-11, a kernel driver
+ *                       without FlipImmediateMmIo) measured an IMMEDIATE Quake II RTX chain with the
+ *                       flag in independent flip for 637 of 640 packets, and BD-197 (2026-10-21,
+ *                       0.7.216.103) 631 of 633 presents. The 31v3 kernel driver declares
+ *                       FlipImmediateMmIo with FlipOnVSyncMmIo and FlipIndependent (BD-170,
+ *                       driver/kmd/wddm.c:4237-4239 at e08e3bb0), so such a chain's flips are
+ *                       immediate and may tear, which is what IMMEDIATE asks for. The earlier
+ *                       reading here ("this driver has no immediate flip, so a tearing chain is
+ *                       not a flip candidate") is withdrawn.
  *   3. BufferCount      2, because wsi_win32_surface_get_capabilities pinned
  *                       minImageCount = maxImageCount = 2 for the DXGI path. Upstream's reason is
  *                       that a DXGI chain must be presented in acquire order, which held only
@@ -114,7 +122,6 @@ enum wsi_iflip_reason {
    WSI_IFLIP_EXTENT,           /* the chain's buffers are not the size of the output */
    WSI_IFLIP_FORMAT,           /* not a SCANOUT_PRIMARY row of the shared format table */
    WSI_IFLIP_ALPHA,            /* the chain asks the compositor to blend it */
-   WSI_IFLIP_TEARING,          /* the chain carries ALLOW_TEARING; this part has no immediate flip */
    WSI_IFLIP_SCALING,          /* the chain stretches, so its buffer is not the plane's surface */
    WSI_IFLIP_BUFFERS,          /* fewer buffers than the flip model's minimum */
    WSI_IFLIP_NOT_DISPLAYABLE,  /* DXGI gave the back buffers no ALLOW_DISPLAY heap */
@@ -132,7 +139,6 @@ wsi_iflip_reason_text(enum wsi_iflip_reason reason)
    case WSI_IFLIP_EXTENT:            return "extent";
    case WSI_IFLIP_FORMAT:            return "format";
    case WSI_IFLIP_ALPHA:             return "alpha";
-   case WSI_IFLIP_TEARING:           return "tearing";
    case WSI_IFLIP_SCALING:           return "scaling";
    case WSI_IFLIP_BUFFERS:           return "buffers";
    case WSI_IFLIP_NOT_DISPLAYABLE:   return "not-displayable";
@@ -291,8 +297,7 @@ wsi_iflip_plan_of(const struct wsi_iflip_knobs *knobs, const struct wsi_iflip_in
       plan.reason = WSI_IFLIP_FORMAT;
    else if (!in->alpha_ignore)
       plan.reason = WSI_IFLIP_ALPHA;
-   else if (plan.allow_tearing)
-      plan.reason = WSI_IFLIP_TEARING;
+   /* No tearing clause: ALLOW_TEARING does not keep a chain from an independent flip (item 2). */
    else if (plan.scaling != WSI_IFLIP_SCALING_NONE)
       plan.reason = WSI_IFLIP_SCALING;
    else if (plan.buffer_count < WSI_IFLIP_BUFFERS_MIN)
@@ -397,7 +402,7 @@ struct wsi_iflip_got {
    bool known;              /* GetDesc1 succeeded; without it only the plan is known */
    unsigned scaling;
    unsigned buffer_count;
-   bool allow_tearing;
+   bool allow_tearing;      /* read back for the chain's line; not a refusal (item 2 above) */
    bool heap_queried;       /* ID3D12Resource::GetHeapProperties succeeded */
    bool allow_display;
 };
@@ -408,8 +413,6 @@ wsi_iflip_chain_reason(const struct wsi_iflip_plan *plan, const struct wsi_iflip
    if (!plan->eligible)
       return plan->reason;
    if (got->known) {
-      if (got->allow_tearing)
-         return WSI_IFLIP_TEARING;
       if (got->scaling != WSI_IFLIP_SCALING_NONE)
          return WSI_IFLIP_SCALING;
       if (got->buffer_count < WSI_IFLIP_BUFFERS_MIN)
@@ -490,7 +493,6 @@ wsi_iflip_reason_is_ours(enum wsi_iflip_reason reason)
 {
    switch (reason) {
    case WSI_IFLIP_ALPHA:
-   case WSI_IFLIP_TEARING:
    case WSI_IFLIP_SCALING:
    case WSI_IFLIP_BUFFERS:
    case WSI_IFLIP_NOT_DISPLAYABLE:

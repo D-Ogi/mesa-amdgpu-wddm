@@ -39,6 +39,7 @@
 #include "wsi_common_entrypoints.h"
 #include "wsi_common_private.h"
 #include "wsi_win32_deadline.h"
+#include "wsi_win32_formats.h"
 #include "wsi_win32_iflip.h"
 #include "wsi_win32_shared_fence.h"
 
@@ -519,30 +520,7 @@ wsi_win32_surface_get_capabilities2(VkIcdSurfaceBase *surface,
 }
 
 
-/* Surface formats. resource is the format of the D3D12 resource the Vulkan image aliases, buffer is
- * the format of the DXGI swap chain's buffers; CopyResource needs both in one cast family. A flip
- * model swap chain takes no sRGB buffer format, so the sRGB formats use the UNORM layout on both
- * sides: the bytes are the same, and the Vulkan view does the encoding. dxgi_only formats have no CPU
- * path (the GDI copy handles 8-bit BGRA and RGBA only) and are listed only on the DXGI route.
- */
-struct wsi_win32_format {
-   VkFormat     format;
-   DXGI_FORMAT  resource;
-   DXGI_FORMAT  buffer;
-   bool         dxgi_only;
-};
-
-static const struct wsi_win32_format available_surface_formats[] = {
-   { VK_FORMAT_B8G8R8A8_UNORM, DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_FORMAT_B8G8R8A8_UNORM, false },
-   { VK_FORMAT_R8G8B8A8_UNORM, DXGI_FORMAT_R8G8B8A8_UNORM, DXGI_FORMAT_R8G8B8A8_UNORM, false },
-   { VK_FORMAT_B8G8R8A8_SRGB, DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_FORMAT_B8G8R8A8_UNORM, false },
-   { VK_FORMAT_R8G8B8A8_SRGB, DXGI_FORMAT_R8G8B8A8_UNORM, DXGI_FORMAT_R8G8B8A8_UNORM, true },
-   { VK_FORMAT_A2B10G10R10_UNORM_PACK32, DXGI_FORMAT_R10G10B10A2_UNORM,
-     DXGI_FORMAT_R10G10B10A2_UNORM, true },
-   { VK_FORMAT_R16G16B16A16_SFLOAT, DXGI_FORMAT_R16G16B16A16_FLOAT,
-     DXGI_FORMAT_R16G16B16A16_FLOAT, true },
-};
-
+/* The surface format table and the listing rule are in wsi_win32_formats.h, host-tested. */
 static const struct wsi_win32_format *
 wsi_win32_find_format(VkFormat format)
 {
@@ -551,13 +529,6 @@ wsi_win32_find_format(VkFormat format)
          return &available_surface_formats[i];
    }
    return NULL;
-}
-
-/* The 8-bit RGBA layouts, whose BGRA8 twins are the firmware plane's own format. */
-static bool
-wsi_win32_format_is_rgba8(VkFormat format)
-{
-   return format == VK_FORMAT_R8G8B8A8_UNORM || format == VK_FORMAT_R8G8B8A8_SRGB;
 }
 
 static bool
@@ -597,13 +568,9 @@ wsi_win32_output_is_hdr(IDXGIFactory4 *factory, HWND hwnd)
    return hdr;
 }
 
-struct wsi_win32_surface_format {
-   VkFormat format;
-   VkColorSpaceKHR color_space;
-};
-
-/* The (format, color space) pairs of a surface, in the order they are reported. Returns the count;
- * out holds room for ARRAY_SIZE(available_surface_formats) + 2.
+/* The (format, color space) pairs of a surface, in the order they are reported
+ * (wsi_win32_surface_formats_of). Returns the count; out holds room for
+ * WSI_WIN32_SURFACE_FORMATS_MAX. Every input is read again at each call.
  */
 static unsigned
 wsi_win32_list_surface_formats(VkIcdSurfaceBase *icd_surface, struct wsi_device *wsi_device,
@@ -620,50 +587,21 @@ wsi_win32_list_surface_formats(VkIcdSurfaceBase *icd_surface, struct wsi_device 
     */
    const char *reason = NULL;
    struct wsi_win32 *win32 = (struct wsi_win32 *)wsi_device->wsi[VK_ICD_WSI_PLATFORM_WIN32];
-   const bool dxgi = wsi_win32_device_uses_dxgi(wsi_device) &&
-                     (!win32 || wsi_win32_route_usable(&win32->route)) &&
-                     (!wsi_device->win32.route_allowed ||
-                      wsi_device->win32.route_allowed(wsi_device->pdevice, &reason));
-   /* BD-197. On the DXGI route a chain that covers its output is scanned out only in a layout the
-    * plane takes. Where that is BGRA8 alone, an RGBA8 chain stays composed (the D3D12 shell's
-    * FORMAT clause), and an application that prefers RGBA8 - Quake II RTX asks for
-    * R8G8B8A8_SRGB first - would never reach an independent flip. The RGBA8 formats hold the same
-    * pixels as their BGRA8 twins, which stay listed, so nothing an application can show is lost.
-    * The 10-bit and FP16 formats have no twin and stay listed: such a chain is composed.
-    */
-   const bool rgba8_listed = !dxgi || !wsi_device->win32.scanout_plane_formats ||
-                             wsi_device->win32.scanout_plane_formats(wsi_device->pdevice, &reason);
-   unsigned count = 0;
-
-   for (unsigned i = 0; i < ARRAY_SIZE(available_surface_formats); i++) {
-      if (available_surface_formats[i].dxgi_only && !dxgi)
-         continue;
-      if (!rgba8_listed && wsi_win32_format_is_rgba8(available_surface_formats[i].format))
-         continue;
-      /* FP16 is scRGB (linear) in DXGI; it is only offered with the extended linear color space. */
-      if (available_surface_formats[i].format == VK_FORMAT_R16G16B16A16_SFLOAT)
-         continue;
-      out[count++] = { available_surface_formats[i].format, VK_COLOR_SPACE_SRGB_NONLINEAR_KHR };
-   }
-
-   if (wsi_device->force_bgra8_unorm_first) {
-      for (unsigned i = 0; i < count; i++) {
-         if (out[i].format == VK_FORMAT_B8G8R8A8_UNORM) {
-            out[i] = out[0];
-            out[0] = { VK_FORMAT_B8G8R8A8_UNORM, VK_COLOR_SPACE_SRGB_NONLINEAR_KHR };
-            break;
-         }
-      }
-   }
-
    VK_FROM_HANDLE(vk_physical_device, pdevice, wsi_device->pdevice);
-   if (dxgi && pdevice->instance->enabled_extensions.EXT_swapchain_colorspace) {
-      struct wsi_win32 *wsi = (struct wsi_win32 *)wsi_device->wsi[VK_ICD_WSI_PLATFORM_WIN32];
-      out[count++] = { VK_FORMAT_R16G16B16A16_SFLOAT, VK_COLOR_SPACE_EXTENDED_SRGB_LINEAR_EXT };
-      if (wsi_win32_output_is_hdr(wsi->dxgi.factory, ((VkIcdSurfaceWin32 *)icd_surface)->hwnd))
-         out[count++] = { VK_FORMAT_A2B10G10R10_UNORM_PACK32, VK_COLOR_SPACE_HDR10_ST2084_EXT };
-   }
-   return count;
+   struct wsi_win32_format_inputs in = {};
+   in.dxgi = wsi_win32_device_uses_dxgi(wsi_device) &&
+             (!win32 || wsi_win32_route_usable(&win32->route)) &&
+             (!wsi_device->win32.route_allowed ||
+              wsi_device->win32.route_allowed(wsi_device->pdevice, &reason));
+   in.force_bgra8_unorm_first = wsi_device->force_bgra8_unorm_first;
+   in.colorspace_ext = pdevice->instance->enabled_extensions.EXT_swapchain_colorspace;
+   in.output_hdr = in.dxgi && in.colorspace_ext && win32 &&
+                   wsi_win32_output_is_hdr(win32->dxgi.factory,
+                                           ((VkIcdSurfaceWin32 *)icd_surface)->hwnd);
+   /* BD-197: the plane reading is asked by the rule itself, on the DXGI route only. */
+   in.scanout_plane_formats = wsi_device->win32.scanout_plane_formats;
+   in.pdevice = wsi_device->pdevice;
+   return wsi_win32_surface_formats_of(&in, out);
 }
 
 static VkResult
@@ -674,7 +612,7 @@ wsi_win32_surface_get_formats(VkIcdSurfaceBase *icd_surface,
 {
    VK_OUTARRAY_MAKE_TYPED(VkSurfaceFormatKHR, out, pSurfaceFormats, pSurfaceFormatCount);
 
-   struct wsi_win32_surface_format formats[ARRAY_SIZE(available_surface_formats) + 2];
+   struct wsi_win32_surface_format formats[WSI_WIN32_SURFACE_FORMATS_MAX];
    const unsigned count = wsi_win32_list_surface_formats(icd_surface, wsi_device, formats);
 
    for (unsigned i = 0; i < count; i++) {
@@ -696,7 +634,7 @@ wsi_win32_surface_get_formats2(VkIcdSurfaceBase *icd_surface,
 {
    VK_OUTARRAY_MAKE_TYPED(VkSurfaceFormat2KHR, out, pSurfaceFormats, pSurfaceFormatCount);
 
-   struct wsi_win32_surface_format formats[ARRAY_SIZE(available_surface_formats) + 2];
+   struct wsi_win32_surface_format formats[WSI_WIN32_SURFACE_FORMATS_MAX];
    const unsigned count = wsi_win32_list_surface_formats(icd_surface, wsi_device, formats);
 
    for (unsigned i = 0; i < count; i++) {
@@ -2806,9 +2744,10 @@ wsi_win32_surface_create_swapchain_dxgi(
 
    /* M15.14. Up to b27 ALLOW_TEARING went on every chain the system allowed it on, whatever the
     * present mode, so that the mode could change per present (VK_KHR_swapchain_maintenance1) and a
-    * chain that takes over the window's swap chain kept its flags for ResizeBuffers. This part has
-    * no immediate flip, so such a chain asks for a capability the display path does not have, and
-    * the plan gives the flag only to a chain that may actually tear (wsi_win32_iflip.h). The
+    * chain that takes over the window's swap chain kept its flags for ResizeBuffers. A FIFO chain
+    * has no use for the flag, so the plan gives it only to a chain that may actually tear
+    * (wsi_win32_iflip.h). The flag does not keep a chain from an independent flip (BD-197: the
+    * kernel driver declares FlipImmediateMmIo, and a tearing chain's flips are immediate). The
     * compatible present modes of a maintenance1 chain are part of that answer, so a mode switch
     * still needs no new chain.
     */

@@ -255,10 +255,13 @@ main(int argc, char **argv)
       in.hwnd_target = false;
       check(!wsi_iflip_plan_of(&knobs, &in).window_changes,
             "a composition chain keeps NO_WINDOW_CHANGES");
+      /* BD-197: a tearing chain is eligible (ALLOW_TEARING is no refusal), so it is the chain
+       * under test and drops the flag like any other.
+       */
       in = borderless_1920x1200(WSI_IFLIP_DXGI_B8G8R8A8_UNORM, 2);
       in.may_tear = true;
-      check(!wsi_iflip_plan_of(&knobs, &in).window_changes,
-            "a tearing chain is not eligible, so it keeps the flag too");
+      check(wsi_iflip_plan_of(&knobs, &in).window_changes,
+            "a tearing chain is the chain under test: DXGI may watch its window");
       in = borderless_1920x1200(WSI_IFLIP_DXGI_B8G8R8A8_UNORM, 2);
       in.extent_width = 1280;
       in.extent_height = 720;
@@ -268,13 +271,23 @@ main(int argc, char **argv)
       in = borderless_1920x1200(WSI_IFLIP_DXGI_B8G8R8A8_UNORM, 2);
       in.alpha_ignore = false;
       check(wsi_iflip_plan_of(&knobs, &in).reason == WSI_IFLIP_ALPHA, "blended by the compositor");
+      /* BD-197: no tearing clause. An IMMEDIATE chain keeps ALLOW_TEARING and stays eligible:
+       * arm A5g (2026-10-11) and BD-197 (2026-10-21) measured such a Quake II RTX chain in
+       * independent flip, and the 31v3 kernel driver declares FlipImmediateMmIo (BD-170).
+       */
       in = borderless_1920x1200(WSI_IFLIP_DXGI_B8G8R8A8_UNORM, 2);
       in.may_tear = true;
-      check(wsi_iflip_plan_of(&knobs, &in).reason == WSI_IFLIP_TEARING,
-            "an IMMEDIATE chain keeps its tearing and loses the flip");
+      {
+         const struct wsi_iflip_plan tearing = wsi_iflip_plan_of(&knobs, &in);
+         check(tearing.eligible && tearing.allow_tearing,
+               "an IMMEDIATE chain keeps its tearing and stays a flip candidate");
+      }
       in.system_tearing = false;
-      check(wsi_iflip_plan_of(&knobs, &in).eligible,
-            "IMMEDIATE without system tearing support is not a tearing chain");
+      {
+         const struct wsi_iflip_plan no_tearing = wsi_iflip_plan_of(&knobs, &in);
+         check(no_tearing.eligible && !no_tearing.allow_tearing,
+               "IMMEDIATE without system tearing support is not a tearing chain");
+      }
    }
 
    /* 5. The scaling clause follows the sizes: a buffer that is not its window's size keeps the
@@ -384,8 +397,8 @@ main(int argc, char **argv)
             "a reused chain that kept STRETCH is reported as stretching, not as eligible");
       got.scaling = WSI_IFLIP_SCALING_NONE;
       got.allow_tearing = true;
-      check(wsi_iflip_chain_reason(&plan, &got) == WSI_IFLIP_TEARING,
-            "a reused chain that kept ALLOW_TEARING is reported as tearing");
+      check(wsi_iflip_chain_reason(&plan, &got) == WSI_IFLIP_ELIGIBLE,
+            "a reused chain that kept ALLOW_TEARING is still eligible (BD-197)");
       got.allow_tearing = false;
       got.buffer_count = 1;
       check(wsi_iflip_chain_reason(&plan, &got) == WSI_IFLIP_BUFFERS,

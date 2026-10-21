@@ -25,6 +25,7 @@
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
+#include <string.h>
 #include <wchar.h>
 
 #ifdef __cplusplus
@@ -445,6 +446,23 @@ static inline bool
 radv_wddm2_scanout_lists_rgba8(enum radv_wddm2_scanout_planes planes)
 {
    return planes != RADV_WDDM2_SCANOUT_PLANES_BGRA8;
+}
+
+/* One reading of the trailer. query fills caps (size bytes) and says whether it succeeded; in the
+ * driver it is the D3DKMT private caps query, in the host test a fake. The trailer can change while
+ * the process runs (a mode change, a re-plug, the kernel driver's own state), so every reading asks
+ * again into a buffer zeroed for it: nothing of an earlier answer survives into a later one.
+ */
+typedef bool (*radv_wddm2_scanout_caps_query)(void *ctx, void *caps, size_t size);
+
+static inline enum radv_wddm2_scanout_planes
+radv_wddm2_scanout_planes_read(radv_wddm2_scanout_caps_query query, void *ctx)
+{
+   unsigned char caps[RADV_WDDM2_SCANOUT_CAPS_TOTAL];
+
+   memset(caps, 0, sizeof(caps));
+   const bool ok = query && query(ctx, caps, sizeof(caps));
+   return radv_wddm2_scanout_planes_of(caps, sizeof(caps), ok);
 }
 
 #ifdef __cplusplus
