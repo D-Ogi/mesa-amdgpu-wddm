@@ -87,6 +87,50 @@ struct radv_wddm2_winsys {
    struct radv_winsys_bo_list global_bo_list;
    struct radv_winsys_bo_log bo_log;
 
+   /* Deferred destruction (radv_wddm2_bo.c, BD-201): a destroyed BO keeps its allocation, its VA and
+    * its residency until every queue's work that was in flight at the destroy has retired, as the
+    * amdgpu kernel keeps a freed BO until its fences signal. BC250_DEFERRED_DESTROY=0 turns it off in
+    * the lab flavour. All fields below the lock are guarded by it; count and starved_count are also
+    * read without it as a hint, and enabled and cap_bytes are set once at creation. */
+   struct {
+      simple_mtx_t lock;
+      bool enabled;
+      uint64_t cap_bytes;        /* held bytes above this CPU-wait for the oldest held BO; 0: no cap */
+      uint32_t next_serial;      /* the last tracker serial handed out */
+      struct list_head trackers; /* struct radv_wddm2_tracker: one per queue with a progress fence */
+      struct list_head entries;  /* struct radv_wddm2_deferred_bo, oldest first */
+      uint32_t count;            /* BOs held now */
+      uint64_t bytes;            /* their size */
+      uint64_t total;            /* BOs deferred since the winsys was created */
+      uint64_t total_bytes;
+      uint64_t released;         /* held BOs destroyed since the winsys was created */
+      uint64_t immediate;        /* destroys that found nothing in flight */
+      uint32_t peak_count;
+      uint64_t peak_bytes;
+      uint64_t max_hold_ns;      /* longest time a BO was held */
+      uint32_t report_count;     /* the next count, bytes or hold that prints a line */
+      uint64_t report_bytes;
+      uint64_t report_hold_ns;
+      uint64_t report_total;
+      uint64_t forced;           /* destroyed unretired at teardown */
+      uint64_t retries;          /* allocations retried after waiting for held BOs */
+      uint64_t oom_waits;        /* CPU waits for the oldest held BO after a failed allocation */
+      uint64_t cap_waits;        /* CPU waits for the oldest held BO over the cap */
+      uint64_t cap_wait_ns, cap_wait_max_ns;
+      uint64_t cap_failed;       /* cap waits that failed or released nothing */
+      uint64_t report_cap_waits;
+      /* BD-201: a destroy that could not allocate its entry waits for the published values itself,
+       * with no allocation. A BO whose wait failed or timed out keeps its allocation, its VA and its
+       * residency here, through starved_link: the drain points and teardown retry it. */
+      struct list_head starved;  /* struct radv_wddm2_bo, through starved_link */
+      uint32_t starved_count;    /* atomic */
+      uint64_t starved_bytes;
+      uint64_t starved_total;    /* destroys that found no entry */
+      uint64_t starved_waits;    /* CPU waits those destroys made */
+      uint64_t starved_wait_ns;
+      uint64_t starved_failed;   /* of them, the waits that failed: the BO went on the list */
+   } deferred;
+
    struct vk_sync_binary_type sync_binary_type;
    const struct vk_sync_type *sync_types[3];
    struct {

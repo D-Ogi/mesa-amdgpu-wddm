@@ -673,6 +673,10 @@ radv_wddm2_winsys_destroy(struct radeon_winsys *_ws)
       ws->base.buffer_destroy(&ws->base, ws->null_prt.bo);
    simple_mtx_destroy(&ws->null_prt.lock);
 
+   /* Held BOs go before the paging queue and the device: a CPU wait for their work, then the release. */
+   radv_wddm2_deferred_finish(ws);
+   simple_mtx_destroy(&ws->deferred.lock);
+
    D3DDDI_DESTROYPAGINGQUEUE destroy_paging_queue = {
       .hPagingQueue = ws->paging_queue_h,
    };
