@@ -194,6 +194,11 @@ radv_wddm2_queue_destroy(struct radv_wddm2_queue *queue)
    if (queue->bc250_progress.handle) {
       if (queue->bc250_progress.wait_value)
          vk_wddm2_fence_wait(queue->bc250_ws, &queue->bc250_progress);
+      /* BD-201: the progress fence goes next, so held BOs stop waiting on it first, and the drain
+       * releases those whose work this wait retired. */
+      radv_wddm2_tracker_detach(ws, queue->bc250_tracker, true);
+      queue->bc250_tracker = NULL;
+      radv_wddm2_deferred_drain(ws);
       D3DKMT_DESTROYSYNCHRONIZATIONOBJECT destroy_progress = {
          .hSyncObject = queue->bc250_progress.handle,
       };
@@ -329,6 +334,17 @@ radv_wddm2_queue_init(struct radv_wddm2_winsys *ws, enum amd_ip_type hw_ip,
          goto failed;
       queue->vm_fence.handle = create_progress.hSyncObject;
       queue->vm_fence.value_map = create_progress.Info.MonitoredFence.FenceValueCPUVirtualAddress;
+      /* BD-201: the queue publishes, before each submission, the progress value that submission will
+       * signal, and a destroyed BO waits for what every queue published. An untracked queue publishes
+       * nothing, so no destroy would wait for its work and every BO it uses would be evicted and lose
+       * its VA under running work. A queue that cannot be tracked is therefore not created: here the
+       * failure is still reportable, at a destroy it is not. */
+      queue->bc250_tracker = radv_wddm2_tracker_attach(ws, queue->bc250_progress.handle,
+                                                       queue->bc250_progress.value_map, queue->context_h);
+      if (!queue->bc250_tracker && ws->deferred.enabled && queue->bc250_progress.value_map) {
+         radv_wddm2_queue_destroy(queue);
+         return VK_ERROR_OUT_OF_HOST_MEMORY;
+      }
       return VK_SUCCESS;
    }
 
@@ -599,6 +615,18 @@ vk_wddm2_fence_wait(struct radv_wddm2_winsys *ws, struct vk_wddm2_fence *fence)
    return result == VK_SUCCESS && bc250_host_fence_valid(&ws->host,p_atomic_read(fence->value_map));
 }
 
+/* One CPU wait on a progress fence, for deferred destruction (radv_wddm2_bo.c, BD-201). */
+bool
+radv_wddm2_fence_wait_value(struct radv_wddm2_winsys *ws, uint32_t fence, const uint64_t *value_map, uint64_t value)
+{
+   struct vk_wddm2_fence wait = {
+      .handle = fence,
+      .wait_value = value,
+      .value_map = (uint64_t *)value_map,
+   };
+   return vk_wddm2_fence_wait(ws, &wait);
+}
+
 static bool
 radv_wddm2_ctx_wait_idle(struct radeon_winsys_ctx *rwctx, enum amd_ip_type ip_type, int ring_index)
 {
@@ -607,6 +635,9 @@ radv_wddm2_ctx_wait_idle(struct radeon_winsys_ctx *rwctx, enum amd_ip_type ip_ty
 
    if (ctx->per_ip[ip_type].last_submission.handle)
       ret = vk_wddm2_fence_wait(ctx->ws, &ctx->per_ip[ip_type].last_submission);
+
+   /* An idle queue has retired what it published: the held BOs of its work may go (BD-201). */
+   radv_wddm2_deferred_drain(ctx->ws);
 
    return ret;
 }
@@ -1189,13 +1220,19 @@ radv_wddm2_cs_submit(struct radeon_winsys_ctx *_ctx,
       reuse.wait_value = slot->retire_value;
       if (reuse.wait_value && !vk_wddm2_fence_wait(ctx->ws, &reuse))
          return VK_ERROR_DEVICE_LOST;
+      if (queue->bc250_progress.wait_value >= UINT64_MAX-1) return VK_ERROR_DEVICE_LOST;
+      uint64_t next_value = queue->bc250_progress.wait_value + 1;
+      /* BD-201: the value this submission will signal is published before its IB reaches the kernel, so
+       * that a destroy running next to this submit waits for this work too. A submission that then
+       * fails leaves the value published, which only holds BOs until the queue is released. */
+      radv_wddm2_tracker_publish(queue->bc250_tracker, next_value);
+      /* Held BOs whose work retired go back now, while this queue's fences have just been read. */
+      radv_wddm2_deferred_drain(ws);
       status = radv_wddm2_bc250_submit(ctx, queue, submit);
       if (!NT_SUCCESS(status)) {
          fprintf(stderr, "bc250: native submit failed NTSTATUS=0x%X cs_count=%u\n", status, submit->cs_count);
          return VK_ERROR_DEVICE_LOST;
       }
-      if (queue->bc250_progress.wait_value >= UINT64_MAX-1) return VK_ERROR_DEVICE_LOST;
-      uint64_t next_value = queue->bc250_progress.wait_value + 1;
       D3DKMT_SIGNALSYNCHRONIZATIONOBJECTFROMGPU2 progress_signal = {
          .ObjectCount = 1,
          .ObjectHandleArray = &queue->bc250_progress.handle,

@@ -29,6 +29,7 @@
 #define RADV_WDDM2_BO_H
 
 #include "radv_wddm2_winsys.h"
+#include "util/u_atomic.h"
 
 #define RADV_WDDM2_HEAP_START          0x0000000200000000ull
 #define RADV_WDDM2_32BIT_HEAP_START    0x0000000100000000ull
@@ -58,6 +59,10 @@ struct radv_wddm2_bo {
    uint32_t resource_handle; /* nonzero for an opened shared WDDM resource */
 
    struct radeon_bo_metadata md;
+
+   /* Deferred destruction (radv_wddm2_bo.c, BD-201). */
+   bool destroyed;                 /* buffer_destroy ran: the BO waits for the GPU */
+   struct list_head starved_link;  /* ws->deferred.starved, while the BO is kept whole */
 };
 
 static inline struct radv_wddm2_bo *
@@ -70,5 +75,48 @@ struct radv_wddm2_queue;
 void radv_wddm2_sparse_groups_clear(struct radv_wddm2_queue *queue);
 
 void radv_wddm2_bo_init_functions(struct radv_wddm2_winsys *ws);
+
+/* The progress of one queue as deferred destruction sees it (radv_wddm2_bo.c, BD-201). The queue's
+ * submitter publishes, before each submission, the progress value that submission will signal; a
+ * destroyed BO then waits for the value published on every queue at the time of its destroy. */
+struct radv_wddm2_tracker {
+   struct list_head link;       /* ws->deferred.trackers */
+   const uint64_t *value_map;   /* the queue's progress fence; NULL once the queue's work retired */
+   uint64_t published;          /* the largest value submitted or being submitted; atomic */
+   uint32_t refs;               /* the queue while attached, each held BO that waits on it, each CPU waiter */
+   uint32_t waiters;            /* CPU waits on the fence now: a retired detach waits for them */
+   uint32_t fence;              /* the progress fence's handle, for CPU waits */
+   uint32_t serial;             /* unique in the winsys, never 0 */
+   uint32_t context;            /* for the lines only */
+   bool attached;
+};
+
+struct radv_wddm2_tracker *radv_wddm2_tracker_attach(struct radv_wddm2_winsys *ws, uint32_t fence,
+                                                     const uint64_t *value_map, uint32_t context);
+/* retired: every value the queue signalled has retired, and its fence may go after this call.
+ * Otherwise the fence stays with the device and held BOs keep waiting on it. */
+void radv_wddm2_tracker_detach(struct radv_wddm2_winsys *ws, struct radv_wddm2_tracker *tracker, bool retired);
+
+static inline void
+radv_wddm2_tracker_publish(struct radv_wddm2_tracker *tracker, uint64_t value)
+{
+   if (tracker)
+      p_atomic_set(&tracker->published, value);
+}
+
+/* A bounded CPU wait for value on a progress fence (radv_wddm2_cs.c); false if it failed or timed out. */
+bool radv_wddm2_fence_wait_value(struct radv_wddm2_winsys *ws, uint32_t fence, const uint64_t *value_map,
+                                 uint64_t value);
+
+/* Destroys the held BOs whose waits retired. Makes no host call when none did. */
+void radv_wddm2_deferred_drain(struct radv_wddm2_winsys *ws);
+/* Teardown: CPU-waits for every held BO's work, destroys every held BO (one whose wait failed too) and
+ * writes the summary line. */
+void radv_wddm2_deferred_finish(struct radv_wddm2_winsys *ws);
+
+/* BD-201: while this counter is positive, that many allocations of a deferred-destroy entry fail, and
+ * each failure decrements it. Only the winsys host tests write it; the driver never does, and no knob
+ * reaches it. It is here so that a test can prove that the destroy path needs no allocation. */
+extern int32_t radv_wddm2_deferred_entry_fail;
 
 #endif /* RADV_WDDM2_BO_H */

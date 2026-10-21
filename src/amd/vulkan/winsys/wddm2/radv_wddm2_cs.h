@@ -34,6 +34,8 @@
 #include <stdint.h>
 #include "util/u_dynarray.h"
 
+struct radv_wddm2_tracker; /* radv_wddm2_bo.h: deferred destruction, BD-201 */
+
 struct vk_wddm2_fence {
    uint32_t handle;
    uint64_t wait_value;
@@ -63,6 +65,8 @@ struct radv_wddm2_queue {
    struct radv_winsys_ib *bc250_ibs;
    unsigned bc250_ib_capacity;
    struct vk_wddm2_fence bc250_progress;
+   /* Deferred destruction (radv_wddm2_bo.c, BD-201): this queue's published progress. */
+   struct radv_wddm2_tracker *bc250_tracker;
 };
 
 struct radv_wddm2_ctx {
