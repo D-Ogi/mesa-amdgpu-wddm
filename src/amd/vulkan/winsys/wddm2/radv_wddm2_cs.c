@@ -547,6 +547,12 @@ radv_wddm2_queue_init(struct radv_wddm2_winsys *ws, enum amd_ip_type hw_ip,
       /* Deferred destruction waits on this fence from now on (radv_wddm2_bo.c). */
       queue->bc250_tracker = radv_wddm2_tracker_attach(ws, queue->bc250_progress.handle,
                                                        queue->bc250_progress.value_map, queue->context_h);
+      /* BD-201: an untracked queue publishes nothing, so no destroy would ever wait for its work and
+       * every BO it uses would be evicted and lose its VA under running work. A queue that cannot be
+       * tracked is not bound: here the failure is still reportable, at a destroy it is not. */
+      if (!queue->bc250_tracker && queue->bc250_progress.value_map &&
+          (ws->deferred.enabled || ws->deferred.witness))
+         goto failed_no_memory;
       /* Packet submission also needs a distinct companion-paging fence.
        * The render progress fence protects CPU-repacked IBs and cannot share
        * ownership with UpdateGpuVirtualAddress increments. */
@@ -603,6 +609,11 @@ radv_wddm2_queue_init(struct radv_wddm2_winsys *ws, enum amd_ip_type hw_ip,
    }
 
    return VK_SUCCESS;
+
+failed_no_memory:
+   /* Nothing was submitted either: the same release, a code the caller can act on. */
+   radv_wddm2_queue_release(queue, queue_context, NULL);
+   return VK_ERROR_OUT_OF_HOST_MEMORY;
 
 failed:
    /* Nothing was submitted: release what was created, within the call. */

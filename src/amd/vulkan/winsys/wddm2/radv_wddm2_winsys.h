@@ -190,6 +190,17 @@ struct radv_wddm2_winsys {
       uint64_t locked_next_ns;   /* the next retry */
       uint64_t locked_interval_ns;
       uint64_t unlock_failed;    /* Unlock2 calls that failed; atomic */
+      /* BD-201: a destroy that could not allocate its entry waits for the published values itself,
+       * with no allocation. A BO whose wait failed or timed out keeps its allocation, its VA and its
+       * residency here, through pool_link: the drain points and teardown retry it, and its VA is never
+       * freed while a queue may still use it. */
+      struct list_head starved;  /* struct radv_wddm2_bo, through pool_link */
+      uint32_t starved_count;    /* atomic */
+      uint64_t starved_bytes;
+      uint64_t starved_total;    /* destroys that found no entry */
+      uint64_t starved_waits;    /* CPU waits those destroys made */
+      uint64_t starved_wait_ns;
+      uint64_t starved_failed;   /* of them, the waits that failed: the BO went on the list */
    } deferred;
 
    /* The periodic summary (radv_wddm2_bo.c): every BC250_DEFERRED_SUMMARY_S seconds (30 by default, 0
