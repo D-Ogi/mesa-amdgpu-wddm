@@ -2245,6 +2245,101 @@ test_deferred_oom(void)
    contract();
 }
 
+/* BD-201: the destroy path may not depend on an allocation of its own. The entry of a held BO is that
+ * allocation; radv_wddm2_deferred_entry_fail forces it to fail, as host memory pressure would. While a
+ * queue's published progress value has not retired, the BO's allocation may not be evicted and its VA
+ * may not be freed before that value is reached, because D3DKMTEvict makes the allocation illegal to
+ * access and FreeGpuVirtualAddress lets a new range take the VA at once. The mocked host records every
+ * call, so the order of the CPU wait, the Evict and the VA free is the proof. */
+static void
+test_deferred_no_entry(void)
+{
+   void *const cookie = (void *)(uintptr_t)0xA0;
+   clear_deferred_env();
+   struct radv_wddm2_winsys *ws = make_ws();
+   struct radeon_winsys_ctx *a = new_ctx(ws);
+   bind(ws, a, cookie);
+   struct radv_wddm2_queue *qa = gfx(a);
+   const uint32_t a_progress = qa->bc250_progress.handle;
+   char line[4096];
+
+   /* The published value 1 has not retired and the entry allocation fails. */
+   struct radeon_winsys_bo *b0 = sized_bo(ws, 65536, PLAIN_FLAGS, 0);
+   const uint32_t b0_h = b0->handle;
+   check(submit_one(ws, a) == VK_SUCCESS && qa->bc250_tracker->published == 1 && *qa->bc250_progress.value_map == 0,
+         "A submits: its progress fence published 1, completed 0");
+   long lm = log_mark();
+   unsigned mark = h.n_ev;
+   radv_wddm2_deferred_entry_fail = 1;
+   ws->base.buffer_destroy(&ws->base, b0);
+   check(radv_wddm2_deferred_entry_fail == 0, "the destroy made one entry allocation, and it failed");
+   const int w = find_op(mark, BC250_HOST_WaitForSynchronizationObjectFromCpu, 0);
+   const int evict = find_op(mark, BC250_HOST_Evict, 0);
+   const int free_va = find_op(mark, BC250_HOST_FreeGpuVirtualAddress, 0);
+   const int destroy = find_destroy(mark, b0_h);
+   check(cpu_wait_is(w, a_progress, 1), "with no entry the destroy waits for A's published 1 itself (%d)", w);
+   check(w >= 0 && evict > w && free_va > w && destroy > w,
+         "no Evict, no VA free and no allocation destroy before that wait (w=%d, %d %d %d)", w, evict, free_va,
+         destroy);
+   check(evict >= 0 && evict < free_va && free_va < destroy, "then in that order (%d %d %d)", evict, free_va,
+         destroy);
+   check(*qa->bc250_progress.value_map >= 1, "and the value was reached first (%llu)",
+         (unsigned long long)*qa->bc250_progress.value_map);
+   check(!alloc_live(b0_h) && !ws->deferred.count && !ws->deferred.starved_count && ws->deferred.starved_total == 1 &&
+            ws->deferred.starved_waits == 1 && !ws->deferred.starved_failed,
+         "the BO is gone, nothing held or kept, one entry-less destroy counted");
+   check_log(log_lines(lm, "no memory to hold a 65536-byte BO", line, sizeof(line)) == 1 &&
+                has(line, "1 CPU wait") && has(line, "destroyed after it"),
+             "and logged: %.200s", line);
+
+   /* Every published value retired: the same failure needs no wait at all. */
+   retire(a_progress, 1);
+   struct radeon_winsys_bo *b1 = sized_bo(ws, 65536, PLAIN_FLAGS, 0);
+   const uint32_t b1_h = b1->handle;
+   mark = h.n_ev;
+   radv_wddm2_deferred_entry_fail = 1;
+   ws->base.buffer_destroy(&ws->base, b1);
+   check(!radv_wddm2_deferred_entry_fail && !alloc_live(b1_h) &&
+            !count_op(mark, BC250_HOST_WaitForSynchronizationObjectFromCpu) && ws->deferred.starved_total == 1 &&
+            ws->deferred.starved_waits == 1,
+         "with nothing in flight the destroy is immediate, no wait");
+
+   /* The entry allocation fails and the CPU wait fails too: the BO keeps its allocation, its VA and its
+    * residency, and a drain point retries it. */
+   struct radeon_winsys_bo *b2 = sized_bo(ws, 65536, PLAIN_FLAGS, 0);
+   const uint32_t b2_h = b2->handle;
+   check(submit_one(ws, a) == VK_SUCCESS, "A submits; its progress 2 is in flight");
+   lm = log_mark();
+   mark = h.n_ev;
+   radv_wddm2_deferred_entry_fail = 1;
+   fail_calls(BC250_HOST_WaitForSynchronizationObjectFromCpu, 1);
+   ws->base.buffer_destroy(&ws->base, b2);
+   no_failures();
+   check(alloc_live(b2_h) && !count_op(mark, BC250_HOST_Evict) && !count_op(mark, BC250_HOST_FreeGpuVirtualAddress) &&
+            find_destroy(mark, b2_h) < 0,
+         "a failed wait frees nothing: no Evict, no VA free, no allocation destroy");
+   check(ws->deferred.starved_count == 1 && ws->deferred.starved_bytes == 65536 && ws->deferred.starved_failed == 1 &&
+            ws->deferred.starved_waits == 2,
+         "the BO is kept whole (%u BOs, %llu bytes)", ws->deferred.starved_count,
+         (unsigned long long)ws->deferred.starved_bytes);
+   check_log(log_lines(lm, "kept whole", NULL, 0) == 1, "and logged");
+   mark = h.n_ev;
+   radv_wddm2_deferred_drain(ws);
+   check(alloc_live(b2_h) && ws->deferred.starved_count == 1 && !count_op(mark, BC250_HOST_Evict),
+         "a drain with A's 2 still in flight keeps it");
+   retire(a_progress, 2);
+   mark = h.n_ev;
+   radv_wddm2_deferred_drain(ws);
+   check(!alloc_live(b2_h) && find_destroy(mark, b2_h) >= 0 && !ws->deferred.starved_count &&
+            !ws->deferred.starved_bytes,
+         "once A's 2 retired a drain releases it");
+
+   check(unbind(ws, a, cookie) == VK_SUCCESS, "the queue unbinds");
+   ws->base.ctx_destroy(a);
+   check(!live(h.allocs, h.n_allocs, false), "no allocation left");
+   contract();
+}
+
 static void
 test_deferred_teardown(void)
 {
@@ -4893,6 +4988,7 @@ static const struct {
    {"ib2_fallback", test_ib2_fallback},
    {"deferred_cap", test_deferred_cap},
    {"deferred_oom", test_deferred_oom},
+   {"deferred_no_entry", test_deferred_no_entry},
    {"deferred_teardown", test_deferred_teardown},
    {"deferred_witness", test_deferred_witness},
    {"deferred_policy", test_deferred_policy},

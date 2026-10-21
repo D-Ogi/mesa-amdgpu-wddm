@@ -139,6 +139,11 @@ void radv_wddm2_deferred_finish(struct radv_wddm2_winsys *ws);
 /* Frees the BO structs the pool keeps; after radv_wddm2_deferred_finish. */
 void radv_wddm2_bo_pool_finish(struct radv_wddm2_winsys *ws);
 
+/* BD-201: while this counter is positive, that many allocations of a deferred-destroy entry fail, and
+ * each failure decrements it. Only the winsys host tests write it; the driver never does, and no knob
+ * reaches it. It is here so that a test can prove that the destroy path needs no allocation. */
+extern int32_t radv_wddm2_deferred_entry_fail;
+
 /* The periodic summary (radv_wddm2_bo.c). due is the deadline the caller read; final writes both lines
  * now, whatever changed (teardown). */
 void radv_wddm2_summary_write(struct radv_wddm2_winsys *ws, uint64_t now, uint64_t due, bool final);
