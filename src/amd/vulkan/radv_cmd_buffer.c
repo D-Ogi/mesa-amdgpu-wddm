@@ -7177,8 +7177,8 @@ radv_flush_dynamic_descriptors(struct radv_cmd_buffer *cmd_buffer, VkShaderStage
       radv_flush_dynamic_descriptors_offsets(cmd_buffer, stages, bind_point);
 }
 
-ALWAYS_INLINE void
-radv_get_vbo_info(const struct radv_cmd_buffer *cmd_buffer, uint32_t idx, struct radv_vbo_info *vbo_info)
+ALWAYS_INLINE static void
+radv_get_vbo_info_inline(const struct radv_cmd_buffer *cmd_buffer, uint32_t idx, struct radv_vbo_info *vbo_info)
 {
    const struct radv_vertex_buffer_state *vertex_buffer = &cmd_buffer->state.vertex_buffer;
    const struct radv_dynamic_state *d = &cmd_buffer->state.dynamic;
@@ -7193,6 +7193,14 @@ radv_get_vbo_info(const struct radv_cmd_buffer *cmd_buffer, uint32_t idx, struct
    vbo_info->attrib_offset = d->vertex_input.offsets[idx];
    vbo_info->attrib_format_size = d->vertex_input.format_sizes[idx];
    vbo_info->non_trivial_format = d->vertex_input.non_trivial_format[idx];
+}
+
+/* The external definition for radv_dgc.c. clang-cl gives a non-static __forceinline function the C++ inline
+ * linkage of MSVC mode and emits no copy for another translation unit. */
+void
+radv_get_vbo_info(const struct radv_cmd_buffer *cmd_buffer, uint32_t idx, struct radv_vbo_info *vbo_info)
+{
+   radv_get_vbo_info_inline(cmd_buffer, idx, vbo_info);
 }
 
 /* bc250: the vertex count of the per-attribute descriptors, (size - attrib_end) / stride + 1, divided once per
@@ -7253,7 +7261,7 @@ radv_write_vertex_descriptor(const struct radv_cmd_buffer *cmd_buffer, const str
    }
 
    struct radv_vbo_info vbo_info;
-   radv_get_vbo_info(cmd_buffer, i, &vbo_info);
+   radv_get_vbo_info_inline(cmd_buffer, i, &vbo_info);
 
    uint32_t rsrc_word3;
 

@@ -25,6 +25,7 @@
 
 struct ac_addr_info;
 struct radeon_info;
+struct radv_image;
 struct vk_device;
 struct vk_sync_type;
 struct vk_sync_wait;
