@@ -1285,6 +1285,54 @@ radv_wddm2_bc250_submit(struct radv_wddm2_ctx *ctx, struct radv_wddm2_queue *que
    return status;
 }
 
+/* R6 (BD-201, DESIGN.md 6.4): the value a submission was to signal stays published when the submission
+ * or its signal call fails, because a destroy running next to the submit may already have captured it
+ * and a published value is never withdrawn. A value nothing will ever signal would hold those ranges for
+ * the life of the queue, so a failure is followed by a repair signal of the same value on the same
+ * queue: the GPU, or the kernel on its behalf, writes it exactly once more. The repair is never an
+ * artificial completion by the CPU: it asks the same engine for the same value, and a repair that cannot
+ * be sent is counted and said so, which leaves that value unproven until the queue is released. */
+static void
+radv_wddm2_progress_repair(struct radv_wddm2_winsys *ws, struct radv_wddm2_queue *queue, uint64_t value)
+{
+   if (!value || !queue->bc250_progress.handle)
+      return;
+   NTSTATUS status;
+   if (queue->handle) {
+      const D3DKMT_SUBMITSIGNALSYNCOBJECTSTOHWQUEUE repair = {
+         .BroadcastHwQueueCount = 1,
+         .BroadcastHwQueueArray = &queue->handle,
+         .ObjectCount = 1,
+         .ObjectHandleArray = &queue->bc250_progress.handle,
+         .FenceValueArray = &value,
+      };
+      status = BC250_WDDM_CALL(&ws->host, SubmitSignalSyncObjectsToHwQueue, &repair);
+   } else if (queue->context_h) {
+      const D3DKMT_SIGNALSYNCHRONIZATIONOBJECTFROMGPU2 repair = {
+         .ObjectCount = 1,
+         .ObjectHandleArray = &queue->bc250_progress.handle,
+         .BroadcastContextCount = 1,
+         .BroadcastContextArray = &queue->context_h,
+         .MonitoredFenceValueArray = &value,
+      };
+      status = BC250_WDDM_CALL(&ws->host, SignalSynchronizationObjectFromGpu2, &repair);
+   } else {
+      status = STATUS_INVALID_HANDLE;
+   }
+   if (NT_SUCCESS(status)) {
+      p_atomic_inc(&ws->deferred.progress_repairs);
+      fprintf(stderr,
+              "bc250: repair signal of progress %" PRIu64 " queued on context 0x%x after a failed submission\n",
+              value, queue->context_h);
+   } else {
+      p_atomic_inc(&ws->deferred.progress_repairs_failed);
+      fprintf(stderr,
+              "bc250: the repair signal of progress %" PRIu64 " on context 0x%x failed 0x%X: that value stays "
+              "unproven\n",
+              value, queue->context_h, (unsigned)status);
+   }
+}
+
 static VkResult
 radv_wddm2_cs_submit(struct radeon_winsys_ctx *_ctx,
                      const struct radv_winsys_submit_info *submit,
@@ -1374,6 +1422,8 @@ radv_wddm2_cs_submit(struct radeon_winsys_ctx *_ctx,
       status = radv_wddm2_bc250_submit(ctx, queue, submit);
       if (!NT_SUCCESS(status)) {
          fprintf(stderr, "bc250: native submit failed NTSTATUS=0x%X cs_count=%u\n", status, submit->cs_count);
+         /* R6: the IB never reached the kernel, so nothing will signal the value published above. */
+         radv_wddm2_progress_repair(ws, queue, next_value);
          return VK_ERROR_DEVICE_LOST;
       }
       D3DKMT_SIGNALSYNCHRONIZATIONOBJECTFROMGPU2 progress_signal = {
@@ -1386,10 +1436,15 @@ radv_wddm2_cs_submit(struct radeon_winsys_ctx *_ctx,
       status = BC250_WDDM_CALL(&ws->host, SignalSynchronizationObjectFromGpu2, &progress_signal);
       if (!NT_SUCCESS(status)) {
          queue->bc250_submit_failed = true; // accepted IB has no retirement value: never reuse its slot
+         /* R6: the IB runs, but no signal of this value was queued behind it: ask again, on the same
+          * queue and for the same value, so the held ranges of destroys that captured it are proved. */
+         radv_wddm2_progress_repair(ws, queue, next_value);
          return VK_ERROR_DEVICE_LOST;
       }
       slot->retire_value = next_value;
       queue->bc250_progress.wait_value = next_value;
+      /* R6: this only tells the host about a value the GPU will signal anyway, so a failure here needs
+       * no repair: the signal call above was accepted and the value is on its way. */
       if (ws->host.dispatch) {
          struct bc250_host_progress progress = {queue->context_h, queue->bc250_progress.handle, next_value, queue->bc250_progress.value_map};
          if (ws->host.dispatch(ws->host.userdata, BC250_HOST_PUBLISH_PROGRESS, &progress) < 0) {

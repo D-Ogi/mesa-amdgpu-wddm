@@ -64,7 +64,15 @@ struct radv_wddm2_bo {
 
    /* Deferred destruction (radv_wddm2_bo.c, BD-201). */
    bool destroyed;                 /* buffer_destroy ran: the BO waits for the GPU */
-   struct list_head starved_link;  /* ws->deferred.starved, while the BO is kept whole */
+   /* R2/R5: this BO owns a GPU VA range (radv_wddm2_bo_owns_va) that was given up without being freed,
+    * because no proof of retirement was ever established for it (teardown, or no entry at the destroy).
+    * ws->deferred.leaked_ranges counts it. */
+   bool va_leaked;
+   /* The range is no longer this driver's to free: freed already, or leaked. A destroy retried after a
+    * refused DestroyAllocation2 must not free it twice. */
+   bool va_gone;
+   struct list_head refused_link;  /* ws->deferred.refused, while a refused DestroyAllocation2 waits for
+                                    * a retry (R7) */
 };
 
 static inline struct radv_wddm2_bo *
@@ -91,6 +99,13 @@ struct radv_wddm2_tracker {
    uint32_t serial;             /* unique in the winsys, never 0 */
    uint32_t context;            /* for the lines only */
    bool attached;
+   /* BD-212: the queue went while a value it published had not retired. The tracker stays listed and
+    * referenced until the value retires (radv_wddm2_tracker_reap_locked), so a destroy in between
+    * still records a wait for that work. */
+   bool abandoned;
+   /* R4: every value this queue published was proved retired before its value page went, so the
+    * tracker answers every later question without the page (radv_wddm2_tracker_page_done_locked). */
+   bool retired_done;
 };
 
 struct radv_wddm2_tracker *radv_wddm2_tracker_attach(struct radv_wddm2_winsys *ws, uint32_t fence,

@@ -905,12 +905,8 @@ radv_wddm2_winsys_create(const struct vk_dx_adapter_info *adapter_info,
    ws->paging_queue_h = create_paging_queue.hPagingQueue;
    ws->paging_fence_h = create_paging_queue.hSyncObject;
 
-   /* Initialize the heaps */
-   simple_mtx_init(&ws->heap_mtx, mtx_plain);
+   /* R1-c: no VA heaps of our own any more. The OS places every range (radv_wddm2_winsys.h). */
    simple_mtx_init(&ws->null_prt.lock, mtx_plain);
-   util_vma_heap_init(&ws->_32bit_heap, RADV_WDDM2_32BIT_HEAP_START, 1ull << 32);
-   util_vma_heap_init(&ws->heap, RADV_WDDM2_HEAP_START, RADV_WDDM2_REPLAY_HEAP_START - RADV_WDDM2_HEAP_START);
-   util_vma_heap_init(&ws->replay_heap, RADV_WDDM2_REPLAY_HEAP_START, 1ull << 32);
 
    ws->base.destroy = radv_wddm2_winsys_destroy;
    ws->base.query_info = radv_wddm2_winsys_query_info;
