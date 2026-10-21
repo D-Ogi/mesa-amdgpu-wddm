@@ -97,6 +97,7 @@ struct event {
    uint32_t op;
    uint32_t handle; /* the allocation or the fence the call names */
    uint64_t value;
+   int32_t status;  /* FreeGpuVirtualAddress: what the host answered */
 };
 
 static struct {
@@ -113,6 +114,11 @@ static struct {
    uint32_t fail_op; /* this op fails while fail_calls is positive */
    unsigned fail_calls;
    int32_t fail_status;
+   /* FreeGpuVirtualAddress refuses the next fail_va_left[i] frees of the range at fail_va[i], with
+    * fail_va_status[i] (zero: STATUS_UNSUCCESSFUL). The range stays reserved then. */
+   uint64_t fail_va[2];
+   unsigned fail_va_left[2];
+   int32_t fail_va_status[2];
 } h;
 
 static unsigned checks, failures, skipped;
@@ -288,10 +294,27 @@ fake_dispatch(void *userdata, uint32_t op, void *arg)
       record(op, e->AllocationList ? e->AllocationList[0] : 0, e->NumAllocations);
       return failing(op) ? h.fail_status : STATUS_SUCCESS;
    }
+   case BC250_HOST_ReserveGpuVirtualAddress: {
+      D3DDDI_RESERVEGPUVIRTUALADDRESS *r = arg;
+      record(op, 0, r->BaseAddress);
+      if (failing(op))
+         return h.fail_status;
+      r->VirtualAddress = r->BaseAddress ? r->BaseAddress : (h.next_va += 0x10000000ull);
+      return STATUS_SUCCESS;
+   }
    case BC250_HOST_FreeGpuVirtualAddress: {
       const D3DKMT_FREEGPUVIRTUALADDRESS *f = arg;
       record(op, 0, f->BaseAddress);
-      return failing(op) ? h.fail_status : STATUS_SUCCESS;
+      int32_t status = failing(op) ? h.fail_status : STATUS_SUCCESS;
+      for (unsigned i = 0; i < ARRAY_SIZE(h.fail_va) && status == STATUS_SUCCESS; i++) {
+         if (h.fail_va_left[i] && f->BaseAddress == h.fail_va[i]) {
+            h.fail_va_left[i]--;
+            status = h.fail_va_status[i] ? h.fail_va_status[i] : (int32_t)0xC0000001; /* STATUS_UNSUCCESSFUL */
+         }
+      }
+      if (!h.dropped)
+         h.ev[h.n_ev - 1].status = status;
+      return status;
    }
    case BC250_HOST_DestroyAllocation2: {
       const D3DKMT_DESTROYALLOCATION2 *d = arg;
@@ -720,6 +743,352 @@ test_tracker_abandoned(void)
    free(ws);
 }
 
+/* A FreeGpuVirtualAddress the host refuses leaves the range with the ICD: the call "releases a range",
+ * and a failure says nothing of it was released (d3dkmthk.md:12613, :12621-12628). Each own range is freed
+ * on its own and written down as freed only when its own free succeeded. The BO is kept whole, on a list
+ * threaded through its own link: no DestroyAllocation2 follows while a range is kept, so a REPLAYABLE BO's
+ * range cannot go with its allocation and be freed a second time by the retry. The drain points retry it,
+ * and teardown leaks and counts what is still refused. The first refused call of a destroy is the one
+ * logged. The host records the BaseAddress and the answer of every free, so a range freed twice, or a free
+ * that was skipped, shows in the counts below. */
+
+/* The FreeGpuVirtualAddress calls at or after mark that name va: every one, or only those the host
+ * accepted. */
+static unsigned
+va_frees(unsigned mark, uint64_t va, bool accepted)
+{
+   unsigned n = 0;
+   for (unsigned i = mark; i < h.n_ev; i++)
+      if (h.ev[i].op == BC250_HOST_FreeGpuVirtualAddress && h.ev[i].value == va &&
+          (!accepted || h.ev[i].status == STATUS_SUCCESS))
+         n++;
+   return n;
+}
+
+/* The next count frees of the range at va are refused with status (zero: STATUS_UNSUCCESSFUL). */
+static void
+refuse_va(unsigned slot, uint64_t va, unsigned count, int32_t status)
+{
+   h.fail_va[slot] = va;
+   h.fail_va_left[slot] = count;
+   h.fail_va_status[slot] = status;
+}
+
+/* Compares pointers only: a BO whose destroy succeeded is freed. */
+static bool
+bo_listed(struct list_head *list, struct radeon_winsys_bo *bo)
+{
+   list_for_each_entry (struct radv_wddm2_bo, b, list, refused_link) {
+      if (&b->base == bo)
+         return true;
+   }
+   return false;
+}
+
+/* The winsys's own null PRT BO is 8 MiB and zero-filled through Lock2, which this host does not answer:
+ * the sparse BOs alias an ordinary BO instead. */
+static void
+sparse_setup(struct radv_wddm2_winsys *ws)
+{
+   simple_mtx_init(&ws->null_prt.lock, mtx_plain);
+   ws->null_prt.bo = make_bo(ws);
+}
+
+static void
+sparse_teardown(struct radv_wddm2_winsys *ws)
+{
+   struct radeon_winsys_bo *null_bo = ws->null_prt.bo;
+   ws->null_prt.bo = NULL;
+   ws->base.buffer_destroy(&ws->base, null_bo);
+   simple_mtx_destroy(&ws->null_prt.lock);
+}
+
+/* A sparse BO with its high PRT view (radv_wddm2_init_sparse_alias): two ranges of its own, each with its
+ * own FreeGpuVirtualAddress at the destroy. */
+static struct radeon_winsys_bo *
+sparse_bo(struct radv_wddm2_winsys *ws)
+{
+   struct radeon_winsys_bo *bo = NULL;
+   const VkResult result = ws->base.buffer_create(&ws->base, BO_SIZE, 65536, RADEON_DOMAIN_VRAM,
+                                                  RADEON_FLAG_VIRTUAL | RADEON_FLAG_EMULATE_SPARSE_RESIDENCY, 0,
+                                                  0, NULL, &bo);
+   check(result == VK_SUCCESS && bo && radv_wddm2_bo(bo)->sparse_high_va ==
+                                          (radv_wddm2_bo(bo)->reserved_va | RADV_WDDM2_PRT_CONTROL_MASK),
+         "a sparse BO with a high view is made (%d)", result);
+   return bo;
+}
+
+/* The two ranges of a sparse BO: the high view's free refused alone, the main range's alone, and both. */
+static void
+test_va_refused_sparse(void)
+{
+   struct radv_wddm2_winsys *ws = make_ws();
+   struct radv_wddm2_tracker *tracker = attach_queue(ws);
+   sparse_setup(ws);
+   char line[1024];
+
+   /* The high view's free alone is refused: the main range is still freed, the BO is kept with the high
+    * view's range, and the log names the high view's call and status, although the free after it
+    * succeeded. */
+   struct radeon_winsys_bo *s0 = sparse_bo(ws);
+   struct radv_wddm2_bo *s0b = radv_wddm2_bo(s0);
+   const uint64_t s0_low = s0b->reserved_va, s0_high = s0b->sparse_high_va;
+   size_t lm = log_mark();
+   unsigned mark = h.n_ev;
+   refuse_va(0, s0_high, 1, 0);
+   ws->base.buffer_destroy(&ws->base, s0);
+   check(va_frees(mark, s0_high, false) == 1 && !va_frees(mark, s0_high, true) && va_frees(mark, s0_low, true) == 1,
+         "the high view's free is refused; the main range's is made and goes through");
+   check(bo_listed(&ws->deferred.va_refused, s0) && !s0b->va_gone && s0b->va_freed && !s0b->sparse_high_freed &&
+            ws->deferred.va_refused_count == 1 && ws->deferred.va_refused_bytes == BO_SIZE &&
+            ws->deferred.va_refused_total == 1,
+         "the BO is kept whole with the high view's range (%u kept, %" PRIu64 " bytes)",
+         ws->deferred.va_refused_count, ws->deferred.va_refused_bytes);
+   check_log(log_lines(lm, "FreeGpuVirtualAddress of the sparse high view refused (0xc0000001)", line, sizeof(line)) == 1 &&
+                strstr(line, " 64 KiB of own address space"),
+             "and logged with the call and its status: %.200s", line);
+
+   /* Inside the retry interval a drain makes no host call; past it, the drain frees the high view, and
+    * only it. A virtual BO has no allocation, so nothing else is called. */
+   mark = h.n_ev;
+   radv_wddm2_deferred_drain(ws);
+   check(h.n_ev == mark && ws->deferred.va_refused_count == 1, "a drain inside the retry interval makes no host call");
+   ws->deferred.va_refused_next_ns = 0;
+   mark = h.n_ev;
+   radv_wddm2_deferred_drain(ws);
+   check(va_frees(mark, s0_high, true) == 1 && !va_frees(mark, s0_low, false) &&
+            !count_op(mark, BC250_HOST_DestroyAllocation2) && !bo_listed(&ws->deferred.va_refused, s0),
+         "past it the drain frees the high view once and never the main range again");
+   check(!ws->deferred.va_refused_count && !ws->deferred.va_refused_bytes && ws->deferred.va_refused_retries == 1 &&
+            !ws->deferred.leaked_ranges,
+         "the kept counts are zero (retries %" PRIu64 ")", ws->deferred.va_refused_retries);
+
+   /* The main range's free alone is refused: the high view is freed, the BO is kept with the main range. */
+   struct radeon_winsys_bo *s1 = sparse_bo(ws);
+   struct radv_wddm2_bo *s1b = radv_wddm2_bo(s1);
+   const uint64_t s1_low = s1b->reserved_va, s1_high = s1b->sparse_high_va;
+   lm = log_mark();
+   mark = h.n_ev;
+   refuse_va(0, s1_low, 1, 0);
+   ws->base.buffer_destroy(&ws->base, s1);
+   check(va_frees(mark, s1_high, true) == 1 && va_frees(mark, s1_low, false) == 1 && !va_frees(mark, s1_low, true) &&
+            bo_listed(&ws->deferred.va_refused, s1) && s1b->sparse_high_freed && !s1b->va_freed &&
+            ws->deferred.va_refused_bytes == BO_SIZE,
+         "the main range's free alone is refused: the high view is freed, the BO kept with the main range");
+   check_log(log_lines(lm, "FreeGpuVirtualAddress of the range refused (0xc0000001)", NULL, 0) == 1,
+             "and logged with its call");
+   ws->deferred.va_refused_next_ns = 0;
+   mark = h.n_ev;
+   radv_wddm2_deferred_drain(ws);
+   check(va_frees(mark, s1_low, true) == 1 && !va_frees(mark, s1_high, false) && !bo_listed(&ws->deferred.va_refused, s1) &&
+            !ws->deferred.va_refused_count && !ws->deferred.va_refused_bytes && ws->deferred.va_refused_retries == 2,
+         "the retry frees the main range once and not the high view again");
+
+   /* Both refused, with different statuses: the first one is what the log keeps. */
+   struct radeon_winsys_bo *s2 = sparse_bo(ws);
+   struct radv_wddm2_bo *s2b = radv_wddm2_bo(s2);
+   const uint64_t s2_low = s2b->reserved_va, s2_high = s2b->sparse_high_va;
+   lm = log_mark();
+   mark = h.n_ev;
+   refuse_va(0, s2_high, 1, (int32_t)0xC0000017); /* STATUS_NO_MEMORY */
+   refuse_va(1, s2_low, 1, 0);
+   ws->base.buffer_destroy(&ws->base, s2);
+   check(va_frees(mark, s2_high, false) == 1 && va_frees(mark, s2_low, false) == 1 && !va_frees(mark, s2_high, true) &&
+            !va_frees(mark, s2_low, true) && ws->deferred.va_refused_bytes == 2 * BO_SIZE,
+         "both frees are refused: both ranges are kept (%" PRIu64 " bytes)", ws->deferred.va_refused_bytes);
+   check_log(log_lines(lm, "FreeGpuVirtualAddress of the sparse high view refused (0xc0000017)", NULL, 0) == 1 &&
+                !log_lines(lm, "FreeGpuVirtualAddress of the range refused", NULL, 0),
+             "the log keeps the first refusal, not the later one");
+   ws->deferred.va_refused_next_ns = 0;
+   mark = h.n_ev;
+   radv_wddm2_deferred_drain(ws);
+   check(va_frees(mark, s2_high, true) == 1 && va_frees(mark, s2_low, true) == 1 && va_frees(mark, s2_high, false) == 1 &&
+            va_frees(mark, s2_low, false) == 1 && !ws->deferred.va_refused_count,
+         "the retry frees each range once");
+
+   sparse_teardown(ws);
+   finish(ws, tracker);
+}
+
+/* A REPLAYABLE BO: its range refused alone, its DestroyAllocation2 refused alone, and both. */
+static void
+test_va_refused_replay(void)
+{
+   struct radv_wddm2_winsys *ws = make_ws();
+   struct radv_wddm2_tracker *tracker = attach_queue(ws);
+
+   /* The range's free is refused: the allocation is kept as well. No DestroyAllocation2 while the range
+    * is kept, so the OS cannot free the range with the allocation before the retry does. */
+   struct radeon_winsys_bo *r0 = make_bo_flags(ws, HELD_FLAGS);
+   const uint32_t r0_h = r0->handle;
+   const uint64_t r0_va = r0->va;
+   unsigned mark = h.n_ev;
+   refuse_va(0, r0_va, 1, 0);
+   ws->base.buffer_destroy(&ws->base, r0);
+   check(va_frees(mark, r0_va, false) == 1 && !count_op(mark, BC250_HOST_DestroyAllocation2) && alloc_live(r0_h) &&
+            bo_listed(&ws->deferred.va_refused, r0) && ws->deferred.va_refused_bytes == BO_SIZE,
+         "the range's free is refused: no DestroyAllocation2, the allocation live, the BO kept");
+   ws->deferred.va_refused_next_ns = 0;
+   mark = h.n_ev;
+   radv_wddm2_deferred_drain(ws);
+   const int r0_free = find_op(mark, BC250_HOST_FreeGpuVirtualAddress);
+   const int r0_destroy = find_handle(mark, BC250_HOST_DestroyAllocation2, r0_h);
+   check(va_frees(mark, r0_va, true) == 1 && r0_free >= 0 && r0_destroy > r0_free && !alloc_live(r0_h) &&
+            !ws->deferred.va_refused_count,
+         "the retry frees the range, then destroys the allocation (%d %d)", r0_free, r0_destroy);
+
+   /* DestroyAllocation2 alone is refused (R7): the range is freed once, the BO stays with its handle. */
+   struct radeon_winsys_bo *r1 = make_bo_flags(ws, HELD_FLAGS);
+   const uint32_t r1_h = r1->handle;
+   const uint64_t r1_va = r1->va;
+   const size_t lm = log_mark();
+   mark = h.n_ev;
+   fail_calls(BC250_HOST_DestroyAllocation2, 1);
+   ws->base.buffer_destroy(&ws->base, r1);
+   no_failures();
+   check(va_frees(mark, r1_va, true) == 1 && count_op(mark, BC250_HOST_DestroyAllocation2) == 1 && alloc_live(r1_h) &&
+            bo_listed(&ws->deferred.refused, r1) && r1->handle == r1_h && radv_wddm2_bo(r1)->va_gone &&
+            ws->deferred.refused_count == 1 && !ws->deferred.va_refused_count,
+         "a refused DestroyAllocation2 alone: the range is freed, the BO stays on the R7 list with its handle");
+   check_log(log_lines(lm, "DestroyAllocation2 refused a 65536-byte allocation (0xc0000001)", NULL, 0) == 1,
+             "and logged with its status");
+   ws->deferred.refused_next_ns = 0;
+   mark = h.n_ev;
+   radv_wddm2_deferred_drain(ws);
+   check(!va_frees(mark, r1_va, false) && find_handle(mark, BC250_HOST_DestroyAllocation2, r1_h) >= 0 &&
+            !alloc_live(r1_h) && !ws->deferred.refused_count && !ws->deferred.refused_bytes,
+         "the R7 retry destroys the allocation and does not free the range again");
+
+   /* Both refused: the destroy is not even tried while the range is kept; the retry frees the range and
+    * then meets the refused destroy, and the BO moves to the R7 list; the next retry ends it. */
+   struct radeon_winsys_bo *r2 = make_bo_flags(ws, HELD_FLAGS);
+   const uint32_t r2_h = r2->handle;
+   const uint64_t r2_va = r2->va;
+   mark = h.n_ev;
+   refuse_va(0, r2_va, 1, 0);
+   fail_calls(BC250_HOST_DestroyAllocation2, 1);
+   ws->base.buffer_destroy(&ws->base, r2);
+   check(va_frees(mark, r2_va, false) == 1 && !count_op(mark, BC250_HOST_DestroyAllocation2) &&
+            bo_listed(&ws->deferred.va_refused, r2) && ws->deferred.va_refused_count == 1,
+         "the free is refused and no destroy is tried");
+   ws->deferred.va_refused_next_ns = 0;
+   mark = h.n_ev;
+   radv_wddm2_deferred_drain(ws);
+   no_failures();
+   check(va_frees(mark, r2_va, true) == 1 && count_op(mark, BC250_HOST_DestroyAllocation2) == 1 && alloc_live(r2_h) &&
+            bo_listed(&ws->deferred.refused, r2) && !ws->deferred.va_refused_count && !ws->deferred.va_refused_bytes &&
+            ws->deferred.refused_count == 1 && ws->deferred.refused_bytes == BO_SIZE,
+         "the retry frees the range; its destroy is refused and the BO moves to the R7 list");
+   ws->deferred.refused_next_ns = 0;
+   mark = h.n_ev;
+   radv_wddm2_deferred_drain(ws);
+   check(!va_frees(mark, r2_va, false) && find_handle(mark, BC250_HOST_DestroyAllocation2, r2_h) >= 0 &&
+            !alloc_live(r2_h) && !ws->deferred.refused_count && !ws->deferred.va_refused_count &&
+            !ws->deferred.leaked_ranges,
+         "the R7 retry destroys it; the range is not freed twice and every count is zero");
+
+   finish(ws, tracker);
+}
+
+/* R2 accounting: a held range whose free is refused when its work retires leaves the held count and
+ * enters the kept one, and leaves that once it is freed. Each range is counted once. */
+static void
+test_va_refused_held(void)
+{
+   struct radv_wddm2_winsys *ws = make_ws();
+   struct radv_wddm2_tracker *tracker = attach_queue(ws);
+   struct radeon_winsys_bo *bo = make_bo_flags(ws, HELD_FLAGS);
+   const uint32_t bo_h = bo->handle;
+   const uint64_t bo_va = bo->va;
+
+   radv_wddm2_tracker_publish(tracker, 1);
+   ws->base.buffer_destroy(&ws->base, bo);
+   check(alloc_live(bo_h) && ws->deferred.count == 1 && ws->deferred.held_va_bytes == BO_SIZE,
+         "the BO is held behind the published 1, its range counted as held");
+   refuse_va(0, bo_va, 1, 0);
+   h.fence_value = 1;
+   unsigned mark = h.n_ev;
+   radv_wddm2_deferred_drain(ws);
+   check(va_frees(mark, bo_va, false) == 1 && !ws->deferred.count && !ws->deferred.held_va_bytes &&
+            ws->deferred.va_refused_bytes == BO_SIZE && bo_listed(&ws->deferred.va_refused, bo) && alloc_live(bo_h),
+         "the 1 reached, the free is refused: the range moves from the held count to the kept one");
+   ws->deferred.va_refused_next_ns = 0;
+   mark = h.n_ev;
+   radv_wddm2_deferred_drain(ws);
+   check(va_frees(mark, bo_va, true) == 1 && !alloc_live(bo_h) && !ws->deferred.va_refused_bytes &&
+            !ws->deferred.held_va_bytes && !ws->deferred.leaked_ranges && !ws->deferred.refused_count,
+         "the retry frees it: every count is zero");
+
+   finish(ws, tracker);
+}
+
+/* Teardown: a range still refused is tried once more, then leaked and counted, and the BO's
+ * DestroyAllocation2, refused too, is the R7 retry's after it: the allocation goes with the device, and no
+ * struct is left on a list. */
+static void
+test_va_refused_teardown(void)
+{
+   struct radv_wddm2_winsys *ws = make_ws();
+   struct radv_wddm2_tracker *tracker = attach_queue(ws);
+   struct radeon_winsys_bo *bo = make_bo_flags(ws, HELD_FLAGS);
+   const uint32_t bo_h = bo->handle;
+   const uint64_t bo_va = bo->va;
+   char line[1024];
+
+   refuse_va(0, bo_va, 100, 0);
+   ws->base.buffer_destroy(&ws->base, bo);
+   check(bo_listed(&ws->deferred.va_refused, bo) && ws->deferred.va_refused_count == 1, "the BO is kept");
+   fail_calls(BC250_HOST_DestroyAllocation2, 100);
+   const size_t lm = log_mark();
+   const unsigned mark = h.n_ev;
+   radv_wddm2_deferred_finish(ws);
+   check(va_frees(mark, bo_va, false) == 1 && !va_frees(mark, bo_va, true),
+         "teardown tries the refused range once more; it is refused again");
+   check(ws->deferred.leaked_ranges == 1 && ws->deferred.leaked_va_bytes == BO_SIZE && !ws->deferred.va_refused_count &&
+            !ws->deferred.va_refused_bytes,
+         "the range is leaked and counted once (%" PRIu64 " ranges, %" PRIu64 " bytes)", ws->deferred.leaked_ranges,
+         ws->deferred.leaked_va_bytes);
+   check(count_op(mark, BC250_HOST_DestroyAllocation2) == 2 && alloc_live(bo_h) && !ws->deferred.refused_count &&
+            !ws->deferred.refused_bytes && list_is_empty(&ws->deferred.refused) &&
+            list_is_empty(&ws->deferred.va_refused),
+         "its destroy, refused at the leak and at R7's last retry, goes with the device; no list keeps it");
+   check_log(log_lines(lm, "still refused a FreeGpuVirtualAddress at teardown", line, sizeof(line)) == 1 &&
+                strstr(line, "1 BOs (64 KiB"),
+             "the leak is logged: %.200s", line);
+   check_log(log_lines(lm, "still refused at teardown", NULL, 0) == 1, "and the allocation left to the device");
+   h.fail_op = 0;
+   h.fail_calls = 0;
+
+   h.fence_value = 0;
+   radv_wddm2_tracker_detach(ws, tracker, true);
+   check(!h.unknown && !h.dropped, "no unexpected host call and no dropped record");
+   check(h.n_allocs == 1 && alloc_live(bo_h), "the one allocation left is the one the device takes (%u)", h.n_allocs);
+   simple_mtx_destroy(&ws->deferred.lock);
+   free(ws);
+}
+
+/* A host import is the host's: no free and no destroy, whatever the host would refuse. */
+static void
+test_va_refused_borrowed(void)
+{
+   struct radv_wddm2_winsys *ws = make_ws();
+   struct radv_wddm2_tracker *tracker = attach_queue(ws);
+   struct radeon_winsys_bo *bo = NULL;
+   check(ws->base.buffer_from_hosted(&ws->base, ws->host.identity, 0x999u, 0x800000000ull, BO_SIZE, &bo) ==
+               VK_SUCCESS &&
+            bo,
+         "a host import");
+   refuse_va(0, 0x800000000ull, 1, 0);
+   fail_calls(BC250_HOST_DestroyAllocation2, 1);
+   const unsigned mark = h.n_ev;
+   ws->base.buffer_destroy(&ws->base, bo);
+   check(h.n_ev == mark && !ws->deferred.va_refused_count && !ws->deferred.refused_count,
+         "its destroy makes no host call and keeps nothing");
+   h.fail_op = 0;
+   h.fail_calls = 0;
+   finish(ws, tracker);
+}
+
 static const struct {
    const char *name;
    void (*fn)(void);
@@ -731,6 +1100,11 @@ static const struct {
    {"refused_kept", test_refused_kept},
    {"teardown_leak", test_teardown_leak},
    {"tracker_abandoned", test_tracker_abandoned},
+   {"va_refused_sparse", test_va_refused_sparse},
+   {"va_refused_replay", test_va_refused_replay},
+   {"va_refused_held", test_va_refused_held},
+   {"va_refused_teardown", test_va_refused_teardown},
+   {"va_refused_borrowed", test_va_refused_borrowed},
 };
 
 int

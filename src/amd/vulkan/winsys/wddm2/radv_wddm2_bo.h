@@ -69,8 +69,15 @@ struct radv_wddm2_bo {
    /* The range is no longer this driver's to free: freed already, or leaked. A destroy retried after a
     * refused DestroyAllocation2 must not free it twice. */
    bool va_gone;
+   /* Each own range on its own (radv_wddm2_bo_destroy_now): a FreeGpuVirtualAddress that was refused
+    * leaves its flag clear, so a retry frees only what is still this driver's, and va_gone is set once
+    * every range is freed. va_freed is the main range (reserved_va, or base.va), sparse_high_freed the
+    * high PRT view at sparse_high_va. */
+   bool va_freed;
+   bool sparse_high_freed;
    struct list_head refused_link;  /* ws->deferred.refused, while a refused DestroyAllocation2 waits for
-                                    * a retry (R7) */
+                                    * a retry (R7); ws->deferred.va_refused, while a refused
+                                    * FreeGpuVirtualAddress does */
 };
 
 static inline struct radv_wddm2_bo *

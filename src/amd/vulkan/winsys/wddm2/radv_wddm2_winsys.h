@@ -136,6 +136,17 @@ struct radv_wddm2_winsys {
       uint64_t refused_retries;  /* DestroyAllocation2 calls a retry made */
       uint64_t refused_next_ns;  /* the next retry */
       uint64_t refused_interval_ns;
+      /* A FreeGpuVirtualAddress the OS refused, of a range only this driver frees
+       * (radv_wddm2_bo_owns_va). The range is still the ICD's, so the BO is kept whole, through
+       * refused_link, and the drain points and teardown retry the free, every refused_interval_ns;
+       * teardown leaks and counts what is still refused then (radv_wddm2_bo.c). va_refused_bytes is the
+       * address space those BOs still own. */
+      struct list_head va_refused; /* struct radv_wddm2_bo, through refused_link */
+      uint32_t va_refused_count;   /* atomic */
+      uint64_t va_refused_bytes;
+      uint64_t va_refused_total;   /* refusals seen, retries included */
+      uint64_t va_refused_retries; /* destroys a retry made */
+      uint64_t va_refused_next_ns; /* the next retry */
       /* R6 (BD-201): repair signals of a published progress value whose submission or signal failed,
        * and those that could not be sent, which leave that value unproven for ever. Atomic: the
        * submission path writes them without the lock. */
