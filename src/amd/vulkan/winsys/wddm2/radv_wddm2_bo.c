@@ -1297,7 +1297,7 @@ radv_wddm2_bo_keep_locked(struct radv_wddm2_winsys *ws, struct radv_wddm2_bo *bo
  * allocation: the BO's own pool_link carries it, as the BD-045 locked list does. The struct is not in
  * the pool, so nothing reuses it meanwhile. */
 static void
-radv_wddm2_bo_keep_refused(struct radv_wddm2_winsys *ws, struct radv_wddm2_bo *bo)
+radv_wddm2_bo_keep_refused(struct radv_wddm2_winsys *ws, struct radv_wddm2_bo *bo, NTSTATUS status)
 {
    simple_mtx_lock(&ws->deferred.lock);
    /* The first kept allocation starts the interval: the call that just failed was its first try. */
@@ -1307,10 +1307,55 @@ radv_wddm2_bo_keep_refused(struct radv_wddm2_winsys *ws, struct radv_wddm2_bo *b
    ws->deferred.refused_bytes += bo->base.size;
    ws->deferred.refused_total++;
    p_atomic_inc(&ws->deferred.refused_count);
-   radv_wddm2_deferred_line("DestroyAllocation2 refused a %" PRIu64 "-byte allocation: it stays with the ICD, "
-                            "%u kept (%" PRIu64 " MiB), retried at the drain points (%" PRIu64 " refusals so far)",
-                            bo->base.size, ws->deferred.refused_count, ws->deferred.refused_bytes >> 20,
-                            ws->deferred.refused_total);
+   radv_wddm2_deferred_line("DestroyAllocation2 refused a %" PRIu64 "-byte allocation (0x%08x): it stays with the "
+                            "ICD, %u kept (%" PRIu64 " MiB), retried at the drain points (%" PRIu64
+                            " refusals so far)",
+                            bo->base.size, (unsigned)status, ws->deferred.refused_count,
+                            ws->deferred.refused_bytes >> 20, ws->deferred.refused_total);
+   simple_mtx_unlock(&ws->deferred.lock);
+}
+
+static uint64_t radv_wddm2_va_bytes(const struct radv_wddm2_bo *bo);
+
+/* A FreeGpuVirtualAddress the host or the OS refused, of a range this driver owns by itself
+ * (radv_wddm2_bo_owns_va). The call "releases a range ... which was previously reserved or mapped", any
+ * NTSTATUS other than success is a failure, and nothing says the range was released then
+ * (ref\ddi-display\d3dkmthk.md:12613, :12621-12628). So the range is still the ICD's: it is not written
+ * down as gone, and the OS, which places every range of this winsys (ReserveGpuVirtualAddress,
+ * MapGpuVirtualAddress), cannot hand it out again while it stays reserved.
+ *
+ * Retried, not left to the device: a reservation lives "in the current process graphics processing unit
+ * (GPU) virtual address space" (d3dkmthk.md:16150), each process has its own
+ * (ref\windows-driver-docs\windows-driver-docs-pr\display\gpu-virtual-address.md:24), and the free names
+ * the adapter, not the device (d3dkmthk.md:23960).
+ * No DDI text frees a reservation with the device, so nothing but this driver's own free gives the
+ * range back. The drain points and teardown retry it (radv_wddm2_va_refused_retry), and teardown leaks
+ * and counts what is still refused then (radv_wddm2_deferred_finish). The D3D12 shell's HostedDispatch
+ * answers a refused free the same way: it admits the retry of exactly that extent.
+ *
+ * Nothing else of the BO is released meanwhile, so the BO is kept whole. A REPLAYABLE BO's allocation
+ * stays: destroying it would let the OS free the same range with it (d3dkmthk.md:13810), and a retried
+ * free after that could free an address another BO was given in between. The list costs no allocation:
+ * the BO's own pool_link carries it, as the BD-045 and R7 lists do. call and status are the first call of
+ * this destroy that failed. */
+static void
+radv_wddm2_bo_keep_va_refused(struct radv_wddm2_winsys *ws, struct radv_wddm2_bo *bo, const char *call,
+                              NTSTATUS status)
+{
+   const uint64_t va = radv_wddm2_va_bytes(bo);
+   simple_mtx_lock(&ws->deferred.lock);
+   /* The first kept BO starts the interval: the call that just failed was its first try. */
+   if (!ws->deferred.va_refused_count)
+      ws->deferred.va_refused_next_ns = os_time_get_nano() + ws->deferred.locked_interval_ns;
+   list_addtail(&bo->pool_link, &ws->deferred.va_refused);
+   ws->deferred.va_refused_bytes += va;
+   ws->deferred.va_refused_total++;
+   p_atomic_inc(&ws->deferred.va_refused_count);
+   radv_wddm2_deferred_line("%s refused (0x%08x) for a %" PRIu64 "-byte BO: its %" PRIu64
+                            " KiB of own address space stay with the ICD and nothing of it is released, "
+                            "%u kept (%" PRIu64 " KiB), retried at the drain points (%" PRIu64 " refusals so far)",
+                            call, (unsigned)status, bo->base.size, va >> 10, ws->deferred.va_refused_count,
+                            ws->deferred.va_refused_bytes >> 10, ws->deferred.va_refused_total);
    simple_mtx_unlock(&ws->deferred.lock);
 }
 
@@ -1355,11 +1400,18 @@ radv_wddm2_bo_owns_va(const struct radv_wddm2_bo *bo)
  * submission naming the BO can still be waiting in a software queue when the destroy reaches the OS.
  *
  * The proof for the ranges this function does free belongs to the caller: radv_wddm2_bo_destroy either
- * has it at the destroy or defers the BO until it does (R2). An ordinary BO needs no proof at all. */
+ * has it at the destroy or defers the BO until it does (R2). An ordinary BO needs no proof at all.
+ *
+ * A refused call releases nothing after it. A refused range free keeps the BO whole
+ * (radv_wddm2_bo_keep_va_refused) and a refused DestroyAllocation2 keeps the allocation
+ * (radv_wddm2_bo_keep_refused); both are retried by calling this function again, which skips what is
+ * already done. The first failing call of the sequence is the one logged: a later success does not hide
+ * it. */
 static void
 radv_wddm2_bo_destroy_now(struct radv_wddm2_winsys *ws, struct radv_wddm2_bo *bo)
 {
-   ASSERTED NTSTATUS status;
+   NTSTATUS status, failed = STATUS_SUCCESS;
+   const char *failed_call = NULL;
 
    if (!radv_wddm2_bo_unlock(bo)) {
       if (!bo->borrowed) {
@@ -1378,20 +1430,38 @@ radv_wddm2_bo_destroy_now(struct radv_wddm2_winsys *ws, struct radv_wddm2_bo *bo
    }
 
    if (radv_wddm2_bo_owns_va(bo) && !bo->va_gone) {
-      if (bo->sparse_high_va) {
+      /* Each range on its own: a refusal of one does not stop the free of the other, and only a range
+       * whose own free succeeded is written down as freed. */
+      if (bo->sparse_high_va && !bo->sparse_high_freed) {
          const D3DKMT_FREEGPUVIRTUALADDRESS high = {
             .hAdapter = ws->adapter_h,
             .BaseAddress = bo->sparse_high_va,
             .Size = align64(bo->base.size, 65536),
          };
          status = BC250_WDDM_CALL(&ws->host, FreeGpuVirtualAddress, &high);
+         bo->sparse_high_freed = NT_SUCCESS(status);
+         if (!NT_SUCCESS(status) && !failed_call) {
+            failed = status;
+            failed_call = "FreeGpuVirtualAddress of the sparse high view";
+         }
       }
-      const D3DKMT_FREEGPUVIRTUALADDRESS unmap = {
-         .hAdapter = ws->adapter_h,
-         .BaseAddress = bo->reserved_va ? bo->reserved_va : bo->base.va,
-         .Size = bo->reserved_size ? bo->reserved_size : bo->base.size,
-      };
-      status = BC250_WDDM_CALL(&ws->host, FreeGpuVirtualAddress, &unmap);
+      if (!bo->va_freed) {
+         const D3DKMT_FREEGPUVIRTUALADDRESS unmap = {
+            .hAdapter = ws->adapter_h,
+            .BaseAddress = bo->reserved_va ? bo->reserved_va : bo->base.va,
+            .Size = bo->reserved_size ? bo->reserved_size : bo->base.size,
+         };
+         status = BC250_WDDM_CALL(&ws->host, FreeGpuVirtualAddress, &unmap);
+         bo->va_freed = NT_SUCCESS(status);
+         if (!NT_SUCCESS(status) && !failed_call) {
+            failed = status;
+            failed_call = "FreeGpuVirtualAddress of the range";
+         }
+      }
+      if (failed_call) {
+         radv_wddm2_bo_keep_va_refused(ws, bo, failed_call, failed);
+         return;
+      }
       bo->va_gone = true;
    }
 
@@ -1409,7 +1479,7 @@ radv_wddm2_bo_destroy_now(struct radv_wddm2_winsys *ws, struct radv_wddm2_bo *bo
       } else {
          /* R7: the allocation is still this driver's. It keeps its byte charge and goes on the kept
           * list, which the drain points and teardown retry; it is never written down as released. */
-         radv_wddm2_bo_keep_refused(ws, bo);
+         radv_wddm2_bo_keep_refused(ws, bo, status);
          return;
       }
 
@@ -1743,14 +1813,17 @@ radv_wddm2_held_bytes(const struct radv_wddm2_bo *bo)
 }
 
 /* R7/G4: the address space this BO still owns, the only thing an R2 hold keeps from the OS. Zero for an
- * ordinary BO, whose range the OS frees with the allocation, and zero once the range is gone. */
+ * ordinary BO, whose range the OS frees with the allocation, and zero once the range is gone. A range
+ * whose own free succeeded while the other one was refused no longer counts. */
 static uint64_t
 radv_wddm2_va_bytes(const struct radv_wddm2_bo *bo)
 {
    if (!radv_wddm2_bo_owns_va(bo) || bo->va_gone)
       return 0;
-   uint64_t bytes = bo->reserved_size ? bo->reserved_size : bo->base.size;
-   if (bo->sparse_high_va)
+   uint64_t bytes = 0;
+   if (!bo->va_freed)
+      bytes += bo->reserved_size ? bo->reserved_size : bo->base.size;
+   if (bo->sparse_high_va && !bo->sparse_high_freed)
       bytes += align64(bo->base.size, 65536);
    return bytes;
 }
@@ -2007,11 +2080,49 @@ radv_wddm2_refused_retry(struct radv_wddm2_winsys *ws, bool final)
    }
 }
 
+/* Destroys the BOs a refused FreeGpuVirtualAddress kept, which retries the free of each range still
+ * theirs (radv_wddm2_bo_keep_va_refused); one that is refused again is kept again, and one whose ranges
+ * are freed goes on to its DestroyAllocation2. At most once per locked_interval_ns, unless final
+ * (teardown). The retry needs no proof of retirement: the BO came here from a destroy that had it. */
+static void
+radv_wddm2_va_refused_retry(struct radv_wddm2_winsys *ws, bool final)
+{
+   struct list_head kept;
+   list_inithead(&kept);
+   simple_mtx_lock(&ws->deferred.lock);
+   const uint64_t now = os_time_get_nano();
+   if (final || now >= ws->deferred.va_refused_next_ns) {
+      list_splicetail(&ws->deferred.va_refused, &kept);
+      list_inithead(&ws->deferred.va_refused);
+      ws->deferred.va_refused_bytes = 0;
+      p_atomic_set(&ws->deferred.va_refused_count, 0);
+      ws->deferred.va_refused_next_ns = now + ws->deferred.locked_interval_ns;
+   }
+   simple_mtx_unlock(&ws->deferred.lock);
+   uint64_t tried = 0;
+   list_for_each_entry_safe (struct radv_wddm2_bo, bo, &kept, pool_link) {
+      list_del(&bo->pool_link);
+      /* A refusal puts it straight back on the list, which counts it again; nothing of bo may be read
+       * after this call. */
+      radv_wddm2_bo_destroy_now(ws, bo);
+      tried++;
+   }
+   if (tried) {
+      simple_mtx_lock(&ws->deferred.lock);
+      ws->deferred.va_refused_retries += tried;
+      simple_mtx_unlock(&ws->deferred.lock);
+   }
+}
+
 void
 radv_wddm2_deferred_drain(struct radv_wddm2_winsys *ws)
 {
+   /* In the order of a destroy: the unlock, the range frees, the allocation destroy. A retry that gets
+    * further and is refused there puts the BO on the next list. */
    if (p_atomic_read(&ws->deferred.locked_count))
       radv_wddm2_locked_retry(ws, false);
+   if (p_atomic_read(&ws->deferred.va_refused_count))
+      radv_wddm2_va_refused_retry(ws, false);
    if (p_atomic_read(&ws->deferred.refused_count))
       radv_wddm2_refused_retry(ws, false);
    const bool reap = p_atomic_read(&ws->deferred.abandoned) != 0;
@@ -2252,8 +2363,8 @@ radv_wddm2_witness_stale(struct radv_wddm2_winsys *ws, struct radv_wddm2_bo *fir
  * (held now and at the peak, the address space held and leaked, the allocations kept by an Unlock2 or a
  * DestroyAllocation2 refusal, held and released since creation, destroys, host imports, the witness's
  * in-flight destroys by class, stale names, cap reports,
- * allocation retries and sweeps) and the submit path's (submissions, progress signals in their own call or
- * merged or written by the GPU, application signals, waits queued and left out, gather-slot waits, queues
+ * allocation retries and sweeps, the BOs kept by a FreeGpuVirtualAddress refusal) and the submit path's
+ * (submissions, progress signals in their own call or merged or written by the GPU, application signals, waits queued and left out, gather-slot waits, queues
  * that fell back to the kernel signal). Every count is since the
  * winsys was created; t= is the time since then. */
 struct radv_wddm2_summary_deferred {
@@ -2261,6 +2372,7 @@ struct radv_wddm2_summary_deferred {
    uint64_t held_va_bytes, held_va_32bit, leaked_ranges, leaked_va_bytes;
    uint64_t borrowed, cap_reports, retries, oom_waits, sweeps;
    uint64_t locked, locked_bytes, refused, refused_bytes, refused_total, refused_retries;
+   uint64_t va_refused, va_refused_bytes, va_refused_total, va_refused_retries;
    struct radv_wddm2_witness_totals witness;
 };
 
@@ -2342,6 +2454,10 @@ radv_wddm2_summary_write(struct radv_wddm2_winsys *ws, uint64_t now, uint64_t du
    d.refused_bytes = ws->deferred.refused_bytes;
    d.refused_total = ws->deferred.refused_total;
    d.refused_retries = ws->deferred.refused_retries;
+   d.va_refused = ws->deferred.va_refused_count;
+   d.va_refused_bytes = ws->deferred.va_refused_bytes;
+   d.va_refused_total = ws->deferred.va_refused_total;
+   d.va_refused_retries = ws->deferred.va_refused_retries;
    radv_wddm2_witness_totals_locked(ws, &d.witness);
    simple_mtx_unlock(&ws->deferred.lock);
 
@@ -2404,14 +2520,16 @@ radv_wddm2_summary_write(struct radv_wddm2_winsys *ws, uint64_t now, uint64_t du
                                   " borrowed=%" PRIu64 " in_flight=%" PRIu64 " in_flight_32bit=%" PRIu64
                                   " in_flight_kib=%" PRIu64 " stale_names=%" PRIu64 " cap_reports=%" PRIu64
                                   " retries=%" PRIu64 " oom_waits=%" PRIu64 " sweeps=%" PRIu64
-                                  " classes(destroyed/held/in_flight)=%s",
+                                  " va_refused=%" PRIu64 " va_refused_kib=%" PRIu64 " va_refusals=%" PRIu64
+                                  " va_refused_retries=%" PRIu64 " classes(destroyed/held/in_flight)=%s",
                                   tag, t, d.held, d.held_bytes >> 10, d.held_va_bytes >> 10, d.held_va_32bit, d.peak,
                                   d.peak_bytes >> 10, d.total, d.total_bytes >> 20, d.released, d.immediate,
                                   radv_wddm2_ms(d.max_hold_ns), d.leaked_ranges, d.leaked_va_bytes >> 10, d.locked,
                                   d.locked_bytes >> 10, d.refused, d.refused_bytes >> 10, d.refused_total,
                                   d.refused_retries, d.witness.destroys_total, d.borrowed, d.witness.in_flight_total,
                                   d.witness.in_flight_32bit, d.witness.in_flight_bytes >> 10, d.witness.stale_names,
-                                  d.cap_reports, d.retries, d.oom_waits, d.sweeps, classes);
+                                  d.cap_reports, d.retries, d.oom_waits, d.sweeps, d.va_refused,
+                                  d.va_refused_bytes >> 10, d.va_refused_total, d.va_refused_retries, classes);
          memcpy(ws->summary.deferred_snapshot, &d, sizeof(d));
       }
       if (write_s) {
@@ -2522,6 +2640,63 @@ radv_wddm2_deferred_finish(struct radv_wddm2_winsys *ws)
    simple_mtx_unlock(&ws->deferred.lock);
    radv_wddm2_deferred_destroy_list(ws, &rest);
 
+   /* The last retries go in the order of a destroy, unlock, range frees, allocation destroy, because a
+    * retry that gets further and is refused there puts the BO on the next list: each list is emptied
+    * only after every list before it. */
+
+   /* BD-045: one last unlock of the kept BOs. What the host still keeps locked is its to release with the
+    * device; the ICD gives up only its structs. */
+   radv_wddm2_locked_retry(ws, true);
+   simple_mtx_lock(&ws->deferred.lock);
+   const uint32_t locked = ws->deferred.locked_count;
+   if (locked)
+      radv_wddm2_deferred_line("%u BOs (%" PRIu64 " MiB) still CPU-locked at teardown after %" PRIu64
+                               " failed unlocks: left to the host",
+                               locked, ws->deferred.locked_bytes >> 20, p_atomic_read(&ws->deferred.unlock_failed));
+   struct list_head kept;
+   list_inithead(&kept);
+   list_splicetail(&ws->deferred.locked, &kept);
+   list_inithead(&ws->deferred.locked);
+   ws->deferred.locked_bytes = 0;
+   p_atomic_set(&ws->deferred.locked_count, 0);
+   simple_mtx_unlock(&ws->deferred.lock);
+   list_for_each_entry_safe (struct radv_wddm2_bo, bo, &kept, pool_link) {
+      list_del(&bo->pool_link);
+      radv_wddm2_bo_struct_free(ws, bo);
+   }
+
+   /* One last FreeGpuVirtualAddress for every range a refusal kept. No DDI text frees such a range with
+    * the device (radv_wddm2_bo_keep_va_refused), and no retry can follow this one, so a range refused
+    * again is given up unfreed and counted with the leaked ones: leaked_ranges counts the own ranges this
+    * driver gave up without a free of its own. The rest of the BO then goes as any destroy does; a
+    * REPLAYABLE BO's DestroyAllocation2 is the R7 retry's just below if it is refused. */
+   radv_wddm2_va_refused_retry(ws, true);
+   simple_mtx_lock(&ws->deferred.lock);
+   const uint32_t va_refused = ws->deferred.va_refused_count;
+   if (va_refused)
+      radv_wddm2_deferred_line("%u BOs (%" PRIu64 " KiB of own address space) still refused a FreeGpuVirtualAddress"
+                               " at teardown, of %" PRIu64 " refusals and %" PRIu64
+                               " retries: the ranges are leaked, not freed",
+                               va_refused, ws->deferred.va_refused_bytes >> 10, ws->deferred.va_refused_total,
+                               ws->deferred.va_refused_retries);
+   struct list_head unfreed;
+   list_inithead(&unfreed);
+   list_splicetail(&ws->deferred.va_refused, &unfreed);
+   list_inithead(&ws->deferred.va_refused);
+   ws->deferred.va_refused_bytes = 0;
+   p_atomic_set(&ws->deferred.va_refused_count, 0);
+   list_for_each_entry (struct radv_wddm2_bo, bo, &unfreed, pool_link) {
+      ws->deferred.leaked_ranges++;
+      ws->deferred.leaked_va_bytes += radv_wddm2_va_bytes(bo);
+      bo->va_leaked = true;
+      bo->va_gone = true;
+   }
+   simple_mtx_unlock(&ws->deferred.lock);
+   list_for_each_entry_safe (struct radv_wddm2_bo, bo, &unfreed, pool_link) {
+      list_del(&bo->pool_link);
+      radv_wddm2_bo_destroy_now(ws, bo);
+   }
+
    /* R7: one last DestroyAllocation2 for every allocation a refusal kept. What is refused again goes
     * with the device, whose allocations the OS destroys with it; the ICD gives up only its structs, and
     * the count below says how many. */
@@ -2541,27 +2716,6 @@ radv_wddm2_deferred_finish(struct radv_wddm2_winsys *ws)
    p_atomic_set(&ws->deferred.refused_count, 0);
    simple_mtx_unlock(&ws->deferred.lock);
    list_for_each_entry_safe (struct radv_wddm2_bo, bo, &unretired, pool_link) {
-      list_del(&bo->pool_link);
-      radv_wddm2_bo_struct_free(ws, bo);
-   }
-
-   /* BD-045: one last unlock of the kept BOs. What the host still keeps locked is its to release with the
-    * device; the ICD gives up only its structs. */
-   radv_wddm2_locked_retry(ws, true);
-   simple_mtx_lock(&ws->deferred.lock);
-   const uint32_t locked = ws->deferred.locked_count;
-   if (locked)
-      radv_wddm2_deferred_line("%u BOs (%" PRIu64 " MiB) still CPU-locked at teardown after %" PRIu64
-                               " failed unlocks: left to the host",
-                               locked, ws->deferred.locked_bytes >> 20, p_atomic_read(&ws->deferred.unlock_failed));
-   struct list_head kept;
-   list_inithead(&kept);
-   list_splicetail(&ws->deferred.locked, &kept);
-   list_inithead(&ws->deferred.locked);
-   ws->deferred.locked_bytes = 0;
-   p_atomic_set(&ws->deferred.locked_count, 0);
-   simple_mtx_unlock(&ws->deferred.lock);
-   list_for_each_entry_safe (struct radv_wddm2_bo, bo, &kept, pool_link) {
       list_del(&bo->pool_link);
       radv_wddm2_bo_struct_free(ws, bo);
    }
@@ -3040,6 +3194,7 @@ radv_wddm2_bo_init_functions(struct radv_wddm2_winsys *ws)
    list_inithead(&ws->deferred.entries);
    list_inithead(&ws->deferred.pool);
    list_inithead(&ws->deferred.locked);
+   list_inithead(&ws->deferred.va_refused);
    list_inithead(&ws->deferred.refused);
    ws->deferred.locked_interval_ns = 1000000000ull;
 
