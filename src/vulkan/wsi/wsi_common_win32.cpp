@@ -27,6 +27,8 @@
 #include <string.h>
 
 #include "util/cnd_monotonic.h"
+#include "util/log.h"
+#include "util/os_time.h"
 #include "util/timespec.h"
 #include "util/u_thread.h"
 #include "vk_format.h"
@@ -35,6 +37,7 @@
 #include "vk_util.h"
 #include "wsi_common_entrypoints.h"
 #include "wsi_common_private.h"
+#include "wsi_win32_release_gate.h"
 
 #include <dxgi1_4.h>
 #include "util/u_win32_library.h"
@@ -568,6 +571,7 @@ wsi_dxgi_create_blit_context(struct wsi_win32_swapchain *chain,
                                         IID_PPV_ARGS(&win32_image->dxgi.cmd_list));
    if (FAILED(hr)) {
       win32_image->dxgi.cmd_alloc->Release();
+      win32_image->dxgi.cmd_alloc = NULL;
       return VK_ERROR_OUT_OF_DEVICE_MEMORY;
    }
 
@@ -603,14 +607,22 @@ wsi_dxgi_create_blit_context(struct wsi_win32_swapchain *chain,
    return VK_SUCCESS;
 }
 
+/* BD-213: this had no caller, so the copy command list and its allocator stayed for the life of the
+ * process. Now wsi_win32_image_finish calls it, behind the release gate, and every pointer is cleared
+ * so that a second teardown of the same image cannot release the same object twice. */
 static void
 wsi_dxgi_destroy_blit_context(struct wsi_win32_swapchain *chain,
                               struct wsi_win32_image *win32_image)
 {
-   if (win32_image->dxgi.cmd_list)
+   (void)chain;
+   if (win32_image->dxgi.cmd_list) {
       win32_image->dxgi.cmd_list->Release();
-   if (win32_image->dxgi.cmd_alloc)
+      win32_image->dxgi.cmd_list = NULL;
+   }
+   if (win32_image->dxgi.cmd_alloc) {
       win32_image->dxgi.cmd_alloc->Release();
+      win32_image->dxgi.cmd_alloc = NULL;
+   }
 }
 
 static VkResult
@@ -816,13 +828,171 @@ wsi_win32_image_finish(struct wsi_win32_swapchain *chain,
                        const VkAllocationCallbacks *allocator,
                        struct wsi_win32_image *image)
 {
-   if (image->dxgi.swapchain_res)
-      image->dxgi.swapchain_res->Release();
+   (void)allocator;
+   /* The copy list, its allocator and the back buffer the copy writes: the release gate above this
+    * call is what makes this safe (BD-213). */
+   wsi_dxgi_destroy_blit_context(chain, image);
 
-   if(image->sw.bmp)
+   if (image->dxgi.swapchain_res) {
+      image->dxgi.swapchain_res->Release();
+      image->dxgi.swapchain_res = NULL;
+   }
+
+   if (image->sw.bmp) {
       DeleteObject(image->sw.bmp);
+      image->sw.bmp = NULL;
+   }
    wsi_destroy_image(&chain->base, &image->base);
+
+   /* The Vulkan memory that aliased it is gone, so the D3D12 resource the copy reads can go too. */
+   if (image->dxgi.blit_res) {
+      image->dxgi.blit_res->Release();
+      image->dxgi.blit_res = NULL;
+   }
 }
+
+/* The driver's side of the release gate (wsi_win32_release_gate.h, BD-213). One object with the five
+ * calls of the bounded drain and the four releases of a chain, so that the decision stays in the header
+ * the host test drives and this file only makes the Direct3D calls.
+ *
+ * The drain fence is created on the device that owns the present queue and signalled on that queue, so
+ * it sits behind every Wait, ExecuteCommandLists and Signal of every present of this chain, and of any
+ * other chain that shares the queue. Its completion is therefore proof for all of them.
+ */
+struct wsi_win32_release_adapter {
+   struct wsi_win32_swapchain *chain;
+   const VkAllocationCallbacks *allocator;
+   ID3D12Fence *fence;
+
+   /* A GDI chain has no present queue, and a route chain that never presented has nothing on one: its
+    * blit timeline values are all still 0, because a present raises one of them twice: the application's
+    * own submission signals it (wsi_common.c:2759) and wsi_dxgi_blit signals it on the queue. A creation that
+    * failed half way therefore tears down as it always did, instead of leaking over a queue that never
+    * saw it. */
+   bool needs_drain() const
+   {
+      if (!chain->dxgi || !chain->base.blit.timeline_values)
+         return false;
+      for (uint32_t i = 0; i < chain->base.image_count; i++) {
+         if (chain->base.blit.timeline_values[i])
+            return true;
+      }
+      return false;
+   }
+
+   ID3D12CommandQueue *queue() const
+   {
+      const struct wsi_device *wsi = chain->base.wsi;
+      if (!wsi->win32.get_d3d12_command_queue)
+         return NULL;
+      return (ID3D12CommandQueue *)wsi->win32.get_d3d12_command_queue(chain->base.device);
+   }
+
+   ID3D12Device *device() const
+   {
+      const struct wsi_device *wsi = chain->base.wsi;
+      if (!wsi->win32.get_d3d12_device)
+         return NULL;
+      return (ID3D12Device *)wsi->win32.get_d3d12_device(chain->base.device);
+   }
+
+   bool create_fence()
+   {
+      ID3D12Device *d3d12 = device();
+      if (!d3d12 || !queue())
+         return false;
+      return SUCCEEDED(d3d12->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&fence))) && fence;
+   }
+
+   bool signal_fence()
+   {
+      ID3D12CommandQueue *q = queue();
+      return q && SUCCEEDED(q->Signal(fence, 1));
+   }
+
+   bool wait_fence(uint32_t deadline_ms)
+   {
+      HANDLE event = CreateEventW(NULL, FALSE, FALSE, NULL);
+      if (event) {
+         const HRESULT hr = fence->SetEventOnCompletion(1, event);
+         const bool done = SUCCEEDED(hr) && WaitForSingleObject(event, deadline_ms) == WAIT_OBJECT_0;
+         CloseHandle(event);
+         if (done)
+            return true;
+         if (SUCCEEDED(hr))
+            return false;
+      }
+      /* No event to wait on: poll to the same deadline instead of blocking without one. UINT64_MAX is
+       * the removal sentinel of a monitored fence, not a completed value. */
+      const uint64_t end = os_time_get_nano() + WSI_WIN32_RELEASE_DEADLINE_NS;
+      do {
+         const uint64_t value = fence->GetCompletedValue();
+         if (value != UINT64_MAX && value >= 1)
+            return true;
+         Sleep(1);
+      } while (os_time_get_nano() < end);
+      return false;
+   }
+
+   void release_fence()
+   {
+      if (fence) {
+         fence->Release();
+         fence = NULL;
+      }
+   }
+
+   bool device_removed() const
+   {
+      ID3D12Device *d3d12 = device();
+      return d3d12 && FAILED(d3d12->GetDeviceRemovedReason());
+   }
+
+   /* Nothing was released. The chain, its images, its D3D12 resources, its shared blit fences and its
+    * swap chain stay as they are: one leaked swapchain against a release of memory a live queue reads.
+    * One line says so, because a leak nobody can see is worse than the leak. Mesa's logger, not stderr:
+    * the process that loads this driver on the desktop route is DWM, which has no console, and the
+    * Windows backend of the logger writes to the debugger (util/log.c:418). The line is a warning of the
+    * release flavour as much as of the lab one: it names a leak, not a diagnostic of our own (BD-167). */
+   void pin(enum wsi_win32_release_state state)
+   {
+      mesa_logw("chain %p destroyed with the present queue's use of its resources %s: its %u images, "
+                "their D3D12 resources and copy lists, its shared blit fences and its swap chain are kept",
+                (void *)chain, wsi_win32_release_state_name(state), chain->base.image_count);
+   }
+
+   void release_images()
+   {
+      for (uint32_t i = 0; i < chain->base.image_count; i++)
+         wsi_win32_image_finish(chain, allocator, &chain->images[i]);
+   }
+
+   void release_swapchain()
+   {
+      if (chain->dxgi) {
+         chain->dxgi->Release();
+         chain->dxgi = NULL;
+      }
+   }
+
+   void release_fences()
+   {
+      if (!chain->d3d12_blit_fences)
+         return;
+      for (uint32_t i = 0; i < chain->base.image_count; i++) {
+         if (chain->d3d12_blit_fences[i]) {
+            chain->d3d12_blit_fences[i]->Release();
+            chain->d3d12_blit_fences[i] = NULL;
+         }
+      }
+      vk_free(allocator, chain->d3d12_blit_fences);
+      chain->d3d12_blit_fences = NULL;
+   }
+
+   /* The WSI base owns the semaphores a pending submission of the application waits on and the fences
+    * that submission signals, so it goes last and only inside the gate. */
+   void release_base() { wsi_swapchain_finish(&chain->base); }
+};
 
 static VkResult
 wsi_win32_swapchain_destroy(struct wsi_swapchain *drv_chain,
@@ -831,25 +1001,18 @@ wsi_win32_swapchain_destroy(struct wsi_swapchain *drv_chain,
    struct wsi_win32_swapchain *chain =
       (struct wsi_win32_swapchain *) drv_chain;
 
-   for (uint32_t i = 0; i < chain->base.image_count; i++)
-      wsi_win32_image_finish(chain, allocator, &chain->images[i]);
-
+   /* BD-213. Vulkan does not ask the application to wait for the present copy of the DXGI route, so at
+    * this point the queue may still be reading this chain's imported image memory and writing its back
+    * buffers. The gate proves the queue is past all of it, or the chain keeps everything.
+    */
+   struct wsi_win32_release_adapter adapter = {chain, allocator, NULL};
+   const struct wsi_win32_drain_outcome outcome = wsi_win32_release_swapchain(adapter);
 
    if (chain->surface->current_swapchain == chain)
       chain->surface->current_swapchain = NULL;
 
-   if (chain->dxgi)
-      chain->dxgi->Release();
-
-   if (chain->d3d12_blit_fences) {
-      for (uint32_t i = 0; i < chain->base.image_count; i++) {
-         if (chain->d3d12_blit_fences[i])
-            chain->d3d12_blit_fences[i]->Release();
-      }
-      vk_free(allocator, chain->d3d12_blit_fences);
-   }
-
-   wsi_swapchain_finish(&chain->base);
+   if (!wsi_win32_release_allowed(outcome.state))
+      return VK_SUCCESS;
 
    u_cnd_monotonic_destroy(&chain->acquire_cond);
    mtx_destroy(&chain->acquire_mutex);
