@@ -867,6 +867,26 @@ radv_init_graphics_state(struct radv_cmd_stream *cs, struct radv_device *device)
    }
 }
 
+/* BD-201 lab case (DESIGN.md 6.6 and 6.7): the idle wait in radv_update_preambles is today the only
+ * completion gate on the replaced preamble objects, so it also hides what R1 has to be right about. The
+ * lab flavour can skip it, which destroys the old scratch, rings and descriptors while the submissions
+ * that use them still run: R1 alone, the work really pending. The release flavour reads no such variable
+ * (BD-167), so there it always waits. */
+static bool
+radv_preamble_no_idle_wait(void)
+{
+#if defined(AMDGPU_WDDM_LAB_FLAVOUR)
+   static int mode = -1; /* benign race: every thread computes the same value */
+   if (mode < 0) {
+      const char *value = getenv("BC250_PREAMBLE_NO_IDLE_WAIT");
+      mode = value && !strcmp(value, "1");
+   }
+   return mode == 1;
+#else
+   return false;
+#endif
+}
+
 static VkResult
 radv_update_preamble_cs(struct radv_queue_state *queue, struct radv_device *device,
                         const struct radv_queue_ring_info *needs, bool secure,
@@ -1130,9 +1150,28 @@ radv_update_preamble_cs(struct radv_queue_state *queue, struct radv_device *devi
     * kernel driver does. Submissions in flight on this queue still use the old scratch, rings and
     * descriptors, so wait for them before anything below is destroyed. If the wait fails, keep the old
     * objects (a leak) rather than unmap pages under running waves. */
-   const bool old_idle = !queue->initial_full_flush_preamble_cs || ws->ctx_wait_idle(hw_ctx, ip, 0);
+   const bool no_wait = radv_preamble_no_idle_wait();
+   const bool old_idle = no_wait || !queue->initial_full_flush_preamble_cs || ws->ctx_wait_idle(hw_ctx, ip, 0);
    if (!old_idle)
       fprintf(stderr, "radv: queue not idle, keeping the replaced preamble objects\n");
+
+#if defined(AMDGPU_WDDM_LAB_FLAVOUR)
+   /* One line per replacement, which is what the BD-201 lab case (DESIGN.md 6.6) has to see happen: the
+    * sizes before and after, the bytes of the compute scratch the queue gives up, and whether the wait
+    * that normally retires that memory first was skipped. */
+   if (scratch_bo != queue->scratch_bo || compute_scratch_bo != queue->compute_scratch_bo ||
+       esgs_ring_bo != queue->esgs_ring_bo || gsvs_ring_bo != queue->gsvs_ring_bo ||
+       descriptor_bo != queue->descriptor_bo)
+      fprintf(stderr,
+              "radv: preamble replaced: scratch %u -> %u per wave, compute scratch %u -> %u per wave, "
+              "old compute scratch %llu bytes, old objects %s%s\n",
+              queue->ring_info.scratch_size_per_wave, needs->scratch_size_per_wave,
+              queue->ring_info.compute_scratch_size_per_wave, needs->compute_scratch_size_per_wave,
+              (unsigned long long)(compute_scratch_bo != queue->compute_scratch_bo && queue->compute_scratch_bo
+                                      ? queue->compute_scratch_bo->size
+                                      : 0),
+              old_idle ? "destroyed" : "kept", no_wait ? ", queue wait skipped" : "");
+#endif
 
    if (queue->initial_full_flush_preamble_cs && old_idle)
       radv_destroy_cmd_stream(device, queue->initial_full_flush_preamble_cs);
@@ -1891,6 +1930,10 @@ radv_queue_sparse_submit(struct vk_queue *vqueue, struct vk_queue_submit *submis
    struct radv_device *device = radv_queue_device(queue);
    VkResult result;
 
+   /* BD-201 (DESIGN.md 6.7): the winsys hands every submission to the OS inline, under this queue's
+    * lock, because that is the only order the deferred-destruction contract covers. */
+   assert(queue->vk.submit.mode == VK_QUEUE_SUBMIT_MODE_IMMEDIATE);
+
    if (radv_queue_is_unbound(queue))
       return vk_errorf(queue, VK_ERROR_VALIDATION_FAILED, "vkQueueBindSparse() on an unbound queue");
 
@@ -1941,6 +1984,9 @@ static VkResult
 radv_queue_submit(struct vk_queue *vqueue, struct vk_queue_submit *submission)
 {
    struct radv_queue *queue = (struct radv_queue *)vqueue;
+
+   /* BD-201 (DESIGN.md 6.7): see radv_queue_sparse_submit. */
+   assert(queue->vk.submit.mode == VK_QUEUE_SUBMIT_MODE_IMMEDIATE);
 
    /* Refused without a host call and without losing the device: nothing
     * was queued, and the queue may still be bound later. */
@@ -2069,11 +2115,16 @@ radv_queue_init(struct radv_device *device, struct radv_queue *queue, int idx,
    if (queue->state.qf == RADV_QUEUE_SPARSE) {
       queue->vk.driver_submit = radv_queue_sparse_submit;
       /* Linux performs host waits here. WDDM already queues GPU waits and
-       * signals and uses native timelines, so it must remain immediate. */
+       * signals and uses native timelines, so it must remain immediate.
+       *
+       * BD-201 (DESIGN.md 6.7): and it must remain immediate in every build, release included. The
+       * winsys releases an ordinary BO's allocation at its destroy and relies on the OS to defer that
+       * destruction until the commands queued before it finish (d3dukmdt.md:3398-3402). A submit thread
+       * would leave submissions naming the BO in a software queue, which that contract does not cover,
+       * so a winsys without buffer_virtual_bind_end is refused here instead of silently getting one. */
       if (!device->ws->buffer_virtual_bind_end) {
-         result = vk_queue_enable_submit_thread(&queue->vk);
-         if (result != VK_SUCCESS)
-            goto fail;
+         result = VK_ERROR_INITIALIZATION_FAILED;
+         goto fail;
       }
    } else {
       queue->vk.driver_submit = radv_queue_submit;

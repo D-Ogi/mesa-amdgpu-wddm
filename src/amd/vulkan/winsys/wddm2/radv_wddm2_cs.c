@@ -894,10 +894,19 @@ vk_wddm2_fence_wait(struct radv_wddm2_winsys *ws, struct vk_wddm2_fence *fence)
       amdgpu_wddm_log("radv/wddm2: fence %u value %" PRIu64 " completed after %" PRIu64 " ms of wait\n",
               fence->handle, fence->wait_value, waited_ns / 1000000);
 
+   /* R4: the execution state is read, not assumed. Before this, the structure was filled and its
+    * ExecutionState tested without any GetDeviceState call, so the field was whatever the initialiser
+    * left and the page-fault report below was dead code. A hosted device has no kernel device of its
+    * own and answers no device-state query, so there is nothing to read there. */
    D3DKMT_GETDEVICESTATE get_state = {
       .hDevice = ws->device_h,
       .StateType = D3DKMT_DEVICESTATE_EXECUTION,
    };
+   if (!ws->host.dispatch) {
+      status = BC250_WDDM_CALL(&ws->host, GetDeviceState, &get_state);
+      if (!NT_SUCCESS(status))
+         get_state.ExecutionState = D3DKMT_DEVICEEXECUTION_ACTIVE;
+   }
 
    if (get_state.ExecutionState == D3DKMT_DEVICEEXECUTION_ERROR_DMAPAGEFAULT) {
       get_state.StateType = D3DKMT_DEVICESTATE_PAGE_FAULT;
@@ -1677,6 +1686,57 @@ radv_wddm2_progress_signalled(struct radv_wddm2_winsys *ws, struct radv_wddm2_qu
    return VK_SUCCESS;
 }
 
+/* R6 (BD-201, DESIGN.md 6.4): the repair signal. The progress value is published before the submit, so
+ * that a destroy racing with this submission counts it (that bullet stands: the publication stays where
+ * it is). The price is that a submission which then fails leaves a published value nothing will ever
+ * write, and every BO holding its own range against that value would wait for it for ever. The queue
+ * therefore signals the same value, on the same context, once more. Execution on a context is in order,
+ * so when that signal completes every submission the context accepted earlier is done, which is what the
+ * value was published to mean.
+ *
+ * No value is ever marked complete artificially. If the repair signal cannot be sent either, the value
+ * stays unproven: proof could then only come from the device state (R4), and the ranges held against it
+ * are leaked and counted at teardown (R5) rather than freed under work that may still run. */
+static void
+radv_wddm2_progress_repair(struct radv_wddm2_winsys *ws, struct radv_wddm2_queue *queue, uint64_t value)
+{
+   if (!value || !queue->bc250_progress.handle)
+      return;
+   NTSTATUS status;
+   if (queue->handle) {
+      const D3DKMT_SUBMITSIGNALSYNCOBJECTSTOHWQUEUE repair = {
+         .BroadcastHwQueueCount = 1,
+         .BroadcastHwQueueArray = &queue->handle,
+         .ObjectCount = 1,
+         .ObjectHandleArray = &queue->bc250_progress.handle,
+         .FenceValueArray = &value,
+      };
+      status = BC250_WDDM_CALL(&ws->host, SubmitSignalSyncObjectsToHwQueue, &repair);
+   } else if (queue->context_h) {
+      const D3DKMT_SIGNALSYNCHRONIZATIONOBJECTFROMGPU2 repair = {
+         .ObjectCount = 1,
+         .ObjectHandleArray = &queue->bc250_progress.handle,
+         .BroadcastContextCount = 1,
+         .BroadcastContextArray = &queue->context_h,
+         .MonitoredFenceValueArray = &value,
+      };
+      status = BC250_WDDM_CALL(&ws->host, SignalSynchronizationObjectFromGpu2, &repair);
+   } else {
+      status = STATUS_INVALID_HANDLE;
+   }
+   if (NT_SUCCESS(status)) {
+      p_atomic_inc(&ws->submit_stats.progress_repairs);
+      amdgpu_wddm_log("bc250: repair signal of progress %" PRIu64 " queued on context 0x%x after a failed "
+                      "submission\n",
+                      value, queue->context_h);
+   } else {
+      p_atomic_inc(&ws->submit_stats.progress_repairs_failed);
+      amdgpu_wddm_log("bc250: the repair signal of progress %" PRIu64 " on context 0x%x failed 0x%X: that value "
+                      "stays unproven\n",
+                      value, queue->context_h, (unsigned)status);
+   }
+}
+
 /* A CPU wait for a gather slot to retire, for the periodic summary. */
 static void
 radv_wddm2_count_gather_wait(struct radv_wddm2_winsys *ws, uint64_t ns)
@@ -1834,6 +1894,9 @@ radv_wddm2_cs_submit(struct radeon_winsys_ctx *_ctx,
       status = radv_wddm2_bc250_submit(ctx, queue, submit, gpu_progress ? next_value : 0);
       if (!NT_SUCCESS(status)) {
          amdgpu_wddm_log("bc250: native submit failed NTSTATUS=0x%X cs_count=%u\n", status, submit->cs_count);
+         /* R6, the rejected submit: this IB was never accepted, so nothing will write next_value, which
+          * is already published. The repair signal gives that value a writer. */
+         radv_wddm2_progress_repair(ws, queue, next_value);
          return VK_ERROR_DEVICE_LOST;
       }
       p_atomic_inc(&ws->submit_stats.submits);
@@ -1851,6 +1914,10 @@ radv_wddm2_cs_submit(struct radeon_winsys_ctx *_ctx,
        * and shared ones included; only the progress fence, which the queue created unshared, moves. */
       if (gpu_progress) {
          p_atomic_inc(&ws->submit_stats.progress_gpu);
+         /* R6 does not need a repair signal here or at the two calls below. The writer of next_value is
+          * already in place when this runs: the IB1's own RELEASE_MEM packet with gpu_progress, and the
+          * accepted signal call in the other two. What radv_wddm2_progress_signalled can fail at is the
+          * host's record of the value (BC250_HOST_PUBLISH_PROGRESS), which no release decision reads. */
          const VkResult result = radv_wddm2_progress_signalled(ws, queue, slot, next_value);
          if (result != VK_SUCCESS)
             return result;
@@ -1874,6 +1941,9 @@ radv_wddm2_cs_submit(struct radeon_winsys_ctx *_ctx,
          status = BC250_WDDM_CALL(&ws->host, SignalSynchronizationObjectFromGpu2, &progress_signal);
          if (!NT_SUCCESS(status)) {
             queue->bc250_submit_failed = true; // accepted IB has no retirement value: never reuse its slot
+            /* R6, the accepted work whose signal failed: the same signal once more. In-order execution
+             * makes its completion proof that this IB is done too. */
+            radv_wddm2_progress_repair(ws, queue, next_value);
             return VK_ERROR_DEVICE_LOST;
          }
          p_atomic_inc(&ws->submit_stats.progress_separate);
@@ -1976,8 +2046,11 @@ radv_wddm2_cs_submit(struct radeon_winsys_ctx *_ctx,
       }
       assert(NT_SUCCESS(status));
       if (!NT_SUCCESS(status)) {
-         if (merge_progress)
+         if (merge_progress) {
             queue->bc250_submit_failed = true; // accepted IB has no retirement value: never reuse its slot
+            /* R6: the progress value rode in this call, so it was not signalled either. */
+            radv_wddm2_progress_repair(ws, queue, next_value);
+         }
          return VK_ERROR_DEVICE_LOST;
       }
       if (merge_progress) {

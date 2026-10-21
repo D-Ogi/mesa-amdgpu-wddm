@@ -97,41 +97,6 @@ radv_wddm2_require_paging_fence(uint64_t *required, uint64_t value)
    *required = MAX2(*required, value);
 }
 
-static struct util_vma_heap *
-radv_wddm2_bo_heap(struct radv_wddm2_winsys *ws, enum radeon_bo_flag flags)
-{
-   if (flags & RADEON_FLAG_32BIT)
-      return &ws->_32bit_heap;
-   else if (flags & RADEON_FLAG_REPLAYABLE)
-      return &ws->replay_heap;
-   else
-      return &ws->heap;
-}
-
-static uint64_t
-radv_wddm2_bo_va_alloc(struct radv_wddm2_winsys *ws, enum radeon_bo_flag flags,
-                       uint64_t size, uint32_t alignment)
-{
-   struct util_vma_heap *heap = radv_wddm2_bo_heap(ws, flags);
-
-   simple_mtx_lock(&ws->heap_mtx);
-   uint64_t addr = util_vma_heap_alloc(heap, size, alignment);
-   simple_mtx_unlock(&ws->heap_mtx);
-
-   return addr;
-}
-
-static void
-radv_wddm2_bo_va_free(struct radv_wddm2_winsys *ws, enum radeon_bo_flag flags,
-                      uint64_t addr, uint64_t size)
-{
-   struct util_vma_heap *heap = radv_wddm2_bo_heap(ws, flags);
-
-   simple_mtx_lock(&ws->heap_mtx);
-   util_vma_heap_free(heap, addr, size);
-   simple_mtx_unlock(&ws->heap_mtx);
-}
-
 /* BO structs (ws->deferred.pool). A destroyed struct waits behind RADV_WDDM2_BO_POOL_KEEP others before
  * reuse and is freed only with the winsys. A command stream's BO set that still names a destroyed BO (an
  * application or driver fault) then names a BO struct, and the witness's stamp (radv_wddm2_cs.c) writes
@@ -813,12 +778,6 @@ radv_wddm2_bo_create_internal(struct radeon_winsys *_ws, uint64_t size, unsigned
    fflush(stdout);
 #endif
 
-   /*bo->base.va = radv_wddm2_bo_va_alloc(ws, flags, phys_size, virt_alignment);
-   if (bo->base.va == 0) {
-      result = VK_ERROR_OUT_OF_DEVICE_MEMORY;
-      goto error_create;
-   }*/
-
    status = BC250_WDDM_CALL(&ws->host, CreateAllocation2, &create);
    if (!NT_SUCCESS(status)) {
       amdgpu_wddm_log("CreateAllocation2 failed 0x%X\n", status);
@@ -912,8 +871,6 @@ radv_wddm2_bo_create_internal(struct radeon_winsys *_ws, uint64_t size, unsigned
    return VK_SUCCESS;
 
 error_va_alloc:
-   //radv_wddm2_bo_va_free(ws, flags, bo->base.va, bo->base.size);
-
    amdgpu_wddm_log("destroy allocation\n");
    status = BC250_WDDM_CALL(&ws->host, DestroyAllocation2, &destroy);
    if (status == STATUS_DEVICE_REMOVED) {
@@ -959,14 +916,18 @@ radv_wddm2_bo_create(struct radeon_winsys *_ws, uint64_t size, unsigned alignmen
    }
    radv_wddm2_deferred_drain(ws);
    VkResult result = radv_wddm2_bo_create_once(_ws, size, alignment, initial_domain, flags, priority, address, out_bo);
+   /* R7: the sweep runs after a failed allocation and after a failed VA reservation alike. Both report
+    * VK_ERROR_OUT_OF_DEVICE_MEMORY here (radv_wddm2_allocation_error, radv_wddm2_virtual_bo_create), and
+    * what the held BOs keep is address space, which a reservation needs as much as an allocation does. */
    if (result != VK_ERROR_OUT_OF_DEVICE_MEMORY || !p_atomic_read(&ws->deferred.count))
       return result;
-   /* Held BOs keep memory and VA a destroy has already given back to the application: before the
-    * allocation fails, CPU-wait for the oldest held BO, release what retired and try again, until it
-    * succeeds or nothing held is released any more. */
+   /* A held BO keeps a range a destroy has already given back to the application: before the create
+    * fails, CPU-wait for the oldest held range, release what is proved and try again, until it succeeds
+    * or nothing held is released any more. A released allocation is another matter: DestroyAllocation2
+    * only asked the OS to destroy it, so this never assumes that memory is back (R7). */
    simple_mtx_lock(&ws->deferred.lock);
    const uint32_t held = ws->deferred.count;
-   const uint64_t held_bytes = ws->deferred.bytes;
+   const uint64_t held_va = ws->deferred.held_va_bytes;
    simple_mtx_unlock(&ws->deferred.lock);
    uint64_t waits = 0, waited = 0;
    while (result == VK_ERROR_OUT_OF_DEVICE_MEMORY) {
@@ -980,12 +941,13 @@ radv_wddm2_bo_create(struct radeon_winsys *_ws, uint64_t size, unsigned alignmen
    }
    simple_mtx_lock(&ws->deferred.lock);
    ws->deferred.retries++;
+   ws->deferred.sweeps++;
    ws->deferred.oom_waits += waits;
-   radv_wddm2_deferred_line("a %" PRIu64 "-byte allocation failed with %u BOs (%" PRIu64 " MiB) held; %" PRIu64
-                            " CPU waits for the oldest held BO, %" PRIu64 " ms; %u still held (%" PRIu64
-                            " MiB); the retry %s",
-                            size, held, held_bytes >> 20, waits, waited / 1000000u, ws->deferred.count,
-                            ws->deferred.bytes >> 20, result == VK_SUCCESS ? "succeeded" : "failed too");
+   radv_wddm2_deferred_line("a %" PRIu64 "-byte create failed with %u BOs holding %" PRIu64 " KiB of ranges; %" PRIu64
+                            " CPU waits for the oldest, %" PRIu64 " ms; %u still held (%" PRIu64
+                            " KiB); the retry %s",
+                            size, held, held_va >> 10, waits, waited / 1000000u, ws->deferred.count,
+                            ws->deferred.held_va_bytes >> 10, result == VK_SUCCESS ? "succeeded" : "failed too");
    simple_mtx_unlock(&ws->deferred.lock);
    return result;
 }
@@ -1363,8 +1325,70 @@ radv_wddm2_bo_keep_locked(struct radv_wddm2_winsys *ws, struct radv_wddm2_bo *bo
    simple_mtx_unlock(&ws->deferred.lock);
 }
 
-/* Unlock, evict, free the VA and destroy the allocation, now. The unlock comes first: a BO the host keeps
- * locked is kept whole (radv_wddm2_bo_keep_locked), not half released. */
+/* R7: an allocation the host or the OS refused to destroy. It is still the ICD's, with its handle, its
+ * byte charge and its residency, and the drain points and teardown retry it. The list costs no
+ * allocation: the BO's own pool_link carries it, as the BD-045 locked list does. The struct is not in
+ * the pool, so nothing reuses it meanwhile. */
+static void
+radv_wddm2_bo_keep_refused(struct radv_wddm2_winsys *ws, struct radv_wddm2_bo *bo)
+{
+   simple_mtx_lock(&ws->deferred.lock);
+   /* The first kept allocation starts the interval: the call that just failed was its first try. */
+   if (!ws->deferred.refused_count)
+      ws->deferred.refused_next_ns = os_time_get_nano() + ws->deferred.locked_interval_ns;
+   list_addtail(&bo->pool_link, &ws->deferred.refused);
+   ws->deferred.refused_bytes += bo->base.size;
+   ws->deferred.refused_total++;
+   p_atomic_inc(&ws->deferred.refused_count);
+   radv_wddm2_deferred_line("DestroyAllocation2 refused a %" PRIu64 "-byte allocation: it stays with the ICD, "
+                            "%u kept (%" PRIu64 " MiB), retried at the drain points (%" PRIu64 " refusals so far)",
+                            bo->base.size, ws->deferred.refused_count, ws->deferred.refused_bytes >> 20,
+                            ws->deferred.refused_total);
+   simple_mtx_unlock(&ws->deferred.lock);
+}
+
+/* R2 (BD-201, DESIGN.md 6.1): the BO owns a GPU virtual address range of its own, which only this driver
+ * can free, so its release needs proof that the work naming it has retired.
+ *
+ * A virtual BO's range comes from ReserveGpuVirtualAddress (radv_wddm2_reserve_va_range, and the high PRT
+ * view in radv_wddm2_init_sparse_alias): no allocation holds it, so nothing else will ever free it. A
+ * REPLAYABLE BO's range is API-allocated, but capture/replay promises the application the same address
+ * again: the range has to be gone when the destroy returns, not whenever VidMm gets to the deferred
+ * allocation destroy, so this driver frees it explicitly and must prove it is idle first.
+ *
+ * A virtual BO's bindings are made with UpdateGpuVirtualAddress MAP_PROTECT, and no allocation destroy
+ * unmaps them: Vulkan requires the application to unbind the memory before it frees the sparse resource,
+ * so by the time this runs the range carries nothing of the application's. The range itself is still
+ * ours, and that is what needs the proof.
+ *
+ * Every other BO is R1: the range is freed with the allocation by the OS, which defers both. */
+static inline bool
+radv_wddm2_bo_owns_va(const struct radv_wddm2_bo *bo)
+{
+   return bo->base.is_virtual || (bo->flags & RADEON_FLAG_REPLAYABLE);
+}
+
+/* R1 (BD-201, DESIGN.md 6.1): release one BO, now. The unlock comes first, because a BO the host keeps
+ * locked is kept whole (radv_wddm2_bo_keep_locked) and not half released. Then the ranges that are this
+ * driver's alone (radv_wddm2_bo_owns_va), and then DestroyAllocation2 with flags 0.
+ *
+ * What is not here any more, and why. There is no Evict: with AssumeNotInUse clear VidMm "assume[s] that
+ * commands queued prior to the destruction request may attempt to access the allocation being destroyed
+ * and defers the destruction operation until the queued commands finish"
+ * (ref\ddi-display\d3dukmdt.md:3398-3402, d3dumddi.md:3328), so the residency reference goes with the
+ * allocation, while an Evict of an allocation that queued work still reads is the BD-201 breach itself
+ * (d3dkmthk.md:12514). There is no FreeGpuVirtualAddress of an ordinary BO's address either: that range
+ * is allocated by the API and "is freed when the allocation (the GPU VA is mapped to) is destroyed"
+ * (d3dkmthk.md:13810), so VidMm frees it with the deferred destruction, whereas freeing it here would
+ * let the next allocation take the address at once (d3dkmthk.md:12632), under the running work.
+ *
+ * The contract covers the commands already queued to the OS, and no further (C1). That is what
+ * ORDER-PROOF.md establishes for every internal BO class of this line: the queue submits inline, under
+ * vk_queue::lock, before vkQueueSubmit returns (VK_QUEUE_SUBMIT_MODE_IMMEDIATE, no submit thread), so no
+ * submission naming the BO can still be waiting in a software queue when the destroy reaches the OS.
+ *
+ * The proof for the ranges this function does free belongs to the caller: radv_wddm2_bo_destroy either
+ * has it at the destroy or defers the BO until it does (R2). An ordinary BO needs no proof at all. */
 static void
 radv_wddm2_bo_destroy_now(struct radv_wddm2_winsys *ws, struct radv_wddm2_bo *bo)
 {
@@ -1380,41 +1404,32 @@ radv_wddm2_bo_destroy_now(struct radv_wddm2_winsys *ws, struct radv_wddm2_bo *bo
       bo->map = NULL;
    }
 
-   if (all_resident && !bo->base.is_virtual && !bo->borrowed) {
-      D3DKMT_EVICT evict = {
-         .hDevice = ws->device_h,
-         .NumAllocations = 1,
-         .AllocationList = &bo->base.handle,
-         .Flags.EvictOnlyIfNecessary = false,
-      };
-      status = BC250_WDDM_CALL(&ws->host, Evict, &evict);
-      if (!NT_SUCCESS(status)) {
-         amdgpu_wddm_log("*****  Evict failed\n");
-         return;
-      }
-   }
-
    if (bo->borrowed) {
       radv_wddm2_bo_account(ws, bo, false);
       radv_wddm2_bo_struct_free(ws, bo);
       return;
    }
-   if (bo->sparse_high_va) {
-      const D3DKMT_FREEGPUVIRTUALADDRESS high = {
+
+   if (radv_wddm2_bo_owns_va(bo) && !bo->va_gone) {
+      if (bo->sparse_high_va) {
+         const D3DKMT_FREEGPUVIRTUALADDRESS high = {
+            .hAdapter = ws->adapter_h,
+            .BaseAddress = bo->sparse_high_va,
+            .Size = align64(bo->base.size, 65536),
+         };
+         status = BC250_WDDM_CALL(&ws->host, FreeGpuVirtualAddress, &high);
+      }
+      const D3DKMT_FREEGPUVIRTUALADDRESS unmap = {
          .hAdapter = ws->adapter_h,
-         .BaseAddress = bo->sparse_high_va,
-         .Size = align64(bo->base.size, 65536),
+         .BaseAddress = bo->reserved_va ? bo->reserved_va : bo->base.va,
+         .Size = bo->reserved_size ? bo->reserved_size : bo->base.size,
       };
-      status = BC250_WDDM_CALL(&ws->host, FreeGpuVirtualAddress, &high);
+      status = BC250_WDDM_CALL(&ws->host, FreeGpuVirtualAddress, &unmap);
+      bo->va_gone = true;
    }
-   const D3DKMT_FREEGPUVIRTUALADDRESS unmap = {
-      .hAdapter = ws->adapter_h,
-      .BaseAddress = bo->reserved_va ? bo->reserved_va : bo->base.va,
-      .Size = bo->reserved_size ? bo->reserved_size : bo->base.size,
-   };
-   status = BC250_WDDM_CALL(&ws->host, FreeGpuVirtualAddress, &unmap);
 
    if (!bo->base.is_virtual) {
+      /* Flags stay 0: AssumeNotInUse clear is what makes the destruction a deferred one. */
       const D3DKMT_DESTROYALLOCATION2 destroy = {
          .hDevice = ws->device_h,
          .hResource = bo->resource_handle,
@@ -1422,10 +1437,14 @@ radv_wddm2_bo_destroy_now(struct radv_wddm2_winsys *ws, struct radv_wddm2_bo *bo
          .AllocationCount = bo->resource_handle ? 0 : 1,
       };
       status = BC250_WDDM_CALL(&ws->host, DestroyAllocation2, &destroy);
-      if (NT_SUCCESS(status))
+      if (NT_SUCCESS(status)) {
          radv_wddm2_bo_account(ws, bo, false);
-      else
-         amdgpu_wddm_log("radv: DestroyAllocation2 failed; retaining allocation byte charge\n");
+      } else {
+         /* R7: the allocation is still this driver's. It keeps its byte charge and goes on the kept
+          * list, which the drain points and teardown retry; it is never written down as released. */
+         radv_wddm2_bo_keep_refused(ws, bo);
+         return;
+      }
 
       if (ws->debug_all_bos)
          radv_winsys_bo_list_del(&ws->global_bo_list, &bo->base);
@@ -1433,30 +1452,37 @@ radv_wddm2_bo_destroy_now(struct radv_wddm2_winsys *ws, struct radv_wddm2_bo *bo
          radv_winsys_log_bo(&ws->bo_log, &bo->base, true);
    }
 
-   //radv_wddm2_bo_va_free(ws, bo->flags, bo->base.va, bo->base.size);
-
    radv_wddm2_bo_struct_free(ws, bo);
 }
 
-/* Deferred destruction (amdgpu-wddm). The amdgpu kernel keeps a freed BO, its pages and its VA mapping
- * until the fences of the work that used it signal, so a Vulkan-level free of memory still in use is
- * harmless on Linux. radv_wddm2_bo_destroy_now evicts, frees the VA and destroys the allocation at once,
- * and the OS may hand either to the next allocation while the GPU still uses them. Resident BOs are in
- * no command stream's buffer list, so the work that uses a BO is unknown: a destroyed BO instead waits
- * for the progress value published on every queue at its destroy, which covers all work in flight then.
- * The check reads the fences' CPU values, with no kernel call, at every submission, BO creation and BO
- * destruction, and at a queue's idle point. A held BO stays in the winsys's byte accounting (the memory
- * budget) until its release. Over a cap of held bytes (BC250_DEFERRED_CAP_MB, 512 by default, 0 for
- * none), and when an allocation fails for want of device memory, the CPU waits for the oldest held BO's
- * work (WaitForSynchronizationObjectFromCpu) and releases what retired. Teardown waits for all of it.
- * Borrowed BOs are the host's, which retires them itself. BC250_DEFERRED_DESTROY=0 turns this off.
+/* Deferred destruction (amdgpu-wddm), R v2 (BD-201, DESIGN.md 6).
  *
- * The hold needs one allocation, of the entry that records the waits, and the destroy path may not
- * depend on it (BD-201): the answer to "no host memory" cannot be an eviction and a VA free under
- * running work. A destroy that gets no entry while a queue has unretired published work therefore
- * waits for those values itself, with no allocation and with no lock held over the wait
- * (radv_wddm2_destroy_no_entry), and a BO whose wait does not finish is kept whole until every queue
- * retires what it published (radv_wddm2_bo_keep_starved, checked at the drain points and at teardown).
+ * The amdgpu kernel keeps a freed BO, its pages and its VA mapping until the fences of the work that
+ * used it signal, so a Vulkan-level free of memory still in use is harmless on Linux. WDDM gives the
+ * same guarantee for an allocation, through the OS: DestroyAllocation2 with flags 0 defers the
+ * destruction until the commands queued before the request finish, and the API-allocated VA range goes
+ * with the allocation (d3dukmdt.md:3398-3402, d3dkmthk.md:13810). So an ordinary BO is released at its
+ * destroy, with no record, no wait and no allocation of ours (R1, radv_wddm2_bo_destroy_now).
+ *
+ * What the OS does not cover is a range this driver owns by itself: a virtual BO's reservations, and a
+ * REPLAYABLE BO's address, which has to be free when the destroy returns (radv_wddm2_bo_owns_va). Such
+ * a BO is held here (R2) until the progress values captured at its destroy are reached, which covers
+ * every submission in flight then; the values are compared against the queues' fence pages with no
+ * kernel call, at every submission, BO creation and BO destruction, and at a queue's idle point. An
+ * allocation that fails for want of memory or of address space sweeps and CPU-waits for the oldest held
+ * range before it gives up. Borrowed BOs are the host's, which retires them itself.
+ * BC250_DEFERRED_DESTROY=0 turns the hold off; an ordinary BO's release does not depend on it.
+ *
+ * Nothing is ever released without proof (owner criterion 2): a failed wait, a timeout, a missing
+ * tracker and teardown are not proof, and the only answer to a missing proof is to keep the range or, at
+ * teardown, to leak it and count it (R5). Every allocation the ICD still holds has an owner and a
+ * counter: the BD-045 Unlock2 refusal (locked_*) and a refused DestroyAllocation2 (refused_*), both
+ * retried at the drain points. A cap on held bytes never forces a release; it only reports (R7).
+ *
+ * The hold needs one allocation, of the entry that records the captured values, and the destroy path may
+ * not depend on it (BD-201): the answer to "no host memory" cannot be a VA free under running work. An
+ * ordinary BO needs no entry at all, so the question only arises for an R2 BO, and the answer there is
+ * to give its range up unfreed and count it (leaked_ranges), never to free it.
  *
  * The witness, which needs no fault: every submission stamps the BOs it names with its queue and the
  * progress value it signals (radv_wddm2_cs.c), and a destroy whose stamp has not retired counts as
@@ -1749,6 +1775,19 @@ radv_wddm2_held_bytes(const struct radv_wddm2_bo *bo)
    return bo->base.is_virtual ? 0 : bo->base.size;
 }
 
+/* R7/G4: the address space this BO still owns, the only thing an R2 hold keeps from the OS. Zero for an
+ * ordinary BO, whose range the OS frees with the allocation, and zero once the range is gone. */
+static uint64_t
+radv_wddm2_va_bytes(const struct radv_wddm2_bo *bo)
+{
+   if (!radv_wddm2_bo_owns_va(bo) || bo->va_gone)
+      return 0;
+   uint64_t bytes = bo->reserved_size ? bo->reserved_size : bo->base.size;
+   if (bo->sparse_high_va)
+      bytes += align64(bo->base.size, 65536);
+   return bytes;
+}
+
 static uint64_t
 radv_wddm2_ms(uint64_t ns)
 {
@@ -1789,6 +1828,35 @@ radv_wddm2_tracker_unref_locked(struct radv_wddm2_tracker *tracker)
    }
 }
 
+/* R4 (DESIGN.md 6.4): what counts as proof that the work up to value completed on this queue. Only the
+ * GPU-written value does. A tracker with no value page is not proof, and neither is UINT64_MAX in the
+ * page: that value is undocumented as a loss marker (native-gpu-fence-objects.md:46 is MonitoredValue,
+ * another field), so a read of it proves nothing in either direction. retired_done is set only where
+ * every published value was proved before the page went (a retired detach, the reap), and that proof
+ * carries all the values an entry can name, because an entry never names a value above the one
+ * published at its destroy. A failed wait, a timeout, a missing tracker and teardown are never proof. */
+static bool
+radv_wddm2_tracker_retired_locked(const struct radv_wddm2_tracker *tracker, uint64_t value)
+{
+   if (tracker->retired_done)
+      return true;
+   if (!tracker->value_map)
+      return false;
+   const uint64_t seen = p_atomic_read(tracker->value_map);
+   if (seen == UINT64_MAX)
+      return false;
+   return seen >= value;
+}
+
+/* The value page goes only where every published value is proved: the tracker then answers every
+ * later question without the page. */
+static void
+radv_wddm2_tracker_page_done_locked(struct radv_wddm2_tracker *tracker)
+{
+   tracker->retired_done = true;
+   tracker->value_map = NULL;
+}
+
 void
 radv_wddm2_tracker_detach(struct radv_wddm2_winsys *ws, struct radv_wddm2_tracker *tracker, bool retired)
 {
@@ -1796,62 +1864,112 @@ radv_wddm2_tracker_detach(struct radv_wddm2_winsys *ws, struct radv_wddm2_tracke
       return;
    simple_mtx_lock(&ws->deferred.lock);
    assert(tracker->attached);
-   /* A CPU wait of the cap, of an allocation or of teardown may be using the fence: the fence goes only
-    * after that wait. Every value the queue signalled retired, so that wait returns at once. */
+   /* A CPU wait of an allocation or of teardown may be using the fence: the fence goes only after that
+    * wait. Every value the queue signalled retired, so that wait returns at once. */
    while (retired && tracker->waiters) {
       simple_mtx_unlock(&ws->deferred.lock);
       os_time_sleep(100);
       simple_mtx_lock(&ws->deferred.lock);
    }
-   /* Retired: the fence may go right after this; nothing reads it again. Otherwise it stays with the
-    * device, and held BOs keep polling it. */
-   if (retired)
-      tracker->value_map = NULL;
+   /* BD-212: whether the published work really retired decides this, not the caller's word. A value
+    * still unretired keeps the tracker listed, with its fence and its value page, and keeps the
+    * queue's reference with it: the queue that could not retire keeps its fence too (it releases
+    * nothing until its work retired), so the page stays mapped and later destroys still record a wait
+    * for that value. radv_wddm2_tracker_reap_locked drops the reference once the value retires.
+    * Dropping the tracker here is the BD-212 breach: every later destroy would record no wait for a
+    * queue whose work is still running. */
+   const uint64_t value = p_atomic_read(&tracker->published);
+   const bool unretired = value && !radv_wddm2_tracker_retired_locked(tracker, value);
    tracker->attached = false;
-   radv_wddm2_tracker_unref_locked(tracker);
+   if (unretired) {
+      tracker->abandoned = true;
+      p_atomic_inc(&ws->deferred.abandoned);
+      radv_wddm2_deferred_line("the queue of context 0x%x went with %" PRIu64
+                               " published and %" PRIu64 " retired: its tracker stays until it retires",
+                               tracker->context, value, tracker->value_map ? p_atomic_read(tracker->value_map) : 0);
+   } else {
+      /* Retired, or it never published: the fence may go right after this call and nothing reads the
+       * page again. */
+      radv_wddm2_tracker_page_done_locked(tracker);
+      radv_wddm2_tracker_unref_locked(tracker);
+   }
    simple_mtx_unlock(&ws->deferred.lock);
 }
 
-/* A lost device reads UINT64_MAX, above every value: the GPU runs nothing any more. */
-static bool
-radv_wddm2_tracker_retired_locked(const struct radv_wddm2_tracker *tracker, uint64_t value)
+/* BD-212: drops the reference an abandoned tracker kept, once its published work retired. Only the
+ * reference goes: an entry that still names the tracker holds its own. */
+static void
+radv_wddm2_tracker_reap_locked(struct radv_wddm2_winsys *ws)
 {
-   return !tracker->value_map || p_atomic_read(tracker->value_map) >= value;
+   list_for_each_entry_safe (struct radv_wddm2_tracker, tracker, &ws->deferred.trackers, link) {
+      if (!tracker->abandoned)
+         continue;
+      const uint64_t value = p_atomic_read(&tracker->published);
+      if (value && !radv_wddm2_tracker_retired_locked(tracker, value))
+         continue;
+      tracker->abandoned = false;
+      p_atomic_dec(&ws->deferred.abandoned);
+      radv_wddm2_tracker_page_done_locked(tracker);
+      ws->deferred.reaped++;
+      radv_wddm2_tracker_unref_locked(tracker);
+   }
 }
 
-/* Moves the held BOs whose waits all retired (all: every held BO) to ready. The entries are in destroy
- * order and a queue's published value only grows: a later entry waits on the queue that holds an
- * earlier one, for a value at least as large, so the first entry still held ends the scan. */
+/* Takes one entry off the held list: the tracker references go, the counters drop and the entry moves to
+ * ready, whose BOs the caller destroys with no lock held. leak: no proof ever arrived, so the range is
+ * given up unfreed and counted (R2/R5); the BO is not counted as released. */
 static void
-radv_wddm2_deferred_take_locked(struct radv_wddm2_winsys *ws, struct list_head *ready, bool all)
+radv_wddm2_deferred_unhold_locked(struct radv_wddm2_winsys *ws, struct radv_wddm2_deferred_bo *e, uint64_t now,
+                                  struct list_head *ready, bool leak)
+{
+   const uint64_t va = radv_wddm2_va_bytes(e->bo);
+   for (unsigned i = 0; i < e->wait_count; i++)
+      radv_wddm2_tracker_unref_locked(e->waits[i].tracker);
+   e->wait_count = 0;
+   const uint64_t held = now - e->since_ns;
+   ws->deferred.max_hold_ns = MAX2(ws->deferred.max_hold_ns, held);
+   p_atomic_set(&ws->deferred.count, ws->deferred.count - 1);
+   ws->deferred.bytes -= radv_wddm2_held_bytes(e->bo);
+   ws->deferred.held_va_bytes -= va;
+   if (e->bo->flags & RADEON_FLAG_32BIT)
+      ws->deferred.held_va_32bit--;
+   if (leak) {
+      e->bo->va_leaked = true;
+      e->bo->va_gone = true;
+      ws->deferred.leaked_ranges++;
+      ws->deferred.leaked_va_bytes += va;
+   } else {
+      ws->deferred.released++;
+   }
+   list_del(&e->link);
+   list_addtail(&e->link, ready);
+   if (held >= ws->deferred.report_hold_ns) {
+      radv_wddm2_deferred_line("a %" PRIu64 "-byte BO held its %" PRIu64 "-KiB range %" PRIu64 " ms%s (%u BOs, %" PRIu64
+                               " MiB of ranges still held)",
+                               e->bo->base.size, va >> 10, radv_wddm2_ms(held), leak ? ", the range leaked" : "",
+                               ws->deferred.count, ws->deferred.held_va_bytes >> 20);
+      while (ws->deferred.report_hold_ns <= held)
+         ws->deferred.report_hold_ns *= 2;
+   }
+}
+
+/* Moves the held BOs whose waits all retired to ready. The entries are in destroy order and a queue's
+ * published value only grows: a later entry waits on the queue that holds an earlier one, for a value at
+ * least as large, so the first entry still held ends the scan.
+ *
+ * R2/R4: a captured value is reached or it is not, and nothing here releases anything else. There is no
+ * forced release and no release on a failed wait, a timeout or a missing tracker; an entry whose proof
+ * never arrives is leaked at teardown (radv_wddm2_deferred_finish), never released on a guess. */
+static void
+radv_wddm2_deferred_take_locked(struct radv_wddm2_winsys *ws, struct list_head *ready)
 {
    const uint64_t now = os_time_get_nano();
    list_for_each_entry_safe (struct radv_wddm2_deferred_bo, e, &ws->deferred.entries, link) {
-      bool retired = true;
-      for (unsigned i = 0; i < e->wait_count && retired; i++)
-         retired = radv_wddm2_tracker_retired_locked(e->waits[i].tracker, e->waits[i].value);
-      if (!retired && !all)
-         break;
-      if (!retired)
-         ws->deferred.forced++;
-      for (unsigned i = 0; i < e->wait_count; i++)
-         radv_wddm2_tracker_unref_locked(e->waits[i].tracker);
-      e->wait_count = 0;
-      const uint64_t held = now - e->since_ns;
-      ws->deferred.max_hold_ns = MAX2(ws->deferred.max_hold_ns, held);
-      p_atomic_set(&ws->deferred.count, ws->deferred.count - 1);
-      ws->deferred.bytes -= radv_wddm2_held_bytes(e->bo);
-      ws->deferred.released++;
-      list_del(&e->link);
-      list_addtail(&e->link, ready);
-      if (held >= ws->deferred.report_hold_ns) {
-         radv_wddm2_deferred_line("a %" PRIu64 "-byte BO was held %" PRIu64 " ms%s (%u BOs, %" PRIu64
-                                  " MiB still held)",
-                                  e->bo->base.size, radv_wddm2_ms(held), retired ? "" : ", destroyed unretired",
-                                  ws->deferred.count, ws->deferred.bytes >> 20);
-         while (ws->deferred.report_hold_ns <= held)
-            ws->deferred.report_hold_ns *= 2;
+      for (unsigned i = 0; i < e->wait_count; i++) {
+         if (!radv_wddm2_tracker_retired_locked(e->waits[i].tracker, e->waits[i].value))
+            return;
       }
+      radv_wddm2_deferred_unhold_locked(ws, e, now, ready, false);
    }
 }
 
@@ -1888,51 +2006,37 @@ radv_wddm2_locked_retry(struct radv_wddm2_winsys *ws, bool final)
    }
 }
 
-/* BD-201: a BO kept whole because the destroy path had no entry for it and could not wait for the
- * published values either. It keeps its allocation, its VA and its residency, and the list costs no
- * allocation: the BO's own pool_link carries it, as the BD-045 locked list does. */
+/* R7: destroys the allocations a DestroyAllocation2 refused, which retries the call; one that is refused
+ * again is kept again. At most once per locked_interval_ns, unless final (teardown). The retry needs no
+ * proof of anything: the first call already asked the OS to destroy the allocation when its queued work
+ * finishes, and so does this one. */
 static void
-radv_wddm2_bo_keep_starved(struct radv_wddm2_winsys *ws, struct radv_wddm2_bo *bo)
+radv_wddm2_refused_retry(struct radv_wddm2_winsys *ws, bool final)
 {
+   struct list_head kept;
+   list_inithead(&kept);
    simple_mtx_lock(&ws->deferred.lock);
-   list_addtail(&bo->pool_link, &ws->deferred.starved);
-   ws->deferred.starved_bytes += radv_wddm2_held_bytes(bo);
-   p_atomic_inc(&ws->deferred.starved_count);
-   radv_wddm2_deferred_line("a %" PRIu64 "-byte BO is kept whole: no entry held it and its wait did not finish; "
-                            "%u BOs (%" PRIu64 " MiB) kept, retried at the drain points",
-                            bo->base.size, ws->deferred.starved_count, ws->deferred.starved_bytes >> 20);
-   simple_mtx_unlock(&ws->deferred.lock);
-}
-
-/* The kept BOs go once every queue has retired what it published: no work of the destroy's time is left
- * anywhere then, since a published value only grows. final (teardown) releases them whatever the fences
- * say, as the forced release of held BOs does, and counts those as forced. */
-static void
-radv_wddm2_starved_retry(struct radv_wddm2_winsys *ws, bool final)
-{
-   struct list_head ready;
-   list_inithead(&ready);
-   simple_mtx_lock(&ws->deferred.lock);
-   bool idle = true;
-   list_for_each_entry (struct radv_wddm2_tracker, tracker, &ws->deferred.trackers, link) {
-      const uint64_t value = p_atomic_read(&tracker->published);
-      if (value && !radv_wddm2_tracker_retired_locked(tracker, value)) {
-         idle = false;
-         break;
-      }
-   }
-   if (idle || final) {
-      if (!idle)
-         ws->deferred.forced += ws->deferred.starved_count;
-      list_splicetail(&ws->deferred.starved, &ready);
-      list_inithead(&ws->deferred.starved);
-      ws->deferred.starved_bytes = 0;
-      p_atomic_set(&ws->deferred.starved_count, 0);
+   const uint64_t now = os_time_get_nano();
+   if (final || now >= ws->deferred.refused_next_ns) {
+      list_splicetail(&ws->deferred.refused, &kept);
+      list_inithead(&ws->deferred.refused);
+      ws->deferred.refused_bytes = 0;
+      p_atomic_set(&ws->deferred.refused_count, 0);
+      ws->deferred.refused_next_ns = now + ws->deferred.locked_interval_ns;
    }
    simple_mtx_unlock(&ws->deferred.lock);
-   list_for_each_entry_safe (struct radv_wddm2_bo, bo, &ready, pool_link) {
+   uint64_t tried = 0;
+   list_for_each_entry_safe (struct radv_wddm2_bo, bo, &kept, pool_link) {
       list_del(&bo->pool_link);
+      /* A refusal puts it straight back on the list (radv_wddm2_bo_keep_refused), which counts it; a
+       * success frees the struct, so nothing of bo may be read after this call. */
       radv_wddm2_bo_destroy_now(ws, bo);
+      tried++;
+   }
+   if (tried) {
+      simple_mtx_lock(&ws->deferred.lock);
+      ws->deferred.refused_retries += tried;
+      simple_mtx_unlock(&ws->deferred.lock);
    }
 }
 
@@ -1941,14 +2045,19 @@ radv_wddm2_deferred_drain(struct radv_wddm2_winsys *ws)
 {
    if (p_atomic_read(&ws->deferred.locked_count))
       radv_wddm2_locked_retry(ws, false);
-   if (p_atomic_read(&ws->deferred.starved_count))
-      radv_wddm2_starved_retry(ws, false);
-   if (!p_atomic_read(&ws->deferred.count))
+   if (p_atomic_read(&ws->deferred.refused_count))
+      radv_wddm2_refused_retry(ws, false);
+   const bool reap = p_atomic_read(&ws->deferred.abandoned) != 0;
+   if (!reap && !p_atomic_read(&ws->deferred.count))
       return;
    struct list_head ready;
    list_inithead(&ready);
    simple_mtx_lock(&ws->deferred.lock);
-   radv_wddm2_deferred_take_locked(ws, &ready, false);
+   /* BD-212: an abandoned tracker's reference goes here, once its work retired. */
+   if (reap)
+      radv_wddm2_tracker_reap_locked(ws);
+   if (ws->deferred.count)
+      radv_wddm2_deferred_take_locked(ws, &ready);
    simple_mtx_unlock(&ws->deferred.lock);
    radv_wddm2_deferred_destroy_list(ws, &ready);
 }
@@ -2020,113 +2129,6 @@ radv_wddm2_deferred_wait_oldest(struct radv_wddm2_winsys *ws, uint64_t *waited_n
    const bool progress = ws->deferred.released != released;
    simple_mtx_unlock(&ws->deferred.lock);
    return ok && progress;
-}
-
-/* Over the cap: CPU-wait for the oldest held BO and release what retired, until the held bytes fit. */
-static void
-radv_wddm2_deferred_bound(struct radv_wddm2_winsys *ws)
-{
-   for (;;) {
-      simple_mtx_lock(&ws->deferred.lock);
-      const uint64_t bytes = ws->deferred.bytes;
-      simple_mtx_unlock(&ws->deferred.lock);
-      if (!ws->deferred.cap_bytes || bytes <= ws->deferred.cap_bytes)
-         return;
-      uint64_t waited;
-      const bool progress = radv_wddm2_deferred_wait_oldest(ws, &waited);
-      simple_mtx_lock(&ws->deferred.lock);
-      ws->deferred.cap_waits++;
-      ws->deferred.cap_wait_ns += waited;
-      ws->deferred.cap_wait_max_ns = MAX2(ws->deferred.cap_wait_max_ns, waited);
-      if (!progress)
-         ws->deferred.cap_failed++;
-      if (!progress || ws->deferred.cap_waits >= ws->deferred.report_cap_waits) {
-         radv_wddm2_deferred_line("cap: %" PRIu64 " MiB held over the %" PRIu64 " MiB cap; a CPU wait of %" PRIu64
-                                  " us for the oldest held BO %s (%" PRIu64 " MiB now; %" PRIu64
-                                  " cap waits, %" PRIu64 " ms in all, longest %" PRIu64 " ms, %" PRIu64 " failed)",
-                                  bytes >> 20, ws->deferred.cap_bytes >> 20, waited / 1000u,
-                                  progress ? "released it" : "failed or released nothing", ws->deferred.bytes >> 20,
-                                  ws->deferred.cap_waits, radv_wddm2_ms(ws->deferred.cap_wait_ns),
-                                  radv_wddm2_ms(ws->deferred.cap_wait_max_ns), ws->deferred.cap_failed);
-         while (ws->deferred.report_cap_waits <= ws->deferred.cap_waits)
-            ws->deferred.report_cap_waits *= 2;
-      }
-      simple_mtx_unlock(&ws->deferred.lock);
-      if (!progress)
-         return;
-   }
-}
-
-/* A queue list longer than RADV_WDDM2_CPU_WAITS takes one round per RADV_WDDM2_CPU_WAITS queues. A
- * round waits for the values published when it starts, which are at least those of the destroy, so the
- * rounds end: this is a bound against a pathological queue count, not a timeout. */
-#define RADV_WDDM2_STARVED_ROUNDS 16u
-
-/* BD-201: the destroy of a BO whose entry could not be allocated. It allocates nothing: the unretired
- * published values are gathered into a stack array, waited for with the lock dropped, and only then is
- * the BO evicted and its VA freed. While one value is not reached, D3DKMTEvict would make an allocation
- * the GPU still reads illegal to access, and FreeGpuVirtualAddress would let the next allocation take
- * the VA under the running work; the later DestroyAllocation2 protects neither. A wait that fails or
- * times out therefore keeps the BO whole (radv_wddm2_bo_keep_starved) instead of freeing anything. */
-static void
-radv_wddm2_destroy_no_entry(struct radv_wddm2_winsys *ws, struct radv_wddm2_bo *bo)
-{
-   const uint64_t start = os_time_get_nano();
-   uint64_t made = 0;
-   bool clear = false; /* proven: no queue has unretired published work */
-
-   for (unsigned round = 0; round < RADV_WDDM2_STARVED_ROUNDS; round++) {
-      struct radv_wddm2_cpu_wait waits[RADV_WDDM2_CPU_WAITS];
-      unsigned n = 0;
-      bool waitable = true;
-      simple_mtx_lock(&ws->deferred.lock);
-      list_for_each_entry (struct radv_wddm2_tracker, tracker, &ws->deferred.trackers, link) {
-         const uint64_t value = p_atomic_read(&tracker->published);
-         if (!value || radv_wddm2_tracker_retired_locked(tracker, value))
-            continue;
-         if (!tracker->fence) {
-            /* Unretired work on a queue with no fence to wait on: only a hold can cover it. */
-            waitable = false;
-            continue;
-         }
-         if (n == RADV_WDDM2_CPU_WAITS)
-            break;
-         tracker->refs++;
-         tracker->waiters++;
-         waits[n] = (struct radv_wddm2_cpu_wait){tracker, tracker->fence, tracker->value_map, value};
-         n++;
-      }
-      simple_mtx_unlock(&ws->deferred.lock);
-
-      if (!n && waitable) {
-         clear = true;
-         break;
-      }
-      /* The waits taken are made even when another queue cannot be waited for: the references must go
-       * back, and the work waited for is work the hold would have covered. */
-      const bool ok = n ? radv_wddm2_cpu_waits(ws, waits, n) : true;
-      made += n;
-      if (!ok || !waitable)
-         break;
-   }
-
-   const uint64_t ns = os_time_get_nano() - start;
-   simple_mtx_lock(&ws->deferred.lock);
-   ws->deferred.starved_total++;
-   ws->deferred.starved_waits += made;
-   ws->deferred.starved_wait_ns += ns;
-   if (!clear)
-      ws->deferred.starved_failed++;
-   radv_wddm2_deferred_line("no memory to hold a %" PRIu64 "-byte BO: %" PRIu64 " CPU wait%s of %" PRIu64
-                            " us for the values published at its destroy, %s",
-                            bo->base.size, made, made == 1 ? "" : "s", ns / 1000u,
-                            clear ? "destroyed after it" : "its wait did not finish");
-   simple_mtx_unlock(&ws->deferred.lock);
-
-   if (clear)
-      radv_wddm2_bo_destroy_now(ws, bo);
-   else
-      radv_wddm2_bo_keep_starved(ws, bo);
 }
 
 /* The witness's counters, copied under the lock for a line written after it. */
@@ -2279,23 +2281,26 @@ radv_wddm2_witness_stale(struct radv_wddm2_winsys *ws, struct radv_wddm2_bo *fir
  * teardown; a session that crosses none and is killed at its end writes the first held BO only
  * (session 219: the game device's header, then one line in its five minutes). So every
  * BC250_DEFERRED_SUMMARY_S seconds (30 by default, 0 off) a submission writes two lines, each only
- * when its counters changed since its last one, both again at teardown: the deferred-destroy counters (held now and at the peak, held and released since
- * creation, destroys, host imports, the witness's in-flight destroys by class, stale names, cap waits,
- * allocation retries) and the submit path's (submissions, progress signals in their own call or
+ * when its counters changed since its last one, both again at teardown: the deferred-destroy counters
+ * (held now and at the peak, the address space held and leaked, the allocations kept by an Unlock2 or a
+ * DestroyAllocation2 refusal, held and released since creation, destroys, host imports, the witness's
+ * in-flight destroys by class, stale names, cap reports,
+ * allocation retries and sweeps) and the submit path's (submissions, progress signals in their own call or
  * merged or written by the GPU, application signals, waits queued and left out, gather-slot waits, queues
  * that fell back to the kernel signal). Every count is since the
  * winsys was created; t= is the time since then. */
 struct radv_wddm2_summary_deferred {
-   uint64_t held, held_bytes, peak, peak_bytes, total, total_bytes, released, immediate, max_hold_ns, forced;
-   uint64_t borrowed, cap_waits, cap_failed, cap_wait_ns, retries, oom_waits;
-   uint64_t starved_total, starved_waits, starved_failed;
+   uint64_t held, held_bytes, peak, peak_bytes, total, total_bytes, released, immediate, max_hold_ns;
+   uint64_t held_va_bytes, held_va_32bit, leaked_ranges, leaked_va_bytes;
+   uint64_t borrowed, cap_reports, retries, oom_waits, sweeps;
+   uint64_t locked, locked_bytes, refused, refused_bytes, refused_total, refused_retries;
    struct radv_wddm2_witness_totals witness;
 };
 
 struct radv_wddm2_summary_submit {
    uint64_t submits, progress_separate, progress_merged, signal_calls, signal_objects;
    uint64_t wait_objects, wait_dropped, wait_calls, wait_skipped, gather_waits, gather_wait_ns, gather_wait_max_ns;
-   uint64_t progress_gpu, kernel_queues;
+   uint64_t progress_gpu, kernel_queues, progress_repairs, progress_repairs_failed;
 };
 
 _Static_assert(sizeof(struct radv_wddm2_summary_deferred) <= sizeof(((struct radv_wddm2_winsys *)0)->summary.deferred_snapshot),
@@ -2353,16 +2358,23 @@ radv_wddm2_summary_write(struct radv_wddm2_winsys *ws, uint64_t now, uint64_t du
    d.released = ws->deferred.released;
    d.immediate = ws->deferred.immediate;
    d.max_hold_ns = ws->deferred.max_hold_ns;
-   d.forced = ws->deferred.forced;
+   d.held_va_bytes = ws->deferred.held_va_bytes;
+   d.held_va_32bit = ws->deferred.held_va_32bit;
+   d.leaked_ranges = ws->deferred.leaked_ranges;
+   d.leaked_va_bytes = ws->deferred.leaked_va_bytes;
    d.borrowed = p_atomic_read(&ws->deferred.borrowed);
-   d.cap_waits = ws->deferred.cap_waits;
-   d.cap_failed = ws->deferred.cap_failed;
-   d.cap_wait_ns = ws->deferred.cap_wait_ns;
+   d.cap_reports = ws->deferred.cap_reports;
    d.retries = ws->deferred.retries;
    d.oom_waits = ws->deferred.oom_waits;
-   d.starved_total = ws->deferred.starved_total;
-   d.starved_waits = ws->deferred.starved_waits;
-   d.starved_failed = ws->deferred.starved_failed;
+   d.sweeps = ws->deferred.sweeps;
+   /* R7/G4: what the ICD still holds now, each with its owner, in every periodic line and not only at
+    * teardown. No figure here can read "nothing held" while one of these lists is not empty. */
+   d.locked = ws->deferred.locked_count;
+   d.locked_bytes = ws->deferred.locked_bytes;
+   d.refused = ws->deferred.refused_count;
+   d.refused_bytes = ws->deferred.refused_bytes;
+   d.refused_total = ws->deferred.refused_total;
+   d.refused_retries = ws->deferred.refused_retries;
    radv_wddm2_witness_totals_locked(ws, &d.witness);
    simple_mtx_unlock(&ws->deferred.lock);
 
@@ -2381,6 +2393,8 @@ radv_wddm2_summary_write(struct radv_wddm2_winsys *ws, uint64_t now, uint64_t du
       .gather_wait_max_ns = p_atomic_read(&ws->submit_stats.gather_wait_max_ns),
       .progress_gpu = p_atomic_read(&ws->submit_stats.progress_gpu),
       .kernel_queues = p_atomic_read(&ws->submit_stats.kernel_queues),
+      .progress_repairs = p_atomic_read(&ws->submit_stats.progress_repairs),
+      .progress_repairs_failed = p_atomic_read(&ws->submit_stats.progress_repairs_failed),
    };
 
 #if defined(AMDGPU_WDDM_LAB_FLAVOUR)
@@ -2414,20 +2428,23 @@ radv_wddm2_summary_write(struct radv_wddm2_winsys *ws, uint64_t now, uint64_t du
          char classes[1024];
          radv_wddm2_witness_classes(&d.witness, classes, sizeof(classes));
          radv_wddm2_deferred_line("periodic %s t=%" PRIu64 "s deferred: held=%" PRIu64 " held_kib=%" PRIu64
-                                  " peak=%" PRIu64 " peak_kib=%" PRIu64 " held_total=%" PRIu64
-                                  " held_total_mib=%" PRIu64 " released=%" PRIu64 " immediate=%" PRIu64
-                                  " longest_hold_ms=%" PRIu64 " forced=%" PRIu64 " destroys=%" PRIu64
+                                  " held_va_kib=%" PRIu64 " held_va_32bit=%" PRIu64 " peak=%" PRIu64
+                                  " peak_kib=%" PRIu64 " held_total=%" PRIu64 " held_total_mib=%" PRIu64
+                                  " released=%" PRIu64 " immediate=%" PRIu64 " longest_hold_ms=%" PRIu64
+                                  " leaked_ranges=%" PRIu64 " leaked_va_kib=%" PRIu64 " locked=%" PRIu64
+                                  " locked_kib=%" PRIu64 " refused=%" PRIu64 " refused_kib=%" PRIu64
+                                  " refusals=%" PRIu64 " refused_retries=%" PRIu64 " destroys=%" PRIu64
                                   " borrowed=%" PRIu64 " in_flight=%" PRIu64 " in_flight_32bit=%" PRIu64
-                                  " in_flight_kib=%" PRIu64 " stale_names=%" PRIu64 " cap_waits=%" PRIu64
-                                  " cap_failed=%" PRIu64 " cap_wait_ms=%" PRIu64 " retries=%" PRIu64
-                                  " oom_waits=%" PRIu64 " no_entry=%" PRIu64 " no_entry_waits=%" PRIu64
-                                  " no_entry_kept=%" PRIu64 " classes(destroyed/held/in_flight)=%s",
-                                  tag, t, d.held, d.held_bytes >> 10, d.peak, d.peak_bytes >> 10, d.total,
-                                  d.total_bytes >> 20, d.released, d.immediate, radv_wddm2_ms(d.max_hold_ns), d.forced,
-                                  d.witness.destroys_total, d.borrowed, d.witness.in_flight_total,
+                                  " in_flight_kib=%" PRIu64 " stale_names=%" PRIu64 " cap_reports=%" PRIu64
+                                  " retries=%" PRIu64 " oom_waits=%" PRIu64 " sweeps=%" PRIu64
+                                  " classes(destroyed/held/in_flight)=%s",
+                                  tag, t, d.held, d.held_bytes >> 10, d.held_va_bytes >> 10, d.held_va_32bit, d.peak,
+                                  d.peak_bytes >> 10, d.total, d.total_bytes >> 20, d.released, d.immediate,
+                                  radv_wddm2_ms(d.max_hold_ns), d.leaked_ranges, d.leaked_va_bytes >> 10, d.locked,
+                                  d.locked_bytes >> 10, d.refused, d.refused_bytes >> 10, d.refused_total,
+                                  d.refused_retries, d.witness.destroys_total, d.borrowed, d.witness.in_flight_total,
                                   d.witness.in_flight_32bit, d.witness.in_flight_bytes >> 10, d.witness.stale_names,
-                                  d.cap_waits, d.cap_failed, radv_wddm2_ms(d.cap_wait_ns), d.retries, d.oom_waits,
-                                  d.starved_total, d.starved_waits, d.starved_failed, classes);
+                                  d.cap_reports, d.retries, d.oom_waits, d.sweeps, classes);
          memcpy(ws->summary.deferred_snapshot, &d, sizeof(d));
       }
       if (write_s) {
@@ -2436,12 +2453,14 @@ radv_wddm2_summary_write(struct radv_wddm2_winsys *ws, uint64_t now, uint64_t du
                                   " wait_objects=%" PRIu64 " wait_dropped=%" PRIu64 " wait_calls=%" PRIu64
                                   " wait_skipped=%" PRIu64 " gather_slots=%u gather_waits=%" PRIu64
                                   " gather_wait_ms=%" PRIu64 " gather_wait_max_us=%" PRIu64 " coalesce=%s"
-                                  " progress_fence=%s progress_gpu=%" PRIu64 " kernel_queues=%" PRIu64,
+                                  " progress_fence=%s progress_gpu=%" PRIu64 " kernel_queues=%" PRIu64
+                                  " progress_repairs=%" PRIu64 " progress_repairs_failed=%" PRIu64,
                                   tag, t, s.submits, s.progress_separate, s.progress_merged, s.signal_calls,
                                   s.signal_objects, s.wait_objects, s.wait_dropped, s.wait_calls, s.wait_skipped,
                                   ws->bc250_gather_slots, s.gather_waits, radv_wddm2_ms(s.gather_wait_ns),
                                   s.gather_wait_max_ns / 1000u, radv_wddm2_coalesce_name(ws),
-                                  ws->bc250_progress_gpu ? "gpu" : "kernel", s.progress_gpu, s.kernel_queues);
+                                  ws->bc250_progress_gpu ? "gpu" : "kernel", s.progress_gpu, s.kernel_queues,
+                                  s.progress_repairs, s.progress_repairs_failed);
          memcpy(ws->summary.submit_snapshot, &s, sizeof(s));
       }
 #if defined(AMDGPU_WDDM_LAB_FLAVOUR)
@@ -2474,15 +2493,26 @@ radv_wddm2_summary_write(struct radv_wddm2_winsys *ws, uint64_t now, uint64_t du
    simple_mtx_unlock(&ws->summary.lock);
 }
 
+/* R5 (DESIGN.md 6.4): the whole teardown wait, not one bound per BO. The R1 path waits for nothing here:
+ * VidMm completes those deferred destroys for the device, which outlives this winsys on a hosted line.
+ * What is waited for is the proof the R2 ranges need, and when the budget is spent the ranges left are
+ * leaked and counted (leaked_ranges) instead of being freed without proof. 2 s is a process teardown
+ * budget, not a per-wait timeout: radv_wddm2_fence_wait_value has its own. */
+#define RADV_WDDM2_TEARDOWN_BUDGET_NS (2ull * 1000000000ull)
+
 void
 radv_wddm2_deferred_finish(struct radv_wddm2_winsys *ws)
 {
    const uint64_t start = os_time_get_nano();
    uint64_t waits = 0;
-   bool failed = false;
-   /* Oldest first: one CPU wait for each held BO still unretired, which releases it and everything
-    * older on the same queues. A failed wait ends the waiting. */
+   bool failed = false, spent = false;
+   /* Oldest first: one CPU wait for each held range still unproven, which releases it and everything
+    * older on the same queues. A failed wait or the spent budget ends the waiting. */
    while (p_atomic_read(&ws->deferred.count)) {
+      if (os_time_get_nano() - start >= RADV_WDDM2_TEARDOWN_BUDGET_NS) {
+         spent = failed = true;
+         break;
+      }
       uint64_t waited;
       if (!radv_wddm2_deferred_wait_oldest(ws, &waited)) {
          failed = p_atomic_read(&ws->deferred.count) != 0;
@@ -2497,44 +2527,56 @@ radv_wddm2_deferred_finish(struct radv_wddm2_winsys *ws)
    struct radv_wddm2_witness_totals totals;
    simple_mtx_lock(&ws->deferred.lock);
    const uint32_t left = ws->deferred.count;
-   const uint64_t left_bytes = ws->deferred.bytes;
-   radv_wddm2_deferred_take_locked(ws, &rest, true);
+   const uint64_t left_va = ws->deferred.held_va_bytes;
+   /* R5: every entry still held is given up with its range unfreed. Teardown is not proof, so the
+    * alternative would be a FreeGpuVirtualAddress under work that may still run. */
+   const uint64_t now = os_time_get_nano();
+   list_for_each_entry_safe (struct radv_wddm2_deferred_bo, e, &ws->deferred.entries, link)
+      radv_wddm2_deferred_unhold_locked(ws, e, now, &rest, true);
    if (left)
-      radv_wddm2_deferred_line("%u BOs (%" PRIu64 " MiB) still held after %" PRIu64 " CPU waits (%" PRIu64
-                               " ms) at teardown%s: destroyed anyway",
-                               left, left_bytes >> 20, waits, radv_wddm2_ms(waited), failed ? ", a wait failed" : "");
+      radv_wddm2_deferred_line("%u BOs still held after %" PRIu64 " CPU waits (%" PRIu64
+                               " ms) at teardown%s: their %" PRIu64 " KiB of ranges are leaked, not freed",
+                               left, waits, radv_wddm2_ms(waited),
+                               spent ? ", the budget spent" : (failed ? ", a wait failed" : ""), left_va >> 10);
    if (ws->deferred.enabled)
       radv_wddm2_deferred_line("summary: %" PRIu64 " BOs held (%" PRIu64 " MiB), %" PRIu64 " destroyed at once; "
                                "peak %u BOs, %" PRIu64 " MiB; longest hold %" PRIu64 " ms; %" PRIu64
-                               " destroyed unretired; %" PRIu64 " allocations retried after %" PRIu64
-                               " CPU waits; %" PRIu64 " cap waits (%" PRIu64 " ms in all, longest %" PRIu64
-                               " ms, %" PRIu64 " failed); teardown: %" PRIu64 " CPU waits, %" PRIu64 " ms; %" PRIu64
-                               " host imports destroyed, never held",
+                               " ranges leaked (%" PRIu64 " KiB); %" PRIu64 " allocations retried after %" PRIu64
+                               " CPU waits and %" PRIu64 " sweeps; %" PRIu64 " cap reports; teardown: %" PRIu64
+                               " CPU waits, %" PRIu64 " ms; %" PRIu64 " host imports destroyed, never held",
                                ws->deferred.total, ws->deferred.total_bytes >> 20, ws->deferred.immediate,
                                ws->deferred.peak_count, ws->deferred.peak_bytes >> 20,
-                               radv_wddm2_ms(ws->deferred.max_hold_ns), ws->deferred.forced, ws->deferred.retries,
-                               ws->deferred.oom_waits, ws->deferred.cap_waits, radv_wddm2_ms(ws->deferred.cap_wait_ns),
-                               radv_wddm2_ms(ws->deferred.cap_wait_max_ns), ws->deferred.cap_failed, waits,
-                               radv_wddm2_ms(waited), p_atomic_read(&ws->deferred.borrowed));
+                               radv_wddm2_ms(ws->deferred.max_hold_ns), ws->deferred.leaked_ranges,
+                               ws->deferred.leaked_va_bytes >> 10, ws->deferred.retries, ws->deferred.oom_waits,
+                               ws->deferred.sweeps, ws->deferred.cap_reports, waits, radv_wddm2_ms(waited),
+                               p_atomic_read(&ws->deferred.borrowed));
    if (ws->deferred.witness)
       radv_wddm2_witness_totals_locked(ws, &totals);
    simple_mtx_unlock(&ws->deferred.lock);
    radv_wddm2_deferred_destroy_list(ws, &rest);
 
-   /* BD-201: the BOs kept whole go with the device, whose contexts and queues this teardown releases:
-    * no work of theirs can start again. */
+   /* R7: one last DestroyAllocation2 for every allocation a refusal kept. What is refused again goes
+    * with the device, whose allocations the OS destroys with it; the ICD gives up only its structs, and
+    * the count below says how many. */
+   radv_wddm2_refused_retry(ws, true);
    simple_mtx_lock(&ws->deferred.lock);
-   const uint32_t starved = ws->deferred.starved_count;
-   const uint64_t starved_bytes = ws->deferred.starved_bytes;
+   const uint32_t refused = ws->deferred.refused_count;
+   if (refused)
+      radv_wddm2_deferred_line("%u allocations (%" PRIu64 " MiB) still refused at teardown, of %" PRIu64
+                               " refusals and %" PRIu64 " retries: left to the device's own teardown",
+                               refused, ws->deferred.refused_bytes >> 20, ws->deferred.refused_total,
+                               ws->deferred.refused_retries);
+   struct list_head unretired;
+   list_inithead(&unretired);
+   list_splicetail(&ws->deferred.refused, &unretired);
+   list_inithead(&ws->deferred.refused);
+   ws->deferred.refused_bytes = 0;
+   p_atomic_set(&ws->deferred.refused_count, 0);
    simple_mtx_unlock(&ws->deferred.lock);
-   if (starved)
-      radv_wddm2_deferred_line("%u BOs (%" PRIu64 " MiB) kept whole at teardown, of %" PRIu64
-                               " destroys with no entry (%" PRIu64 " CPU waits, %" PRIu64 " ms, %" PRIu64
-                               " of them kept): destroyed now",
-                               starved, starved_bytes >> 20, ws->deferred.starved_total,
-                               ws->deferred.starved_waits, radv_wddm2_ms(ws->deferred.starved_wait_ns),
-                               ws->deferred.starved_failed);
-   radv_wddm2_starved_retry(ws, true);
+   list_for_each_entry_safe (struct radv_wddm2_bo, bo, &unretired, pool_link) {
+      list_del(&bo->pool_link);
+      radv_wddm2_bo_struct_free(ws, bo);
+   }
 
    /* BD-045: one last unlock of the kept BOs. What the host still keeps locked is its to release with the
     * device; the ICD gives up only its structs. */
@@ -2570,6 +2612,9 @@ radv_wddm2_bo_destroy(struct radeon_winsys *_ws, struct radeon_winsys_bo *_bo)
    struct radv_wddm2_winsys *ws = radv_wddm2_winsys(_ws);
    struct radv_wddm2_bo *bo = radv_wddm2_bo(_bo);
    const bool enabled = ws->deferred.enabled;
+   /* R1/R2: only a BO with a range of its own can need a hold. Every other BO is released here and now,
+    * and the OS defers what has to be deferred (radv_wddm2_bo_destroy_now). */
+   const bool owns_va = radv_wddm2_bo_owns_va(bo);
 
    if (bo->borrowed || (!enabled && !ws->deferred.witness)) {
       /* A host import is the host's to retire: never held, never witnessed, only counted. */
@@ -2588,12 +2633,16 @@ radv_wddm2_bo_destroy(struct radeon_winsys *_ws, struct radeon_winsys_bo *_bo)
    unsigned trackers = 0;
    list_for_each_entry (struct radv_wddm2_tracker, tracker, &ws->deferred.trackers, link)
       trackers++;
-   struct radv_wddm2_deferred_bo *e = enabled && trackers ? radv_wddm2_deferred_entry_alloc(trackers) : NULL;
+   /* R2: the entry is allocated only for a BO whose range this driver frees itself. Every other destroy
+    * allocates nothing at all, which is where the BD-201 hole was: a destroy that could not get its
+    * entry used to fall back on an Evict and a VA free under running work. */
+   struct radv_wddm2_deferred_bo *e =
+      enabled && owns_va && trackers ? radv_wddm2_deferred_entry_alloc(trackers) : NULL;
    unsigned waits = 0;
    bool in_flight = false;
-   /* BD-201: with no entry to record the waits in, whether any queue's published work is in flight.
-    * The destroy then waits for it itself, below, instead of evicting the BO at once. */
-   bool unretired = false;
+   /* R2: the range is ours to free, work is in flight, and there is no entry to record the values in.
+    * Nothing can ever prove this range idle then, so it is given up unfreed and counted. */
+   bool unprovable = false;
    list_for_each_entry (struct radv_wddm2_tracker, tracker, &ws->deferred.trackers, link) {
       /* The witness: the queue of the BO's last submission has not retired it. */
       if (ws->deferred.witness && bo->last_use_serial == tracker->serial &&
@@ -2608,10 +2657,15 @@ radv_wddm2_bo_destroy(struct radeon_winsys *_ws, struct radeon_winsys_bo *_bo)
       const uint64_t value = p_atomic_read(&tracker->published);
       if (!value || radv_wddm2_tracker_retired_locked(tracker, value))
          continue;
+      /* R1: an ordinary BO records nothing. Its allocation and its range are released by the OS, which
+       * defers both until the commands queued before this destroy finish (C1, C3). */
+      if (!owns_va)
+         continue;
       if (!e) {
-         unretired = true;
+         unprovable = true;
          continue;
       }
+      /* R2: the value captured here, never a value the tracker publishes later. */
       e->waits[waits].tracker = tracker;
       e->waits[waits].value = value;
       tracker->refs++;
@@ -2621,15 +2675,24 @@ radv_wddm2_bo_destroy(struct radeon_winsys *_ws, struct radeon_winsys_bo *_bo)
       ws->deferred.witness && radv_wddm2_witness_count_locked(ws, bo, waits > 0, in_flight, &note, &totals);
 
    if (!waits) {
-      if (enabled && !unretired)
+      if (enabled && !unprovable)
          ws->deferred.immediate++;
+      if (unprovable) {
+         const uint64_t va = radv_wddm2_va_bytes(bo);
+         bo->va_leaked = true;
+         bo->va_gone = true;
+         ws->deferred.leaked_ranges++;
+         ws->deferred.leaked_va_bytes += va;
+         radv_wddm2_deferred_line("no memory to hold a %" PRIu64 "-byte BO's own %" PRIu64
+                                  " KiB of address space while work is in flight: the range is leaked, not freed "
+                                  "(%" PRIu64 " ranges, %" PRIu64 " KiB so far)",
+                                  bo->base.size, va >> 10, ws->deferred.leaked_ranges,
+                                  ws->deferred.leaked_va_bytes >> 10);
+      }
       simple_mtx_unlock(&ws->deferred.lock);
-      free(e); /* NULL whenever unretired is set; a spare entry of a retired queue goes back here */
+      free(e); /* NULL whenever unprovable is set; a spare entry of a retired queue goes back here */
       radv_wddm2_witness_lines(&note, totals_due ? &totals : NULL);
-      if (unretired)
-         radv_wddm2_destroy_no_entry(ws, bo);
-      else
-         radv_wddm2_bo_destroy_now(ws, bo);
+      radv_wddm2_bo_destroy_now(ws, bo);
       return;
    }
 
@@ -2640,13 +2703,17 @@ radv_wddm2_bo_destroy(struct radeon_winsys *_ws, struct radeon_winsys_bo *_bo)
    const uint64_t bytes = radv_wddm2_held_bytes(bo);
    p_atomic_set(&ws->deferred.count, ws->deferred.count + 1);
    ws->deferred.bytes += bytes;
+   ws->deferred.held_va_bytes += radv_wddm2_va_bytes(bo);
+   if (bo->flags & RADEON_FLAG_32BIT)
+      ws->deferred.held_va_32bit++;
    ws->deferred.total++;
    ws->deferred.total_bytes += bytes;
    ws->deferred.peak_count = MAX2(ws->deferred.peak_count, ws->deferred.count);
    ws->deferred.peak_bytes = MAX2(ws->deferred.peak_bytes, ws->deferred.bytes);
    if (ws->deferred.total == 1)
-      radv_wddm2_deferred_line("first BO held: %" PRIu64 " bytes, until %u queues retire their work in flight",
-                               bo->base.size, waits);
+      radv_wddm2_deferred_line("first BO held: %" PRIu64 " bytes and %" PRIu64
+                               " KiB of its own address space, until %u queues reach the values published now",
+                               bo->base.size, radv_wddm2_va_bytes(bo) >> 10, waits);
    if (ws->deferred.count >= ws->deferred.report_count || ws->deferred.bytes >= ws->deferred.report_bytes) {
       radv_wddm2_deferred_line("%u BOs, %" PRIu64 " MiB held (peak %u, %" PRIu64 " MiB; %" PRIu64
                                " held so far; longest hold %" PRIu64 " ms)",
@@ -2660,20 +2727,30 @@ radv_wddm2_bo_destroy(struct radeon_winsys *_ws, struct radeon_winsys_bo *_bo)
    }
    if (ws->deferred.total >= ws->deferred.report_total) {
       radv_wddm2_deferred_line("progress: %" PRIu64 " BOs held so far (%" PRIu64 " MiB), %" PRIu64
-                               " destroyed at once; now %u BOs, %" PRIu64 " MiB; peak %u BOs, %" PRIu64
-                               " MiB; longest hold %" PRIu64 " ms; %" PRIu64 " allocations retried; %" PRIu64
-                               " cap waits",
+                               " destroyed at once; now %u BOs, %" PRIu64 " MiB and %" PRIu64
+                               " KiB of ranges; peak %u BOs, %" PRIu64 " MiB; longest hold %" PRIu64
+                               " ms; %" PRIu64 " ranges leaked; %" PRIu64 " allocations retried",
                                ws->deferred.total, ws->deferred.total_bytes >> 20, ws->deferred.immediate,
-                               ws->deferred.count, ws->deferred.bytes >> 20, ws->deferred.peak_count,
-                               ws->deferred.peak_bytes >> 20, radv_wddm2_ms(ws->deferred.max_hold_ns),
-                               ws->deferred.retries, ws->deferred.cap_waits);
+                               ws->deferred.count, ws->deferred.bytes >> 20, ws->deferred.held_va_bytes >> 10,
+                               ws->deferred.peak_count, ws->deferred.peak_bytes >> 20,
+                               radv_wddm2_ms(ws->deferred.max_hold_ns), ws->deferred.leaked_ranges,
+                               ws->deferred.retries);
       ws->deferred.report_total *= 2;
    }
-   const bool over = ws->deferred.cap_bytes && ws->deferred.bytes > ws->deferred.cap_bytes;
+   /* R7: a cap never forces a release; it only reports. The held bytes belong to BOs whose ranges no
+    * proof has reached yet, and a wait here would be a destroy-path wait for GPU completion, which is
+    * exactly what R v2 removes. The line is written at most once per doubling of the reports. */
+   if (ws->deferred.cap_bytes && ws->deferred.bytes > ws->deferred.cap_bytes &&
+       ++ws->deferred.cap_reports >= ws->deferred.report_cap_reports) {
+      radv_wddm2_deferred_line("cap: %" PRIu64 " MiB held over the %" PRIu64 " MiB cap, in %u BOs holding %" PRIu64
+                               " KiB of their own ranges; nothing is released early (%" PRIu64 " reports)",
+                               ws->deferred.bytes >> 20, ws->deferred.cap_bytes >> 20, ws->deferred.count,
+                               ws->deferred.held_va_bytes >> 10, ws->deferred.cap_reports);
+      while (ws->deferred.report_cap_reports <= ws->deferred.cap_reports)
+         ws->deferred.report_cap_reports *= 2;
+   }
    simple_mtx_unlock(&ws->deferred.lock);
    radv_wddm2_witness_lines(&note, totals_due ? &totals : NULL);
-   if (over)
-      radv_wddm2_deferred_bound(ws);
 }
 
 struct radv_wddm2_sparse_group {
@@ -2996,7 +3073,7 @@ radv_wddm2_bo_init_functions(struct radv_wddm2_winsys *ws)
    list_inithead(&ws->deferred.entries);
    list_inithead(&ws->deferred.pool);
    list_inithead(&ws->deferred.locked);
-   list_inithead(&ws->deferred.starved);
+   list_inithead(&ws->deferred.refused);
    ws->deferred.locked_interval_ns = 1000000000ull;
 
    /* Only the bc250 path has per-queue progress fences to wait on. */
@@ -3016,9 +3093,10 @@ radv_wddm2_bo_init_functions(struct radv_wddm2_winsys *ws)
       ws->deferred.enabled = ws->bc250 && !(destroy && !strcmp(destroy, "0"));
    }
    ws->deferred.witness = ws->bc250 && !(witness && !strcmp(witness, "0"));
-   /* 512 MiB by default: a BO is held for the GPU's in-flight depth (a few frames), and 512 MiB covers
-    * the frees of a heavy streaming burst over that window while it stays about 3 % of the 16 GiB the
-    * BC-250 shares between CPU and GPU. The CPU waits only when frees outrun the GPU by far. */
+   /* 512 MiB by default: the line above which the held bytes are worth a line. R7: a cap never forces a
+    * release; it only reports. Under R v2 the held BOs are the ones with a range of their own, so this
+    * figure is a sign of a sparse or capture-replay workload whose queues are behind, not of memory the
+    * driver is sitting on. */
    uint64_t cap_mb = 512;
    if (cap) {
       char *end = NULL;
@@ -3134,7 +3212,7 @@ radv_wddm2_bo_init_functions(struct radv_wddm2_winsys *ws)
    ws->deferred.report_bytes = 256ull << 20;
    ws->deferred.report_hold_ns = 1000000000ull;
    ws->deferred.report_total = 1024;
-   ws->deferred.report_cap_waits = 1;
+   ws->deferred.report_cap_reports = 1;
    ws->deferred.report_destroys = 1024;
    ws->deferred.report_in_flight = RADV_WDDM2_WITNESS_LINES;
    if (ws->bc250) {

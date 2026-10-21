@@ -104,6 +104,9 @@ struct radv_wddm2_winsys {
       uint64_t progress_merged;   /* progress signals carried by the application's signal call */
       uint64_t progress_gpu;      /* progress values written by the IB1's RELEASE_MEM: no kernel signal */
       uint64_t kernel_queues;     /* queues bound with the GPU write asked for but signalled by the kernel */
+      /* R6 (BD-201): repair signals of a published progress value whose submission or signal failed, and
+       * those that could not be sent, which leave that value unproven for ever. */
+      uint64_t progress_repairs, progress_repairs_failed;
       uint64_t signal_calls;      /* application signal calls (signal-only submissions too) */
       uint64_t signal_objects;    /* application fences in them */
       uint64_t wait_objects;      /* application waits handed to the winsys */
@@ -125,10 +128,11 @@ struct radv_wddm2_winsys {
       simple_mtx_t lock;
       struct radeon_winsys_bo *bo;
    } null_prt;
-   simple_mtx_t heap_mtx;
-   struct util_vma_heap heap;
-   struct util_vma_heap _32bit_heap;
-   struct util_vma_heap replay_heap;
+   /* R1-c: the three util_vma heaps and their mutex are gone with radv_wddm2_bo_va_alloc and _va_free.
+    * Nothing called them: every range comes from the OS, through MapGpuVirtualAddress for an allocation
+    * (a REPLAYABLE BO included, at the address the application asks for) or through
+    * ReserveGpuVirtualAddress for a virtual BO. The RADV_WDDM2_*_HEAP_START constants stay: they are
+    * the MinimumAddress and MaximumAddress of those calls. */
 
    struct radv_winsys_bo_list global_bo_list;
    struct radv_winsys_bo_log bo_log;
@@ -144,14 +148,16 @@ struct radv_wddm2_winsys {
       /* The witness: destroys of BOs whose last submission had not retired, by class
        * (BC250_DEFERRED_WITNESS=0 turns it off). */
       bool witness;
-      uint64_t cap_bytes;        /* held bytes above this CPU-wait for the oldest held BO; 0: no cap */
+      /* R7: a cap never forces a release; it only reports. Held bytes above this write a line, at most
+       * one per doubling of cap_reports; nothing is waited for and nothing is released early. 0: no
+       * cap, no line. */
+      uint64_t cap_bytes;
+      uint64_t cap_reports;      /* times the held bytes were found over the cap */
+      uint64_t report_cap_reports;
       uint32_t next_serial;      /* the last tracker serial handed out */
       uint64_t released;         /* held BOs destroyed since the winsys was created */
-      uint64_t cap_waits;        /* CPU waits for the oldest held BO over the cap */
-      uint64_t cap_wait_ns, cap_wait_max_ns;
-      uint64_t cap_failed;       /* cap waits that failed or released nothing */
-      uint64_t report_cap_waits;
-      uint64_t oom_waits;        /* CPU waits for the oldest held BO after a failed allocation */
+      uint64_t oom_waits;        /* CPU waits for the oldest held range after a failed allocation */
+      uint64_t sweeps;           /* create-time sweeps: an allocation or a VA reservation that failed */
       uint64_t destroys[RADV_WDDM2_BO_CLASSES];  /* the witness: every non-borrowed destroy */
       uint64_t held_by_class[RADV_WDDM2_BO_CLASSES];
       uint64_t in_flight[RADV_WDDM2_BO_CLASSES]; /* its last submission had not retired */
@@ -166,9 +172,20 @@ struct radv_wddm2_winsys {
       struct list_head pool;
       uint32_t pool_count;
       struct list_head trackers; /* struct radv_wddm2_tracker: one per queue with a progress fence */
+      /* BD-212: a queue that went while a value it published had not retired leaves its tracker
+       * listed, with the fence and value page its queue keeps, until the value retires: a destroy in
+       * between still records a wait for that work. abandoned counts them now (atomic, so a drain
+       * point looks without the lock), reaped counts those released. */
+      uint32_t abandoned;
+      uint64_t reaped;
       struct list_head entries;  /* struct radv_wddm2_deferred_bo, oldest first */
       uint32_t count;            /* BOs held now */
       uint64_t bytes;            /* their size */
+      /* R7/G4: the VA ranges those held BOs keep, and the ranges given up unfreed (R2/R5). */
+      uint64_t held_va_bytes;
+      uint64_t held_va_32bit;
+      uint64_t leaked_va_bytes;
+      uint64_t leaked_ranges;
       uint64_t total;            /* BOs deferred since the winsys was created */
       uint64_t total_bytes;
       uint64_t immediate;        /* destroys that found nothing in flight */
@@ -179,7 +196,6 @@ struct radv_wddm2_winsys {
       uint64_t report_bytes;
       uint64_t report_hold_ns;
       uint64_t report_total;     /* the next total that prints a progress line (a killed process prints no summary) */
-      uint64_t forced;          /* destroyed unretired at teardown */
       uint64_t retries;          /* allocations retried after waiting for held BOs */
       uint64_t borrowed;         /* host imports destroyed: the host's, never held or witnessed; atomic */
       /* BD-045: owned BOs whose CPU lock the host would not release at destroy. They keep the lock, the
@@ -190,17 +206,15 @@ struct radv_wddm2_winsys {
       uint64_t locked_next_ns;   /* the next retry */
       uint64_t locked_interval_ns;
       uint64_t unlock_failed;    /* Unlock2 calls that failed; atomic */
-      /* BD-201: a destroy that could not allocate its entry waits for the published values itself,
-       * with no allocation. A BO whose wait failed or timed out keeps its allocation, its VA and its
-       * residency here, through pool_link: the drain points and teardown retry it, and its VA is never
-       * freed while a queue may still use it. */
-      struct list_head starved;  /* struct radv_wddm2_bo, through pool_link */
-      uint32_t starved_count;    /* atomic */
-      uint64_t starved_bytes;
-      uint64_t starved_total;    /* destroys that found no entry */
-      uint64_t starved_waits;    /* CPU waits those destroys made */
-      uint64_t starved_wait_ns;
-      uint64_t starved_failed;   /* of them, the waits that failed: the BO went on the list */
+      /* R7: a DestroyAllocation2 the host or the OS refused. The allocation is still the ICD's, so it
+       * is counted and the drain points and teardown retry it, through pool_link; nothing is ever
+       * written down as "no allocations held". */
+      struct list_head refused;  /* struct radv_wddm2_bo, through pool_link */
+      uint32_t refused_count;    /* atomic */
+      uint64_t refused_bytes;
+      uint64_t refused_total;    /* refusals seen, retries included */
+      uint64_t refused_retries;  /* DestroyAllocation2 calls a retry made */
+      uint64_t refused_next_ns;  /* the next retry */
    } deferred;
 
    /* The periodic summary (radv_wddm2_bo.c): every BC250_DEFERRED_SUMMARY_S seconds (30 by default, 0
@@ -213,7 +227,7 @@ struct radv_wddm2_winsys {
       uint64_t start_ns;
       uint32_t lines;      /* summaries written */
       /* The counters of the last lines written, in the order radv_wddm2_bo.c collects them. */
-      uint64_t deferred_snapshot[48];
+      uint64_t deferred_snapshot[64];
       uint64_t submit_snapshot[16];
    } summary;
 
