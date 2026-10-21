@@ -47,6 +47,7 @@ extern const struct vk_device_entrypoint_table wsi_device_entrypoints;
 #include <util/list.h>
 
 struct wsi_interface;
+struct wsi_swapchain;
 struct vk_instance;
 struct vk_queue;
 
