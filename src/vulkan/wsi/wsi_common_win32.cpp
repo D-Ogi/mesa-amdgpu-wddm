@@ -501,14 +501,14 @@ wsi_dxgi_create_d3d12_resource(struct wsi_win32_swapchain *chain,
    ID3D12Device *d3d12_device;
    HRESULT hr;
 
-   D3D12_HEAP_PROPERTIES heap_props = { 0 };
+   D3D12_HEAP_PROPERTIES heap_props = {};
    heap_props.Type = D3D12_HEAP_TYPE_DEFAULT;
    heap_props.CPUPageProperty = D3D12_CPU_PAGE_PROPERTY_UNKNOWN;
    heap_props.MemoryPoolPreference = D3D12_MEMORY_POOL_UNKNOWN;
    heap_props.CreationNodeMask = 1;
    heap_props.VisibleNodeMask = 1;
 
-   D3D12_RESOURCE_DESC desc = { 0 };
+   D3D12_RESOURCE_DESC desc = {};
    desc.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
    desc.Alignment = 0;
    desc.Width = chain->extent.width;
@@ -572,7 +572,7 @@ wsi_dxgi_create_blit_context(struct wsi_win32_swapchain *chain,
    }
 
    ID3D12GraphicsCommandList *cmd_list = win32_image->dxgi.cmd_list;
-   D3D12_RESOURCE_BARRIER barrier = { 0 };
+   D3D12_RESOURCE_BARRIER barrier = {};
    barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
    barrier.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
 
