@@ -6,16 +6,21 @@
  * and gpu addresses, and plays the GPU by completing the value a CPU wait asks
  * for, unless the test makes that wait fail.
  *
- * What the tests are for: a destroyed BO keeps its allocation, its VA and its
- * residency until every queue reaches the progress value published when it was
- * destroyed, because D3DKMTEvict makes an allocation illegal to access once the
- * request is queued and after D3DKMTFreeGpuVirtualAddress a new range may take
- * the freed VA at once, under work that still reads it. The hold needs one
- * allocation, of the entry that records the waits, and the destroy path may not
- * depend on it (BD-201): the answer to "no host memory" cannot be an eviction
- * and a VA free under running work. radv_wddm2_deferred_entry_fail forces that
- * one allocation to fail, as host memory pressure would, and the recorded call
- * order is the proof of what the destroy did instead.
+ * What the tests are for (R v2, DESIGN.md 6): an ordinary BO is released at its
+ * destroy through DestroyAllocation2 with flags 0 alone, because the OS defers
+ * that destruction until the commands queued before it finish and frees the
+ * API-allocated range with the allocation (d3dukmdt.md:3398-3402,
+ * d3dkmthk.md:13810). What the OS does not cover is a range this driver owns by
+ * itself, a REPLAYABLE BO's address or a virtual BO's reservation: such a BO is
+ * held until the progress values captured at its destroy are reached, because
+ * after D3DKMTFreeGpuVirtualAddress a new range may take the freed address at
+ * once, under work that still reads it. Nothing is ever released without proof:
+ * a failed wait, a missing entry and teardown are not proof, and the answer to
+ * a missing proof is to keep the range or, at teardown, to leak it and count
+ * it. The hold needs one allocation, of the entry that records those values,
+ * and radv_wddm2_deferred_entry_fail forces it to fail, as host memory
+ * pressure would; the recorded call order is the proof of what the destroy did
+ * instead.
  *
  * The cases drive the real ws->buffer_destroy of the winsys on an internal BO
  * made by the real ws->buffer_create. The queue is one attached tracker with a
@@ -27,9 +32,10 @@
  * vulkan_util, amd_common, mesa_util and mesa_util_c11 libraries
  * (scratch/bd201-fix/tools/winsys-tests.py).
  *
- * The negative control is the source before the fix: there a destroy that gets
- * no entry calls radv_wddm2_bo_destroy_now at once. no_entry_waits and
- * no_entry_kept must fail against it, and they must pass with the fix.
+ * The negative control is the source before the fix: there every destroy evicts
+ * the BO and frees its range at once, and a destroy that gets no entry does so
+ * under running work. plain_destroy, no_entry_leaks, held_until_retired and
+ * teardown_leak must fail against it, and they must pass with the fix.
  *
  * Usage: radv_wddm2_deferred_destroy_test [test], no argument runs all.
  */
@@ -430,14 +436,26 @@ attach_queue(struct radv_wddm2_winsys *ws)
    return tracker;
 }
 
+#define PLAIN_FLAGS RADEON_FLAG_NO_INTERPROCESS_SHARING
+/* A BO that owns its GPU address range (radv_wddm2_bo_owns_va): capture/replay promises the application
+ * the same address again, so this driver frees the range itself and needs proof that it is idle. These
+ * are the only BOs an R2 hold keeps. */
+#define HELD_FLAGS (PLAIN_FLAGS | RADEON_FLAG_REPLAYABLE)
+
+static struct radeon_winsys_bo *
+make_bo_flags(struct radv_wddm2_winsys *ws, enum radeon_bo_flag flags)
+{
+   struct radeon_winsys_bo *bo = NULL;
+   const VkResult result =
+      ws->base.buffer_create(&ws->base, BO_SIZE, 4096, RADEON_DOMAIN_GTT, flags, 0, 0, NULL, &bo);
+   check(result == VK_SUCCESS && bo && bo->handle, "an internal BO is made (%d)", result);
+   return bo;
+}
+
 static struct radeon_winsys_bo *
 make_bo(struct radv_wddm2_winsys *ws)
 {
-   struct radeon_winsys_bo *bo = NULL;
-   const VkResult result = ws->base.buffer_create(&ws->base, BO_SIZE, 4096, RADEON_DOMAIN_GTT,
-                                                 RADEON_FLAG_NO_INTERPROCESS_SHARING, 0, 0, NULL, &bo);
-   check(result == VK_SUCCESS && bo && bo->handle, "an internal BO is made (%d)", result);
-   return bo;
+   return make_bo_flags(ws, PLAIN_FLAGS);
 }
 
 static void
@@ -451,54 +469,85 @@ finish(struct radv_wddm2_winsys *ws, struct radv_wddm2_tracker *tracker)
    free(ws);
 }
 
-/* The published value has not retired and the entry allocation fails: the
- * destroy waits for that value itself, and only then evicts the BO and frees
- * its VA. Before the fix it evicted and freed at once. */
+/* R1 (DESIGN.md 6.4): an ordinary BO is released at its destroy, through DestroyAllocation2 with flags
+ * 0 alone. The OS defers that destruction until the commands queued before it finish and frees the
+ * API-allocated range with the allocation, so there is nothing to record, nothing to wait for and
+ * nothing to allocate: radv_wddm2_deferred_entry_fail is still armed after the destroy, which is the
+ * proof that the destroy path asked for no memory at all. */
 static void
-test_no_entry_waits(void)
+test_plain_destroy(void)
 {
    struct radv_wddm2_winsys *ws = make_ws();
    struct radv_wddm2_tracker *tracker = attach_queue(ws);
    struct radeon_winsys_bo *bo = make_bo(ws);
    const uint32_t bo_h = bo->handle;
-   char line[1024];
 
    radv_wddm2_tracker_publish(tracker, 1);
    check(h.fence_value == 0 && tracker->published == 1, "the queue published 1, completed 0");
 
+   const unsigned mark = h.n_ev;
+   radv_wddm2_deferred_entry_fail = 1;
+   ws->base.buffer_destroy(&ws->base, bo);
+   check(radv_wddm2_deferred_entry_fail == 1, "an ordinary BO's destroy asks for no entry");
+   radv_wddm2_deferred_entry_fail = 0;
+   check(!alloc_live(bo_h) && find_handle(mark, BC250_HOST_DestroyAllocation2, bo_h) >= 0,
+         "the allocation goes to the OS, which defers its destruction");
+   check(!count_op(mark, BC250_HOST_Evict) && !count_op(mark, BC250_HOST_FreeGpuVirtualAddress) &&
+            !count_op(mark, BC250_HOST_WaitForSynchronizationObjectFromCpu),
+         "and nothing else: no Evict, no VA free, no CPU wait");
+   check(!ws->deferred.count && !ws->deferred.held_va_bytes && !ws->deferred.leaked_ranges &&
+            ws->deferred.immediate == 1,
+         "nothing is held and no range is leaked");
+
+   h.fence_value = 1;
+   finish(ws, tracker);
+}
+
+/* R2: the BO owns its range, the published 1 has not retired, and the entry allocation fails. Nothing
+ * can ever prove the range idle then, so it is given up unfreed and counted: a FreeGpuVirtualAddress
+ * here would let the next allocation take the address under the running work (d3dkmthk.md:12632), and a
+ * CPU wait in a destroy is what R v2 removes. The allocation itself still goes to the OS. */
+static void
+test_no_entry_leaks(void)
+{
+   struct radv_wddm2_winsys *ws = make_ws();
+   struct radv_wddm2_tracker *tracker = attach_queue(ws);
+   struct radeon_winsys_bo *bo = make_bo_flags(ws, HELD_FLAGS);
+   const uint32_t bo_h = bo->handle;
+   char line[1024];
+
+   radv_wddm2_tracker_publish(tracker, 1);
    const size_t lm = log_mark();
    const unsigned mark = h.n_ev;
    radv_wddm2_deferred_entry_fail = 1;
    ws->base.buffer_destroy(&ws->base, bo);
-   check(radv_wddm2_deferred_entry_fail == 0, "the destroy made one entry allocation, and it failed");
-
-   const int w = find_op(mark, BC250_HOST_WaitForSynchronizationObjectFromCpu);
-   const int evict = find_op(mark, BC250_HOST_Evict);
-   const int free_va = find_op(mark, BC250_HOST_FreeGpuVirtualAddress);
-   const int destroy = find_handle(mark, BC250_HOST_DestroyAllocation2, bo_h);
-   check(cpu_wait_is(w, PROGRESS_H, 1), "with no entry the destroy waits for the published 1 itself (%d)", w);
-   check(w >= 0 && evict > w && free_va > w && destroy > w,
-         "no Evict, no VA free and no allocation destroy before that wait (w=%d, %d %d %d)", w, evict, free_va,
-         destroy);
-   check(evict >= 0 && evict < free_va && free_va < destroy, "then in that order (%d %d %d)", evict, free_va, destroy);
-   check(h.fence_value >= 1, "and the value was reached first (%" PRIu64 ")", h.fence_value);
-   check(!alloc_live(bo_h) && !ws->deferred.count && !ws->deferred.starved_count, "the BO is gone, nothing held");
-   check(ws->deferred.starved_total == 1 && ws->deferred.starved_waits == 1 && !ws->deferred.starved_failed,
-         "one entry-less destroy counted, one CPU wait, none kept");
-   check_log(log_lines(lm, "no memory to hold a 65536-byte BO", line, sizeof(line)) == 1 &&
-                strstr(line, "1 CPU wait") && strstr(line, "destroyed after it"),
+   check(radv_wddm2_deferred_entry_fail == 0, "the destroy of a BO with its own range made one entry "
+                                              "allocation, and it failed");
+   check(!count_op(mark, BC250_HOST_WaitForSynchronizationObjectFromCpu) &&
+            !count_op(mark, BC250_HOST_Evict) && !count_op(mark, BC250_HOST_FreeGpuVirtualAddress),
+         "no CPU wait, no Evict and no VA free");
+   check(!alloc_live(bo_h) && find_handle(mark, BC250_HOST_DestroyAllocation2, bo_h) >= 0 &&
+            !ws->deferred.count,
+         "the allocation goes to the OS, which defers it; nothing is held");
+   check(ws->deferred.leaked_ranges == 1 && ws->deferred.leaked_va_bytes == BO_SIZE,
+         "the range is counted as leaked (%" PRIu64 " ranges, %" PRIu64 " bytes)", ws->deferred.leaked_ranges,
+         ws->deferred.leaked_va_bytes);
+   check_log(log_lines(lm, "no memory to hold a 65536-byte BO's own", line, sizeof(line)) == 1 &&
+                strstr(line, "leaked, not freed"),
              "and logged: %.180s", line);
 
+   h.fence_value = 1;
    finish(ws, tracker);
 }
 
-/* Every published value retired: the same failed allocation needs no wait. */
+/* R2 with every published value reached: the same failed entry allocation needs no entry. The proof is
+ * there without one, so the range is freed at once and nothing is leaked or waited for. */
 static void
 test_no_entry_retired(void)
 {
    struct radv_wddm2_winsys *ws = make_ws();
    struct radv_wddm2_tracker *tracker = attach_queue(ws);
-   struct radeon_winsys_bo *bo = make_bo(ws);
+   struct radeon_winsys_bo *bo = make_bo_flags(ws, HELD_FLAGS);
    const uint32_t bo_h = bo->handle;
 
    radv_wddm2_tracker_publish(tracker, 1);
@@ -507,76 +556,33 @@ test_no_entry_retired(void)
    radv_wddm2_deferred_entry_fail = 1;
    ws->base.buffer_destroy(&ws->base, bo);
    check(!radv_wddm2_deferred_entry_fail, "the entry allocation was made and failed");
-   check(!alloc_live(bo_h) && find_handle(mark, BC250_HOST_DestroyAllocation2, bo_h) >= 0,
-         "the BO is destroyed at once");
-   check(!count_op(mark, BC250_HOST_WaitForSynchronizationObjectFromCpu), "with nothing in flight, no CPU wait");
-   check(!ws->deferred.starved_total && !ws->deferred.starved_waits && ws->deferred.immediate == 1,
-         "counted as an immediate destroy, not as an entry-less one");
-
-   finish(ws, tracker);
-}
-
-/* The entry allocation fails and the CPU wait fails too: the BO keeps its
- * allocation, its VA and its residency, and a drain point retries it. Nothing
- * of it is freed while the published value is unreached. */
-static void
-test_no_entry_kept(void)
-{
-   struct radv_wddm2_winsys *ws = make_ws();
-   struct radv_wddm2_tracker *tracker = attach_queue(ws);
-   struct radeon_winsys_bo *bo = make_bo(ws);
-   const uint32_t bo_h = bo->handle;
-   char line[1024];
-
-   radv_wddm2_tracker_publish(tracker, 2);
-   const size_t lm = log_mark();
-   unsigned mark = h.n_ev;
-   radv_wddm2_deferred_entry_fail = 1;
-   fail_calls(BC250_HOST_WaitForSynchronizationObjectFromCpu, 1);
-   ws->base.buffer_destroy(&ws->base, bo);
-   no_failures();
-   check(cpu_wait_is(find_op(mark, BC250_HOST_WaitForSynchronizationObjectFromCpu), PROGRESS_H, 2),
-         "the destroy waited for the published 2");
-   check(alloc_live(bo_h) && !count_op(mark, BC250_HOST_Evict) &&
-            !count_op(mark, BC250_HOST_FreeGpuVirtualAddress) &&
-            find_handle(mark, BC250_HOST_DestroyAllocation2, bo_h) < 0,
-         "the failed wait freed nothing: no Evict, no VA free, no allocation destroy");
-   check(ws->deferred.starved_count == 1 && ws->deferred.starved_bytes == BO_SIZE &&
-            ws->deferred.starved_failed == 1 && ws->deferred.starved_waits == 1,
-         "the BO is kept whole (%u BOs, %" PRIu64 " bytes)", ws->deferred.starved_count,
-         ws->deferred.starved_bytes);
-   check_log(log_lines(lm, "kept whole", line, sizeof(line)) == 1, "and logged: %.180s", line);
-
-   mark = h.n_ev;
-   radv_wddm2_deferred_drain(ws);
-   check(alloc_live(bo_h) && ws->deferred.starved_count == 1 && !count_op(mark, BC250_HOST_Evict),
-         "a drain with the 2 still in flight keeps it");
-
-   h.fence_value = 2;
-   mark = h.n_ev;
-   radv_wddm2_deferred_drain(ws);
    check(!alloc_live(bo_h) && find_handle(mark, BC250_HOST_DestroyAllocation2, bo_h) >= 0 &&
-            !ws->deferred.starved_count && !ws->deferred.starved_bytes,
-         "once the 2 retired a drain releases it");
+            count_op(mark, BC250_HOST_FreeGpuVirtualAddress) == 1,
+         "the range is freed and the allocation destroyed at once");
+   check(!count_op(mark, BC250_HOST_WaitForSynchronizationObjectFromCpu) && !count_op(mark, BC250_HOST_Evict),
+         "with nothing in flight, no CPU wait and no Evict");
+   check(!ws->deferred.leaked_ranges && ws->deferred.immediate == 1,
+         "counted as an immediate destroy, with no leaked range");
 
    finish(ws, tracker);
 }
 
-/* The ordinary hold, for the contrast: with an entry the BO waits, and no call
- * of its destroy reaches the host until the published value retires. */
+/* The ordinary R2 hold: with an entry the BO's range waits for the value captured at the destroy, and no
+ * call of its destroy reaches the host until that value is reached. */
 static void
 test_held_until_retired(void)
 {
    struct radv_wddm2_winsys *ws = make_ws();
    struct radv_wddm2_tracker *tracker = attach_queue(ws);
-   struct radeon_winsys_bo *bo = make_bo(ws);
+   struct radeon_winsys_bo *bo = make_bo_flags(ws, HELD_FLAGS);
    const uint32_t bo_h = bo->handle;
 
    radv_wddm2_tracker_publish(tracker, 3);
    unsigned mark = h.n_ev;
    ws->base.buffer_destroy(&ws->base, bo);
-   check(alloc_live(bo_h) && ws->deferred.count == 1 && ws->deferred.bytes == BO_SIZE,
-         "the BO is held (%u BOs, %" PRIu64 " bytes)", ws->deferred.count, ws->deferred.bytes);
+   check(alloc_live(bo_h) && ws->deferred.count == 1 && ws->deferred.held_va_bytes == BO_SIZE,
+         "the BO is held with its range (%u BOs, %" PRIu64 " bytes of ranges)", ws->deferred.count,
+         ws->deferred.held_va_bytes);
    check(!count_op(mark, BC250_HOST_Evict) && !count_op(mark, BC250_HOST_FreeGpuVirtualAddress) &&
             !count_op(mark, BC250_HOST_DestroyAllocation2) &&
             !count_op(mark, BC250_HOST_WaitForSynchronizationObjectFromCpu),
@@ -589,22 +595,142 @@ test_held_until_retired(void)
    h.fence_value = 3;
    mark = h.n_ev;
    radv_wddm2_deferred_drain(ws);
-   const int evict = find_op(mark, BC250_HOST_Evict);
+   const int free_va = find_op(mark, BC250_HOST_FreeGpuVirtualAddress);
    const int destroy = find_handle(mark, BC250_HOST_DestroyAllocation2, bo_h);
-   check(!alloc_live(bo_h) && evict >= 0 && destroy > evict && !ws->deferred.count && ws->deferred.released == 1,
-         "once the 3 retired the drain destroys it (%d %d)", evict, destroy);
+   check(!alloc_live(bo_h) && free_va >= 0 && destroy > free_va && !count_op(mark, BC250_HOST_Evict),
+         "once the 3 retired the drain frees the range, then the allocation, and never evicts (%d %d)", free_va,
+         destroy);
+   check(!ws->deferred.count && !ws->deferred.held_va_bytes && ws->deferred.released == 1 &&
+            !ws->deferred.leaked_ranges,
+         "nothing is held or leaked afterwards");
 
    finish(ws, tracker);
+}
+
+/* R7: a DestroyAllocation2 the host refuses leaves the allocation with the ICD. It is counted, kept on a
+ * list threaded through the BO's own link, and retried at the drain points: nothing is ever written down
+ * as released while the ICD still holds it. */
+static void
+test_refused_kept(void)
+{
+   struct radv_wddm2_winsys *ws = make_ws();
+   struct radv_wddm2_tracker *tracker = attach_queue(ws);
+   struct radeon_winsys_bo *bo = make_bo(ws);
+   const uint32_t bo_h = bo->handle;
+   char line[1024];
+
+   const size_t lm = log_mark();
+   unsigned mark = h.n_ev;
+   fail_calls(BC250_HOST_DestroyAllocation2, 1);
+   ws->base.buffer_destroy(&ws->base, bo);
+   no_failures();
+   check(alloc_live(bo_h) && count_op(mark, BC250_HOST_DestroyAllocation2) == 1 &&
+            ws->deferred.refused_count == 1 && ws->deferred.refused_bytes == BO_SIZE &&
+            ws->deferred.refused_total == 1,
+         "a refused destroy keeps the allocation, counted (%u kept)", ws->deferred.refused_count);
+   check_log(log_lines(lm, "DestroyAllocation2 refused a 65536-byte allocation", line, sizeof(line)) == 1,
+             "and logged: %.160s", line);
+
+   /* The retry interval has not passed, so a drain leaves it alone. */
+   mark = h.n_ev;
+   radv_wddm2_deferred_drain(ws);
+   check(alloc_live(bo_h) && ws->deferred.refused_count == 1 && !count_op(mark, BC250_HOST_DestroyAllocation2),
+         "a drain inside the retry interval leaves it kept");
+
+   ws->deferred.refused_next_ns = 0;
+   mark = h.n_ev;
+   radv_wddm2_deferred_drain(ws);
+   check(!alloc_live(bo_h) && find_handle(mark, BC250_HOST_DestroyAllocation2, bo_h) >= 0 &&
+            !ws->deferred.refused_count && !ws->deferred.refused_bytes && ws->deferred.refused_retries == 1,
+         "the next drain retries it and the allocation goes");
+
+   finish(ws, tracker);
+}
+
+/* R5: teardown is not proof either. A held range whose wait fails at teardown is given up unfreed and
+ * counted, while its allocation goes to the OS: the alternative would be a FreeGpuVirtualAddress under
+ * work that may still run. */
+static void
+test_teardown_leak(void)
+{
+   struct radv_wddm2_winsys *ws = make_ws();
+   struct radv_wddm2_tracker *tracker = attach_queue(ws);
+   struct radeon_winsys_bo *bo = make_bo_flags(ws, HELD_FLAGS);
+   const uint32_t bo_h = bo->handle;
+   char line[1024];
+
+   radv_wddm2_tracker_publish(tracker, 2);
+   ws->base.buffer_destroy(&ws->base, bo);
+   check(alloc_live(bo_h) && ws->deferred.count == 1, "the BO is held against the published 2");
+
+   const size_t lm = log_mark();
+   const unsigned mark = h.n_ev;
+   fail_calls(BC250_HOST_WaitForSynchronizationObjectFromCpu, 1);
+   radv_wddm2_deferred_finish(ws);
+   no_failures();
+   check(!count_op(mark, BC250_HOST_FreeGpuVirtualAddress), "the failed teardown wait frees no range");
+   check(!alloc_live(bo_h) && find_handle(mark, BC250_HOST_DestroyAllocation2, bo_h) >= 0,
+         "the allocation is left to the OS, which defers its destruction");
+   check(ws->deferred.leaked_ranges == 1 && ws->deferred.leaked_va_bytes == BO_SIZE && !ws->deferred.released,
+         "the range is counted as leaked, and the BO is not counted as released");
+   check_log(log_lines(lm, "leaked, not freed", line, sizeof(line)) == 1, "and logged: %.180s", line);
+
+   h.fence_value = 2;
+   radv_wddm2_tracker_detach(ws, tracker, true);
+   check(!h.unknown && !h.dropped, "no unexpected host call and no dropped record");
+   check(!h.n_allocs, "no allocation left (%u)", h.n_allocs);
+   simple_mtx_destroy(&ws->deferred.lock);
+   free(ws);
+}
+
+/* R3 (BD-212): a queue that goes while a value it published has not retired leaves its tracker listed
+ * and referenced, so a destroy after it still records a wait for that work. A drain point reaps the
+ * tracker once the value retires. Dropping it at the detach is the BD-212 breach: the destroy below
+ * would then record no wait at all. */
+static void
+test_tracker_abandoned(void)
+{
+   struct radv_wddm2_winsys *ws = make_ws();
+   struct radv_wddm2_tracker *tracker = attach_queue(ws);
+
+   radv_wddm2_tracker_publish(tracker, 1);
+   radv_wddm2_tracker_detach(ws, tracker, true);
+   check(p_atomic_read(&ws->deferred.abandoned) == 1 && !list_is_empty(&ws->deferred.trackers),
+         "the queue went with its 1 unretired: the tracker stays listed");
+
+   struct radeon_winsys_bo *bo = make_bo_flags(ws, HELD_FLAGS);
+   const uint32_t bo_h = bo->handle;
+   const unsigned mark = h.n_ev;
+   ws->base.buffer_destroy(&ws->base, bo);
+   check(alloc_live(bo_h) && ws->deferred.count == 1 && !count_op(mark, BC250_HOST_FreeGpuVirtualAddress),
+         "a destroy after it still waits for that queue's 1");
+
+   h.fence_value = 1;
+   radv_wddm2_deferred_drain(ws);
+   check(!alloc_live(bo_h) && !ws->deferred.count && ws->deferred.released == 1,
+         "once the 1 retires the drain releases the BO");
+   check(!p_atomic_read(&ws->deferred.abandoned) && ws->deferred.reaped == 1 &&
+            list_is_empty(&ws->deferred.trackers),
+         "and reaps the abandoned tracker (%" PRIu64 " reaped)", ws->deferred.reaped);
+
+   radv_wddm2_deferred_finish(ws);
+   check(!h.unknown && !h.dropped, "no unexpected host call and no dropped record");
+   check(!h.n_allocs, "no allocation left (%u)", h.n_allocs);
+   simple_mtx_destroy(&ws->deferred.lock);
+   free(ws);
 }
 
 static const struct {
    const char *name;
    void (*fn)(void);
 } tests[] = {
-   {"no_entry_waits", test_no_entry_waits},
+   {"plain_destroy", test_plain_destroy},
+   {"no_entry_leaks", test_no_entry_leaks},
    {"no_entry_retired", test_no_entry_retired},
-   {"no_entry_kept", test_no_entry_kept},
    {"held_until_retired", test_held_until_retired},
+   {"refused_kept", test_refused_kept},
+   {"teardown_leak", test_teardown_leak},
+   {"tracker_abandoned", test_tracker_abandoned},
 };
 
 int

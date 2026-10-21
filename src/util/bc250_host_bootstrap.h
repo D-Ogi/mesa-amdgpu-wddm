@@ -49,6 +49,12 @@ static inline int32_t bc250_host_check_status(const struct bc250_host *host)
 {
    return host->dispatch ? host->dispatch(host->userdata, BC250_HOST_CHECK_STATUS, 0) : 0;
 }
+/* Reports a device the host considers lost, for a WAIT that then returns VK_ERROR_DEVICE_LOST. It is
+ * not proof of anything about the GPU, and no release decision may rest on it (R4, BD-201): UINT64_MAX
+ * in a monitored fence's value is undocumented as a loss marker (the documented field of
+ * native-gpu-fence-objects.md:46 is MonitoredValue, another one), and the host's status says what the
+ * host believes, not whether the GPU stopped reading memory. The only proof of completion the winsys
+ * admits is the GPU-written value reaching the wanted one (radv_wddm2_tracker_retired_locked). */
 static inline int bc250_host_fence_valid(const struct bc250_host *host, uint64_t value)
 {
    if (host->dispatch && value == UINT64_MAX) {

@@ -1880,6 +1880,10 @@ radv_queue_sparse_submit(struct vk_queue *vqueue, struct vk_queue_submit *submis
    struct radv_device *device = radv_queue_device(queue);
    VkResult result;
 
+   /* BD-201 (DESIGN.md 6.7): the winsys hands every submission to the OS inline, under this queue's
+    * lock, because that is the only order the deferred-destruction contract covers. */
+   assert(queue->vk.submit.mode == VK_QUEUE_SUBMIT_MODE_IMMEDIATE);
+
    result = radv_queue_submit_bind_sparse_memory(queue, submission);
    if (result != VK_SUCCESS)
       goto fail;
@@ -1927,6 +1931,9 @@ static VkResult
 radv_queue_submit(struct vk_queue *vqueue, struct vk_queue_submit *submission)
 {
    struct radv_queue *queue = (struct radv_queue *)vqueue;
+
+   /* BD-201 (DESIGN.md 6.7): see radv_queue_sparse_submit. */
+   assert(queue->vk.submit.mode == VK_QUEUE_SUBMIT_MODE_IMMEDIATE);
 
    VkResult result = radv_queue_submit_bind_sparse_memory(queue, submission);
    if (result != VK_SUCCESS)
@@ -2034,11 +2041,16 @@ radv_queue_init(struct radv_device *device, struct radv_queue *queue, int idx,
    if (queue->state.qf == RADV_QUEUE_SPARSE) {
       queue->vk.driver_submit = radv_queue_sparse_submit;
       /* Linux performs host waits here. WDDM already queues GPU waits and
-       * signals and uses native timelines, so it must remain immediate. */
+       * signals and uses native timelines, so it must remain immediate.
+       *
+       * BD-201 (DESIGN.md 6.7): and it must remain immediate in every build, release included. The
+       * winsys releases an ordinary BO's allocation at its destroy and relies on the OS to defer that
+       * destruction until the commands queued before it finish (d3dukmdt.md:3398-3402). A submit thread
+       * would leave submissions naming the BO in a software queue, which that contract does not cover,
+       * so a winsys without buffer_virtual_bind_end is refused here instead of silently getting one. */
       if (!device->ws->buffer_virtual_bind_end) {
-         result = vk_queue_enable_submit_thread(&queue->vk);
-         if (result != VK_SUCCESS)
-            goto fail;
+         result = VK_ERROR_INITIALIZATION_FAILED;
+         goto fail;
       }
    } else {
       queue->vk.driver_submit = radv_queue_submit;
