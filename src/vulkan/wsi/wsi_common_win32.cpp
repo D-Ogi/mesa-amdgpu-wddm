@@ -211,6 +211,10 @@ struct wsi_win32_swapchain {
    uint64_t                     pending_present_value;
    /* One bit per enum wsi_win32_present_stage: the stage lines this chain has already written. */
    uint32_t                     stage_log_bits;
+   /* When the chain was created (os_time_get_nano): each stage line says how long after that it
+    * came, so the time to the first present is in the log (BD-197; the BD-105 freeze class).
+    */
+   uint64_t                     created_ns;
    /* BC250_WSI_PRESENT_LOG=<file>: one CSV line per queued present with the
     * time spent in the CPU copy, BitBlt/Present1 and DwmFlush. Diagnostics
     * only; NULL unless the variable is set. */
@@ -235,6 +239,8 @@ struct wsi_win32_swapchain {
    bool                       acquire_empty_logged;
    /* The one window read the plan was made from, kept for the chain's own log line. */
    struct wsi_iflip_geometry  iflip_geometry;
+   /* The driver's reading of the scan-out plane's formats the plan was made from (BD-197). */
+   const char                *iflip_plane;
    struct wsi_win32_image     images[0];
 };
 
@@ -547,6 +553,13 @@ wsi_win32_find_format(VkFormat format)
    return NULL;
 }
 
+/* The 8-bit RGBA layouts, whose BGRA8 twins are the firmware plane's own format. */
+static bool
+wsi_win32_format_is_rgba8(VkFormat format)
+{
+   return format == VK_FORMAT_R8G8B8A8_UNORM || format == VK_FORMAT_R8G8B8A8_SRGB;
+}
+
 static bool
 wsi_win32_device_uses_dxgi(const struct wsi_device *wsi_device)
 {
@@ -611,10 +624,21 @@ wsi_win32_list_surface_formats(VkIcdSurfaceBase *icd_surface, struct wsi_device 
                      (!win32 || wsi_win32_route_usable(&win32->route)) &&
                      (!wsi_device->win32.route_allowed ||
                       wsi_device->win32.route_allowed(wsi_device->pdevice, &reason));
+   /* BD-197. On the DXGI route a chain that covers its output is scanned out only in a layout the
+    * plane takes. Where that is BGRA8 alone, an RGBA8 chain stays composed (the D3D12 shell's
+    * FORMAT clause), and an application that prefers RGBA8 - Quake II RTX asks for
+    * R8G8B8A8_SRGB first - would never reach an independent flip. The RGBA8 formats hold the same
+    * pixels as their BGRA8 twins, which stay listed, so nothing an application can show is lost.
+    * The 10-bit and FP16 formats have no twin and stay listed: such a chain is composed.
+    */
+   const bool rgba8_listed = !dxgi || !wsi_device->win32.scanout_plane_formats ||
+                             wsi_device->win32.scanout_plane_formats(wsi_device->pdevice, &reason);
    unsigned count = 0;
 
    for (unsigned i = 0; i < ARRAY_SIZE(available_surface_formats); i++) {
       if (available_surface_formats[i].dxgi_only && !dxgi)
+         continue;
+      if (!rgba8_listed && wsi_win32_format_is_rgba8(available_surface_formats[i].format))
          continue;
       /* FP16 is scRGB (linear) in DXGI; it is only offered with the extended linear color space. */
       if (available_surface_formats[i].format == VK_FORMAT_R16G16B16A16_SFLOAT)
@@ -800,8 +824,9 @@ wsi_win32_stage_log(struct wsi_win32_swapchain *chain, enum wsi_win32_present_st
       return;
    if (!wsi_win32_stage_first(&chain->stage_log_bits, stage))
       return;
-   wsi_win32_route_log(chain, "chain %p: first present stage %s", (void *)chain,
-                       wsi_win32_present_stage_name(stage));
+   wsi_win32_route_log(chain, "chain %p: first present stage %s at %llu ms", (void *)chain,
+                       wsi_win32_present_stage_name(stage),
+                       (unsigned long long)((os_time_get_nano() - chain->created_ns) / 1000000u));
 }
 
 /* The presenter's removal reason, and whether it could be read at all.
@@ -2626,7 +2651,7 @@ wsi_iflip_inputs_of(const struct wsi_device *wsi_device,
                     const VkSwapchainCreateInfoKHR *create_info,
                     const struct wsi_iflip_geometry *geometry_in, bool hwnd_target,
                     VkPresentModeKHR present_mode, uint32_t dxgi_format, bool system_tearing,
-                    bool own_copy)
+                    bool own_copy, bool plane_formats)
 {
    const struct wsi_iflip_geometry geometry = *geometry_in;
    struct wsi_iflip_inputs in = {};
@@ -2646,6 +2671,7 @@ wsi_iflip_inputs_of(const struct wsi_device *wsi_device,
     * it for today's driver (review of r1).
     */
    in.own_copy = own_copy;
+   in.plane_formats = plane_formats;
    in.dxgi_format = dxgi_format;
    in.extent_width = create_info->imageExtent.width;
    in.extent_height = create_info->imageExtent.height;
@@ -2999,12 +3025,13 @@ wsi_win32_surface_create_swapchain_dxgi(
                           (unsigned)got.Format, got.BufferCount, (unsigned)got.Scaling, got.Flags,
                           read_back ? "" : " (GetDesc1 failed)");
       wsi_win32_route_log(chain, "chain %p: iflip displayable %s, hardware composition 0x%x, "
-                          "switches shape %u scaling %u tearing %u buffers %u hook %u",
+                          "switches shape %u scaling %u tearing %u buffers %u hook %u, plane %s",
                           (void *)chain,
                           !queried ? "unknown" : displayable ? "yes (ALLOW_DISPLAY)" : "NO",
                           composition, knobs->shape ? 1u : 0u, knobs->scaling_none ? 1u : 0u,
                           knobs->tearing_on_demand ? 1u : 0u, knobs->buffers,
-                          knobs->window_hook ? 1u : 0u);
+                          knobs->window_hook ? 1u : 0u,
+                          chain->iflip_plane ? chain->iflip_plane : "unknown");
 
       /* The one WARN of the creation: the chain covers the output and every input this route
        * controls is at its scan-out value, and the heap query of back buffer 0 came back without
@@ -3073,12 +3100,16 @@ wsi_win32_create_chain(wsi_win32_surface *surface,
       wsi_dxgi_image_needs_blit(wsi_device, &dxgi_image_params, device) != WSI_SWAPCHAIN_NO_BLIT;
    /* One window read, kept on the chain: the plan, the reason and the log line all come from it. */
    const struct wsi_iflip_geometry geometry = wsi_iflip_geometry_of(surface->base.hwnd);
+   /* The plane's formats, read once for the chain like the window (BD-197). */
+   const char *plane_reading = "not-asked";
+   const bool plane_formats = !use_dxgi || !wsi_device->win32.scanout_plane_formats ||
+      wsi_device->win32.scanout_plane_formats(wsi_device->pdevice, &plane_reading);
    const struct wsi_iflip_inputs inputs =
       wsi_iflip_inputs_of(wsi_device, create_info, &geometry, hwnd_target,
                           wsi_swapchain_get_present_mode(wsi_device, create_info),
                           plan_format ? (uint32_t)plan_format->buffer : 0u,
                           use_dxgi ? wsi_iflip_system_tearing(wsi->dxgi.factory) : false,
-                          own_copy);
+                          own_copy, plane_formats);
    const struct wsi_iflip_plan plan = wsi_iflip_plan_of(knobs, &inputs);
 
    const unsigned num_images = use_dxgi ? plan.buffer_count : create_info->minImageCount;
@@ -3123,6 +3154,7 @@ wsi_win32_create_chain(wsi_win32_surface *surface,
    if (!use_dxgi)
       chain->iflip.buffer_count = 0;
    chain->iflip_geometry = geometry;
+   chain->iflip_plane = plane_reading;
    chain->iflip_reason = plan.eligible ? WSI_IFLIP_ELIGIBLE : plan.reason;
    chain->iflip_presents = 0;
    chain->iflip_warned = false;
@@ -3146,6 +3178,7 @@ wsi_win32_create_chain(wsi_win32_surface *surface,
    chain->pending_present_image = 0;
    chain->pending_present_value = 0;
    chain->stage_log_bits = 0;
+   chain->created_ns = os_time_get_nano();
 #if defined(AMDGPU_WDDM_LAB_FLAVOUR)
    const char *present_log_path = getenv("BC250_WSI_PRESENT_LOG");
 #else

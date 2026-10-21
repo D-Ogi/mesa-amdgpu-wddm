@@ -155,6 +155,13 @@ struct wsi_device {
        * formats that have no CPU path; *reason names why, for the log.
        */
       bool (*route_allowed)(VkPhysicalDevice pdevice, const char **reason);
+      /* scanout_plane_formats: asked when the surface formats are listed on the DXGI route and
+       * once per DXGI swapchain. False: the scan-out plane takes the firmware's BGRA8 alone, so
+       * the RGBA8 formats (BGRA8 with two channels swapped) are not listed, and an application
+       * that has the choice takes a layout its chain can be scanned out in. True, or NULL: they
+       * are listed. *reason names the reading, for the log.
+       */
+      bool (*scanout_plane_formats)(VkPhysicalDevice pdevice, const char **reason);
       /* The application image aliases the D3D12 shared resource and must have its linear layout. */
       bool linear_blit_image;
       /* Checks that the memory bound to a linear blit image has the image's own layout. */

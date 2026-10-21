@@ -10,7 +10,8 @@
  *                                             fail exactly the cases the lab measured as COMPOSED
  *
  * The cases are numbered in the order of the rules: the switches (1), the advertised image count
- * (1b), the two arms of 2026-10-11 (2), the formats (3), one case per refusal clause (4), the
+ * (1b), the two arms of 2026-10-11 (2), the formats (3), the formats of a plane that takes BGRA8
+ * alone (3b, BD-197), one case per refusal clause (4), the
  * scaling and extent interaction (5), the buffer counts and the array bound (6), the heap reading
  * (7), the chain as it stands against the chain as it was asked for (7b), the coverage arithmetic
  * (8), the reason names (9), the copy-list selection and its bounds (10) and the acquire fallback
@@ -56,6 +57,7 @@ borderless_1920x1200(uint32_t dxgi_format, uint32_t min_image_count)
    in.may_tear = false;              /* FIFO, as both arms presented */
    in.system_tearing = true;         /* the lab's DXGI reports tearing support */
    in.own_copy = true;
+   in.plane_formats = true;          /* the 2026-10-11 start published PLANE_FORMATS (caps 0x3) */
    in.dxgi_format = dxgi_format;
    in.extent_width = 1920;
    in.extent_height = 1200;
@@ -207,6 +209,27 @@ main(int argc, char **argv)
       check(wsi_iflip_plan_of(&knobs, &in).reason == WSI_IFLIP_FORMAT, "FP16 is no scan-out row");
       in.dxgi_format = 0u;
       check(wsi_iflip_plan_of(&knobs, &in).reason == WSI_IFLIP_FORMAT, "an unknown format");
+   }
+
+   /* 3b. BD-197: a start whose plane takes BGRA8 alone (the 31v3 kernel driver while its connector
+    * drives the output: caps 0x1). The shell stands RGBA8 and RGB10A2 down on its FORMAT clause,
+    * so the local verdict must say format for them and nothing new for BGRA8.
+    */
+   {
+      struct wsi_iflip_inputs in = borderless_1920x1200(WSI_IFLIP_DXGI_R8G8B8A8_UNORM, 2);
+      in.plane_formats = false;
+      check(wsi_iflip_plan_of(&knobs, &in).reason == WSI_IFLIP_FORMAT,
+            "BGRA8-only plane: Quake II RTX's RGBA8 chain stands down on format");
+      in.dxgi_format = WSI_IFLIP_DXGI_R10G10B10A2_UNORM;
+      check(wsi_iflip_plan_of(&knobs, &in).reason == WSI_IFLIP_FORMAT,
+            "BGRA8-only plane: RGB10A2 stands down on format");
+      in.dxgi_format = WSI_IFLIP_DXGI_B8G8R8A8_UNORM;
+      check(wsi_iflip_plan_of(&knobs, &in).eligible, "BGRA8-only plane: BGRA8 is still eligible");
+      check(!wsi_iflip_format_is_primary(WSI_IFLIP_DXGI_R8G8B8A8_UNORM, false) &&
+            wsi_iflip_format_is_primary(WSI_IFLIP_DXGI_R8G8B8A8_UNORM, true) &&
+            wsi_iflip_format_is_primary(WSI_IFLIP_DXGI_B8G8R8A8_UNORM, false) &&
+            !wsi_iflip_format_is_primary(10u, true),
+            "the format rule is bc250_scanout_format_admitted's, row by row");
    }
 
    /* 4. One clause per refusal, in the order the rules ask them. Each case moves one input of the

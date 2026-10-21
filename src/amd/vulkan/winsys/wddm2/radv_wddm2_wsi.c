@@ -319,6 +319,35 @@ radv_wddm2_wsi_route_allowed(VkPhysicalDevice _pdevice, const char **reason)
    return true;
 }
 
+/* BD-197: does the scan-out plane of this start take RGBA8 as well as BGRA8. The trailer is read at
+ * every call, as the D3D12 shell reads it for every primary: the start that answers is the one the
+ * chain will be presented on. A device that is not ours, or a failed query, reads UNKNOWN, which
+ * keeps the formats listed (radv_wddm2_scanout_lists_rgba8).
+ */
+static bool
+radv_wddm2_wsi_scanout_plane_formats(VkPhysicalDevice _pdevice, const char **reason)
+{
+   VK_FROM_HANDLE(radv_physical_device, pdev, _pdevice);
+   struct radv_wddm2_winsys *ws = radv_wddm2_winsys(pdev->ws);
+   unsigned char caps[RADV_WDDM2_SCANOUT_CAPS_TOTAL];
+   enum radv_wddm2_scanout_planes planes = RADV_WDDM2_SCANOUT_PLANES_UNKNOWN;
+
+   if (ws->bc250) {
+      memset(caps, 0, sizeof(caps));
+      D3DKMT_QUERYADAPTERINFO query = {
+         .hAdapter = ws->adapter_h,
+         .Type = KMTQAITYPE_UMDRIVERPRIVATE,
+         .pPrivateDriverData = caps,
+         .PrivateDriverDataSize = sizeof(caps),
+      };
+      const NTSTATUS status = WDDM2_DISPATCH(QueryAdapterInfo(&query));
+      planes = radv_wddm2_scanout_planes_of(caps, sizeof(caps), NT_SUCCESS(status));
+   }
+   if (reason)
+      *reason = radv_wddm2_scanout_planes_name(planes);
+   return radv_wddm2_scanout_lists_rgba8(planes);
+}
+
 /* The application's image aliases the D3D12 shared resource. Our D3D12 shell describes that resource
  * as a linear surface with LB7A, and the import keeps LB7A's pitch in the BO metadata. The image the
  * WSI created is linear as well; this asks whether both sides agree on the address of every row.
@@ -463,6 +492,7 @@ radv_wddm2_wsi_init(struct radeon_winsys *_ws, struct wsi_device *wsi)
       wsi->win32.get_d3d12_command_queue = radv_wddm2_wsi_get_d3d12_command_queue;
       wsi->win32.requires_blits = radv_wddm2_wsi_needs_blits;
       wsi->win32.route_allowed = radv_wddm2_wsi_route_allowed;
+      wsi->win32.scanout_plane_formats = radv_wddm2_wsi_scanout_plane_formats;
       wsi->win32.linear_blit_image = true;
       wsi->win32.check_blit_image = radv_wddm2_wsi_check_blit_image;
       wsi->win32.hwnd_target = choice.route == RADV_WDDM2_WSI_ROUTE_DXGI;

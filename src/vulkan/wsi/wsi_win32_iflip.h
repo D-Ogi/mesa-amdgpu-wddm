@@ -98,7 +98,9 @@
 /* The scan-out primary rows of the shared format table, by DXGI number
  * (driver/contract/amdgpu_wddm_surface_format.h, SCANOUT_PRIMARY). BGRA8 is the firmware's own
  * format; RGBA8 and RGB10A2 also need BC250_SCANOUT_CAPS_PLANE_FORMATS in the kernel driver's
- * trailer, which the WSI cannot read, so the clause admits them and the line says so.
+ * trailer (bc250_scanout_format_admitted, driver/contract/bc250_scanout_caps.h). The driver reads
+ * the trailer for the WSI (wsi_device.win32.scanout_plane_formats) and the answer is the input
+ * plane_formats; a driver without that hook gives true, and the clause then admits them as before.
  */
 #define WSI_IFLIP_DXGI_B8G8R8A8_UNORM   87u
 #define WSI_IFLIP_DXGI_R8G8B8A8_UNORM   28u
@@ -161,6 +163,7 @@ struct wsi_iflip_inputs {
    bool system_tearing;     /* IDXGIFactory5 reports DXGI_FEATURE_PRESENT_ALLOW_TEARING */
    bool own_copy;           /* the route's own D3D12 copy per present, so image and back buffer
                              * indices can be told apart (see wsi_iflip_buffer_count) */
+   bool plane_formats;      /* the scan-out plane takes RGBA8 and RGB10A2 as well as BGRA8 */
    uint32_t dxgi_format;
    uint32_t extent_width, extent_height;
    uint32_t client_width, client_height;
@@ -178,12 +181,18 @@ struct wsi_iflip_plan {
    enum wsi_iflip_reason reason;
 };
 
+/* The D3D12 shell's FORMAT clause for this chain (bc250_scanout_primary.h): BGRA8 always, the
+ * other two rows only on a start whose plane takes them. Without plane_formats the shell stands an
+ * RGBA8 chain down, and the chain is composed although every other input is at its scan-out value
+ * (BD-197: the 31v3 kernel driver withholds PLANE_FORMATS while its connector drives the output).
+ */
 static inline bool
-wsi_iflip_format_is_primary(uint32_t dxgi_format)
+wsi_iflip_format_is_primary(uint32_t dxgi_format, bool plane_formats)
 {
-   return dxgi_format == WSI_IFLIP_DXGI_B8G8R8A8_UNORM ||
-          dxgi_format == WSI_IFLIP_DXGI_R8G8B8A8_UNORM ||
-          dxgi_format == WSI_IFLIP_DXGI_R10G10B10A2_UNORM;
+   if (dxgi_format == WSI_IFLIP_DXGI_B8G8R8A8_UNORM)
+      return true;
+   return plane_formats && (dxgi_format == WSI_IFLIP_DXGI_R8G8B8A8_UNORM ||
+                            dxgi_format == WSI_IFLIP_DXGI_R10G10B10A2_UNORM);
 }
 
 /* The buffer count, which is also the swapchain's image count. Raising it above the application's
@@ -278,7 +287,7 @@ wsi_iflip_plan_of(const struct wsi_iflip_knobs *knobs, const struct wsi_iflip_in
    else if (!in->extent_width || in->extent_width != in->output_width ||
             in->extent_height != in->output_height)
       plan.reason = WSI_IFLIP_EXTENT;
-   else if (!wsi_iflip_format_is_primary(in->dxgi_format))
+   else if (!wsi_iflip_format_is_primary(in->dxgi_format, in->plane_formats))
       plan.reason = WSI_IFLIP_FORMAT;
    else if (!in->alpha_ignore)
       plan.reason = WSI_IFLIP_ALPHA;

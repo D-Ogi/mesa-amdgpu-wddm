@@ -4,7 +4,7 @@
  *
  * Host test of radv_wddm2_wsi_route.h and wsi_win32_deadline.h: the present route switch, the
  * report of application-local runtime modules, the D3D12 implementation check, the LB7A checks of
- * the shared-resource import, and the deadlines, the degrade rule and the retirement rules of the
+ * the shared-resource import, the reading of the scan-out caps trailer (BD-197), and the deadlines, the degrade rule and the retirement rules of the
  * DXGI route (BD-105). No GPU, no Vulkan and no Windows header: the one thing outside the C library
  * is _beginthread from <process.h>, which the concurrency case of round 4b needs to run the route
  * flags from two threads at once (V3). Run through
@@ -240,6 +240,63 @@ test_lb7a(void)
    s = lb7a(64, 64, 256, RADV_WDDM2_D3DDDIFMT_A8R8G8B8);
    s.size = UINT64_MAX;
    CHECK(!radv_wddm2_lb7a_valid(&s));
+}
+
+/* A caps buffer of the trailer's full size with the trailer's four words at offset 1496. */
+static void
+scanout_caps(unsigned char *caps, uint32_t magic, uint32_t version, uint32_t flags)
+{
+   const uint32_t word[4] = {magic, version, 24u, flags};
+   memset(caps, 0, RADV_WDDM2_SCANOUT_CAPS_TOTAL);
+   for (unsigned i = 0; i < 4; i++)
+      for (unsigned b = 0; b < 4; b++)
+         caps[RADV_WDDM2_SCANOUT_CAPS_OFFSET + 4 * i + b] = (unsigned char)(word[i] >> (8 * b));
+}
+
+/* BD-197: the scan-out caps trailer, read the way the D3D12 shell reads it
+ * (bc250_scanout_primary_rule, bc250-win driver/contract/bc250_scanout_primary.h at 31abd669).
+ * The two starts the lab measured: 2026-10-11 published 0x3 and Quake II RTX's RGBA8 chain flipped;
+ * the 31v3 start of 2026-10-20 publishes 0x1 and the same chain was composed.
+ */
+static void
+test_scanout_planes(void)
+{
+   unsigned char caps[RADV_WDDM2_SCANOUT_CAPS_TOTAL];
+   const uint32_t magic = RADV_WDDM2_SCANOUT_CAPS_MAGIC;
+
+   scanout_caps(caps, magic, 1, 0x3u);
+   CHECK(radv_wddm2_scanout_planes_of(caps, sizeof(caps), true) == RADV_WDDM2_SCANOUT_PLANES_ALL);
+   CHECK(radv_wddm2_scanout_lists_rgba8(RADV_WDDM2_SCANOUT_PLANES_ALL));
+
+   scanout_caps(caps, magic, 1, 0x1u);
+   CHECK(radv_wddm2_scanout_planes_of(caps, sizeof(caps), true) == RADV_WDDM2_SCANOUT_PLANES_BGRA8);
+   CHECK(!radv_wddm2_scanout_lists_rgba8(RADV_WDDM2_SCANOUT_PLANES_BGRA8));
+   CHECK(!strcmp(radv_wddm2_scanout_planes_name(RADV_WDDM2_SCANOUT_PLANES_BGRA8), "bgra8-only"));
+
+   /* PLANE_FORMATS is written only with DIRECT_FLIP; a trailer without DIRECT_FLIP scans nothing out. */
+   scanout_caps(caps, magic, 1, 0x2u);
+   CHECK(radv_wddm2_scanout_planes_of(caps, sizeof(caps), true) == RADV_WDDM2_SCANOUT_PLANES_NO_FLIP);
+   CHECK(radv_wddm2_scanout_lists_rgba8(RADV_WDDM2_SCANOUT_PLANES_NO_FLIP));
+
+   /* Nothing known keeps the list as it was: no trailer (the handshake off, an older driver), a
+    * failed query, a short buffer, another magic or version.
+    */
+   memset(caps, 0, sizeof(caps));
+   CHECK(radv_wddm2_scanout_planes_of(caps, sizeof(caps), true) == RADV_WDDM2_SCANOUT_PLANES_UNKNOWN);
+   scanout_caps(caps, magic, 1, 0x1u);
+   CHECK(radv_wddm2_scanout_planes_of(caps, sizeof(caps), false) == RADV_WDDM2_SCANOUT_PLANES_UNKNOWN);
+   CHECK(radv_wddm2_scanout_planes_of(caps, RADV_WDDM2_SCANOUT_CAPS_TOTAL - 1, true) ==
+         RADV_WDDM2_SCANOUT_PLANES_UNKNOWN);
+   CHECK(radv_wddm2_scanout_planes_of(NULL, sizeof(caps), true) == RADV_WDDM2_SCANOUT_PLANES_UNKNOWN);
+   scanout_caps(caps, 0x46533243u, 1, 0x1u);
+   CHECK(radv_wddm2_scanout_planes_of(caps, sizeof(caps), true) == RADV_WDDM2_SCANOUT_PLANES_UNKNOWN);
+   scanout_caps(caps, magic, 2, 0x1u);
+   CHECK(radv_wddm2_scanout_planes_of(caps, sizeof(caps), true) == RADV_WDDM2_SCANOUT_PLANES_UNKNOWN);
+   CHECK(radv_wddm2_scanout_lists_rgba8(RADV_WDDM2_SCANOUT_PLANES_UNKNOWN));
+
+   /* The layout is the contract's: "B2SF" at 1496 of a 1520-byte buffer. */
+   CHECK(RADV_WDDM2_SCANOUT_CAPS_OFFSET == 1496u && RADV_WDDM2_SCANOUT_CAPS_TOTAL == 1520u);
+   CHECK(RADV_WDDM2_SCANOUT_CAPS_MAGIC == ('B' | 'S' << 16 | 'F' << 24 | '2' << 8));
 }
 
 /* The deadlines of the DXGI route (wsi_win32_deadline.h). The rule under test is the one the route
@@ -1166,6 +1223,7 @@ static const struct {
    {"app_local", test_app_local},
    {"d3d12_impl", test_d3d12_impl},
    {"lb7a", test_lb7a},
+   {"scanout_planes", test_scanout_planes},
    {"deadline", test_deadline},
    {"present_completion", test_present_completion},
    {"presenter_state", test_presenter_state},

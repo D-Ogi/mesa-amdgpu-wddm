@@ -377,6 +377,76 @@ radv_wddm2_lb7a_valid(const struct radv_wddm2_lb7a *s)
    return true;
 }
 
+/* BD-197: the formats the scan-out plane takes on this start, read from the kernel driver's
+ * scan-out caps trailer (bc250-win driver/contract/bc250_scanout_caps.h at 31abd669). The trailer
+ * is 24 bytes at offset 1496 of the private adapter caps, written only into a query buffer of at
+ * least 1520 bytes and only while the start offers a client scan-out flip: magic "B2SF", version 1,
+ * size, flags. DIRECT_FLIP says the start admits a client scan-out flip; PLANE_FORMATS says the
+ * plane also takes the table's other SCANOUT_PRIMARY rows (RGBA8, RGB10A2). The D3D12 shell applies
+ * the same two bits to every primary (bc250_scanout_primary_rule), so a reading here is the
+ * shell's answer for a chain of the same format.
+ *
+ *   UNKNOWN   the query failed, or no trailer (an older driver, or the handshake is off)
+ *   NO_FLIP   a trailer without DIRECT_FLIP: no chain is scanned out, whatever its format
+ *   BGRA8     DIRECT_FLIP without PLANE_FORMATS: the firmware's BGRA8 alone
+ *   ALL       DIRECT_FLIP and PLANE_FORMATS
+ *
+ * Only BGRA8 is a reason to withhold the RGBA8 surface formats; every other reading keeps the
+ * list the route had before (radv_wddm2_scanout_lists_rgba8).
+ */
+#define RADV_WDDM2_SCANOUT_CAPS_OFFSET        1496u
+#define RADV_WDDM2_SCANOUT_CAPS_TOTAL         1520u
+#define RADV_WDDM2_SCANOUT_CAPS_MAGIC         0x46533242u /* "B2SF" */
+#define RADV_WDDM2_SCANOUT_CAPS_VERSION       1u
+#define RADV_WDDM2_SCANOUT_CAPS_DIRECT_FLIP   0x1u
+#define RADV_WDDM2_SCANOUT_CAPS_PLANE_FORMATS 0x2u
+
+enum radv_wddm2_scanout_planes {
+   RADV_WDDM2_SCANOUT_PLANES_UNKNOWN = 0,
+   RADV_WDDM2_SCANOUT_PLANES_NO_FLIP,
+   RADV_WDDM2_SCANOUT_PLANES_BGRA8,
+   RADV_WDDM2_SCANOUT_PLANES_ALL,
+};
+
+static inline const char *
+radv_wddm2_scanout_planes_name(enum radv_wddm2_scanout_planes planes)
+{
+   switch (planes) {
+   case RADV_WDDM2_SCANOUT_PLANES_NO_FLIP: return "no-flip";
+   case RADV_WDDM2_SCANOUT_PLANES_BGRA8: return "bgra8-only";
+   case RADV_WDDM2_SCANOUT_PLANES_ALL: return "all-formats";
+   default: return "unknown";
+   }
+}
+
+/* caps is the buffer the query filled, size its length, and query_ok whether the query
+ * succeeded. Read byte by byte: the buffer has no alignment promise at the trailer's offset.
+ */
+static inline enum radv_wddm2_scanout_planes
+radv_wddm2_scanout_planes_of(const void *caps, size_t size, bool query_ok)
+{
+   const unsigned char *p = (const unsigned char *)caps + RADV_WDDM2_SCANOUT_CAPS_OFFSET;
+   uint32_t word[4];
+
+   if (!query_ok || !caps || size < RADV_WDDM2_SCANOUT_CAPS_TOTAL)
+      return RADV_WDDM2_SCANOUT_PLANES_UNKNOWN;
+   for (unsigned i = 0; i < 4; i++)
+      word[i] = (uint32_t)p[4 * i] | (uint32_t)p[4 * i + 1] << 8 | (uint32_t)p[4 * i + 2] << 16 |
+                (uint32_t)p[4 * i + 3] << 24;
+   if (word[0] != RADV_WDDM2_SCANOUT_CAPS_MAGIC || word[1] != RADV_WDDM2_SCANOUT_CAPS_VERSION)
+      return RADV_WDDM2_SCANOUT_PLANES_UNKNOWN;
+   if (!(word[3] & RADV_WDDM2_SCANOUT_CAPS_DIRECT_FLIP))
+      return RADV_WDDM2_SCANOUT_PLANES_NO_FLIP;
+   return (word[3] & RADV_WDDM2_SCANOUT_CAPS_PLANE_FORMATS) ? RADV_WDDM2_SCANOUT_PLANES_ALL
+                                                            : RADV_WDDM2_SCANOUT_PLANES_BGRA8;
+}
+
+static inline bool
+radv_wddm2_scanout_lists_rgba8(enum radv_wddm2_scanout_planes planes)
+{
+   return planes != RADV_WDDM2_SCANOUT_PLANES_BGRA8;
+}
+
 #ifdef __cplusplus
 }
 #endif
