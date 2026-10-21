@@ -28,7 +28,12 @@
 #include <stdlib.h>
 
 #ifdef _WIN32
+#include <fcntl.h>
+#include <io.h>
 #include <windows.h>
+
+/* Distinguishes the temporary files of one process. */
+static volatile LONG u_memstream_counter;
 #endif
 
 bool
@@ -41,28 +46,51 @@ u_memstream_open(struct u_memstream *mem, char **bufp, size_t *sizep)
 
    return err == 0;
 #elif defined(_WIN32)
-   bool success = false;
-
+   /* The stream is a temporary file that the system deletes when its last handle closes, also when the process ends
+    * without u_memstream_close. Its name comes from the process id and a counter, not from GetTempFileName: that
+    * function has 65535 names per prefix and probes the existing ones on every call, and the files of a stream whose
+    * deletion failed used to fill that namespace, after which every open cost 65535 failed CreateFile calls.
+    */
    char path[MAX_PATH];
-   DWORD dwResult = GetTempPath(MAX_PATH, path);
-   if ((dwResult > 0) && (dwResult < MAX_PATH)) {
-      char *temp = mem->temp;
-      UINT uResult = GetTempFileName(path, "MEMSTREAM", 0, temp);
-      if (uResult != 0) {
-         FILE *f = fopen(temp, "w+b");
-         success = f != NULL;
-         if (success)
-         {
-            *bufp = NULL;
-            *sizep = 0;
-            mem->f = f;
-            mem->bufp = bufp;
-            mem->sizep = sizep;
-         }
+   DWORD dwResult = GetTempPathA(MAX_PATH, path);
+   if (dwResult == 0 || dwResult >= MAX_PATH)
+      return false;
+
+   for (unsigned attempt = 0; attempt < 8; attempt++) {
+      int len = snprintf(mem->temp, sizeof(mem->temp), "%smesa-memstream-%lu-%ld-%lu.tmp", path,
+                         (unsigned long)GetCurrentProcessId(), (long)InterlockedIncrement(&u_memstream_counter),
+                         (unsigned long)GetTickCount());
+      if (len < 0 || (size_t)len >= sizeof(mem->temp))
+         return false;
+
+      HANDLE h = CreateFileA(mem->temp, GENERIC_READ | GENERIC_WRITE, 0, NULL, CREATE_NEW,
+                             FILE_ATTRIBUTE_TEMPORARY | FILE_FLAG_DELETE_ON_CLOSE, NULL);
+      if (h == INVALID_HANDLE_VALUE) {
+         if (GetLastError() == ERROR_FILE_EXISTS)
+            continue;
+         return false;
       }
+
+      int fd = _open_osfhandle((intptr_t)h, _O_RDWR | _O_BINARY);
+      if (fd == -1) {
+         CloseHandle(h);
+         return false;
+      }
+      FILE *f = _fdopen(fd, "w+b");
+      if (f == NULL) {
+         _close(fd);
+         return false;
+      }
+
+      *bufp = NULL;
+      *sizep = 0;
+      mem->f = f;
+      mem->bufp = bufp;
+      mem->sizep = sizep;
+      return true;
    }
 
-   return success;
+   return false;
 #else
    FILE *const f = open_memstream(bufp, sizep);
    mem->f = f;
@@ -96,9 +124,9 @@ u_memstream_close(struct u_memstream *mem)
 
 #ifdef _WIN32
    u_memstream_update_buffer(mem);
-   remove(mem->temp);
 #endif
 
+   /* On Windows this also deletes the file (FILE_FLAG_DELETE_ON_CLOSE). */
    fclose(f);
 }
 
