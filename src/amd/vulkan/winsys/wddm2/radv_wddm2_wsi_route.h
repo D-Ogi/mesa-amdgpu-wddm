@@ -37,7 +37,7 @@ enum radv_wddm2_wsi_route {
    RADV_WDDM2_WSI_ROUTE_DXGI_COMPOSITION = 2,
 };
 
-/* The default route is DXGI: the owner's decision of 2026-10-07, because a GPU route that has to be
+/* The default route is DXGI (project decision, 2026-10-07), because a GPU route that has to be
  * switched on gets forgotten. From BD-105 (2026-10-09: the first lab trial of this route froze every
  * client before its first present, GPU idle, no TDR) the default was GDI, until a lab arm presented
  * through DXGI. BD-197 did, on the release KMD 22BA3CDB (2026-10-21, block D2, the route asked for
@@ -212,7 +212,7 @@ radv_wddm2_wsi_base_name_is(const wchar_t *path, const wchar_t *name)
 /* Application-local runtime modules. The DXGI route binds System32 dxgi.dll and d3d12.dll by full
  * path and takes CreateDXGIFactory2 and D3D12CreateDevice from those handles, so a copy of dxgi.dll
  * (DXVK), d3d12.dll or d3d12core.dll (vkd3d-proton, or the Agility SDK) next to the application does
- * not change the route (owner decision 2026-10-07; M793: the DXGI present route passes beside DXVK
+ * not change the route (M793: the DXGI present route passes beside DXVK
  * and vkd3d-proton DLLs in all six E56 modes). The copies are only reported on the init line.
  *
  * Each path is the full path of a module or file under that name, or NULL. A path directly inside

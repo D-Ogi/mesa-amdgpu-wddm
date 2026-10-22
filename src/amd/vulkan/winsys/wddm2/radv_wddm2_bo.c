@@ -841,7 +841,7 @@ error_ptr_alloc:
  * range before it gives up. Borrowed BOs are the host's, which retires them itself.
  * BC250_DEFERRED_DESTROY=0 turns the hold off; an ordinary BO's release does not depend on it.
  *
- * Nothing is ever released without proof (owner criterion 2): a failed wait, a timeout, a missing
+ * Nothing is ever released without proof: a failed wait, a timeout, a missing
  * tracker and teardown are not proof, and the only answer to a missing proof is to keep the range or, at
  * teardown, to leak it and count it (R5). Every allocation the ICD still holds has an owner and a
  * counter: a refused DestroyAllocation2 (refused_*), retried at the drain points. A cap on held bytes

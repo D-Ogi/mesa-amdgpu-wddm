@@ -56,7 +56,7 @@ test_choose(void)
 {
    struct radv_wddm2_wsi_route_choice c;
 
-   /* Nothing set: the default is DXGI (the owner's decision of 2026-10-07, back since the BD-197 lab
+   /* Nothing set: the default is DXGI (the project default since 2026-10-07, back since the BD-197 lab
     * arm presented through it). An application reaches GDI by asking for it, or by a DXGI failure.
     */
    c = radv_wddm2_wsi_route_choose(NULL, NULL);
