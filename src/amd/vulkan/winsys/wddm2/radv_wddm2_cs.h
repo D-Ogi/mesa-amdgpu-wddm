@@ -35,6 +35,7 @@
 #include "util/u_dynarray.h"
 
 struct radv_wddm2_tracker; /* radv_wddm2_bo.h: deferred destruction, BD-201 */
+struct bc250_submit_ib; /* radv_wddm2_cs.c */
 
 struct vk_wddm2_fence {
    uint32_t handle;
@@ -62,7 +63,7 @@ struct radv_wddm2_queue {
    struct bc250_gather_slot bc250_gather[BC250_GATHER_SLOTS];
    unsigned bc250_gather_index;
    bool bc250_submit_failed;
-   struct radv_winsys_ib *bc250_ibs;
+   struct bc250_submit_ib *bc250_ibs;
    unsigned bc250_ib_capacity;
    struct vk_wddm2_fence bc250_progress;
    /* Deferred destruction (radv_wddm2_bo.c, BD-201): this queue's published progress. */
