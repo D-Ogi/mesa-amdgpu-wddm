@@ -955,28 +955,34 @@ bc250_collect_submit(const struct radv_winsys_submit_info *submit,
 
 /* Whether the CP may run this IB as an IB2 called from the gather slot: it calls no IB2
  * itself (there is no third level), and its address and size fit IB_BASE (dword aligned)
- * and IB_SIZE. The caller checked that the IB lies inside its BO.
+ * and IB_SIZE. The caller checked that the IB lies inside its BO (bc250_ib_in_bo).
  */
 static bool
 bc250_ib2_callable(const struct bc250_submit_ib *s)
 {
-   return !s->calls_ib2 && s->ib.va >= s->ib.bo->va && (s->ib.va & 3) == 0 &&
-          s->ib.cdw <= G_3F3_IB_SIZE(UINT32_MAX);
+   return !s->calls_ib2 && (s->ib.va & 3) == 0 && s->ib.cdw <= G_3F3_IB_SIZE(UINT32_MAX);
+}
+
+/* Whether all dwords of the IB lie inside its BO. The checks subtract, so that no sum can wrap.
+ * An IB that starts below its BO is refused too: the copy read the start of the BO for it before.
+ */
+static bool
+bc250_ib_in_bo(const struct radv_winsys_ib *ib)
+{
+   if (!ib->bo || ib->va < ib->bo->va)
+      return false;
+   const uint64_t off = ib->va - ib->bo->va;
+   return off <= ib->bo->size && (uint64_t)ib->cdw * 4 <= ib->bo->size - off;
 }
 
 /* The CS BO bytes of one IB, NULL if the IB is not inside a mapped BO. */
 static const uint8_t *
 bc250_ib_bytes(struct radv_wddm2_winsys *ws, const struct radv_winsys_ib *ib)
 {
-   uint64_t off = 0;
-   if (!ib->bo)
-      return NULL;
-   if (ib->va >= ib->bo->va)
-      off = ib->va - ib->bo->va;
-   if (off + (uint64_t)ib->cdw * 4 > ib->bo->size)
+   if (!bc250_ib_in_bo(ib))
       return NULL;
    const uint8_t *src = ws->base.buffer_map(&ws->base, ib->bo, false, NULL);
-   return src ? src + off : NULL;
+   return src ? src + (ib->va - ib->bo->va) : NULL;
 }
 
 /* One IB1 on the gfx ring: the KMD runs the single IB of a BC2S blob (driver/kmd/umd_blob.c,
@@ -992,12 +998,13 @@ bc250_ib_bytes(struct radv_wddm2_winsys *ws, const struct radv_winsys_ib *ib)
  * was refused, which the application saw as VK_ERROR_DEVICE_LOST. vkd3d-proton 3.0.1 sent
  * 1101808 dwords in one submission of Cyberpunk 2077. The calls make the IB1 four dwords per IB.
  *
- * The IB2 calls leave the command streams in use until this submission retires. That holds
- * as for any Vulkan submission: a command buffer stays pending until the application's
- * signal, which is queued after this IB1 on the same context, and RADV destroys a replaced
- * queue preamble only after ctx_wait_idle (radv_update_preamble_cs). A command BO destroyed
- * early goes through DestroyAllocation2, which the OS defers until the work queued before it
- * finishes (radv_wddm2_bo.c, BD-201).
+ * The IB2 calls leave the command streams in use until this submission retires. Vulkan keeps
+ * an application command buffer pending until the application's signal, which is queued after
+ * this IB1 on the same context. RADV can destroy other streams earlier: radv_update_preamble_cs
+ * destroys a replaced queue preamble with no wait. A destroyed command BO goes through
+ * DestroyAllocation2, which the OS defers until the work queued before it finishes, and a VA
+ * that the winsys owns stays reserved until that work retires (radv_wddm2_bo.c, BD-201). So
+ * the CP never reads a released stream.
  */
 static NTSTATUS
 radv_wddm2_bc250_submit(struct radv_wddm2_ctx *ctx, struct radv_wddm2_queue *queue,
@@ -1040,6 +1047,9 @@ radv_wddm2_bc250_submit(struct radv_wddm2_ctx *ctx, struct radv_wddm2_queue *que
 
    const bool direct = n == 1;
    if (direct) {
+      /* The KMD runs this IB as the IB1, so it gets the same range check as a gathered IB. */
+      if (!bc250_ib_in_bo(&ibs[0].ib))
+         return STATUS_INVALID_PARAMETER;
       va = ibs[0].ib.va;
       bytes = ibs[0].ib.cdw * 4;
    } else {
