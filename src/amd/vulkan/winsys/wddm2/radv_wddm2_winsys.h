@@ -61,6 +61,14 @@ struct radv_wddm2_winsys {
    bool dump_ibs;
    bool bc250_trace_submits; /* optional hot-path diagnostic output */
    bool bc250; /* caps blob was ours; allocate/context/submit use the BC2* contract */
+   /* The gather slot of a submission (radv_wddm2_bc250_submit): false calls each IB as an IB2,
+    * true copies every IB into the IB1, the old path. Only the lab flavour sets it, from
+    * BC250_IB_NOCOPY=0 or BC250_IB_DWORDS (the clamp, read once into bc250_ib_dwords_cap,
+    * applies to a copied stream). bc250_inline_submits counts the submissions that copied an
+    * IB although the calls were on. */
+   bool bc250_gather_copy;
+   unsigned long bc250_ib_dwords_cap;
+   uint64_t bc250_inline_submits;
 
    uint32_t adapter_h;
    LUID adapter_luid;

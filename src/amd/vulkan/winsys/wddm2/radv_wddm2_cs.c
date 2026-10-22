@@ -61,6 +61,13 @@
 #include <assert.h>
 #include <d3dkmthk.h>
 
+/* One IB of a bc250 submission, in submission order. calls_ib2 is the flag of the
+ * command stream it came from: such an IB runs at IB1 level, copied into the gather slot. */
+struct bc250_submit_ib {
+   struct radv_winsys_ib ib;
+   bool calls_ib2;
+};
+
 struct PACKED create_context_private_data {
    uint32_t header_size;
    uint32_t flags;
@@ -898,7 +905,7 @@ radv_wddm2_submit_add_queue(struct radv_wddm2_ctx *ctx, struct submit_pdd_writer
  * A NULL output counts the complete submission before allocating its collection.
  */
 static bool
-bc250_collect_cs(struct radv_winsys_cs *cs, struct radv_winsys_ib *out, unsigned *n, unsigned cap)
+bc250_collect_cs(struct radv_winsys_cs *cs, struct bc250_submit_ib *out, unsigned *n, unsigned cap)
 {
    unsigned count = cs->chain_ib ? 1 : cs->num_ib_buffers;
    unsigned i;
@@ -907,15 +914,17 @@ bc250_collect_cs(struct radv_winsys_cs *cs, struct radv_winsys_ib *out, unsigned
       return false;
    }
    if (out) {
-      for (i = 0; i < count; i++)
-         out[*n + i] = cs->ib_buffers[i];
+      for (i = 0; i < count; i++) {
+         out[*n + i].ib = cs->ib_buffers[i];
+         out[*n + i].calls_ib2 = cs->calls_ib2;
+      }
    }
    *n += count;
    return true;
 }
 
 static bool
-bc250_collect_array(struct ac_cmdbuf **arr, unsigned count, struct radv_winsys_ib *out, unsigned *n, unsigned cap)
+bc250_collect_array(struct ac_cmdbuf **arr, unsigned count, struct bc250_submit_ib *out, unsigned *n, unsigned cap)
 {
    unsigned i;
    for (i = 0; i < count; i++) {
@@ -927,7 +936,7 @@ bc250_collect_array(struct ac_cmdbuf **arr, unsigned count, struct radv_winsys_i
 
 static bool
 bc250_collect_submit(const struct radv_winsys_submit_info *submit,
-                      struct radv_winsys_ib *ibs, unsigned *n, unsigned cap)
+                      struct bc250_submit_ib *ibs, unsigned *n, unsigned cap)
 {
    /* Same order as the amdgpu winsys: initial preamble on the first CS, the continue
     * preamble on every later CS in this submit, postamble once at the end.
@@ -944,18 +953,62 @@ bc250_collect_submit(const struct radv_winsys_submit_info *submit,
    return true;
 }
 
-/* One IB on the gfx ring. Several command streams are copied into one gather BO: the KMD
- * runs a single IB and does not half-run a list.
+/* Whether the CP may run this IB as an IB2 called from the gather slot: it calls no IB2
+ * itself (there is no third level), and its address and size fit IB_BASE (dword aligned)
+ * and IB_SIZE. The caller checked that the IB lies inside its BO.
+ */
+static bool
+bc250_ib2_callable(const struct bc250_submit_ib *s)
+{
+   return !s->calls_ib2 && s->ib.va >= s->ib.bo->va && (s->ib.va & 3) == 0 &&
+          s->ib.cdw <= G_3F3_IB_SIZE(UINT32_MAX);
+}
+
+/* The CS BO bytes of one IB, NULL if the IB is not inside a mapped BO. */
+static const uint8_t *
+bc250_ib_bytes(struct radv_wddm2_winsys *ws, const struct radv_winsys_ib *ib)
+{
+   uint64_t off = 0;
+   if (!ib->bo)
+      return NULL;
+   if (ib->va >= ib->bo->va)
+      off = ib->va - ib->bo->va;
+   if (off + (uint64_t)ib->cdw * 4 > ib->bo->size)
+      return NULL;
+   const uint8_t *src = ws->base.buffer_map(&ws->base, ib->bo, false, NULL);
+   return src ? src + off : NULL;
+}
+
+/* One IB1 on the gfx ring: the KMD runs the single IB of a BC2S blob (driver/kmd/umd_blob.c,
+ * single_ib) and puts its own frame and fence around it on the ring. A submission of several
+ * IBs is packed into a gather BO of the queue. By default the gather BO holds one IB2 call
+ * (INDIRECT_BUFFER without CHAIN, the form RADV uses for secondaries) per IB, and the CP reads
+ * the command streams where RADV recorded them; an IB whose stream calls an IB2 itself is
+ * copied into the gather BO instead and runs at IB1 level. The lab flavour's BC250_IB_NOCOPY=0
+ * copies every IB, the previous behaviour.
+ *
+ * Every IB of a submission was copied before (BD-207): the CPU read write-combined command
+ * buffers on each submission, and a submission of more than 1048575 dwords, the IB_SIZE field,
+ * was refused, which the application saw as VK_ERROR_DEVICE_LOST. vkd3d-proton 3.0.1 sent
+ * 1101808 dwords in one submission of Cyberpunk 2077. The calls make the IB1 four dwords per IB.
+ *
+ * The IB2 calls leave the command streams in use until this submission retires. That holds
+ * as for any Vulkan submission: a command buffer stays pending until the application's
+ * signal, which is queued after this IB1 on the same context, and RADV destroys a replaced
+ * queue preamble only after ctx_wait_idle (radv_update_preamble_cs). A command BO destroyed
+ * early goes through DestroyAllocation2, which the OS defers until the work queued before it
+ * finishes (radv_wddm2_bo.c, BD-201).
  */
 static NTSTATUS
 radv_wddm2_bc250_submit(struct radv_wddm2_ctx *ctx, struct radv_wddm2_queue *queue,
                         const struct radv_winsys_submit_info *submit)
 {
    struct radv_wddm2_winsys *ws = ctx->ws;
-   struct radv_winsys_ib local_ibs[16];
-   struct radv_winsys_ib *ibs = local_ibs;
+   struct bc250_submit_ib local_ibs[16];
+   struct bc250_submit_ib *ibs = local_ibs;
    struct bc250_submit_blob blob;
    unsigned n = 0, i;
+   unsigned calls = 0, copies = 0, nested = 0;
    uint64_t total = 0;
    uint64_t va;
    uint32_t bytes;
@@ -985,17 +1038,42 @@ radv_wddm2_bc250_submit(struct radv_wddm2_ctx *ctx, struct radv_wddm2_queue *que
    if (n == 0)
       return STATUS_SUCCESS;
 
-   if (n == 1) {
-      va = ibs[0].va;
-      bytes = ibs[0].cdw * 4;
+   const bool direct = n == 1;
+   if (direct) {
+      va = ibs[0].ib.va;
+      bytes = ibs[0].ib.cdw * 4;
    } else {
+      const bool copy_all = ws->bc250_gather_copy;
+      uint64_t copied_dw = 0;
+      unsigned pad = 0;
       uint8_t *dst;
-      for (i = 0; i < n; i++)
-         total += ibs[i].cdw;
+      for (i = 0; i < n; i++) {
+         const struct radv_winsys_ib *ib = &ibs[i].ib;
+         if (!bc250_ib_bytes(ws, ib))
+            return STATUS_INVALID_PARAMETER;
+         if (!copy_all && !ib->cdw)
+            continue; /* nothing to call */
+         if (copy_all || !bc250_ib2_callable(&ibs[i])) {
+            copied_dw += ib->cdw;
+            copies++;
+            nested += ibs[i].calls_ib2;
+         } else {
+            calls++;
+         }
+      }
+      total = copied_dw + 4ull * calls;
+      /* The IB1 ends on the IB padding of the GFX queue, as every RADV IB does. Copied IBs are
+       * already padded; four-dword calls may leave half a unit. */
+      if (!copy_all) {
+         const uint32_t pad_mask = ws->gpu_info.ip[AMD_IP_GFX].ib_pad_dw_mask;
+         pad = (unsigned)((pad_mask + 1u - (total & pad_mask)) & pad_mask);
+         total += pad;
+      }
       /* Match the GFX INDIRECT_BUFFER IB_SIZE field, not an arbitrary 1 MiB
        * staging limit. The caller retired the selected gather slot before any write or resize. */
       if (total == 0 || total > G_3F3_IB_SIZE(UINT32_MAX)) {
-         fprintf(stderr, "bc250: gather exceeds IB_SIZE field: %" PRIu64 " dwords\n", total);
+         fprintf(stderr, "bc250: gather exceeds IB_SIZE field: %" PRIu64 " dwords (%u calls, %u copies)\n",
+                 total, calls, copies);
          return STATUS_INVALID_PARAMETER;
       }
       bytes = (uint32_t)(total * 4);
@@ -1017,43 +1095,64 @@ radv_wddm2_bc250_submit(struct radv_wddm2_ctx *ctx, struct radv_wddm2_queue *que
             ws->base.buffer_destroy(&ws->base, queue->bc250_gather[queue->bc250_gather_index].bo);
          queue->bc250_gather[queue->bc250_gather_index].bo = replacement;
          queue->bc250_gather[queue->bc250_gather_index].map = mapping;
-         fprintf(stderr, "bc250: gather capacity=%" PRIu64 " bytes required=%u ibs=%u\n", capacity, bytes, n);
+         fprintf(stderr, "bc250: gather capacity=%" PRIu64 " bytes required=%u ibs=%u calls=%u copies=%u\n",
+                 capacity, bytes, n, calls, copies);
       }
       dst = queue->bc250_gather[queue->bc250_gather_index].map;
       for (i = 0; i < n; i++) {
-         uint8_t *src = NULL;
-         uint64_t off = 0;
-         if (!ibs[i].bo)
-            return STATUS_INVALID_PARAMETER;
-         if (ibs[i].va >= ibs[i].bo->va)
-            off = ibs[i].va - ibs[i].bo->va;
-         if (off + (uint64_t)ibs[i].cdw * 4 > ibs[i].bo->size)
-            return STATUS_INVALID_PARAMETER;
-         src = ws->base.buffer_map(&ws->base, ibs[i].bo, false, NULL);
-         if (!src)
-            return STATUS_INVALID_PARAMETER;
-         memcpy(dst, src + off, ibs[i].cdw * 4);
-         dst += ibs[i].cdw * 4;
+         const struct radv_winsys_ib *ib = &ibs[i].ib;
+         if (!copy_all && !ib->cdw)
+            continue;
+         if (copy_all || !bc250_ib2_callable(&ibs[i])) {
+            /* Checked above; the mapping is the BO's persistent one. */
+            memcpy(dst, bc250_ib_bytes(ws, ib), ib->cdw * 4);
+            dst += ib->cdw * 4;
+         } else {
+            /* IB2: header, IB_BASE_LO, IB_BASE_HI, IB_SIZE. No CHAIN and no VMID, as RADV's
+             * IB2 for secondaries (radv_winsys_cs_emit_secondary_ib2); the CP runs it at the
+             * IB1's VMID, which the KMD put on the ring. */
+            const uint32_t packet[4] = {
+               PKT3(PKT3_INDIRECT_BUFFER, 2, 0),
+               (uint32_t)ib->va,
+               (uint32_t)(ib->va >> 32),
+               S_3F3_IB_SIZE(ib->cdw),
+            };
+            memcpy(dst, packet, sizeof(packet));
+            dst += sizeof(packet);
+         }
+      }
+      if (pad == 1) {
+         const uint32_t nop = PKT3_NOP_PAD;
+         memcpy(dst, &nop, 4);
+      } else if (pad > 1) {
+         const uint32_t nop = PKT3(PKT3_NOP, pad - 2, 0);
+         memcpy(dst, &nop, 4);
+         memset(dst + 4, 0, (pad - 1) * 4);
       }
       va = queue->bc250_gather[queue->bc250_gather_index].bo->va;
+
+      if (!copy_all && copies) {
+         const uint64_t count = p_atomic_inc_return(&ws->bc250_inline_submits);
+         if (count <= 16 || util_is_power_of_two_or_zero64(count))
+            fprintf(stderr,
+                    "bc250: IB2 fallback: %u of %u IBs copied into the IB1 (%u call an IB2 themselves, %u outside "
+                    "IB_BASE/IB_SIZE), %" PRIu64 " dwords; %" PRIu64 " such submissions so far\n",
+                    copies, n, nested, copies - nested, copied_dw, count);
+      }
    }
 
    /* BC250_IB_DWORDS cuts the IB the CP executes. 5 is CONTEXT_CONTROL plus
     * CLEAR_STATE, a packet boundary. The ring fence still follows the IB, so a
-    * timeout here means the CP did not finish that prefix. Unset, the whole IB runs. Only a lab build
-    * reads it (BD-167): in the release flavour the whole IB runs. */
-#if defined(AMDGPU_WDDM_LAB_FLAVOUR)
+    * timeout here means the CP did not finish that prefix. Unset, the whole IB runs.
+    * Read once by a lab build (radv_wddm2_cs_init_functions), where it also selects the
+    * gather copy; the release flavour reads no variable (BD-167) and the whole IB runs. */
    {
-      const char *cap_env = getenv("BC250_IB_DWORDS");
-      if (cap_env && cap_env[0]) {
-         unsigned long cap = strtoul(cap_env, NULL, 0);
-         if (cap > 0 && cap < 0x100000ul && cap * 4ul < bytes) {
-            fprintf(stderr, "bc250: IB clamped to %lu dwords (%u were ready)\n", cap, bytes / 4u);
-            bytes = (uint32_t)(cap * 4ul);
-         }
+      const unsigned long cap = ws->bc250_ib_dwords_cap;
+      if (cap > 0 && cap < 0x100000ul && cap * 4ul < bytes) {
+         fprintf(stderr, "bc250: IB clamped to %lu dwords (%u were ready)\n", cap, bytes / 4u);
+         bytes = (uint32_t)(cap * 4ul);
       }
    }
-#endif
 
    memset(&blob, 0, sizeof(blob));
    _Static_assert(offsetof(struct bc250_submit_blob, ib) == 40, "BC2S prefix is 40 bytes");
@@ -1083,17 +1182,21 @@ radv_wddm2_bc250_submit(struct radv_wddm2_ctx *ctx, struct radv_wddm2_queue *que
       fprintf(stderr, "bc250: SubmitCommand 0x%X (%u ibs packed, %u bytes)\n", status, n, bytes);
    else if (ws->bc250_trace_submits) {
       const uint32_t *dw = NULL;
-      if (n == 1 && ibs[0].bo)
-         dw = (const uint32_t *)((uint8_t *)ws->base.buffer_map(&ws->base, ibs[0].bo, false, NULL) +
-                                 (ibs[0].va - ibs[0].bo->va));
+      if (direct && ibs[0].ib.bo)
+         dw = (const uint32_t *)((uint8_t *)ws->base.buffer_map(&ws->base, ibs[0].ib.bo, false, NULL) +
+                                 (ibs[0].ib.va - ibs[0].ib.bo->va));
       else
          dw = (const uint32_t *)queue->bc250_gather[queue->bc250_gather_index].map;
       fprintf(stderr, "bc250: SubmitCommand ib 0x%" PRIx64 " %u bytes (from %u) %08x %08x %08x %08x\n",
               va, bytes, n,
               dw ? dw[0] : 0, dw && bytes >= 8 ? dw[1] : 0,
               dw && bytes >= 12 ? dw[2] : 0, dw && bytes >= 16 ? dw[3] : 0);
-      /* Slices of the unclamped preamble and the main CS. 163 is the first
-       * ACQUIRE_MEM, 176 the main IB, 216 the dispatch. */
+      if (!direct)
+         fprintf(stderr, "bc250: IB1 holds %u IB2 calls and %u copied IBs\n", calls, copies);
+      /* Slices of the unclamped preamble and the main CS, when the IB1 is their copy. 163 is
+       * the first ACQUIRE_MEM, 176 the main IB, 216 the dispatch. */
+      if (calls)
+         dw = NULL;
       if (dw && bytes >= 176u * 4u) {
          fprintf(stderr, "bc250: IB +158 %08x %08x %08x %08x %08x %08x %08x %08x\n",
                  dw[158], dw[159], dw[160], dw[161], dw[162], dw[163], dw[164], dw[165]);
@@ -1403,15 +1506,47 @@ radv_wddm2_cs_submit(struct radeon_winsys_ctx *_ctx,
    return VK_SUCCESS;
 }
 
+/* The CS was written through a write-combined mapping on this thread. With IB2 calls the
+ * CP reads it where it is, and another thread may submit it: drain this core's write-
+ * combining buffers before the stream leaves the recording thread. The submit's own sfence
+ * drains the submitting core only. */
+static VkResult
+radv_wddm2_cs_finalize(struct ac_cmdbuf *_cs)
+{
+   VkResult result = radv_winsys_cs_finalize(_cs);
+   _mm_sfence();
+   return result;
+}
+
 void
 radv_wddm2_cs_init_functions(struct radv_wddm2_winsys *ws)
 {
+   if (ws->bc250) {
+#if defined(AMDGPU_WDDM_LAB_FLAVOUR)
+      const char *nocopy = getenv("BC250_IB_NOCOPY");
+      const char *cap = getenv("BC250_IB_DWORDS");
+      ws->bc250_ib_dwords_cap = cap && cap[0] ? strtoul(cap, NULL, 0) : 0;
+      ws->bc250_gather_copy = (nocopy && !strcmp(nocopy, "0")) || ws->bc250_ib_dwords_cap;
+      if (!ws->bc250_gather_copy)
+         fprintf(stderr, "bc250: IB submission: IB2 calls from the gather slot (BC250_IB_NOCOPY=0 copies every IB)\n");
+      else if (nocopy && !strcmp(nocopy, "0"))
+         fprintf(stderr, "bc250: IB submission fallback: every IB copied into the gather slot (BC250_IB_NOCOPY=0)\n");
+      else
+         fprintf(stderr, "bc250: IB submission fallback: every IB copied into the gather slot (BC250_IB_DWORDS=%lu"
+                         " clamps the copied stream)\n", ws->bc250_ib_dwords_cap);
+#else
+      /* The release flavour reads no diagnostic variable (BD-167): IB2 calls and no cap, as with both unset. */
+      ws->bc250_ib_dwords_cap = 0;
+      ws->bc250_gather_copy = false;
+#endif
+   }
+
    ws->base.ctx_create = radv_wddm2_ctx_create;
    ws->base.ctx_destroy = radv_wddm2_ctx_destroy;
    ws->base.ctx_wait_idle = radv_wddm2_ctx_wait_idle;
    ws->base.cs_domain = radv_wddm2_cs_domain;
    ws->base.cs_create = radv_wddm2_cs_create;
-   ws->base.cs_finalize = radv_winsys_cs_finalize;
+   ws->base.cs_finalize = radv_wddm2_cs_finalize;
    ws->base.cs_reset = radv_wddm2_cs_reset;
    ws->base.cs_chain = radv_winsys_cs_chain;
    ws->base.cs_unchain = radv_winsys_cs_unchain;
