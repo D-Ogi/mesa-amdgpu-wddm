@@ -25,9 +25,12 @@
  *
  * The negative control is the source before the change (29d95fd7), with this file compiled with
  * IB2_GATHER_NEGATIVE_CONTROL defined: that source has no mark and no copy knob. There every IB is
- * copied, so two_calls, caller_copied, nested_marks and above_ib_size must fail, and above_ib_size
- * gets VK_ERROR_DEVICE_LOST. In the lab flavour, copy_fallback is the same control inside this
- * build: BC250_IB_NOCOPY=0 copies every IB, and the submission above IB_SIZE is refused again.
+ * copied, the copy accepts an IB below its BO, and the direct path checks no range. So two_calls,
+ * caller_copied, nested_marks, above_ib_size, below_bo, direct_outside_bo, dgc_mark and
+ * odd_call_padding must fail, and above_ib_size gets VK_ERROR_DEVICE_LOST. above_bo must pass there
+ * too, because the copy refused an IB past the end of its BO before the change. In the lab flavour,
+ * copy_fallback is the same control inside this build: BC250_IB_NOCOPY=0 copies every IB, and the
+ * submission above IB_SIZE is refused again.
  *
  * Usage: radv_wddm2_ib2_gather_test [test], no argument runs all.
  */
@@ -758,6 +761,92 @@ test_copy_fallback(void)
 #endif
 }
 
+/* An IB that is not inside its BO is refused before the kernel, on the gather path and on the direct
+ * path. count streams of 8 payload dwords; the first one's IB gets the address va_of(its BO). A
+ * refusal also marks the queue as failed, so every case makes its own winsys and context. */
+static void
+refused_outside(unsigned count, uint64_t (*va_of)(const struct radeon_winsys_bo *bo), const char *what)
+{
+   struct radv_wddm2_winsys *ws = make_ws(NULL);
+   struct radeon_winsys_ctx *ctx = make_ctx(ws);
+   struct ac_cmdbuf *cs[2] = {make_stream(ws, 8), count > 1 ? make_stream(ws, 8) : NULL};
+   struct radv_winsys_ib *ib = &radv_winsys_cs(cs[0])->ib_buffers[0];
+   const uint64_t saved = ib->va;
+   ib->va = va_of(ib->bo);
+   const unsigned before = h.submits;
+   const VkResult r = submit(ws, ctx, count, cs);
+   check(r == VK_ERROR_DEVICE_LOST && h.submits == before, "%s: refused before the kernel (%d, %u submits)", what,
+         r, h.submits - before);
+   ib->va = saved;
+   finish(ws, ctx, count, cs);
+}
+
+static uint64_t
+below_base(const struct radeon_winsys_bo *bo)
+{
+   return bo->va - 4;
+}
+
+static uint64_t
+at_end(const struct radeon_winsys_bo *bo)
+{
+   return bo->va + bo->size;
+}
+
+/* The copy read the start of the BO for an IB below its BO (review of the change). */
+static void
+test_below_bo(void)
+{
+   refused_outside(2, below_base, "a gathered IB that starts 4 bytes below its BO");
+}
+
+static void
+test_above_bo(void)
+{
+   refused_outside(2, at_end, "a gathered IB of 8 dwords that starts at the end of its BO");
+}
+
+static void
+test_direct_outside_bo(void)
+{
+   refused_outside(1, below_base, "a direct IB that starts 4 bytes below its BO");
+   refused_outside(1, at_end, "a direct IB of 8 dwords that starts at the end of its BO");
+}
+
+/* A GFX stream that calls a DGC buffer runs it as an IB2, so the stream is marked and copied. */
+static void
+test_dgc_mark(void)
+{
+   struct radv_wddm2_winsys *ws = make_ws(NULL);
+   struct radeon_winsys_ctx *ctx = make_ctx(ws);
+   struct ac_cmdbuf *child = make_stream(ws, 8);
+   struct ac_cmdbuf *parent = ws->base.cs_create(&ws->base, AMD_IP_GFX, false);
+   struct ac_cmdbuf *cs[2] = {child, parent};
+   const struct radv_winsys_ib target = radv_winsys_cs(child)->ib_buffers[0];
+   ws->base.cs_chain_dgc_ib(parent, target.va, target.cdw, 0, false);
+   check(CALLS_IB2(parent), "a GFX stream that calls a DGC buffer is marked");
+   parent->reserved_dw = MAX2(parent->reserved_dw, parent->cdw);
+   check(ws->base.cs_finalize(parent) == VK_SUCCESS, "the DGC caller is finalized");
+   check(submit(ws, ctx, 2, cs) == VK_SUCCESS, "the plain stream and the DGC caller are accepted");
+   const struct walk w = walk_ib1();
+   check(w.ok && w.targets_ok && w.calls == 2, "the caller is copied: two IB2 calls, one level deep each");
+   finish(ws, ctx, 2, cs);
+}
+
+/* Three calls are 12 dwords: the IB1 ends on a NOP of four dwords, at the GFX padding unit. */
+static void
+test_odd_call_padding(void)
+{
+   struct radv_wddm2_winsys *ws = make_ws(NULL);
+   struct radeon_winsys_ctx *ctx = make_ctx(ws);
+   struct ac_cmdbuf *cs[3] = {make_stream(ws, 8), make_stream(ws, 8), make_stream(ws, 8)};
+   check(submit(ws, ctx, 3, cs) == VK_SUCCESS, "three plain streams are accepted");
+   check(one_ib1(gfx(ctx), 16), "three calls and four dwords of NOP padding (%u dwords)", h.ib1_dw);
+   const struct walk w = walk_ib1();
+   check(w.ok && w.targets_ok && w.calls == 3, "the padding ends on the end of the IB1");
+   finish(ws, ctx, 3, cs);
+}
+
 static const struct {
    const char *name;
    void (*fn)(void);
@@ -768,6 +857,11 @@ static const struct {
    {"above_ib_size", test_above_ib_size},
    {"single_direct", test_single_direct},
    {"copy_fallback", test_copy_fallback},
+   {"below_bo", test_below_bo},
+   {"above_bo", test_above_bo},
+   {"direct_outside_bo", test_direct_outside_bo},
+   {"dgc_mark", test_dgc_mark},
+   {"odd_call_padding", test_odd_call_padding},
 };
 
 int
