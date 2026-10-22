@@ -118,6 +118,7 @@ struct wsi_iflip_geometry {
 
 struct wsi_win32_image {
    struct wsi_image base;
+   bool base_initialized;
    enum wsi_win32_image_state state;
    /* M15.14: the chain's present serial at the moment this image was queued, so that the acquire
     * fallback can take the OLDEST queued image instead of stepping one place from the current back
@@ -1485,6 +1486,7 @@ wsi_win32_image_init(VkDevice device_h,
    if (result != VK_SUCCESS)
       return result;
 
+   image->base_initialized = true;
    VkIcdSurfaceWin32 *win32_surface = (VkIcdSurfaceWin32 *)create_info->surface;
    chain->wnd = win32_surface->hwnd;
    image->chain = chain;
@@ -1647,9 +1649,14 @@ wsi_win32_image_finish(struct wsi_win32_swapchain *chain,
 {
    wsi_win32_image_release_dxgi_buffers(image);
 
-   if(image->sw.bmp)
+   if(image->sw.bmp) {
       DeleteObject(image->sw.bmp);
-   wsi_destroy_image(&chain->base, &image->base);
+      image->sw.bmp = NULL;
+   }
+   if (image->base_initialized) {
+      wsi_destroy_image(&chain->base, &image->base);
+      image->base_initialized = false;
+   }
 
    /* The Vulkan memory that aliased it is gone; the D3D12 resource can go too. */
    if (image->dxgi.blit_res) {

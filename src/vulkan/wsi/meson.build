@@ -30,6 +30,18 @@ endif
 if with_platform_windows
   files_vulkan_wsi += files('wsi_common_win32.cpp', 'wsi_win32_deadline.h')
   platform_deps += [dep_dxheaders, cc.find_library('dwmapi')]
+  if with_tests
+    win32_image_lifetime_source = custom_target(
+      'wsi_win32_image_lifetime_source',
+      input : ['wsi_common_win32.cpp', 'tests/wsi_win32_image_lifetime_test.py'],
+      output : 'wsi_win32_image_lifetime_test.cpp',
+      command : [prog_python, '@INPUT1@', '--source', '@INPUT0@', '--output', '@OUTPUT@'],
+    )
+    test('wsi_win32_image_lifetime', executable(
+      'wsi_win32_image_lifetime_test', win32_image_lifetime_source,
+      cpp_args : cpp.get_supported_arguments('-Wno-unused-parameter', '-Wno-missing-field-initializers'),
+    ))
+  endif
 else
   files_vulkan_wsi += files('wsi_common_headless.c')
 endif
