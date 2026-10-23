@@ -1144,6 +1144,20 @@ radv_wddm2_witness_submit(struct radv_wddm2_winsys *ws, struct radv_wddm2_queue 
       radv_wddm2_witness_stale(ws, first, stale, queue->context_h);
 }
 
+/* Add every buffer the child references to the parent's list, and no commands. The BC250 index
+ * route records its own command stream beside the main one and chains that IB itself
+ * (radv_bc250.c, radv_bc250_idx_batch_close); the parent's submission must still carry the
+ * child's buffers, because only the submitted stream's list is made resident. */
+static void
+radv_wddm2_cs_merge_buffers(struct ac_cmdbuf *_parent, struct ac_cmdbuf *_child)
+{
+   struct radv_wddm2_cs *parent = radv_wddm2_cs(_parent);
+   struct radv_wddm2_cs *child = radv_wddm2_cs(_child);
+
+   set_foreach (child->buffers, entry)
+      _mesa_set_add(parent->buffers, entry->key);
+}
+
 static void
 radv_wddm2_get_cpu_addr(void *_cs, uint64_t addr, struct ac_addr_info *info)
 {
@@ -2149,6 +2163,7 @@ radv_wddm2_cs_init_functions(struct radv_wddm2_winsys *ws)
    ws->base.cs_add_buffer = radv_wddm2_cs_add_buffer;
    ws->base.cs_submit = radv_wddm2_cs_submit;
    ws->base.cs_execute_secondary = radv_wddm2_cs_execute_secondary;
+   ws->base.cs_merge_buffers = radv_wddm2_cs_merge_buffers;
    ws->base.cs_execute_ib = radv_winsys_cs_execute_ib;
    ws->base.cs_chain_dgc_ib = radv_winsys_cs_chain_dgc_ib;
    ws->base.cs_dump = radv_winsys_cs_dump;
