@@ -1483,6 +1483,7 @@ radv_reset_cmd_buffer(struct vk_command_buffer *vk_cmd_buffer, UNUSED VkCommandB
    radv_bc250_task_tails_free(cmd_buffer);
    cmd_buffer->bc250_mesh_amd_reuse_off = false;
    cmd_buffer->bc250_mesh_dealloc_dist_set = false;
+   cmd_buffer->bc250_task_witness = false; /* BD-119: the arm belongs to the recording, not the object */
 
    if (cmd_buffer->utrace.trace) {
       u_trace_fini(cmd_buffer->utrace.trace);
@@ -14611,6 +14612,15 @@ radv_get_ngg_state_query(struct radv_cmd_buffer *cmd_buffer)
    const struct radv_physical_device *pdev = radv_device_physical(device);
    enum radv_shader_query_state shader_query_state = radv_shader_query_none;
 
+   /* BD-119: below GFX11 every emulated shader-query counter is a GDS atomic
+    * (radv_nir_lower_abi.c, nir_gds_atomic_add_amd), and a submission that performs a GDS access on a
+    * winsys without a GDS partition does not retire (radeon_winsys::supports_gds). Leaving the state
+    * at none means the shader takes no such branch, so the affected statistic reads 0 instead of
+    * hanging the GPU. This covers the inherited-statistics route as well, which can enable the state
+    * with no query pool of ours involved. */
+   if (!radv_bc250_gds_available(device) && pdev->info.gfx_level < GFX11)
+      return shader_query_state;
+
    /* By default shader queries are disabled but they are enabled if the command buffer has active GDS
     * queries or if it's a secondary command buffer that inherits the number of generated
     * primitives.
@@ -14738,10 +14748,11 @@ radv_emit_task_state(struct radv_cmd_buffer *cmd_buffer)
 
    /* By default shader queries are disabled but they are enabled if the command buffer has active ACE
     * queries or if it's a secondary command buffer that inherits the number of task shader
-    * invocations query.
+    * invocations query. BD-119: not below GFX11 without a GDS partition, see radv_get_ngg_state_query.
     */
-   if (cmd_buffer->state.active_pipeline_ace_queries ||
-       (cmd_buffer->state.inherited_pipeline_statistics & VK_QUERY_PIPELINE_STATISTIC_TASK_SHADER_INVOCATIONS_BIT_EXT))
+   if ((radv_bc250_gds_available(device) || pdev->info.gfx_level >= GFX11) &&
+       (cmd_buffer->state.active_pipeline_ace_queries ||
+        (cmd_buffer->state.inherited_pipeline_statistics & VK_QUERY_PIPELINE_STATISTIC_TASK_SHADER_INVOCATIONS_BIT_EXT)))
       shader_query_state |= radv_shader_query_pipeline_stat;
 
    radeon_begin(cmd_buffer->gang.cs);

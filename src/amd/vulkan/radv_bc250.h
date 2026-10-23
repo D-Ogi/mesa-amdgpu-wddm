@@ -249,4 +249,41 @@ struct radv_shader;
 void radv_bc250_report_mesh_route(const struct radv_device *device, const struct radv_shader *shader,
                                   const char *object, unsigned pieces, bool task, bool ordered, bool empty);
 
+/* BD-119, the hybrid-task GDS contract and progress witness.
+ *
+ * radv_bc250_gds_available: may a shader of this device execute a GDS access at all (see
+ * radeon_winsys::supports_gds). False under WDDM, where no GDS partition is programmed.
+ *
+ * radv_bc250_task_latched_off: the process has seen a hybrid-task submission that the GPU did not
+ * retire. taskShader (hence D3D12 MeshShaderTier) is then reported false for devices created after
+ * that point, and a draw or pipeline with an APPLICATION TASK stage is refused instead of submitted
+ * (a mesh-only pipeline, whose producer is the internal synthetic one, is not affected). Nothing
+ * clears the latch.
+ *
+ * radv_bc250_task_witness_after_submit: called at the end of every successful queue submit, with
+ * carried_witness true only for the submission that carried the command buffer holding an armed
+ * hybrid-task draw (radv_cmd_buffer::bc250_task_witness). It never waits: it reads the GPU-written
+ * phase word once, reports a draw that reached DONE, and latches the path off only when the phase is
+ * still short of DONE after RADV_BC250_TASK_WITNESS_MS, whose default is the KMD's hardware fence
+ * budget. A pending draw that is neither done nor past the bound stays pending.
+ *
+ * radv_bc250_task_witness_poll: the same resolution from a place that is not a submit
+ * (vkQueueWaitIdle), so a process that submits once still learns the verdict.
+ *
+ * radv_bc250_task_witness_device_finish: resolves a last time and releases the witness buffer. */
+bool radv_bc250_gds_available(const struct radv_device *device);
+bool radv_bc250_task_latched_off(void);
+void radv_bc250_task_witness_after_submit(struct radv_device *device, bool carried_witness);
+void radv_bc250_task_witness_poll(struct radv_device *device, const char *where);
+void radv_bc250_task_witness_device_finish(struct radv_device *device);
+
+/* The GPU-written phase word of one witnessed hybrid-task draw, in the order the command stream
+ * writes it. A phase below DONE after the bound means the CP never got past that point. */
+enum radv_bc250_task_phase {
+   RADV_BC250_TASK_PHASE_NONE = 0,      /* the command stream did not reach the draw */
+   RADV_BC250_TASK_PHASE_PRODUCER = 1,  /* the producer dispatch was issued */
+   RADV_BC250_TASK_PHASE_RETIRED = 2,   /* the producer's waves retired (CS_PARTIAL_FLUSH returned) */
+   RADV_BC250_TASK_PHASE_DONE = 3,      /* the mesh draw's waves retired as well */
+};
+
 #endif

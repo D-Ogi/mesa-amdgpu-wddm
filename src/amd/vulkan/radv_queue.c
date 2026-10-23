@@ -1048,7 +1048,23 @@ radv_update_preamble_cs(struct radv_queue_state *queue, struct radv_device *devi
       radv_rmv_log_command_buffer_bo_create(device, ge_rings_bo, 0, 0, pdev->info.total_attribute_pos_prim_ring_size);
    }
 
-   if (!queue->ring_info.gds && needs->gds) {
+   if (!queue->ring_info.gds && needs->gds && !ws->supports_gds) {
+      /* BD-119: RADEON_DOMAIN_GDS is not GDS on this winsys. The allocation succeeds as ordinary GTT
+       * memory and the submission still runs with a zero-size GDS partition, which is how a shader's
+       * GDS access came to wait forever. Allocate nothing and say so once. Nothing in the preamble
+       * reads this buffer: it exists only so that a kernel that programs the partition sees it. The
+       * hybrid-task producer no longer asks for GDS at all (radv_bc250.c); what remains are the
+       * emulated pipeline-statistics queries of radv_query.c, whose shader-side counting is a runtime
+       * branch on the query state and is therefore reachable only while such a query is active. */
+      static bool said;
+      if (!said) {
+         said = true;
+         fprintf(stderr, "radv/bc250: this winsys has no GDS; no GDS buffer is allocated. A shader that "
+                         "still executes a GDS access here would not retire (BD-119).\n");
+      }
+   }
+
+   if (!queue->ring_info.gds && needs->gds && ws->supports_gds) {
       assert(pdev->info.gfx_level == GFX10 || pdev->info.gfx_level == GFX10_3);
 
       /* 4 streamout GDS counters.
@@ -1067,7 +1083,21 @@ radv_update_preamble_cs(struct radv_queue_state *queue, struct radv_device *devi
          goto fail;
    }
 
-   if (!queue->ring_info.gds_oa && needs->gds_oa) {
+   if (!queue->ring_info.gds_oa && needs->gds_oa && !ws->supports_gds) {
+      /* BD-119: RADEON_DOMAIN_OA is the ordered-append side of the same gap. The written contract
+       * names them together ("AMDGPU_GEM_DOMAIN_VRAM / _GTT / _GDS / _OA ... GDS and OA are a gap on
+       * WDDM", driver/contract/bc250_umd_submit.h), the KMD's blob parser refuses the GDS heap in the
+       * same block of unimplemented heaps, and nothing writes GDS_OA_VMID<n>. So the allocation would
+       * be ordinary GTT memory under another name. Nothing on gfx1013 reaches here today (gds_oa comes
+       * from GFX11 NGG streamout), and it is guarded so that it cannot become the next BD-119. */
+      static bool said;
+      if (!said) {
+         said = true;
+         fprintf(stderr, "radv/bc250: this winsys has no GDS OA; no OA buffer is allocated (BD-119).\n");
+      }
+   }
+
+   if (!queue->ring_info.gds_oa && needs->gds_oa && ws->supports_gds) {
       assert(pdev->info.gfx_level >= GFX10 && pdev->info.gfx_level < GFX12);
 
       result = radv_bo_create(device, NULL, 1, 1, RADEON_DOMAIN_OA, ring_bo_flags, RADV_BO_PRIORITY_SCRATCH, 0, true,
@@ -1785,9 +1815,14 @@ radv_queue_submit_normal(struct radv_queue *queue, struct vk_queue_submit *submi
    if (radv_device_fault_detection_enabled(device))
       simple_mtx_lock(&device->trace_mtx);
 
+   /* BD-119: true only when a command buffer of THIS submission recorded a witnessed hybrid-task
+    * draw, so no other submission of this device can consume or be blamed for the witness. */
+   bool bc250_task_witness = false;
+
    for (uint32_t j = 0; j < submission->command_buffer_count; j++) {
       struct radv_cmd_buffer *cmd_buffer = (struct radv_cmd_buffer *)submission->command_buffers[j];
       shader_upload_seq = MAX2(shader_upload_seq, cmd_buffer->queue_state.shader_upload_seq);
+      bc250_task_witness |= cmd_buffer->bc250_task_witness;
    }
 
    if (shader_upload_seq > queue->last_shader_upload_seq) {
@@ -1953,6 +1988,10 @@ radv_queue_submit_normal(struct radv_queue *queue, struct vk_queue_submit *submi
    queue->last_shader_upload_seq = MAX2(queue->last_shader_upload_seq, shader_upload_seq);
 
    radv_dump_printf_data(device, stderr, true);
+
+   /* BD-119: never waits. It records the submit time when this submission carried the witnessed
+    * hybrid-task draw, and resolves an earlier one that is now done or past its bound. */
+   radv_bc250_task_witness_after_submit(device, bc250_task_witness);
 
 fail:
    free(cs_array);
@@ -2439,7 +2478,11 @@ radv_QueueWaitIdle(VkQueue _queue)
    if (radv_queue_is_unbound(queue))
       return vk_device_is_lost(&radv_queue_device(queue)->vk) ? VK_ERROR_DEVICE_LOST : VK_SUCCESS;
 
-   return vk_common_QueueWaitIdle(_queue);
+   const VkResult result = vk_common_QueueWaitIdle(_queue);
+   /* BD-119: a process that submits the witnessed draw and then only waits would otherwise hear the
+    * verdict at device destruction. Reading the phase word here costs one load. */
+   radv_bc250_task_witness_poll(radv_queue_device(queue), "queue wait idle");
+   return result;
 }
 
 enum amd_ip_type

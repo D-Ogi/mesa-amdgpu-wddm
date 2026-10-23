@@ -1430,7 +1430,15 @@ radv_physical_device_get_features(const struct radv_physical_device *pdev, struc
 
       /* VK_EXT_mesh_shader */
       .meshShader = radv_mesh_enabled(pdev),
-      .taskShader = taskmesh_en || pdev->bc250_hybrid_task || pdev->bc250_native_task,
+      /* BD-119: a D3D12 runtime reports MeshShaderTier 1 exactly when meshShader and taskShader are
+       * both true (vkd3d-proton d3d12_device_determine_mesh_shader_tier), so once the hybrid-task
+       * witness has latched the path off in this process, taskShader goes false and the tier with it.
+       * The tier is never reported for a path whose draws are refused. The latch is a BC-250 process
+       * latch and applies to the BC-250 route only: a real GFX10.3+ device enumerated later in the
+       * same process has hardware task rings that the BD-119 hang says nothing about, so the latch
+       * must never withdraw a task stage it did not grant. */
+      .taskShader = taskmesh_en || ((pdev->bc250_hybrid_task || pdev->bc250_native_task) &&
+                                    !radv_bc250_task_latched_off()),
       /* RADV_BC250_EXPOSE_MULTIVIEW_MESH: the Mesh lowering writes the layer per view and multiview
        * Mesh shaders take the expanded route. vkd3d-proton turns D3D12 view instancing off when Mesh
        * is exposed without multiview Mesh. */

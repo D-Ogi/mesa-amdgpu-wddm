@@ -558,6 +558,9 @@ struct radv_cmd_buffer {
    const uint32_t *bc250_trace_start_buf;
    uint32_t bc250_trace_start_dw;
    bool bc250_inside_mesh_draw;
+   /* BD-119: this command buffer records a witnessed hybrid-task draw, so the submission that carries
+    * it - and only that submission - claims the device's witness (radv_bc250.c, radv_queue.c). */
+   bool bc250_task_witness;
    struct radv_bc250_timer_cmd bc250_timer; /* BC250_MESH_TIMER (radv_bc250_timer.h) */
    /* RADV_BC250_MESH_MERGE option A: low 32 bits of the prepped driver
     * records of the indirect draw being emitted (0 otherwise). */

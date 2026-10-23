@@ -80,6 +80,42 @@ radv_bc250_mesh_pipeline(const struct radv_cmd_buffer *cmd_buffer)
       ? radv_bc250_shader_object_pipeline(cmd_buffer->state.shader_objs[MESA_SHADER_MESH]) : NULL;
 }
 
+/* BD-119. True when a shader of this device may execute a GDS access (a DS instruction with the GDS
+ * bit, nir_gds_atomic_add_amd) or a COPY_DATA may read GDS. See radeon_winsys::supports_gds: the
+ * WDDM winsys programs no GDS partition, and a submission that performs a GDS access there does not
+ * retire. That the wave specifically waits on the dropped GDS acknowledgement is the most likely
+ * mechanism, not a measured one (BD-119 LAB-PLAN.md arm E is the discriminator). */
+bool
+radv_bc250_gds_available(const struct radv_device *device)
+{
+   return device->ws->supports_gds;
+}
+
+/* BD-119. Process-wide latch: the hybrid-task path produced a submission the GPU did not retire. The
+ * feature it backs (VkPhysicalDeviceMeshShaderFeaturesEXT::taskShader, which is what makes a D3D12
+ * runtime report MeshShaderTier 1) is static for the life of a device, so the latch is what keeps a
+ * later device from advertising a tier whose draws hang: taskShader reads it, and every hybrid-task
+ * draw of a device already created refuses instead of submitting. Nothing ever clears it. */
+static uint32_t bc250_task_latched;
+
+bool
+radv_bc250_task_latched_off(void)
+{
+   return p_atomic_read(&bc250_task_latched) != 0;
+}
+
+static void
+bc250_task_latch_off(const char *why, uint32_t phase, uint32_t draws, unsigned waited_ms)
+{
+   if (p_atomic_cmpxchg(&bc250_task_latched, 0u, 1u) != 0u)
+      return;
+   fprintf(stderr,
+           "BC250 TASK WITNESS: hybrid task disabled for this process: %s (phase=%u draws=%u waited=%u ms). "
+           "Mesh pipelines with an amplification/TASK stage are refused from now on, and a device created "
+           "after this point reports taskShader false, hence MeshShaderTier 0.\n",
+           why, phase, draws, waited_ms);
+}
+
 void
 radv_bc250_device_env_init(struct radv_device *device, const struct radv_physical_device *pdev)
 {
@@ -119,6 +155,17 @@ radv_bc250_device_env_init(struct radv_device *device, const struct radv_physica
     * live in the amdgpu winsys and in vk_queue/vk_sync, which this port leaves alone (our Win32
     * semaphore work is in the same code). */
    env->submit_profile = false;
+   /* BD-119. The witness watches the first hybrid-task draws of this device; it costs nothing on any
+    * other path. RADV_BC250_TASK_WITNESS=0 turns it off, and the two numbers are how long a draw may
+    * stay short of DONE before the path latches off, and how many draws are watched. The default
+    * bound is the KMD's own hardware fence budget: past it the kernel has already called the
+    * submission hung, so the latch cannot mistake a slow submission for a stuck one. No thread ever
+    * waits for it (bc250_task_witness_resolve). */
+   env->task_witness = pdev->bc250_hybrid_task && debug_get_bool_option("RADV_BC250_TASK_WITNESS", true);
+   env->task_witness_ms = debug_get_num_option("RADV_BC250_TASK_WITNESS_MS", 12000);
+   env->task_witness_draws = debug_get_num_option("RADV_BC250_TASK_WITNESS_DRAWS", 1);
+   simple_mtx_init(&device->bc250_task_witness_mtx, mtx_plain);
+   device->bc250_task_witness_armed = env->task_witness ? env->task_witness_draws : 0;
    if (env->local_bos)
       fprintf(stderr, "radv/bc250: submission switches local_bos=%d\n", env->local_bos);
 }
@@ -4580,9 +4627,17 @@ bc250_prepare_ordered(struct radv_device *device, struct radv_graphics_pipeline 
    nir_push_if(&b, nir_ieq_imm(&b, lane, 0));
    nir_store_shared(&b, nir_imm_ivec2(&b, 0, 0), nir_imm_int(&b, 0),
                     .base = counts->data.driver_location, .align_mul = 4);
-   nir_gds_atomic_add_amd(&b, 32, nir_imm_int(&b,
-      producer->info.workgroup_size[0] * producer->info.workgroup_size[1] * producer->info.workgroup_size[2]),
-      nir_imm_int(&b, RADV_SHADER_QUERY_MS_INVOCATION_OFFSET), nir_imm_int(&b, 0x100));
+   /* BD-119: the MESH-invocation counter is a GDS atomic, so it exists only where this winsys gives
+    * the submission a GDS partition (radeon_winsys::supports_gds). The safe-ordered route is
+    * hybrid-task-only (bc250_prepare_task), so without the guard one environment variable
+    * (RADV_BC250_MESH_SAFE_ORDERED) would put the same unretired-submission class back. Nothing on
+    * this platform reads the counter either way: meshShaderQueries is false. */
+   if (radv_bc250_gds_available(device)) {
+      nir_gds_atomic_add_amd(&b, 32, nir_imm_int(&b,
+         producer->info.workgroup_size[0] * producer->info.workgroup_size[1] * producer->info.workgroup_size[2]),
+         nir_imm_int(&b, RADV_SHADER_QUERY_MS_INVOCATION_OFFSET), nir_imm_int(&b, 0x100));
+      pipeline->bc250_task_gds = true;
+   }
    nir_pop_if(&b, NULL);
    bc250_ordered_barrier(&b);
    b.cursor = nir_after_cf_list(&impl->body);
@@ -4591,8 +4646,12 @@ bc250_prepare_ordered(struct radv_device *device, struct radv_graphics_pipeline 
                                 .base = counts->data.driver_location, .align_mul = 4);
    nir_def *vc = nir_channel(&b, cp, 0), *pc = nir_channel(&b, cp, 1);
    nir_push_if(&b, nir_ieq_imm(&b, lane, 0));
-   nir_gds_atomic_add_amd(&b, 32, pc, nir_imm_int(&b, RADV_SHADER_QUERY_MS_PRIM_GEN_OFFSET),
-                         nir_imm_int(&b, 0x100));
+   /* BD-119, as above: the MESH-primitive counter is a GDS atomic. */
+   if (radv_bc250_gds_available(device)) {
+      nir_gds_atomic_add_amd(&b, 32, pc, nir_imm_int(&b, RADV_SHADER_QUERY_MS_PRIM_GEN_OFFSET),
+                            nir_imm_int(&b, 0x100));
+      pipeline->bc250_task_gds = true;
+   }
    nir_pop_if(&b, NULL);
    nir_def *record = bc250_payload_address(&b, nir_imm_int(&b, 0), true);
    unsigned attr_offset[16];
@@ -5947,6 +6006,15 @@ radv_bc250_prepare_task(struct radv_device *device,
                        const struct radv_graphics_pipeline_state *gfx_state)
 {
    struct radv_shader_stage *stages = gfx_state->stages;
+   /* BD-119: after the witness has latched the hybrid-task path off, a pipeline with an application
+    * TASK stage is refused at creation, so no draw of it can be recorded. RADV_BC250_CMD_REFUSED is
+    * VK_ERROR_OUT_OF_DEVICE_MEMORY, which vkCreateGraphicsPipelines may return. */
+   if (stages[MESA_SHADER_TASK].stage != MESA_SHADER_NONE) {
+      if (radv_bc250_task_latched_off())
+         return RADV_BC250_CMD_REFUSED;
+      /* The same test the draw path refuses on, so creation and draw agree on what a latch covers. */
+      pipeline->bc250_task_app = true;
+   }
    if (device->compiler_info.key.bc250_mesh_safe_pieces &&
        !device->compiler_info.key.bc250_mesh_amd_size && !device->compiler_info.key.bc250_mesh_min2waves &&
        stages[MESA_SHADER_TASK].stage == MESA_SHADER_NONE &&
@@ -6408,11 +6476,28 @@ radv_bc250_prepare_task(struct radv_device *device,
          const unsigned api_invocations = producer->info.workgroup_size[0] *
                                           producer->info.workgroup_size[1] *
                                           producer->info.workgroup_size[2];
-         /* Internal producers are not application TASK invocations. */
-         if (!synthetic_task)
+         /* Internal producers are not application TASK invocations.
+          *
+          * BD-119: the counter is a GDS atomic, and a GDS access needs a GDS partition programmed for
+          * the submission's VMID. Only the amdgpu winsys gets one (radeon_winsys::supports_gds); under
+          * WDDM nothing programs one, and what was measured is that the producer's waves stay
+          * resident, the CP's following CS_PARTIAL_FLUSH never completes and the submission's fence
+          * times out. That the partition is base 0 size 0 and that the DS instruction's dropped
+          * acknowledgement is the wait in question are inferences (no GDS register was read in the
+          * fix-r1 round and no KMD code writes one); LAB-PLAN.md reads the partition and arm E reads
+          * the wave state. Nothing can read this counter either way: pipeline
+          * statistics for MESH/TASK are reported through meshShaderQueries, which this driver leaves
+          * false (radv_physical_device.c). So the counter is emitted only where GDS exists, and
+          * bc250_task_gds records the decision for bc250_draw_task's queue_state.gds_needed. */
+         if (!synthetic_task && radv_bc250_gds_available(device)) {
             nir_gds_atomic_add_amd(&pb, 32, nir_imm_int(&pb, api_invocations),
                                    nir_imm_int(&pb, RADV_SHADER_QUERY_TS_INVOCATION_OFFSET),
                                    nir_imm_int(&pb, 0x100));
+            pipeline->bc250_task_gds = true;
+         } else if (!synthetic_task && device->bc250_env.trace_compile) {
+            fprintf(stderr, "BC250 TASK: no GDS on this winsys, TASK invocation counter omitted "
+                            "(meshShaderQueries is false, nothing reads it)\n");
+         }
       }
       nir_pop_if(&pb, if_lid0);
    }
@@ -6973,6 +7058,179 @@ bc250_invalidate_after_task_tail(struct radv_cmd_buffer *cmd_buffer)
                                    AC_BARRIER_SYNC_PS | AC_BARRIER_INV_L2;
 }
 
+/* BD-119, the hybrid-task progress witness.
+ *
+ * The hang this answers leaves no trace in the client: the three passes of the D3D12 mesh witness
+ * share one submission, the fence times out 12 s later and the kernel kills the VMID's waves, so
+ * nothing says which part of the draw stopped. The command stream therefore advances one host-visible
+ * word through the phases of the draw, each write issued by the CP's ME so it cannot pass the ME's own
+ * wait: PRODUCER before the producer dispatch, RETIRED after the flush that waits for the producer's
+ * waves (CS_PARTIAL_FLUSH), DONE after the flush that waits for the mesh draw's waves.
+ *
+ * What the witness does and does not do. It does not prevent the first hang: the phase word is read
+ * without blocking, so the submission that hangs still takes the kernel's fence timeout, the TDR and
+ * the soft recovery. What it gives is attribution (which CP wait did not return) and a refusal of
+ * every later hybrid-task draw in that process instead of a second hang.
+ *
+ * Scope and bound. A draw is armed while it is RECORDED, and the arm is recorded on the command
+ * buffer; the submit path claims it only for the submission that actually carries that command buffer
+ * (radv_queue.c), so an unrelated internal submission can neither consume the arm nor be blamed for
+ * it. The latch needs more than slowness: the phase word must still be short of DONE after
+ * task_witness_ms, whose default is the KMD's own hardware fence budget (12 s), by which time the
+ * kernel has already declared the submission hung.
+ *
+ * Only the first device->bc250_env.task_witness_draws draws are witnessed, so the two forced flushes
+ * are not a steady-state cost. */
+#define BC250_TASK_WITNESS_WORDS 16u
+
+static bool
+bc250_task_witness_arm(struct radv_cmd_buffer *cmd_buffer)
+{
+   struct radv_device *device = radv_cmd_buffer_device(cmd_buffer);
+   if (!device->bc250_env.task_witness || !p_atomic_read(&device->bc250_task_witness_armed))
+      return false;
+   simple_mtx_lock(&device->bc250_task_witness_mtx);
+   bool armed = false;
+   if (device->bc250_task_witness_armed) {
+      if (!device->bc250_task_witness_bo) {
+         VkResult result =
+            radv_bo_create(device, NULL, BC250_TASK_WITNESS_WORDS * 4, 4096, RADEON_DOMAIN_GTT,
+                           RADEON_FLAG_CPU_ACCESS | RADEON_FLAG_NO_INTERPROCESS_SHARING,
+                           RADV_BO_PRIORITY_SCRATCH, 0, true, &device->bc250_task_witness_bo);
+         void *map = result == VK_SUCCESS ? radv_buffer_map(device->ws, device->bc250_task_witness_bo) : NULL;
+         if (!map) {
+            if (result == VK_SUCCESS)
+               radv_bo_destroy(device, NULL, device->bc250_task_witness_bo);
+            device->bc250_task_witness_bo = NULL;
+            device->bc250_task_witness_armed = 0; /* No witness, and no draw refused over it. */
+            fprintf(stderr, "BC250 TASK WITNESS: no witness buffer, progress is not observed\n");
+         } else {
+            memset(map, 0, BC250_TASK_WITNESS_WORDS * 4);
+            device->bc250_task_witness_map = map;
+            device->bc250_task_witness_va = radv_buffer_get_va(device->bc250_task_witness_bo);
+         }
+      }
+      if (device->bc250_task_witness_bo) {
+         device->bc250_task_witness_armed--;
+         device->bc250_task_witness_map[0] = RADV_BC250_TASK_PHASE_NONE;
+         device->bc250_task_witness_map[1]++;
+         armed = true;
+      }
+   }
+   simple_mtx_unlock(&device->bc250_task_witness_mtx);
+   if (armed) {
+      radv_cs_add_buffer(device->ws, cmd_buffer->cs->b, device->bc250_task_witness_bo);
+      /* The arm belongs to this command buffer, not to the device: only the submission that carries
+       * this command buffer may claim it (radv_queue.c). Setting a device-wide "pending" here would
+       * hand the witness to whichever submission happened to come next. */
+      cmd_buffer->bc250_task_witness = true;
+   }
+   return armed;
+}
+
+static void
+bc250_task_witness_mark(struct radv_cmd_buffer *cmd_buffer, enum radv_bc250_task_phase phase)
+{
+   struct radv_device *device = radv_cmd_buffer_device(cmd_buffer);
+   const uint32_t word = phase;
+   /* V_371_MICRO_ENGINE: the write is issued by the unit that performs the partial-flush waits, so a
+    * marker that landed proves the wait before it returned. */
+   radv_cs_write_data(device, cmd_buffer->cs, V_371_MICRO_ENGINE, device->bc250_task_witness_va, 1, &word, false);
+}
+
+/* Emit the pending flush bits now, so that the next marker means "that wait returned". */
+static void
+bc250_task_witness_fence(struct radv_cmd_buffer *cmd_buffer, enum radv_bc250_task_phase phase)
+{
+   radv_emit_cache_flush(cmd_buffer, false);
+   bc250_task_witness_mark(cmd_buffer, phase);
+}
+
+/* Resolve a submitted witnessed draw, without ever waiting. Called after a submit, at the next
+ * submit, at vkQueueWaitIdle and once more before the buffer is released. While the phase word is
+ * short of DONE and the bound has not passed, the draw stays pending and nothing is reported: the
+ * submission may simply not have run yet. */
+static void
+bc250_task_witness_resolve(struct radv_device *device, const char *where)
+{
+   if (!p_atomic_read(&device->bc250_task_witness_pending))
+      return;
+   simple_mtx_lock(&device->bc250_task_witness_mtx);
+   if (!device->bc250_task_witness_pending || !device->bc250_task_witness_map) {
+      simple_mtx_unlock(&device->bc250_task_witness_mtx);
+      return;
+   }
+   const unsigned bound = MAX2(device->bc250_env.task_witness_ms, 1u);
+   const uint32_t phase = device->bc250_task_witness_map[0];
+   const uint32_t draws = device->bc250_task_witness_map[1];
+   const unsigned waited =
+      (unsigned)((os_time_get_nano() - device->bc250_task_witness_submit_ns) / 1000000);
+   const bool done = phase >= RADV_BC250_TASK_PHASE_DONE;
+   const bool expired = waited >= bound;
+   if (done || expired)
+      device->bc250_task_witness_pending = 0u;
+   simple_mtx_unlock(&device->bc250_task_witness_mtx);
+
+   if (done) {
+      fprintf(stderr, "BC250 TASK WITNESS: draw %u retired, phase=%u after %u ms (%s)\n", draws, phase,
+              waited, where);
+      return;
+   }
+   if (!expired)
+      return; /* Not slow enough to say anything about. */
+   if (phase == RADV_BC250_TASK_PHASE_NONE) {
+      /* The command stream never reached the draw. A submission still waiting for a semaphore looks
+       * exactly like this, so this is not the hang signature and nothing is latched. */
+      fprintf(stderr, "BC250 TASK WITNESS: inconclusive, draw %u not started after %u ms "
+                      "(the submission may still be waiting on a semaphore)\n", draws, waited);
+      return;
+   }
+   /* Past the kernel's own fence budget with the CP still inside a wait of this draw. */
+   bc250_task_latch_off(phase == RADV_BC250_TASK_PHASE_PRODUCER
+                           ? "the producer dispatch's waves did not retire (CS_PARTIAL_FLUSH never returned)"
+                           : "the mesh draw's waves did not retire (VS/PS_PARTIAL_FLUSH never returned)",
+                        phase, draws, waited);
+}
+
+void
+radv_bc250_task_witness_after_submit(struct radv_device *device, bool carried_witness)
+{
+   if (carried_witness && device->bc250_task_witness_map) {
+      simple_mtx_lock(&device->bc250_task_witness_mtx);
+      device->bc250_task_witness_submit_ns = os_time_get_nano();
+      device->bc250_task_witness_pending = 1u;
+      simple_mtx_unlock(&device->bc250_task_witness_mtx);
+   }
+   bc250_task_witness_resolve(device, carried_witness ? "submit" : "later submit");
+}
+
+void
+radv_bc250_task_witness_poll(struct radv_device *device, const char *where)
+{
+   bc250_task_witness_resolve(device, where);
+}
+
+void
+radv_bc250_task_witness_device_finish(struct radv_device *device)
+{
+   /* Last chance to report a draw whose submission was the final one of the process. */
+   bc250_task_witness_resolve(device, "device destroy");
+   if (p_atomic_read(&device->bc250_task_witness_pending) && device->bc250_task_witness_map) {
+      fprintf(stderr, "BC250 TASK WITNESS: draw %u unresolved at device destroy, phase=%u "
+                      "(the device was destroyed before the bound elapsed; nothing is latched)\n",
+              device->bc250_task_witness_map[1], device->bc250_task_witness_map[0]);
+      p_atomic_set(&device->bc250_task_witness_pending, 0u);
+   }
+   if (device->bc250_task_witness_bo) {
+      if (device->bc250_task_witness_map)
+         device->ws->buffer_unmap(device->ws, device->bc250_task_witness_bo, false);
+      radv_bo_destroy(device, NULL, device->bc250_task_witness_bo);
+      device->bc250_task_witness_bo = NULL;
+      device->bc250_task_witness_map = NULL;
+   }
+   simple_mtx_destroy(&device->bc250_task_witness_mtx);
+}
+
 static void
 bc250_draw_task(struct radv_cmd_buffer *cmd_buffer, uint32_t x, uint32_t y, uint32_t z,
                 uint64_t indirect_va, uint64_t count_va, uint32_t draw_id, uint64_t *shared_address,
@@ -6980,15 +7238,31 @@ bc250_draw_task(struct radv_cmd_buffer *cmd_buffer, uint32_t x, uint32_t y, uint
 {
    struct radv_graphics_pipeline *pipeline = radv_bc250_mesh_pipeline(cmd_buffer);
    assert(pipeline && pipeline->bc250_task_pipeline);
+   /* BD-119: once the witness has seen a submission the GPU did not retire, a draw of a pipeline with
+    * an APPLICATION TASK stage is refused here instead of hanging the GPU again. vkEndCommandBuffer
+    * returns the error. A mesh-only pipeline reaches this function too (its producer is the internal
+    * synthetic one, radv_bc250.c "internal mesh-only amplification"); that producer carries no GDS
+    * access, was never part of the defect, and keeps working, so a latch does not take mesh shaders
+    * away as well. The test is the one bc250_prepare_task refused creation on. */
+   if (pipeline->bc250_task_app && radv_bc250_task_latched_off()) {
+      vk_command_buffer_set_error(&cmd_buffer->vk, RADV_BC250_CMD_REFUSED);
+      return;
+   }
+   /* Armed on the direct route only, the one the D3D12 DispatchMesh witness takes. The chunked and
+    * indirect routes interleave a setup dispatch and up to 1024 chunk slots, which one phase word
+    * cannot name; they are not claimed here. */
+   bool witness = false;
    bc250_chain_begin(cmd_buffer, "hybrid_task", indirect_va, count_va, 1, 0);
    /* Native TASK may already have allocated an ACE gang for this command
     * buffer. The private producer still executes on the graphics PM4 stream;
     * gang existence does not change radv_get_pm4_cs for a graphics queue.
     */
    assert(!radv_cmd_buffer_uses_mec(cmd_buffer));
-   /* The producer shader unconditionally increments the GDS task-invocation
-    * counter, so the queue must always have the shader query region. */
-   cmd_buffer->queue_state.gds_needed = true;
+   /* The producer increments the GDS task-invocation counter only where this winsys gives the
+    * submission a GDS partition (BD-119, radv_bc250_prepare_task). The queue needs the shader-query
+    * GDS region exactly then; asking for it without GDS allocated a buffer that is not GDS and left
+    * the producer's wave waiting for an acknowledgement that never came. */
+   cmd_buffer->queue_state.gds_needed |= pipeline->bc250_task_gds;
    if (!indirect_va && (!x || !y || !z))
       return;
 
@@ -7174,6 +7448,7 @@ bc250_draw_task(struct radv_cmd_buffer *cmd_buffer, uint32_t x, uint32_t y, uint
       constants.task_slot = address + slots_base;
       bc250_emit_chunks(cmd_buffer, pipeline, &constants, address, x, y, z, total);
    } else {
+      witness = bc250_task_witness_arm(cmd_buffer);
       radv_meta_begin(cmd_buffer);
       assert(mapped);
       struct bc250_task_slot slot = {.full_x = x, .full_y = y, .full_z = z, .pad = draw_id};
@@ -7183,11 +7458,16 @@ bc250_draw_task(struct radv_cmd_buffer *cmd_buffer, uint32_t x, uint32_t y, uint
       radv_meta_push_constants(cmd_buffer, pipeline->bc250_task_layout, VK_SHADER_STAGE_COMPUTE_BIT,
                                0, sizeof(constants), &constants);
       struct radv_dispatch_info dispatch = {.blocks = {x, y, z}};
+      if (witness)
+         bc250_task_witness_mark(cmd_buffer, RADV_BC250_TASK_PHASE_PRODUCER);
       bc250_chain_dispatch(cmd_buffer, &dispatch, "task_producer");
       radv_meta_end(cmd_buffer);
 
       cmd_buffer->state.flush_bits |= AC_BARRIER_SYNC_CS | AC_BARRIER_INV_VMEM |
                                       AC_BARRIER_INV_SMEM | AC_BARRIER_INV_L2;
+      /* BD-119: the producer's waves have retired when this flush returns. */
+      if (witness)
+         bc250_task_witness_fence(cmd_buffer, RADV_BC250_TASK_PHASE_RETIRED);
       if (pipeline->bc250_ordered) {
          cmd_buffer->state.flush_bits |= AC_BARRIER_WB_L2;
          radv_emit_cache_flush(cmd_buffer, false);
@@ -7208,6 +7488,11 @@ bc250_draw_task(struct radv_cmd_buffer *cmd_buffer, uint32_t x, uint32_t y, uint
       cmd_buffer->bc250_inside_mesh_draw = false;
       memcpy(cmd_buffer->push_constants, saved, sizeof(saved));
       cmd_buffer->push_constant_stages |= pipeline->active_stages;
+      /* BD-119: the mesh draw's waves have retired when this flush returns. */
+      if (witness) {
+         cmd_buffer->state.flush_bits |= AC_BARRIER_SYNC_VS | AC_BARRIER_SYNC_PS;
+         bc250_task_witness_fence(cmd_buffer, RADV_BC250_TASK_PHASE_DONE);
+      }
    }
 
    *compute_descriptors = saved_compute_descriptors;

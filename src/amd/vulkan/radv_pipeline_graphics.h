@@ -146,6 +146,14 @@ struct radv_graphics_pipeline {
    VkPipeline bc250_task_pipeline;
    VkPipeline bc250_setup_pipeline;
    bool bc250_shared_setup; /* Setup pipeline and layout owned by the device meta cache. */
+   /* BD-119: the producer of this pipeline contains the GDS TASK-invocation counter, so a draw with it
+    * needs the queue's shader-query GDS region. False wherever the winsys programs no GDS partition,
+    * and then the counter is not in the shader either (radv_bc250_prepare_task). */
+   bool bc250_task_gds;
+   /* BD-119: this pipeline carries an APPLICATION TASK (amplification) stage, so its producer is the
+    * one the defect is about. False for a mesh-only pipeline whose producer is the internal synthetic
+    * one, which contains no GDS access and is refused by nothing (radv_bc250_prepare_task). */
+   bool bc250_task_app;
    VkPipelineLayout bc250_task_layout;
    /* RADV_BC250_MESH_IDXPASS: index-pass compute pipeline (+ its layout) and the indexed-draw pipeline. */
    VkPipeline bc250_idx_cs;

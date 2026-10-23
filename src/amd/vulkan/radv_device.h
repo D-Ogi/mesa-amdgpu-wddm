@@ -184,6 +184,16 @@ struct radv_bc250_device_env {
    /* RADV_BC250_SUBMIT_PROFILE=1: per-queue submission cost (runtime, driver, BO list, CS ioctl,
     * timer, present) printed every 5 s (radv_bc250_submit_profile_*). */
    bool submit_profile;
+   /* BD-119, RADV_BC250_TASK_WITNESS (default on with hybrid task): the first
+    * task_witness_draws hybrid-task draws of this device write a GPU phase word. Nothing waits for
+    * it: the word is read without blocking after the submit that carried the draw, and again at the
+    * next submit, at vkQueueWaitIdle and at device destruction. The path latches off only once
+    * task_witness_ms has passed without the phase reaching DONE, and that bound is the KMD's own
+    * hardware fence budget (12 s), so a slow submission is not mistaken for a stuck one
+    * (radv_bc250.h). The two extra cache flushes the witness forces are paid by those draws only. */
+   bool task_witness;
+   unsigned task_witness_ms;
+   unsigned task_witness_draws;
 };
 
 #define RADV_BC250_MESH_VERT_GRP_CLAMP 1
@@ -202,6 +212,15 @@ struct radv_device {
       bool pool;
    } bc250_idx_spare[32];
    uint32_t bc250_idx_spare_count, bc250_idx_spare_bytes;
+   /* BD-119 hybrid-task progress witness: one host-visible word the command stream advances through
+    * the phases of a witnessed draw, created on the first such draw and read after its submit. */
+   simple_mtx_t bc250_task_witness_mtx;
+   struct radeon_winsys_bo *bc250_task_witness_bo;
+   volatile uint32_t *bc250_task_witness_map;
+   uint64_t bc250_task_witness_va;
+   uint32_t bc250_task_witness_armed;   /* witnessed draws still to record */
+   uint32_t bc250_task_witness_pending; /* a witnessed draw was SUBMITTED and is not yet resolved */
+   int64_t bc250_task_witness_submit_ns; /* os_time_get_nano() of that submit */
    struct radv_bc250_device_env bc250_env;
    /* RADV_BC250_ASYNC_COMPILE: background queue for the optimized Mesh/FS binaries of pipelines that were
     * created with an unoptimized ACO build first (radv_pipeline_graphics.c). */

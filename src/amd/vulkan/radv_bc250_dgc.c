@@ -767,7 +767,12 @@ radv_bc250_dgc_execute(struct radv_cmd_buffer *cmd, VkBool32 preprocessed, const
             radv_get_max_scratch_waves(device, shader));
       }
    }
-   cmd->queue_state.gds_needed |= shape.task;
+   /* BD-119: the same consequence as radv_bc250.c's direct route. The queue needs the shader-query
+    * GDS region exactly when the producer of this pipeline carries the GDS counter, which it does
+    * only where the winsys programs a GDS partition. Asking unconditionally allocated a buffer that
+    * is not GDS and, since the fix, makes the queue's BD-119 warning fire for a submission with no
+    * GDS user in it. */
+   cmd->queue_state.gds_needed |= shape.task && p->bc250_task_gds;
    cmd->state.flush_bits |= AC_BARRIER_SYNC_CS | AC_BARRIER_INV_L2 | AC_BARRIER_INV_VMEM |
                             AC_BARRIER_INV_SMEM | AC_BARRIER_WB_L2;
    radv_emit_cache_flush(cmd, false);
