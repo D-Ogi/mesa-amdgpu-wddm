@@ -116,8 +116,8 @@ struct NOP_ctx_gfx6 {
     * operand/definition of another instruction in the clause */
    bool smem_clause = false;
    bool smem_write = false;
-   BITSET_DECLARE(smem_clause_read_write, 128) = {0};
-   BITSET_DECLARE(smem_clause_write, 128) = {0};
+   BITSET_DECLARE(smem_clause_read_write, 128) = { 0 };
+   BITSET_DECLARE(smem_clause_write, 128) = { 0 };
 };
 
 struct NOP_ctx_gfx10 {
@@ -1273,7 +1273,7 @@ struct VALUPartialForwardingHazardGlobalState {
 struct VALUPartialForwardingHazardBlockState {
    /* initialized by number of VGPRs read by VALU, decrement when encountered to return early */
    uint8_t num_vgprs_read = 0;
-   BITSET_DECLARE(vgprs_read, 256) = {0};
+   BITSET_DECLARE(vgprs_read, 256) = { 0 };
    enum VALUPartialForwardingHazardState state = nothing_written;
    unsigned num_valu_since_read = 0;
    unsigned num_valu_since_write = 0;

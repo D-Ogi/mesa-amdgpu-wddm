@@ -32,7 +32,10 @@
 #define ZINK_BIND_MUTABLE (1u << 28)
 #define ZINK_BIND_DMABUF (1u << 29)
 #define ZINK_BIND_TRANSIENT (1u << 30) //transient fb attachment
-#define ZINK_BIND_VIDEO (1u << 31)
+#define ZINK_BIND_VIDEO (1u << 31) //from video frontend
+#define ZINK_RESOURCE_FLAG_VIDEO_DPB (PIPE_RESOURCE_FLAG_DRV_PRIV << 0) //separate video buffer
+#define ZINK_RESOURCE_FLAG_VIDEO_OUTPUT (PIPE_RESOURCE_FLAG_DRV_PRIV << 1) //separate video buffer
+#define ZINK_RESOURCE_FLAG_INTERNAL_ONLY (PIPE_RESOURCE_FLAG_DRV_PRIV << 2)
 
 #ifdef __cplusplus
 extern "C" {
@@ -185,9 +188,13 @@ zink_batch_resource_usage_set(struct zink_batch_state *bs, struct zink_resource 
             util_dynarray_append(&bs->acquires, acquire);
       } else if (res->obj->exportable || res->obj->bc250_runtime) {
          struct pipe_resource *pres = NULL;
-         bool found = false;
          simple_mtx_lock(&bs->exportable_lock);
-         _mesa_set_search_or_add(&bs->dmabuf_exports, res, &found);
+         struct hash_entry *he = _mesa_hash_table_search(&bs->exports, res);
+         bool found = he != NULL;
+         if (!found)
+            he = _mesa_hash_table_insert(&bs->exports, res, NULL);
+         if (write)
+            he->data = (void *)(uintptr_t)true;
          simple_mtx_unlock(&bs->exportable_lock);
          if (!found) {
             pipe_resource_reference(&pres, &res->base.b);
@@ -240,6 +247,7 @@ zink_resource_disable_unordered(struct zink_resource *res, bool disable_write)
 {
    res->obj->unordered_read = false;
    res->obj->ordered_access_is_copied = false;
+   res->obj->has_ordered_access = true;
    if (disable_write)
       zink_resource_disable_unordered_write(res);
 }

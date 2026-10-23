@@ -195,8 +195,7 @@ add_config(struct aco_elf_writer* elf, const ac_shader_config* config, unsigned 
    data[0] = R_00B848_COMPUTE_PGM_RSRC1;
    data[1] = S_00B028_VGPRS(DIV_ROUND_UP(config->num_vgprs, vgpr_alloc) - 1) |
              S_00B028_SGPRS(DIV_ROUND_UP(config->num_sgprs, 8) - 1) |
-             S_00B028_FLOAT_MODE(config->float_mode) |
-             S_00B848_MEM_ORDERED(config->mem_ordered);
+             S_00B028_FLOAT_MODE(config->float_mode) | S_00B848_MEM_ORDERED(config->mem_ordered);
 
    data[2] = R_00B84C_COMPUTE_PGM_RSRC2;
    data[3] = S_00B84C_LDS_SIZE(

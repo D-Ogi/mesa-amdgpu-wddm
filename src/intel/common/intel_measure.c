@@ -661,6 +661,9 @@ static void
 intel_measure_print(struct intel_measure_device *device,
                     const struct intel_device_info *info)
 {
+   if (!config.cpu_measure && ringbuffer_size(device->ringbuffer) == 0)
+      return;
+
    if (unlikely(config.deferred_create_filename)) {
       config.file = fopen(config.deferred_create_filename, "w");
       if (!config.file) {

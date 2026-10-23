@@ -6,6 +6,7 @@ use std::ptr;
 use crate::encode_v9::*;
 use crate::ir::*;
 use crate::isa::ExecUnit;
+use crate::ops::SamplePosition;
 use compiler::bitset::ConstBitSet;
 use kraid_bindings::*;
 
@@ -91,6 +92,8 @@ pub trait Model {
 
     fn op_src_is_64bit(&self, op: &Op, src: &Src) -> bool;
 
+    fn op_src_is_fake(&self, op: &Op, src: &Src) -> bool;
+
     fn op_src_supports_imm32(&self, op: &Op, src: &Src, imm: u32) -> bool;
 
     fn op_src_supports_swizzle(
@@ -129,6 +132,10 @@ pub trait Model {
     fn max_threads(&self, registers_used: u8) -> u8;
 
     fn max_reg_count(&self) -> u8;
+}
+
+fn ptr_eq<T>(a: &T, b: &T) -> bool {
+    (a as *const T) == (b as *const T)
 }
 
 struct ValhallModel {
@@ -266,6 +273,24 @@ impl Model for ValhallModel {
         }
     }
 
+    // Returns true if this source is fake and never actually gets added
+    // to the instruction.  This is useful for legalization to know we can
+    // skip certain sources.
+    fn op_src_is_fake(&self, op: &Op, src: &Src) -> bool {
+        match op {
+            Op::BlendCall(op) => ptr_eq(src, &op.second_color),
+            Op::VarTexBufDual(op) => ptr_eq(src, &op.sample),
+            Op::VarTexBufGather(op) => ptr_eq(src, &op.sample),
+            Op::VarTexBufGradient(op) => ptr_eq(src, &op.sample),
+            Op::VarTexBufSingle(op) => ptr_eq(src, &op.sample),
+            Op::VarTexDual(op) => ptr_eq(src, &op.sample),
+            Op::VarTexGather(op) => ptr_eq(src, &op.sample),
+            Op::VarTexGradient(op) => ptr_eq(src, &op.sample),
+            Op::VarTexSingle(op) => ptr_eq(src, &op.sample),
+            _ => false,
+        }
+    }
+
     fn op_src_supports_imm32(&self, op: &Op, src: &Src, imm: u32) -> bool {
         if let Some(vop) = op.as_virtual() {
             vop.src_supports_imm32(src, imm)
@@ -326,6 +351,23 @@ impl Model for ValhallModel {
     fn op_fixed_src_reg(&self, op: &Op, src: &Src) -> Option<RegRef> {
         let preg = |p| Some(self.preload_reg(p).unwrap());
         let coverage = preg(PreloadReg::CumulativeCoverage);
+
+        // All VAR_TEX_* ops do an implicit read of the SampleCentroidId
+        // preload reg whenever they're not .center.  For SamplePosition::None,
+        // the actual interpolation comes from the hidden register so we don't
+        // need the sample ID in that case, either.
+        macro_rules! var_tex_sample {
+            ($op: expr) => {
+                if ptr::eq(&$op.sample, src)
+                    && $op.sample_position != SamplePosition::Center
+                    && $op.sample_position != SamplePosition::None
+                {
+                    preg(PreloadReg::SampleCentroidId)
+                } else {
+                    None
+                }
+            };
+        }
         match op {
             Op::ATest(op) if ptr::eq(&op.coverage, src) => coverage,
             Op::ZSEmit(op) if ptr::eq(&op.coverage, src) => coverage,
@@ -348,6 +390,14 @@ impl Model for ValhallModel {
                     None
                 }
             }
+            Op::VarTexBufDual(op) => var_tex_sample!(op),
+            Op::VarTexBufGather(op) => var_tex_sample!(op),
+            Op::VarTexBufGradient(op) => var_tex_sample!(op),
+            Op::VarTexBufSingle(op) => var_tex_sample!(op),
+            Op::VarTexDual(op) => var_tex_sample!(op),
+            Op::VarTexGather(op) => var_tex_sample!(op),
+            Op::VarTexGradient(op) => var_tex_sample!(op),
+            Op::VarTexSingle(op) => var_tex_sample!(op),
             _ => None,
         }
     }
@@ -413,14 +463,10 @@ impl Model for ValhallModel {
     }
 }
 
-pub fn model_for_gpu_id(
-    gpu_id: u64,
-    gpu_variant: u32,
+pub fn model_for_arch(
+    arch: u8,
+    pan_model: *const PanModel,
 ) -> Result<Box<dyn Model + Sync + Send>, &'static str> {
-    // SAFETY: pan_arch() just translates one integer to another
-    let arch = u8::try_from(unsafe { pan_arch(gpu_id) }).unwrap();
-    let pan_model = unsafe { pan_get_model(gpu_id, gpu_variant) };
-
     if arch >= 15 {
         Err("Kraid does not yet support this GPU")
     } else if arch >= 9 {
@@ -428,4 +474,15 @@ pub fn model_for_gpu_id(
     } else {
         Err("Kraid only supports Valhall (v9) and later GPUs")
     }
+}
+
+#[cfg(test)]
+pub fn model_for_gpu_id(
+    gpu_id: u64,
+    gpu_variant: u32,
+) -> Result<Box<dyn Model + Sync + Send>, &'static str> {
+    // SAFETY: pan_arch() just translates one integer to another
+    let arch = u8::try_from(unsafe { pan_arch(gpu_id) }).unwrap();
+    let pan_model = unsafe { pan_get_model(gpu_id, gpu_variant, 1, 0) };
+    model_for_arch(arch, pan_model)
 }

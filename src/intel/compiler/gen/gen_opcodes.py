@@ -160,6 +160,7 @@ op('dpas', 'GEN_FORMAT_DPAS_THREE_SRC', {"xe": 89}, num_srcs=3)
 op('send',   'GEN_FORMAT_SEND', 49, num_srcs=1)
 op('sendc',  'GEN_FORMAT_SEND', 50, num_srcs=1)
 op('sendg',  'GEN_FORMAT_SEND', {"xe3p_64bit": 51}, num_srcs=1)
+op('sendgc', 'GEN_FORMAT_SEND', {"xe3p_64bit": 52}, num_srcs=1)
 op('sends',  'GEN_FORMAT_SEND', {"pre_xe": 51, "xe": None}, num_srcs=1)
 op('sendsc', 'GEN_FORMAT_SEND', {"pre_xe": 52, "xe": None}, num_srcs=1)
 

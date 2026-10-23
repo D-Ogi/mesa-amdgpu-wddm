@@ -205,7 +205,7 @@ radv_rt_init_capture_replay(struct radv_device *device, const VkRayTracingPipeli
             library_shader->bo = library_shader->alloc->arena->bo;
             library_shader->va = radv_buffer_get_va(library_shader->bo) + library_shader->alloc->offset;
 
-            if (!radv_shader_reupload(device, library_shader)) {
+            if (!radv_shader_upload(device, library_shader)) {
                result = VK_ERROR_UNKNOWN;
                goto reloc_out;
             }
@@ -303,7 +303,7 @@ radv_rt_fill_stage_info(const struct radv_device *device, const VkRayTracingPipe
    }
 }
 
-static void
+static VkResult
 radv_init_rt_stage_hashes(const struct radv_device *device, VkPipelineCreateFlags2 pipeline_flags,
                           const VkRayTracingPipelineCreateInfoKHR *pCreateInfo, struct radv_ray_tracing_stage *stages)
 {
@@ -317,6 +317,8 @@ radv_init_rt_stage_hashes(const struct radv_device *device, VkPipelineCreateFlag
 
          const struct radv_ray_tracing_binary_header *header =
             (const struct radv_ray_tracing_binary_header *)blob_read_bytes(&blob, sizeof(*header));
+         if (!header)
+            return VK_ERROR_UNKNOWN;
 
          if (header->is_traversal_shader)
             continue;
@@ -333,6 +335,8 @@ radv_init_rt_stage_hashes(const struct radv_device *device, VkPipelineCreateFlag
          _mesa_blake3_final(&ctx, stages[idx].blake3);
       }
    }
+
+   return VK_SUCCESS;
 }
 
 static bool
@@ -796,8 +800,14 @@ radv_rt_compile_shaders(struct radv_device *device, struct vk_pipeline_cache *ca
       if (nir_needed) {
          const bool cached = !stage->key.optimisations_disabled &&
                              !(pipeline->base.base.create_flags & VK_PIPELINE_CREATE_2_CAPTURE_DATA_BIT_KHR);
-         rt_stages[idx].stack_size = stage->nir->scratch_size;
-         rt_stages[idx].nir = radv_pipeline_cache_nir_to_handle(device, cache, stage->nir, rt_stages[idx].blake3, cached);
+
+         /* On partial cache hits (when binaries are found but not NIR), the stack size is already
+          * restored from the cache but NIR must be recompiled in some cases. Do not overwrite it
+          * with the NIR scratch size which might be zero.
+          */
+         rt_stages[idx].stack_size = MAX2(rt_stages[idx].stack_size, stage->nir->scratch_size);
+         rt_stages[idx].nir =
+            radv_pipeline_cache_nir_to_handle(device, cache, stage->nir, rt_stages[idx].blake3, cached);
       }
 
       stage->feedback.duration += os_time_get_nano() - stage_start;
@@ -1148,9 +1158,9 @@ radv_ray_tracing_pipeline_hash(const struct radv_device *device, const VkRayTrac
       _mesa_blake3_update(&ctx, &pCreateInfo->pGroups[i].generalShader, sizeof(pCreateInfo->pGroups[i].generalShader));
       _mesa_blake3_update(&ctx, &pCreateInfo->pGroups[i].anyHitShader, sizeof(pCreateInfo->pGroups[i].anyHitShader));
       _mesa_blake3_update(&ctx, &pCreateInfo->pGroups[i].closestHitShader,
-                        sizeof(pCreateInfo->pGroups[i].closestHitShader));
+                          sizeof(pCreateInfo->pGroups[i].closestHitShader));
       _mesa_blake3_update(&ctx, &pCreateInfo->pGroups[i].intersectionShader,
-                        sizeof(pCreateInfo->pGroups[i].intersectionShader));
+                          sizeof(pCreateInfo->pGroups[i].intersectionShader));
       _mesa_blake3_update(&ctx, &rt_state->groups[i].handle, sizeof(struct radv_pipeline_group_handle));
    }
 
@@ -1272,7 +1282,9 @@ radv_generate_ray_tracing_state_key(struct radv_device *device, const VkRayTraci
    radv_rt_fill_stage_info(device, pCreateInfo, rt_state->stages);
 
    VkPipelineCreateFlags2 create_flags = vk_rt_pipeline_create_flags(pCreateInfo);
-   radv_init_rt_stage_hashes(device, create_flags, pCreateInfo, rt_state->stages);
+   result = radv_init_rt_stage_hashes(device, create_flags, pCreateInfo, rt_state->stages);
+   if (result != VK_SUCCESS)
+      goto fail;
 
    result = radv_rt_fill_group_info(device, pCreateInfo, rt_state->stages, rt_state->groups);
    if (result != VK_SUCCESS)
@@ -1303,33 +1315,36 @@ radv_ray_tracing_pipeline_import_binary(struct radv_device *device, struct radv_
 
       const struct radv_ray_tracing_binary_header *header =
          (const struct radv_ray_tracing_binary_header *)blob_read_bytes(&blob, sizeof(*header));
+      assert(header);
 
-      if (header->is_traversal_shader) {
-         shader = radv_shader_deserialize(device, pipeline_binary->key, sizeof(pipeline_binary->key), &blob);
+      if (header->has_shader || header->is_traversal_shader) {
+         uint32_t shader_size = blob_read_uint32(&blob);
+         const void *shader_data = blob_read_bytes(&blob, shader_size);
+         struct blob_reader shader_blob;
+         blob_reader_init(&shader_blob, shader_data, shader_size);
+         shader = radv_shader_deserialize(device, pipeline_binary->key, sizeof(pipeline_binary->key), &shader_blob);
          if (!shader)
             return VK_ERROR_OUT_OF_DEVICE_MEMORY;
 
-         pipeline->base.base.shaders[MESA_SHADER_INTERSECTION] = shader;
-
          _mesa_blake3_update(&ctx, pipeline_binary->key, sizeof(pipeline_binary->key));
-         continue;
+
+         if (header->is_traversal_shader) {
+            pipeline->base.base.shaders[MESA_SHADER_INTERSECTION] = shader;
+            continue;
+         }
+
+         pipeline->stages[i].shader = shader;
       }
 
       memcpy(&pipeline->stages[i].info, &header->stage_info, sizeof(pipeline->stages[i].info));
       pipeline->stages[i].stack_size = header->stack_size;
 
-      if (header->has_shader) {
-         shader = radv_shader_deserialize(device, pipeline_binary->key, sizeof(pipeline_binary->key), &blob);
-         if (!shader)
-            return VK_ERROR_OUT_OF_DEVICE_MEMORY;
-
-         pipeline->stages[i].shader = shader;
-
-         _mesa_blake3_update(&ctx, pipeline_binary->key, sizeof(pipeline_binary->key));
-      }
-
       if (header->has_nir) {
-         nir_shader *nir = nir_deserialize(NULL, NULL, &blob);
+         uint32_t nir_size = blob_read_uint32(&blob);
+         const void *nir_data = blob_read_bytes(&blob, nir_size);
+         struct blob_reader nir_blob;
+         blob_reader_init(&nir_blob, nir_data, nir_size);
+         nir_shader *nir = nir_deserialize(NULL, NULL, &nir_blob);
 
          pipeline->stages[i].nir = radv_pipeline_cache_nir_to_handle(device, NULL, nir, header->stage_blake3, false);
          ralloc_free(nir);
@@ -1395,9 +1410,10 @@ radv_rt_pipeline_create(VkDevice _device, VkPipelineCache _cache, const VkRayTra
    } else {
       result = radv_rt_pipeline_compile(device, pCreateInfo, pipeline, cache, &rt_state, capture_replay_blocks,
                                         creation_feedback);
-      if (result != VK_SUCCESS)
-         goto fail;
    }
+
+   if (result != VK_SUCCESS)
+      goto fail;
 
    if (!(pipeline->base.base.create_flags & VK_PIPELINE_CREATE_2_LIBRARY_BIT_KHR)) {
       compute_rt_stack_size(pCreateInfo, pipeline);

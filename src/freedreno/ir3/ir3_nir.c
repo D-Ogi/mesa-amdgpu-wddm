@@ -363,9 +363,6 @@ ir3_optimize_loop(struct ir3_compiler *compiler,
       progress |= OPT(s, nir_opt_constant_folding);
       progress |= OPT(s, nir_opt_uub, &options->opt_uub_options);
 
-      /* Remove unused components from IO loads. */
-      progress |= OPT(s, nir_opt_shrink_vectors, true);
-
       const nir_opt_offsets_options offset_options = {
          /* How large an offset we can encode in the instr's immediate field.
           */
@@ -816,8 +813,11 @@ ir3_finalize_nir(struct ir3_compiler *compiler,
    nir_lower_idiv_options idiv_options = {
       .allow_fp16 = true,
    };
-   bool idiv_progress = OPT(s, nir_opt_idiv_const, 8);
-   idiv_progress |= OPT(s, nir_lower_idiv, &idiv_options);
+   bool progress = OPT(s, nir_opt_idiv_const, 8);
+   progress |= OPT(s, nir_lower_idiv, &idiv_options);
+
+   /* Remove unused components from IO loads. */
+   progress |= OPT(s, nir_opt_shrink_vectors, true);
 
    /* Do load/store vectorization after the first opt loop to give us a chance
     * to optimize lowered SSBO pointers. Without the first opt loop every
@@ -831,9 +831,9 @@ ir3_finalize_nir(struct ir3_compiler *compiler,
       .robust_modes = options->robust_modes,
       .cb_data = compiler,
    };
-   bool vectorize_progress = OPT(s, nir_opt_load_store_vectorize, &vectorize_opts);
+   progress |= OPT(s, nir_opt_load_store_vectorize, &vectorize_opts);
 
-   if (idiv_progress || vectorize_progress)
+   if (progress)
       ir3_optimize_loop(compiler, &optimize_options, s);
 
    OPT(s, nir_remove_dead_variables, nir_var_function_temp, NULL);
@@ -1466,6 +1466,25 @@ ir3_nir_set_threadsize(struct ir3_shader_variant *v, const nir_shader *s)
    }
 }
 
+static bool
+lower_draw_id(nir_builder *b, nir_intrinsic_instr *intr, void *data)
+{
+   if (intr->intrinsic != nir_intrinsic_load_draw_id)
+      return false;
+
+   b->cursor = nir_after_instr(&intr->instr);
+   nir_def_rewrite_uses_after(&intr->def,
+                        nir_iadd(b, &intr->def, nir_load_draw_id_offset_ir3(b)));
+   return true;
+}
+
+static bool
+ir3_nir_lower_draw_id(nir_shader *shader)
+{
+   return nir_shader_intrinsics_pass(shader, lower_draw_id,
+                                     nir_metadata_control_flow, NULL);
+}
+
 void
 ir3_nir_lower_variant(struct ir3_shader_variant *so,
                       const struct ir3_shader_nir_options *options,
@@ -1594,6 +1613,9 @@ ir3_nir_lower_variant(struct ir3_shader_variant *so,
    progress |= OPT(s, nir_lower_64bit_phis);
 
    progress |= OPT(s, ir3_nir_opt_subgroups, so);
+
+   if (so->compiler->options.lower_draw_id)
+      progress |= OPT(s, ir3_nir_lower_draw_id);
 
    if (so->compiler->info->props.load_shader_consts_via_preamble)
       progress |= OPT(s, ir3_nir_lower_driver_params_to_ubo, so);
@@ -1786,6 +1808,9 @@ ir3_get_driver_param_info(const nir_shader *shader,
       break;
    case nir_intrinsic_load_draw_id:
       param_info->offset = IR3_DP_VS(draw_id);
+      break;
+   case nir_intrinsic_load_draw_id_offset_ir3:
+      param_info->offset = IR3_DP_VS(draw_id_offset);
       break;
    case nir_intrinsic_load_base_instance:
       param_info->offset = IR3_DP_VS(instid_base);

@@ -16,11 +16,11 @@ vk_format_for_size(int bs)
    case 1:
       return VK_FORMAT_R8_UINT;
    case 2:
-      return VK_FORMAT_R8G8_UINT;
+      return VK_FORMAT_R16_UINT;
    case 4:
-      return VK_FORMAT_R8G8B8A8_UINT;
+      return VK_FORMAT_R32_UINT;
    case 8:
-      return VK_FORMAT_R16G16B16A16_UINT;
+      return VK_FORMAT_R32G32_UINT;
    case 12:
       return VK_FORMAT_R32G32B32_UINT;
    case 16:
@@ -30,16 +30,22 @@ vk_format_for_size(int bs)
    }
 }
 
-struct radv_meta_blit2d_surf
-radv_blit_surf_for_image_level_layer(struct radv_image *image, VkImageLayout layout,
-                                     const VkImageSubresourceLayers *subres)
+static VkFormat
+get_copy_format(struct radv_image *image, const VkImageSubresourceLayers *subres)
 {
    VkFormat format = radv_get_aspect_format(image, subres->aspectMask);
 
    if (!radv_dcc_enabled(image, subres->mipLevel) && !(radv_tc_compat_htile_enabled(image, subres->mipLevel)))
       format = vk_format_for_size(vk_format_get_blocksize(format));
 
-   format = vk_format_no_srgb(format);
+   return vk_format_no_srgb(format);
+}
+
+struct radv_meta_blit2d_surf
+radv_blit_surf_for_image_level_layer(struct radv_image *image, VkImageLayout layout,
+                                     const VkImageSubresourceLayers *subres)
+{
+   VkFormat format = get_copy_format(image, subres);
 
    return (struct radv_meta_blit2d_surf){
       .format = format,
@@ -52,17 +58,36 @@ radv_blit_surf_for_image_level_layer(struct radv_image *image, VkImageLayout lay
    };
 }
 
+static uint64_t
+get_transfer_temp_va(struct radv_cmd_buffer *cmd_buffer)
+{
+   struct radv_device *const device = radv_cmd_buffer_device(cmd_buffer);
+   const struct radv_physical_device *const pdev = radv_device_physical(device);
+   const uint32_t pad = pdev->info.sdma_ip_version < SDMA_4_0 ? RADV_SDMA_TRANSFER_TEMP_PAD_BYTES_SDMA2 : 0;
+   return radv_buffer_get_va(cmd_buffer->transfer.copy_temp) + pad;
+}
+
 static bool
 alloc_transfer_temp_bo(struct radv_cmd_buffer *cmd_buffer)
 {
    struct radv_device *device = radv_cmd_buffer_device(cmd_buffer);
+   const struct radv_physical_device *const pdev = radv_device_physical(device);
    struct radv_cmd_stream *cs = cmd_buffer->cs;
 
    if (!cmd_buffer->transfer.copy_temp) {
-      const VkResult r =
-         radv_bo_create(device, &cmd_buffer->vk.base, RADV_SDMA_TRANSFER_TEMP_BYTES, 4096, RADEON_DOMAIN_VRAM,
-                        RADEON_FLAG_NO_CPU_ACCESS | RADEON_FLAG_NO_INTERPROCESS_SHARING, RADV_BO_PRIORITY_SCRATCH, 0,
-                        true, &cmd_buffer->transfer.copy_temp);
+      /* Allocate twice as much on SDMA2-3 to make space for both the T2T and
+       * unaligned buffer/image copy workarounds at the same time.
+       *
+       * Pad the buffer on SDMA2-3 because SDMA seems to read memory
+       * before the linear address for unaligned tiled buffer/image copies.
+       */
+      const uint32_t pad = pdev->info.sdma_ip_version < SDMA_4_0 ? RADV_SDMA_TRANSFER_TEMP_PAD_BYTES_SDMA2 : 0;
+      const uint32_t factor = pdev->info.sdma_ip_version < SDMA_4_0 ? 2 : 1;
+      const uint64_t temp_bo_size = RADV_SDMA_TRANSFER_TEMP_BYTES * factor + pad;
+
+      const VkResult r = radv_bo_create(device, &cmd_buffer->vk.base, temp_bo_size, 4096, RADEON_DOMAIN_VRAM,
+                                        RADEON_FLAG_NO_CPU_ACCESS | RADEON_FLAG_NO_INTERPROCESS_SHARING,
+                                        RADV_BO_PRIORITY_SCRATCH, 0, true, &cmd_buffer->transfer.copy_temp);
 
       if (r != VK_SUCCESS) {
          vk_command_buffer_set_error(&cmd_buffer->vk, r);
@@ -108,6 +133,7 @@ transfer_copy_memory_image(struct radv_cmd_buffer *cmd_buffer, VkAddressCopyFlag
                            struct radv_image *image, const VkDeviceMemoryImageCopyKHR *region, bool to_image)
 {
    const struct radv_device *device = radv_cmd_buffer_device(cmd_buffer);
+   const struct radv_physical_device *const pdev = radv_device_physical(device);
    struct radv_cmd_stream *cs = cmd_buffer->cs;
 
    if (!radv_sdma_supports_image(cmd_buffer, image, region->imageLayout, &region->imageSubresource, to_image)) {
@@ -141,11 +167,12 @@ transfer_copy_memory_image(struct radv_cmd_buffer *cmd_buffer, VkAddressCopyFlag
       radv_sdma_get_surf(cmd_buffer, image, region->imageLayout, region->imageSubresource, img_offset_el);
    const VkExtent3D extent = radv_sdma_get_copy_extent(image, region->imageSubresource, img_extent_el);
 
-   if (radv_sdma_use_unaligned_buffer_image_copy(device, &buf, &img, extent)) {
+   if (ac_sdma_use_unaligned_buffer_image_copy(&pdev->info, &buf, &img, extent.width, extent.height, extent.depth)) {
       if (!alloc_transfer_temp_bo(cmd_buffer))
          return;
 
-      radv_sdma_copy_buffer_image_unaligned(device, cs, &buf, &img, extent, cmd_buffer->transfer.copy_temp, to_image);
+      const uint64_t temp_bo_va = get_transfer_temp_va(cmd_buffer);
+      radv_sdma_copy_buffer_image_unaligned(device, cs, &buf, &img, extent, temp_bo_va, to_image);
    } else {
       radv_sdma_copy_buffer_image(device, cs, &buf, &img, extent, to_image);
    }
@@ -154,10 +181,10 @@ transfer_copy_memory_image(struct radv_cmd_buffer *cmd_buffer, VkAddressCopyFlag
       radv_transfer_fixup_copy_dst_metadata(cmd_buffer, image, &region->imageSubresource);
 }
 
-static void
-radv_fixup_copy_dst_metadata(struct radv_cmd_buffer *cmd_buffer, struct radv_image *image, VkImageLayout image_layout,
+void
+radv_meta_fixup_dst_metadata(struct radv_cmd_buffer *cmd_buffer, struct radv_image *image, VkImageLayout image_layout,
                              const VkImageSubresourceLayers *subresource, const VkOffset3D *offset,
-                             const VkExtent3D *extent, bool before_copy)
+                             const VkExtent3D *extent, bool before)
 {
    const struct radv_device *device = radv_cmd_buffer_device(cmd_buffer);
    const struct radv_physical_device *pdev = radv_device_physical(device);
@@ -171,54 +198,69 @@ radv_fixup_copy_dst_metadata(struct radv_cmd_buffer *cmd_buffer, struct radv_ima
    };
 
    if (pdev->info.gfx_level >= GFX12) {
-      /* Expand HiZ to [0,1] after the copy because image stores don't update HiZ and the clear can
-       * run in parallel.
+      /* Expand HiZ to [0,1] because image stores to the Z image have no access to HiZ data. This
+       * executes in parallel with the caller's dispatch.
        */
-      if (radv_image_has_hiz(image) && (subresource->aspectMask & VK_IMAGE_ASPECT_DEPTH_BIT) && !before_copy)
+      if (radv_image_has_hiz(image) && (subresource->aspectMask & VK_IMAGE_ASPECT_DEPTH_BIT) && !before)
          radv_expand_hiz_range(cmd_buffer, image, &range);
    } else {
+      if (!radv_htile_enabled(image, subresource->mipLevel))
+         return;
+
+      const bool is_partial_region = offset->x || offset->y || offset->z || extent->width != image->vk.extent.width ||
+                                     extent->height != image->vk.extent.height ||
+                                     extent->depth != image->vk.extent.depth;
       const uint32_t queue_mask = radv_image_queue_family_mask(image, cmd_buffer->qf);
-      if (!radv_layout_is_htile_compressed(device, image, subresource->mipLevel, image_layout, queue_mask))
-         return;
+      const bool has_zs_compression =
+         radv_layout_is_htile_compressed(device, image, subresource->mipLevel, image_layout, queue_mask);
+      const bool image_stores_decompress = radv_image_decompress_htile_on_image_stores(device, image);
 
-      if (radv_image_decompress_htile_on_image_stores(device, image))
-         return;
+      /* To keep it simple, we just decompress if the region is not the whole subresource.
+       * If the region is the whole subresource, decompression is useless because there are
+       * no pixels to preserve, so we just clear HTILE to uncompressed after the caller's
+       * dispatch.
+       */
+      const bool decompress_before = is_partial_region && has_zs_compression && !image_stores_decompress;
 
-      const bool is_partial_copy = offset->x || offset->y || offset->z || extent->width != image->vk.extent.width ||
-                                   extent->height != image->vk.extent.height || extent->depth != image->vk.extent.depth;
-
-      if (before_copy) {
-         /* For partial copies, HTILE is decompressed before because image stores don't write the
-          * uncompressed DWORD to HTILE. And then it's needed to re-initialize HTILE to its
-          * uncompressed state after the copy.
-          */
-         if (is_partial_copy) {
+      if (before) {
+         if (decompress_before) {
             radv_describe_barrier_start(cmd_buffer, RGP_BARRIER_UNKNOWN_REASON);
-
-            u_foreach_bit (i, subresource->aspectMask) {
-               unsigned aspect_mask = 1u << i;
-               radv_expand_depth_stencil(cmd_buffer, image,
-                                         &(VkImageSubresourceRange){
-                                            .aspectMask = aspect_mask,
-                                            .baseMipLevel = subresource->mipLevel,
-                                            .levelCount = 1,
-                                            .baseArrayLayer = subresource->baseArrayLayer,
-                                            .layerCount = vk_image_subresource_layer_count(&image->vk, subresource),
-                                         },
-                                         NULL);
-            }
-
+            radv_decompress_depth_stencil(cmd_buffer, image, &range, NULL);
             radv_describe_barrier_end(cmd_buffer);
          }
-      } else {
-         if (!is_partial_copy) {
-            /* Fixup HTILE after a copy on compute, but not for partial copies because decompressing the
-             * image also means that HTILE is re-initialized to its uncompressed state.
-             */
-            const uint32_t htile_value = radv_get_htile_initial_value(device, image);
+      } else if (!decompress_before) {
+         /* Decompression does this for us, so we have to do this only if we don't decompress.
+          *
+          * Reset HTILE after the caller's dispatch or in parallel with it. Certain HTILE fields
+          * are preserved if necessary.
+          *
+          * This expands Z bounds in HTILE and sets the HTILE compression bits to uncompressed if
+          * image stores don't decompress.
+          *
+          * If Z compression is disabled (like with the GENERAL layout), HiZ stays enabled, so we
+          * must expand the Z bounds in this case too.
+          */
+         enum radv_meta_htile_preserve_flags preserve = RADV_HTILE_PRESERVE_VRS | RADV_HTILE_DYNAMIC_ZRANGE_PRECISION;
 
-            cmd_buffer->state.flush_bits |= radv_clear_htile(cmd_buffer, image, &range, htile_value, false);
+         /* The tiles outside the region may still be compressed, so we must preserve that. */
+         if (has_zs_compression && image_stores_decompress)
+            preserve |= RADV_HTILE_PRESERVE_Z_COMPRESSION | RADV_HTILE_PRESERVE_STENCIL_COMPRESSION;
+
+         /* If image stores update HTILE, we must wait before clearing, otherwise image stores
+          * from the caller's dispatch updating HTILE would race with this HTILE clear.
+          *
+          * Note that this expects that the caller uses a compute shader.
+          */
+         if (image_stores_decompress) {
+            cmd_buffer->state.flush_bits |=
+               AC_BARRIER_SYNC_CS |
+               radv_src_access_flush(cmd_buffer, VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+                                     VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT, 0, image, &range) |
+               radv_dst_access_flush(cmd_buffer, VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+                                     VK_ACCESS_2_SHADER_STORAGE_READ_BIT, 0, image, &range);
          }
+
+         cmd_buffer->state.flush_bits |= radv_clear_htile_rmw_to_uncompressed(cmd_buffer, image, &range, preserve);
       }
    }
 }
@@ -237,7 +279,7 @@ gfx_or_compute_copy_memory_to_image(struct radv_cmd_buffer *cmd_buffer, VkAddres
    assert(image->vk.samples == 1);
 
    if (use_compute) {
-      radv_fixup_copy_dst_metadata(cmd_buffer, image, region->imageLayout, &region->imageSubresource,
+      radv_meta_fixup_dst_metadata(cmd_buffer, image, region->imageLayout, &region->imageSubresource,
                                    &region->imageOffset, &region->imageExtent, true);
    }
 
@@ -323,7 +365,7 @@ gfx_or_compute_copy_memory_to_image(struct radv_cmd_buffer *cmd_buffer, VkAddres
    }
 
    if (use_compute) {
-      radv_fixup_copy_dst_metadata(cmd_buffer, image, region->imageLayout, &region->imageSubresource,
+      radv_meta_fixup_dst_metadata(cmd_buffer, image, region->imageLayout, &region->imageSubresource,
                                    &region->imageOffset, &region->imageExtent, false);
    }
 }
@@ -367,7 +409,7 @@ radv_CmdCopyBufferToImage2(VkCommandBuffer commandBuffer, const VkCopyBufferToIm
       if (cmd_buffer->qf == RADV_QUEUE_TRANSFER) {
          transfer_copy_memory_image(cmd_buffer, src_copy_flags, dst_image, &copy, true);
       } else {
-         const bool use_compute = cmd_buffer->qf == RADV_QUEUE_COMPUTE || !radv_image_is_renderable(dst_image) ||
+         const bool use_compute = cmd_buffer->qf == RADV_QUEUE_COMPUTE || !radv_image_is_renderable(pdev, dst_image) ||
                                   (pdev->drirc.performance.image_meta_path == RADV_IMAGE_META_PATH_COMPUTE &&
                                    !vk_format_is_depth_or_stencil(dst_image->vk.format));
          gfx_or_compute_copy_memory_to_image(cmd_buffer, src_copy_flags, dst_image, &copy, use_compute);
@@ -427,7 +469,7 @@ radv_CmdCopyMemoryToImageKHR(VkCommandBuffer commandBuffer, const VkCopyDeviceMe
       if (cmd_buffer->qf == RADV_QUEUE_TRANSFER) {
          transfer_copy_memory_image(cmd_buffer, copy_flags, dst_image, region, true);
       } else {
-         const bool use_compute = cmd_buffer->qf == RADV_QUEUE_COMPUTE || !radv_image_is_renderable(dst_image) ||
+         const bool use_compute = cmd_buffer->qf == RADV_QUEUE_COMPUTE || !radv_image_is_renderable(pdev, dst_image) ||
                                   pdev->drirc.performance.image_meta_path == RADV_IMAGE_META_PATH_COMPUTE;
          gfx_or_compute_copy_memory_to_image(cmd_buffer, copy_flags, dst_image, region, use_compute);
       }
@@ -634,6 +676,7 @@ transfer_copy_image(struct radv_cmd_buffer *cmd_buffer, struct radv_image *src_i
                     struct radv_image *dst_image, VkImageLayout dst_image_layout, const VkImageCopy2 *region)
 {
    struct radv_device *device = radv_cmd_buffer_device(cmd_buffer);
+   const struct radv_physical_device *const pdev = radv_device_physical(device);
    struct radv_cmd_stream *cs = cmd_buffer->cs;
    unsigned int dst_aspect_mask_remaining = region->dstSubresource.aspectMask;
    VkImageSubresourceLayers src_subresource = region->srcSubresource;
@@ -673,11 +716,12 @@ transfer_copy_image(struct radv_cmd_buffer *cmd_buffer, struct radv_image *src_i
          radv_sdma_get_surf(cmd_buffer, dst_image, dst_image_layout, dst_subresource, dst_offset_el);
       const VkExtent3D extent = radv_sdma_get_copy_extent(src_image, src_subresource, img_extent_el);
 
-      if (radv_sdma_use_t2t_scanline_copy(device, &src, &dst, extent)) {
+      if (ac_sdma_use_t2t_scanline_copy(&pdev->info, &src, &dst, extent.width, extent.height, extent.depth)) {
          if (!alloc_transfer_temp_bo(cmd_buffer))
             return;
 
-         radv_sdma_copy_image_t2t_scanline(device, cs, &src, &dst, extent, cmd_buffer->transfer.copy_temp);
+         const uint64_t temp_bo_va = get_transfer_temp_va(cmd_buffer);
+         radv_sdma_copy_image_t2t_scanline(device, cs, &src, &dst, extent, temp_bo_va);
       } else {
          radv_sdma_copy_image(device, cs, &src, &dst, extent);
       }
@@ -734,56 +778,6 @@ gfx_or_compute_copy_image(struct radv_cmd_buffer *cmd_buffer, struct radv_image 
    assert(src_image->plane_count == 1 || util_is_power_of_two_nonzero(region->srcSubresource.aspectMask));
    assert(dst_image->plane_count == 1 || util_is_power_of_two_nonzero(region->dstSubresource.aspectMask));
 
-   if (use_compute) {
-      radv_fixup_copy_dst_metadata(cmd_buffer, dst_image, dst_image_layout, &region->dstSubresource, &region->dstOffset,
-                                   &region->extent, true);
-   }
-
-   /* Create blit surfaces */
-   struct radv_meta_blit2d_surf b_src =
-      radv_blit_surf_for_image_level_layer(src_image, src_image_layout, &region->srcSubresource);
-
-   struct radv_meta_blit2d_surf b_dst =
-      radv_blit_surf_for_image_level_layer(dst_image, dst_image_layout, &region->dstSubresource);
-
-   uint32_t dst_queue_mask = radv_image_queue_family_mask(dst_image, cmd_buffer->qf);
-   bool dst_compressed =
-      radv_layout_dcc_compressed(device, dst_image, region->dstSubresource.mipLevel, dst_image_layout, dst_queue_mask);
-   uint32_t src_queue_mask = radv_image_queue_family_mask(src_image, cmd_buffer->qf);
-   bool src_compressed =
-      radv_layout_dcc_compressed(device, src_image, region->srcSubresource.mipLevel, src_image_layout, src_queue_mask);
-   bool need_dcc_sign_reinterpret = false;
-
-   if (!src_compressed ||
-       (radv_dcc_formats_compatible(pdev->info.gfx_level, b_src.format, b_dst.format, &need_dcc_sign_reinterpret) &&
-        !need_dcc_sign_reinterpret)) {
-      b_src.format = b_dst.format;
-   } else if (!dst_compressed) {
-      b_dst.format = b_src.format;
-   } else {
-      radv_describe_barrier_start(cmd_buffer, RGP_BARRIER_UNKNOWN_REASON);
-
-      radv_decompress_dcc(cmd_buffer, dst_image,
-                          &(VkImageSubresourceRange){
-                             .aspectMask = region->dstSubresource.aspectMask,
-                             .baseMipLevel = region->dstSubresource.mipLevel,
-                             .levelCount = 1,
-                             .baseArrayLayer = region->dstSubresource.baseArrayLayer,
-                             .layerCount = vk_image_subresource_layer_count(&dst_image->vk, &region->dstSubresource),
-                          });
-      b_dst.format = b_src.format;
-      b_dst.disable_compression = true;
-
-      radv_describe_barrier_end(cmd_buffer);
-   }
-
-   /* Select a compatible color format for color<->depth/stencil copies. */
-   if (vk_format_is_color(src_image->vk.format) && vk_format_is_depth_or_stencil(dst_image->vk.format)) {
-      b_src.format = radv_get_compat_color_ds_format(src_image->vk.format);
-   } else if (vk_format_is_depth_or_stencil(src_image->vk.format) && vk_format_is_color(dst_image->vk.format)) {
-      b_dst.format = radv_get_compat_color_ds_format(dst_image->vk.format);
-   }
-
    /**
     * From the Vulkan 1.0.6 spec: 18.4 Copying Data Between Buffers and Images
     *    imageExtent is the size in texels of the image to copy in width, height
@@ -807,17 +801,85 @@ gfx_or_compute_copy_image(struct radv_cmd_buffer *cmd_buffer, struct radv_image 
     */
    const VkExtent3D img_extent_el = vk_image_extent_to_elements(&src_image->vk, region->extent);
 
-   unsigned num_slices = vk_image_subresource_layer_count(&src_image->vk, &region->srcSubresource);
+   /* Determine the layer range. */
+   unsigned layer_count = vk_image_subresource_layer_count(&src_image->vk, &region->srcSubresource);
+   unsigned src_layer = region->srcSubresource.baseArrayLayer;
+   unsigned dst_layer = region->dstSubresource.baseArrayLayer;
 
    if (src_image->vk.image_type == VK_IMAGE_TYPE_3D) {
-      b_src.layer = src_offset_el.z;
-      num_slices = img_extent_el.depth;
+      src_layer = src_offset_el.z;
+      layer_count = img_extent_el.depth;
    }
 
    if (dst_image->vk.image_type == VK_IMAGE_TYPE_3D)
-      b_dst.layer = dst_offset_el.z;
+      dst_layer = dst_offset_el.z;
 
-   for (unsigned slice = 0; slice < num_slices; slice++) {
+   /* Determine the copy formats. */
+   VkFormat src_format = get_copy_format(src_image, &region->srcSubresource);
+   VkFormat dst_format = get_copy_format(dst_image, &region->dstSubresource);
+
+   const uint32_t dst_queue_mask = radv_image_queue_family_mask(dst_image, cmd_buffer->qf);
+   const bool dst_compressed =
+      radv_layout_dcc_compressed(device, dst_image, region->dstSubresource.mipLevel, dst_image_layout, dst_queue_mask);
+   const uint32_t src_queue_mask = radv_image_queue_family_mask(src_image, cmd_buffer->qf);
+   const bool src_compressed =
+      radv_layout_dcc_compressed(device, src_image, region->srcSubresource.mipLevel, src_image_layout, src_queue_mask);
+   bool need_dcc_sign_reinterpret = false;
+   bool dst_needs_dcc_decompress = false;
+
+   if (!src_compressed ||
+       (radv_dcc_formats_compatible(pdev->info.gfx_level, src_format, dst_format, &need_dcc_sign_reinterpret) &&
+        !need_dcc_sign_reinterpret)) {
+      src_format = dst_format;
+   } else if (!dst_compressed) {
+      dst_format = src_format;
+   } else {
+      dst_needs_dcc_decompress = true;
+      dst_format = src_format;
+   }
+
+   /* Select a compatible color format for color<->depth/stencil copies. */
+   /* TODO: This ignores DCC format compatibility for the color image. */
+   if (vk_format_is_color(src_image->vk.format) && vk_format_is_depth_or_stencil(dst_image->vk.format)) {
+      src_format = radv_get_compat_color_ds_format(src_image->vk.format);
+   } else if (vk_format_is_depth_or_stencil(src_image->vk.format) && vk_format_is_color(dst_image->vk.format)) {
+      dst_format = radv_get_compat_color_ds_format(dst_image->vk.format);
+   }
+
+   if (dst_needs_dcc_decompress) {
+      radv_describe_barrier_start(cmd_buffer, RGP_BARRIER_UNKNOWN_REASON);
+      radv_decompress_dcc(cmd_buffer, dst_image,
+                          &(VkImageSubresourceRange){
+                             .aspectMask = region->dstSubresource.aspectMask,
+                             .baseMipLevel = region->dstSubresource.mipLevel,
+                             .levelCount = 1,
+                             .baseArrayLayer = dst_layer,
+                             .layerCount = layer_count,
+                          });
+      radv_describe_barrier_end(cmd_buffer);
+   }
+
+   if (use_compute) {
+      radv_meta_fixup_dst_metadata(cmd_buffer, dst_image, dst_image_layout, &region->dstSubresource, &region->dstOffset,
+                                   &region->extent, true);
+   }
+
+   /* Create blit surfaces */
+   struct radv_meta_blit2d_surf b_src =
+      radv_blit_surf_for_image_level_layer(src_image, src_image_layout, &region->srcSubresource);
+
+   struct radv_meta_blit2d_surf b_dst =
+      radv_blit_surf_for_image_level_layer(dst_image, dst_image_layout, &region->dstSubresource);
+
+   b_src.layer = src_layer;
+   b_dst.layer = dst_layer;
+
+   b_src.format = src_format;
+   b_dst.format = dst_format;
+
+   b_dst.disable_compression = dst_needs_dcc_decompress;
+
+   for (unsigned layer = 0; layer < layer_count; layer++) {
       /* Perform Blit */
       if (use_compute) {
          radv_meta_image_to_image_cs(cmd_buffer, &b_src, &b_dst, &src_offset_el, &dst_offset_el, &img_extent_el);
@@ -835,7 +897,7 @@ gfx_or_compute_copy_image(struct radv_cmd_buffer *cmd_buffer, struct radv_image 
    }
 
    if (use_compute) {
-      radv_fixup_copy_dst_metadata(cmd_buffer, dst_image, dst_image_layout, &region->dstSubresource, &region->dstOffset,
+      radv_meta_fixup_dst_metadata(cmd_buffer, dst_image, dst_image_layout, &region->dstSubresource, &region->dstOffset,
                                    &region->extent, false);
    }
 }
@@ -868,9 +930,13 @@ radv_CmdCopyImage2(VkCommandBuffer commandBuffer, const VkCopyImageInfo2 *pCopyI
          transfer_copy_image(cmd_buffer, src_image, pCopyImageInfo->srcImageLayout, dst_image,
                              pCopyImageInfo->dstImageLayout, region);
       } else {
-         const bool use_compute = cmd_buffer->qf == RADV_QUEUE_COMPUTE || !radv_image_is_renderable(dst_image) ||
-                                  (pdev->drirc.performance.image_meta_path == RADV_IMAGE_META_PATH_COMPUTE &&
-                                   !(dst_aspect_mask & (VK_IMAGE_ASPECT_DEPTH_BIT | VK_IMAGE_ASPECT_STENCIL_BIT)));
+         const bool use_compute =
+            cmd_buffer->qf == RADV_QUEUE_COMPUTE || !radv_image_is_renderable(pdev, dst_image) ||
+            (pdev->drirc.performance.image_meta_path == RADV_IMAGE_META_PATH_COMPUTE &&
+             !(dst_aspect_mask & (VK_IMAGE_ASPECT_DEPTH_BIT | VK_IMAGE_ASPECT_STENCIL_BIT)) &&
+             radv_layout_fmask_compression(device, dst_image, pCopyImageInfo->dstImageLayout,
+                                           radv_image_queue_family_mask(dst_image, cmd_buffer->qf)) ==
+                RADV_FMASK_COMPRESSION_NONE);
          gfx_or_compute_copy_image(cmd_buffer, src_image, pCopyImageInfo->srcImageLayout, dst_image,
                                    pCopyImageInfo->dstImageLayout, region, use_compute);
       }
@@ -957,7 +1023,7 @@ radv_CmdCopyMemoryToImageIndirectKHR(VkCommandBuffer commandBuffer,
 
    radv_meta_begin(cmd_buffer);
 
-   const bool use_compute = cmd_buffer->qf == RADV_QUEUE_COMPUTE || !radv_image_is_renderable(dst_image) ||
+   const bool use_compute = cmd_buffer->qf == RADV_QUEUE_COMPUTE || !radv_image_is_renderable(pdev, dst_image) ||
                             (pdev->drirc.performance.image_meta_path == RADV_IMAGE_META_PATH_COMPUTE &&
                              !vk_format_is_depth_or_stencil(dst_image->vk.format));
    if (use_compute) {

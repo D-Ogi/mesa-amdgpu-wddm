@@ -378,7 +378,6 @@ virgl_init_screen_caps(struct virgl_screen *vscreen)
    caps->max_viewports = vscreen->caps.caps.v1.max_viewports;
    caps->max_texel_buffer_elements = vscreen->caps.caps.v1.max_tbo_size;
    caps->texture_border_color_quirk = 0;
-   caps->endianness = PIPE_ENDIAN_LITTLE;
    caps->query_pipeline_statistics =
       !!(vscreen->caps.caps.v2.capability_bits_v2 & VIRGL_CAP_V2_PIPELINE_STATISTICS_QUERY);
    caps->mixed_framebuffer_sizes = true;
@@ -424,7 +423,8 @@ virgl_init_screen_caps(struct virgl_screen *vscreen)
    caps->fbfetch =
       (vscreen->caps.caps.v2.capability_bits & VIRGL_CAP_TGSI_FBFETCH) ? 1 : 0;
    caps->blend_equation_advanced =
-      vscreen->caps.caps.v2.capability_bits_v2 & VIRGL_CAP_V2_BLEND_EQUATION;
+      (vscreen->caps.caps.v2.capability_bits_v2 & VIRGL_CAP_V2_BLEND_EQUATION) ?
+      PIPE_ADVANCED_BLEND_KHR_MODES_MASK : 0;
    caps->shader_clock = vscreen->caps.caps.v2.capability_bits & VIRGL_CAP_SHADER_CLOCK;
    caps->shader_array_components =
       vscreen->caps.caps.v2.capability_bits & VIRGL_CAP_TGSI_COMPONENTS;

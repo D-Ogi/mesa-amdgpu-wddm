@@ -1808,9 +1808,7 @@ parse_depctr_wait(const Instruction* instr)
          res.sa_sdst = 0;
          break;
       case aco_opcode::s_cbranch_scc0:
-      case aco_opcode::s_cbranch_scc1:
-         res.sa_sdst = 0;
-         break;
+      case aco_opcode::s_cbranch_scc1: res.sa_sdst = 0; break;
       default: break;
       }
    } else if (instr->isSALU()) {

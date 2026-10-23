@@ -667,8 +667,10 @@ anv_QueueBeginDebugUtilsLabelEXT(
 
    vk_queue_begin_debug_utils_label(&queue->vk, pLabelInfo);
 
-   anv_queue_trace(queue, pLabelInfo->pLabelName,
-                   false /* frame */, true /* begin */);
+   if (u_trace_should_process(&queue->device->ds.trace_context)) {
+      anv_queue_trace(queue, pLabelInfo->pLabelName,
+                      false /* frame */, true /* begin */);
+   }
 
    vk_queue_unlock(&queue->vk);
 }
@@ -680,7 +682,8 @@ anv_QueueEndDebugUtilsLabelEXT(VkQueue _queue)
 
    vk_queue_lock(&queue->vk);
 
-   if (queue->vk.labels.size > 0) {
+   if (queue->vk.labels.size > 0 &&
+       u_trace_should_process(&queue->device->ds.trace_context)) {
       const VkDebugUtilsLabelEXT *label =
          util_dynarray_top_ptr(&queue->vk.labels, VkDebugUtilsLabelEXT);
       anv_queue_trace(queue, label->pLabelName,

@@ -229,10 +229,15 @@ void
 etna_set_shader_uniforms_dirty_flags(struct etna_shader_variant *sobj)
 {
    uint32_t dirty = 0;
+   uint32_t ubo_mask = 0;
 
    for (uint32_t i = 0; i < sobj->uniforms.count; i++) {
       switch (sobj->uniforms.contents[i]) {
       default:
+         break;
+
+      case ETNA_UNIFORM_UBO_ADDR:
+         ubo_mask |= BITFIELD_BIT(sobj->uniforms.data[i]);
          break;
 
       case ETNA_UNIFORM_TEXRECT_SCALE_X:
@@ -258,4 +263,5 @@ etna_set_shader_uniforms_dirty_flags(struct etna_shader_variant *sobj)
    }
 
    sobj->uniforms_dirty_bits = dirty;
+   sobj->ubo_mask = ubo_mask;
 }

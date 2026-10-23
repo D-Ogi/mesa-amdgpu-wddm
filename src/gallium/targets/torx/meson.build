@@ -28,6 +28,24 @@ if with_tests
   torx_ml_devices = ['ethosu-65-256-98304', 'ethosu-85-256-2097152']
   torx_tests_dir = meson.current_build_dir() / 'tests'
 
+  torx_abi_check = custom_target(
+    'torx-abi',
+    command : [
+      prog_python, '-c',
+      'import sys; from torx import gallium; gallium.check_abi(); '
+      + 'open(sys.argv[1], "w").close()',
+      '@OUTPUT@',
+    ],
+    output : 'torx-abi.stamp',
+    build_by_default : true,
+    depends : libtorx,
+    depend_files : [torx_py_sources],
+    env : {
+      'LD_LIBRARY_PATH' : meson.current_build_dir(),
+      'PYTHONPATH' : meson.project_source_root() / 'src' / 'gallium' / 'frontends',
+    },
+  )
+
   # This is just so modifications to the wrap file will trigger a reconfigure.
   fs.read(meson.project_source_root() / 'subprojects' / 'npu-model-zoo.wrap')
 
@@ -36,11 +54,13 @@ if with_tests
   torx_model_pt2 = {}
   torx_model_dir = {}
   if zoo.found()
+    py_mod.find_installation(prog_python.full_path(), pure : false,
+      modules : ['torch', 'executorch', 'torchao'])
     zoo_test_dir = zoo.get_variable('zoo_test_dir')
-    foreach model, formats : zoo.get_variable('zoo_test_models')
-      if 'pt2' in formats
+    foreach model, entry : zoo.get_variable('zoo_test_models')
+      if 'pt2' in entry['models']
         torx_available_models += model
-        torx_model_pt2 += {model : formats['pt2']}
+        torx_model_pt2 += {model : entry['models']['pt2']}
         torx_model_dir += {model : zoo_test_dir / model}
       endif
     endforeach
@@ -81,7 +101,7 @@ if with_tests
         ],
         output : 'compile_@0@_@1@.stamp'.format(device, model),
         build_by_default : true,
-        depends : [libtorx, torx_split_targets[model]],
+        depends : [libtorx, torx_abi_check, torx_split_targets[model]],
         depend_files : [torx_py_sources, files('tests/compile_torx_common.py', 'tests/compile_torx_tests.py')],
         env : {
           'LD_LIBRARY_PATH' : meson.current_build_dir(),
@@ -100,7 +120,7 @@ if with_tests
         ],
         output : 'compile_model_@0@_@1@.stamp'.format(device, model),
         build_by_default : true,
-        depends : [libtorx, torx_split_targets[model]],
+        depends : [libtorx, torx_abi_check, torx_split_targets[model]],
         depend_files : [torx_py_sources, files('tests/compile_torx_common.py', 'tests/compile_torx_tests.py')],
         env : {
           'LD_LIBRARY_PATH' : meson.current_build_dir(),
@@ -119,7 +139,7 @@ if with_tests
       override_options : ['b_asneeded=false'],
       dependencies : [
         dep_executorch,
-        dep_executorch_portable_ops,
+        dep_executorch_cpu_ops,
         dep_executorch_quantized_ops,
         idep_gtest,
         idep_mesautil,

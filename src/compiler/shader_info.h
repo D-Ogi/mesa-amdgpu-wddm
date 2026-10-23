@@ -531,6 +531,15 @@ typedef struct shader_info {
          bool sample_mask_in_declared:1;
 
          /**
+          * Records whether the shader originally had sample_mask_out in
+          * its output interface.
+          * When sample_mask_out_declared is set, the property
+          * fragmentShadingRateWithShaderSampleMask == VK_FALSE
+          * forces FSR to be disabled.
+          */
+         bool sample_mask_out_declared:1;
+
+         /**
           * whether this shader has pixel_local_storage load/store instructions
           */
          bool accesses_pixel_local_storage:1;

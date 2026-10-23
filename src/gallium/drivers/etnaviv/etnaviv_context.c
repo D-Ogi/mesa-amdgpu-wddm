@@ -46,11 +46,13 @@
 #include "etnaviv_transfer.h"
 #include "etnaviv_translate.h"
 #include "etnaviv_zsa.h"
+#include "layout/eil_format.h"
 
 #include "nir/nir_xfb_info.h"
 #include "pipe/p_context.h"
 #include "pipe/p_state.h"
 #include "util/hash_table.h"
+#include "util/perf/cpu_trace.h"
 #include "util/u_blitter.h"
 #include "util/u_draw.h"
 #include "util/u_helpers.h"
@@ -227,6 +229,7 @@ etna_get_fs(struct etna_context *ctx, struct etna_shader_key* const key)
    struct etna_shader *fs = ctx->shader.bind_fs;
 
    key->use_xfb_emu = false;
+   key->rt_pack_rgba16 = ctx->framebuffer_s.rt_pack_rgba16;
 
    /* update the key if we need to run nir_lower_sample_tex_compare(..).
     * halti < 2 has no HW shadow compare. halti >= 2 has it, but depth32f is
@@ -239,7 +242,7 @@ etna_get_fs(struct etna_context *ctx, struct etna_shader_key* const key)
       if (ctx->sampler[i]->compare_mode == PIPE_TEX_COMPARE_NONE)
          continue;
 
-      const bool emulated_z32f = format_is_emulated_z32f(ctx->sampler_view[i]->format);
+      const bool emulated_z32f = eil_format_is_emulated_z32f(ctx->sampler_view[i]->format);
 
       if (ctx->screen->info->halti >= 2 && !emulated_z32f)
          continue;
@@ -303,9 +306,6 @@ etna_reset_gpu_state(struct etna_context *ctx)
    }
    if (screen->info->halti >= 3) { /* Only on HALTI3+ */
       etna_set_state(stream, VIVS_PS_HALTI3_UNK0103C, 0x76543210);
-   }
-   if (screen->info->halti >= 4) { /* Only on HALTI4+ */
-      etna_set_state(stream, VIVS_PE_ADVANCED_ALPHA_CONFIG, 0x00000000);
    }
    if (screen->info->halti >= 5) { /* Only on HALTI5+ */
       etna_set_state(stream, VIVS_NTE_DESCRIPTOR_CONTROL,
@@ -452,16 +452,25 @@ etna_draw_vbo(struct pipe_context *pctx, const struct pipe_draw_info *info,
       ctx->dirty |= ETNA_DIRTY_STREAMOUT;
    }
 
-   /* Update any derived state */
-   if (ctx->dirty && !etna_state_update(ctx))
-      return;
+   const struct etna_shader *bind_vs = ctx->shader.bind_vs;
+   const struct etna_shader *bind_fs = ctx->shader.bind_fs;
+   uint32_t used_views = 0;
 
-   u_foreach_bit(i, ctx->active_sampler_views) {
+   if (bind_fs)
+      used_views |= bind_fs->textures_used;
+   if (bind_vs)
+      used_views |= bind_vs->textures_used << ctx->screen->specs.vertex_sampler_offset;
+
+   u_foreach_bit(i, ctx->active_sampler_views & used_views) {
       /* If a texture was modified since the last update, we need to clear the
        * texture cache and possibly resolve TS or a sampler compatible sibling.
        */
       etna_update_sampler_source(ctx->sampler_view[i], i);
    }
+
+   /* Update any derived state */
+   if (ctx->dirty && !etna_state_update(ctx))
+      return;
 
    /* Now that we know which states need to be emitted for this draw, reserve
     * the space for them in the cmdstream. This will possibly cause a flush of
@@ -551,12 +560,15 @@ etna_draw_vbo(struct pipe_context *pctx, const struct pipe_draw_info *info,
    }
 
    if (ctx->dirty & (ETNA_DIRTY_SHADER | ETNA_DIRTY_CONSTBUF)) {
-      /* Mark constant buffers as being read */
-      u_foreach_bit(i, ctx->constant_buffer[MESA_SHADER_VERTEX].enabled_mask)
-         resource_read(ctx, ctx->constant_buffer[MESA_SHADER_VERTEX].cb[i].buffer);
+      const struct etna_constbuf_state *vs_cb = &ctx->constant_buffer[MESA_SHADER_VERTEX];
+      const struct etna_constbuf_state *fs_cb = &ctx->constant_buffer[MESA_SHADER_FRAGMENT];
 
-      u_foreach_bit(i, ctx->constant_buffer[MESA_SHADER_FRAGMENT].enabled_mask)
-         resource_read(ctx, ctx->constant_buffer[MESA_SHADER_FRAGMENT].cb[i].buffer);
+      /* Mark constant buffers the shaders load from as being read */
+      u_foreach_bit(i, vs_cb->enabled_mask & ctx->shader.vs->ubo_mask)
+         resource_read(ctx, vs_cb->cb[i].buffer);
+
+      u_foreach_bit(i, fs_cb->enabled_mask & ctx->shader.fs->ubo_mask)
+         resource_read(ctx, fs_cb->cb[i].buffer);
    }
 
    if (ctx->dirty & ETNA_DIRTY_VERTEX_BUFFERS) {
@@ -574,8 +586,14 @@ etna_draw_vbo(struct pipe_context *pctx, const struct pipe_draw_info *info,
 
    if (ctx->dirty & ETNA_DIRTY_SAMPLER_VIEWS) {
       /* Mark textures as being read */
-      u_foreach_bit(i, ctx->active_sampler_views)
-         resource_read(ctx, ctx->sampler_view[i]->texture);
+      u_foreach_bit(i, ctx->active_sampler_views) {
+         struct pipe_sampler_view *view = ctx->sampler_view[i];
+
+         resource_read(ctx, view->texture);
+
+         if (etna_sampler_view_uses_border_shadow(ctx, i))
+            resource_read(ctx, &etna_sampler_view_resource(ctx, view, i)->base);
+      }
    }
 
    /* Mark streamout buffers as being written. */
@@ -695,17 +713,20 @@ void
 etna_flush(struct pipe_context *pctx, struct pipe_fence_handle **fence,
            enum pipe_flush_flags flags, bool internal)
 {
+   MESA_TRACE_FUNC();
    struct etna_context *ctx = etna_context(pctx);
    int out_fence_fd = -1;
 
    ctx->stats.flushes++;
 
    if (VIV_FEATURE(ctx->screen, ETNA_FEATURE_HWTFB)) {
-      if (ctx->streamout.xfb_hw_state == ETNA_XFB_HW_ACTIVE)
+      if (ctx->streamout.xfb_hw_state == ETNA_XFB_HW_ACTIVE) {
          etna_set_state(ctx->stream, VIVS_TFB_COMMAND, TFB_COMMAND_DISABLE);
+         ctx->streamout.xfb_hw_state = ETNA_XFB_HW_PAUSED;
+      }
 
-      ctx->streamout.xfb_hw_state = ETNA_XFB_HW_IDLE;
-      ctx->streamout.xfb_should_be_active = false;
+      if (!ctx->streamout.xfb_should_be_active)
+         ctx->streamout.xfb_hw_state = ETNA_XFB_HW_IDLE;
    }
 
    list_for_each_entry(struct etna_acc_query, aq, &ctx->active_acc_queries, node)
@@ -843,6 +864,7 @@ etna_context_create(struct pipe_screen *pscreen, void *priv, unsigned flags)
 
    pctx->destroy = etna_context_destroy;
    pctx->draw_vbo = etna_draw_vbo;
+   pctx->draw_vbo_buffers = util_draw_vbo_buffers;
    pctx->ml_subgraph_invoke = etna_ml_subgraph_invoke;
    pctx->ml_subgraph_read_output = etna_ml_subgraph_read_outputs;
    pctx->flush = etna_context_flush;

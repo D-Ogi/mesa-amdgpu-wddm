@@ -6,6 +6,7 @@ import struct
 from typing import final, List
 
 import torch
+from executorch.exir.dialects._ops import ops as exir_ops
 
 from executorch.exir.backend.backend_api import BackendDetails
 from executorch.exir.backend.backend_details import (
@@ -21,7 +22,7 @@ _libc = ctypes.CDLL(None)
 
 from . import gallium
 from .debug import dump_compiled_graph
-from .exir_to_gallium import CLONE_OP, exir_to_gallium, get_ml_device
+from .exir_to_gallium import exir_to_gallium, get_ml_device
 from .fold_qdq_with_annotated_qparams_pass import FoldAndAnnotateQParamsPass
 
 
@@ -131,7 +132,7 @@ class TorxBackend(BackendDetails):
         graph_module = result.graph_module
 
         # A clone surviving to translation would be dropped there silently.
-        assert not any(n.op == "call_function" and n.target == CLONE_OP
+        assert not any(n.op == "call_function" and n.target == exir_ops.edge.dim_order_ops._clone_dim_order.default
                        for n in graph_module.graph.nodes)
 
         # Re-attach torx_data to the new graph_module's placeholders, because

@@ -220,6 +220,7 @@ static const struct opcode_desc opcode_descs[] = {
    { BRW_OPCODE_SENDC,    50,  "sendc",   2,    1,    GFX_GE(GFX12) },
    { BRW_OPCODE_SENDS,    51,  "sends",   2,    1,    GFX_LT(GFX12) },
    { BRW_OPCODE_SENDG,    51,  "sendg",   2,    1,    GFX_GE(XE3P) },
+   { BRW_OPCODE_SENDGC,   52,  "sendgc",  2,    1,    GFX_GE(XE3P) },
    { BRW_OPCODE_SENDSC,   52,  "sendsc",  2,    1,    GFX_LT(GFX12) },
    { BRW_OPCODE_MATH,     56,  "math",    2,    1,    GFX_ALL },
    { BRW_OPCODE_ADD,      64,  "add",     2,    1,    GFX_ALL },

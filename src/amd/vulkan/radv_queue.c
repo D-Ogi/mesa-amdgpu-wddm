@@ -919,8 +919,7 @@ radv_update_preamble_cs(struct radv_queue_state *queue, struct radv_device *devi
       /* We write the control buffer from the CPU, so need to grant CPU access to the BO.
        * The draw ring needs to be zero-initialized otherwise the ready bits will be incorrect.
        */
-      uint32_t task_rings_bo_flags =
-         RADEON_FLAG_CPU_ACCESS | RADEON_FLAG_NO_INTERPROCESS_SHARING | RADEON_FLAG_ZERO_VRAM;
+      uint32_t task_rings_bo_flags = RADEON_FLAG_CPU_ACCESS | RADEON_FLAG_NO_INTERPROCESS_SHARING;
 
       result = radv_bo_create(device, NULL, pdev->task_info.bo_size_bytes, 256, RADEON_DOMAIN_VRAM, task_rings_bo_flags,
                               RADV_BO_PRIORITY_SCRATCH, 0, true, &task_rings_bo);
@@ -1077,9 +1076,8 @@ radv_update_preamble_cs(struct radv_queue_state *queue, struct radv_device *devi
       if (i < 2 || task_rings_bo) {
          /* The two initial preambles have a cache flush at the beginning. */
          const enum amd_gfx_level gfx_level = pdev->info.gfx_level;
-         enum ac_barrier_flags flush_bits = AC_BARRIER_INV_ICACHE | AC_BARRIER_INV_SMEM |
-                                               AC_BARRIER_INV_VMEM | AC_BARRIER_INV_L2 |
-                                               AC_BARRIER_PIPELINESTAT_START;
+         enum ac_barrier_flags flush_bits = AC_BARRIER_INV_ICACHE | AC_BARRIER_INV_SMEM | AC_BARRIER_INV_VMEM |
+                                            AC_BARRIER_INV_L2 | AC_BARRIER_PIPELINESTAT_START;
 
          if (i == 0 || task_rings_bo) {
             /* The full flush preamble should also wait for previous shader work to finish. */
@@ -1224,11 +1222,13 @@ radv_update_preambles(struct radv_queue_state *queue, struct radv_device *device
    for (uint32_t j = 0; j < cmd_buffer_count; j++) {
       struct radv_cmd_buffer *cmd_buffer = container_of(cmd_buffers[j], struct radv_cmd_buffer, vk);
 
-      needs.scratch_size_per_wave = MAX2(needs.scratch_size_per_wave, cmd_buffer->queue_state.scratch_size_per_wave_needed);
+      needs.scratch_size_per_wave =
+         MAX2(needs.scratch_size_per_wave, cmd_buffer->queue_state.scratch_size_per_wave_needed);
       needs.scratch_waves = MAX2(needs.scratch_waves, cmd_buffer->queue_state.scratch_waves_wanted);
       needs.compute_scratch_size_per_wave =
          MAX2(needs.compute_scratch_size_per_wave, cmd_buffer->queue_state.compute_scratch_size_per_wave_needed);
-      needs.compute_scratch_waves = MAX2(needs.compute_scratch_waves, cmd_buffer->queue_state.compute_scratch_waves_wanted);
+      needs.compute_scratch_waves =
+         MAX2(needs.compute_scratch_waves, cmd_buffer->queue_state.compute_scratch_waves_wanted);
       needs.esgs_ring_size = MAX2(needs.esgs_ring_size, cmd_buffer->queue_state.esgs_ring_size_needed);
       needs.gsvs_ring_size = MAX2(needs.gsvs_ring_size, cmd_buffer->queue_state.gsvs_ring_size_needed);
       needs.tess_rings |= cmd_buffer->queue_state.tess_rings_needed;
@@ -1324,9 +1324,8 @@ radv_create_flush_postamble(struct radv_queue *queue)
    enum ac_barrier_flags flush_bits = AC_BARRIER_SYNC_CS | AC_BARRIER_INV_L2;
 
    if (ip == AMD_IP_GFX)
-      flush_bits |= AC_BARRIER_SYNC_VS | AC_BARRIER_SYNC_PS | AC_BARRIER_SYNC_AND_INV_CB |
-                    AC_BARRIER_SYNC_AND_INV_DB | AC_BARRIER_SYNC_AND_INV_CB_META |
-                    AC_BARRIER_SYNC_AND_INV_DB_META;
+      flush_bits |= AC_BARRIER_SYNC_VS | AC_BARRIER_SYNC_PS | AC_BARRIER_SYNC_AND_INV_CB | AC_BARRIER_SYNC_AND_INV_DB |
+                    AC_BARRIER_SYNC_AND_INV_CB_META | AC_BARRIER_SYNC_AND_INV_DB_META;
 
    enum ac_rgp_flush_bits rgp_flush_bits = 0;
    uint32_t flush_cnt = 0;
@@ -1357,7 +1356,7 @@ radv_create_gang_wait_preambles_postambles(struct radv_queue *queue)
    VkResult r = VK_SUCCESS;
    struct radeon_winsys *ws = device->ws;
    struct radeon_winsys_bo *gang_sem_bo = NULL;
-   enum radeon_bo_flag gang_sem_bo_flags = RADEON_FLAG_NO_INTERPROCESS_SHARING | RADEON_FLAG_ZERO_VRAM;
+   enum radeon_bo_flag gang_sem_bo_flags = RADEON_FLAG_NO_INTERPROCESS_SHARING;
 
    /* Gang wait preamble is executed before the main preamble which means it may be
     * before a cache flush, which may cause the CP to read stale values. Bypass the
@@ -1434,26 +1433,38 @@ radv_create_gang_wait_preambles_postambles(struct radv_queue *queue)
     * in a multi-process environment, because task shader dispatches are not
     * meant to be executed on multiple compute engines at the same time.
     */
-   ac_emit_cp_wait_mem(
-      ace_pre_cs->b, ace_wait_va, 1, 0xffffffff,
-      S_3C1_FUNCTION(V_3C1_GREATER_THAN_OR_EQUAL_REFERENCE_VALUE) | S_3C1_OPERATION(V_3C1_WAIT_MEM_PREEMPTABLE));
+
+   uint32_t ace_pre_wait_flags = S_3C1_FUNCTION(V_3C1_GREATER_THAN_OR_EQUAL_REFERENCE_VALUE);
+   if (pdev->info.gfx_level >= GFX9)
+      ace_pre_wait_flags |= S_3C1_OPERATION(V_3C1_WAIT_MEM_PREEMPTABLE);
+   else if (pdev->info.gfx_level == GFX8)
+      ace_pre_wait_flags |= WAIT_REG_MEM_UNCACHED_VI_MEC;
+
+   ac_emit_cp_wait_mem(ace_pre_cs->b, ace_wait_va, 1, 0xffffffff, ace_pre_wait_flags);
    radv_cs_write_data(device, ace_pre_cs, V_371_MICRO_ENGINE, ace_wait_va, 1, &zero, false);
    radv_cs_write_data(device, leader_pre_cs, V_371_MICRO_ENGINE, ace_wait_va, 1, &one, false);
+
    /* Create postambles for gang submission.
     * This ensures that the gang leader waits for the whole gang,
     * which is necessary because the kernel signals the userspace fence
     * as soon as the gang leader is done, which may lead to bugs because the
     * same command buffers could be submitted again while still being executed.
     */
-   const uint32_t leader_engine_sel = ip == AMD_IP_GFX ? V_371_PREFETCH_PARSER : V_371_MICRO_ENGINE;
-   if (ip == AMD_IP_SDMA)
-      ac_emit_sdma_wait_mem(leader_post_cs->b, WAIT_REG_MEM_GREATER_OR_EQUAL, leader_wait_va, 1, 0xffffffff);
-   else
-      ac_emit_cp_wait_mem(
-         leader_post_cs->b, leader_wait_va, 1, 0xffffffff,
-         S_3C1_FUNCTION(V_3C1_GREATER_THAN_OR_EQUAL_REFERENCE_VALUE) | S_3C1_ENGINE_SEL(leader_engine_sel));
-   radv_cs_write_data(device, leader_post_cs, leader_engine_sel, leader_wait_va, 1, &zero, false);
 
+   const uint32_t leader_engine_sel = ip == AMD_IP_GFX ? V_371_PREFETCH_PARSER : V_371_MICRO_ENGINE;
+
+   if (ip == AMD_IP_SDMA) {
+      ac_emit_sdma_wait_mem(leader_post_cs->b, pdev->info.sdma_ip_version, WAIT_REG_MEM_GREATER_OR_EQUAL,
+                            leader_wait_va, 1, 0xffffffff);
+   } else {
+      uint32_t cp_post_wait_flags =
+         S_3C1_FUNCTION(V_3C1_GREATER_THAN_OR_EQUAL_REFERENCE_VALUE) | S_3C1_ENGINE_SEL(leader_engine_sel);
+      if (pdev->info.gfx_level == GFX8 && ip == AMD_IP_COMPUTE)
+         cp_post_wait_flags |= WAIT_REG_MEM_UNCACHED_VI_MEC;
+
+      ac_emit_cp_wait_mem(leader_post_cs->b, leader_wait_va, 1, 0xffffffff, cp_post_wait_flags);
+   }
+   radv_cs_write_data(device, leader_post_cs, leader_engine_sel, leader_wait_va, 1, &zero, false);
    radv_cs_emit_write_event_eop(ace_post_cs, pdev->info.gfx_level, V_028A90_BOTTOM_OF_PIPE_TS, 0, EOP_DST_SEL_MEM,
                                 EOP_INT_SEL_SEND_DATA_AFTER_WR_CONFIRM, EOP_DATA_SEL_VALUE_32BIT, leader_wait_va, 1, 0);
 

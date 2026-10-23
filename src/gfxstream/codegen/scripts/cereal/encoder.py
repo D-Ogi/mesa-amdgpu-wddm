@@ -75,6 +75,7 @@ ENCODER_CUSTOM_RESOURCE_POSTPROCESS = [
     "vkMapMemoryIntoAddressSpaceGOOGLE",
     "vkGetPhysicalDeviceFeatures2",
     "vkCreateDescriptorUpdateTemplate",
+    "vkCreateDescriptorUpdateTemplateKHR",
     "vkGetPhysicalDeviceExternalSemaphoreProperties",
 ]
 
@@ -412,11 +413,6 @@ def emit_parameter_encode_read(typeInfo, api, cgen):
 def emit_post(typeInfo, api, cgen):
     encodingParams = EncodingParameters(api)
 
-    emit_custom_resource_postprocess(typeInfo, api, cgen)
-
-    for p in encodingParams.toDestroy:
-        emit_handlemap_destroy(typeInfo, p, cgen)
-
     doSeqno = True
     if is_cmdbuf_dispatch(api):
         doSeqno = False
@@ -424,14 +420,16 @@ def emit_post(typeInfo, api, cgen):
     retType = api.getRetTypeExpr()
 
     if api.name in ENCODER_EXPLICIT_FLUSHED_APIS:
-        cgen.stmt("stream->flush()");
-        return
-
-    if doSeqno:
+        cgen.stmt("stream->flush()")
+    elif doSeqno:
         if retType == "void":
-            encodingParams = EncodingParameters(api)
             if 0 == len(encodingParams.toRead):
-                cgen.stmt("stream->flush()");
+                cgen.stmt("stream->flush()")
+
+    emit_custom_resource_postprocess(typeInfo, api, cgen)
+
+    for p in encodingParams.toDestroy:
+        emit_handlemap_destroy(typeInfo, p, cgen)
 
 def emit_pool_free(cgen):
     cgen.stmt("++encodeCount")
@@ -560,8 +558,8 @@ def encode_vkFlushMappedMemoryRanges(typeInfo, api, cgen):
         cgen.stmt("auto offset = range.offset")
         cgen.stmt("uint64_t streamSize = 0")
         cgen.stmt("if (!memory) { %s->write(&streamSize, sizeof(uint64_t)); continue; }" % streamVar)
-        cgen.stmt("auto hostPtr = sResourceTracker->getMappedPointer(memory)")
-        cgen.stmt("auto actualSize = size == VK_WHOLE_SIZE ? sResourceTracker->getMappedSize(memory) : size")
+        cgen.stmt("auto hostPtr = gfxstream_vk_device_memory_get_ptr(memory)")
+        cgen.stmt("auto actualSize = size == VK_WHOLE_SIZE ? gfxstream_vk_device_memory_get_ptr_size(memory) : size")
         cgen.stmt("if (!hostPtr) { %s->write(&streamSize, sizeof(uint64_t)); continue; }" % streamVar)
         cgen.stmt("streamSize = actualSize")
         cgen.stmt("%s->write(&streamSize, sizeof(uint64_t))" % streamVar)
@@ -599,8 +597,8 @@ def encode_vkInvalidateMappedMemoryRanges(typeInfo, api, cgen):
         cgen.stmt("auto offset = range.offset")
         cgen.stmt("uint64_t streamSize = 0")
         cgen.stmt("if (!memory) { %s->read(&streamSize, sizeof(uint64_t)); continue; }" % streamVar)
-        cgen.stmt("auto hostPtr = sResourceTracker->getMappedPointer(memory)")
-        cgen.stmt("auto actualSize = size == VK_WHOLE_SIZE ? sResourceTracker->getMappedSize(memory) : size")
+        cgen.stmt("auto hostPtr = gfxstream_vk_device_memory_get_ptr(memory)")
+        cgen.stmt("auto actualSize = size == VK_WHOLE_SIZE ? gfxstream_vk_device_memory_get_ptr_size(memory) : size")
         cgen.stmt("if (!hostPtr) { %s->read(&streamSize, sizeof(uint64_t)); continue; }" % streamVar)
         cgen.stmt("streamSize = actualSize")
         cgen.stmt("%s->read(&streamSize, sizeof(uint64_t))" % streamVar)

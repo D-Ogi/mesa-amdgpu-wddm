@@ -261,11 +261,20 @@ typedef struct gen_parse_params {
    const char *text;
    int         text_size;
 
-   /* Must be non-NULL, used for allocating `insts` and `errors`. */
+   /* Collect per-instruction Compacted annotations in `compacted`. */
+   bool collect_compacted;
+
+   /* Must be non-NULL, used for allocating the arrays below. */
    void *mem_ctx;
 
    gen_inst *insts;
    int       num_insts;
+
+   /* When collect_compacted is true and parsing succeeds, will contain an array
+    * with `num_insts` elements indicating whether each instruction specified
+    * the Compacted option.  Otherwise, remains NULL.
+    */
+   bool *compacted;
 
    /* For parse errors, `index` is the 1-based input line number. */
    gen_error *errors;

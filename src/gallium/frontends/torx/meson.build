@@ -3,6 +3,7 @@ torx_py_sources = files(
   'backend.py',
   'debug.py',
   'decompose_quant_nodes_pass.py',
+  'dim_order_pass.py',
   'exir_to_gallium.py',
   'fold_qdq_with_annotated_qparams_pass.py',
   'gallium.py',

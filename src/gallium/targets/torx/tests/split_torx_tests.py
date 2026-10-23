@@ -5,7 +5,8 @@
 """Split whole-model .pt2 files into per-op .pt2 files and float references.
 
 This is the first (fast, sequential) step of test artifact generation.
-For each conv2d / add chain in the model it:
+For each conv2d chain, add, concatenation, sigmoid, max pooling and
+upsample in the model it:
 
   1. Builds a standalone nn.Module with copied parameters.
   2. Exports it as a per-op .pt2 file.
@@ -13,9 +14,9 @@ For each conv2d / add chain in the model it:
 
 Output per op:
 
-  <output_dir>/<model>/<op>/op.pt2            -- per-op ExportedProgram
-  <output_dir>/<model>/<op>/example_input.pt  -- float input tensor(s)
-  <output_dir>/<model>/<op>/output-{i}.data   -- float32 CPU reference(s)
+  <output_dir>/<model>/<op>/op.pt2                  -- per-op ExportedProgram
+  <output_dir>/<model>/<op>/example_input.pt        -- float input tensor(s)
+  <output_dir>/<model>/<op>/float-output-{i}.data   -- float32 CPU reference(s)
 
 The .pt2 and example_input.pt are consumed by compile_torx_tests.py
 (the second, parallelisable step) and not needed at test runtime.
@@ -157,6 +158,60 @@ def _build_module(torch, gm, conv_node, chain_nodes):
     return torch.nn.Sequential(*layers)
 
 
+CHANNEL_DIM = 1
+SPATIAL_DIMS = (2, 3)
+
+
+def _build_upsample_module(torch):
+    """Build a standalone nn.Module doubling both spatial dimensions."""
+
+    class UpsampleModule(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.up = torch.nn.Upsample(scale_factor=2, mode="nearest")
+
+        def forward(self, x):
+            return self.up(x)
+
+    return UpsampleModule()
+
+
+def _build_sigmoid_module(torch):
+    """Build a standalone nn.Module applying sigmoid to its input."""
+
+    class SigmoidModule(torch.nn.Module):
+        def forward(self, x):
+            return torch.sigmoid(x)
+
+    return SigmoidModule()
+
+
+def _build_conv_sigmoid_module(torch, gm, conv_node):
+    """Build a convolution followed by sigmoid, the pattern the driver packs
+    into one convolution that writes its output through the table."""
+    conv = _build_module(torch, gm, conv_node, [conv_node])
+    return torch.nn.Sequential(conv, torch.nn.Sigmoid())
+
+
+def _build_conv_sigmoid_maxpool_module(torch, gm, conv_node):
+    """Build convolution -> sigmoid -> 2x2 max pool.  The pool keeps the
+    sigmoid output internal, so the reference compiler fuses the activation
+    into the convolution the way the driver does."""
+    conv = _build_module(torch, gm, conv_node, [conv_node])
+    return torch.nn.Sequential(conv, torch.nn.Sigmoid(),
+                               torch.nn.MaxPool2d(2, stride=2))
+
+
+def _build_cat_module(torch, dim):
+    """Build a standalone nn.Module concatenating its inputs along dim."""
+
+    class CatModule(torch.nn.Module):
+        def forward(self, *inputs):
+            return torch.cat(inputs, dim)
+
+    return CatModule()
+
+
 def _build_add_module(torch, act_node=None):
     """Build a standalone nn.Module for an elementwise add, optionally fused
     with an activation the driver's add can absorb: relu, or a clamp at
@@ -202,11 +257,46 @@ def _build_add_module(torch, act_node=None):
     return AddModule()
 
 
+# Ethos-U pooling accepts strides 1..3 on both axes; mirrors
+# POOLING_STRIDE_MAX in the torx frontend, which this script cannot import.
+POOLING_STRIDE_MAX = 3
+
+
+def _spatial_pair(value, default):
+    """Normalise an aten int-or-list spatial argument to (height, width)."""
+    if value is None:
+        return default
+    if isinstance(value, (list, tuple)):
+        if not value:
+            return default
+        return (value[0], value[-1])
+    return (value, value)
+
+
+def _build_max_pool_module(torch, node):
+    """Build a standalone nn.Module for a max pooling, or None when the torx
+    lowering would decline it and the test would fall back to CPU."""
+    kernel = _spatial_pair(node.args[1], (1, 1))
+    stride = _spatial_pair(node.args[2] if len(node.args) > 2 else None, kernel)
+    padding = _spatial_pair(node.args[3] if len(node.args) > 3 else None, (0, 0))
+    dilation = _spatial_pair(node.args[4] if len(node.args) > 4 else None, (1, 1))
+    ceil_mode = node.args[5] if len(node.args) > 5 else False
+
+    if dilation != (1, 1) or ceil_mode:
+        return None
+    if not all(1 <= s <= POOLING_STRIDE_MAX for s in stride):
+        return None
+
+    return torch.nn.MaxPool2d(kernel, stride=stride, padding=padding)
+
+
 def split_model(pt2_path, torch):
     """Load a whole-model .pt2 and split into per-op submodules.
 
     Returns a list of ``(index_name, module, example_inputs)`` tuples.
-    ``example_inputs`` is a tuple of tensors (length 1 for conv, 2 for add).
+    ``example_inputs`` holds one tensor per input the module takes: one for
+    a conv chain, a sigmoid, a max pooling or an upsample, two for an add,
+    and one per concatenated tensor for a cat.
     """
     ep = torch.export.load(str(pt2_path))
     gm = ep.module()
@@ -252,6 +342,32 @@ def split_model(pt2_path, torch):
         ops.append((f"{idx:03d}", mod, (example_input,)))
         idx += 1
 
+    # --- CAT ops --------------------------------------------------------
+    for node in gm.graph.nodes:
+        if node.op != "call_function":
+            continue
+        if str(node.target) != "aten.cat.default":
+            continue
+
+        input_nodes = node.args[0]
+        if not all(isinstance(n, torch.fx.Node) for n in input_nodes):
+            continue
+        input_metas = [n.meta.get("val") for n in input_nodes]
+        if any(meta is None or meta.dim() != 4 for meta in input_metas):
+            continue
+
+        dim = node.args[1] if len(node.args) > 1 else 0
+        if dim % 4 != CHANNEL_DIM:
+            continue
+        mod = _build_cat_module(torch, dim)
+        mod.eval()
+
+        torch.manual_seed(42 + idx)
+        example_inputs = tuple(torch.randn(meta.shape) for meta in input_metas)
+
+        ops.append((f"{idx:03d}", mod, example_inputs))
+        idx += 1
+
     # --- ADD ops --------------------------------------------------------
     for node in gm.graph.nodes:
         if node.op != "call_function":
@@ -278,6 +394,137 @@ def split_model(pt2_path, torch):
         example_input1 = torch.randn(input1_meta.shape)
 
         ops.append((f"{idx:03d}", mod, (example_input0, example_input1)))
+        idx += 1
+
+    # --- SIGMOID ops ----------------------------------------------------
+    for node in gm.graph.nodes:
+        if node.op != "call_function":
+            continue
+        if str(node.target) != "aten.sigmoid.default":
+            continue
+
+        input_node = node.args[0]
+        if not isinstance(input_node, torch.fx.Node):
+            continue
+        input_meta = input_node.meta.get("val")
+        if input_meta is None or input_meta.dim() != 4:
+            continue
+
+        mod = _build_sigmoid_module(torch)
+        mod.eval()
+
+        torch.manual_seed(42 + idx)
+        example_input = torch.randn(input_meta.shape)
+
+        ops.append((f"{idx:03d}", mod, (example_input,)))
+        idx += 1
+
+    # --- CONV+SIGMOID ops -----------------------------------------------
+    # A sigmoid fed only by a convolution is the case the driver fuses into
+    # one lookup-table convolution; extract it to compare that emission.
+    for node in gm.graph.nodes:
+        if node.op != "call_function":
+            continue
+        if str(node.target) != "aten.sigmoid.default":
+            continue
+
+        conv_node = node.args[0]
+        if not isinstance(conv_node, torch.fx.Node):
+            continue
+        if str(conv_node.target) != "aten.conv2d.default":
+            continue
+        input_meta = conv_node.args[0].meta.get("val")
+        if input_meta is None or input_meta.dim() != 4:
+            continue
+
+        mod = _build_conv_sigmoid_module(torch, gm, conv_node)
+        mod.eval()
+
+        torch.manual_seed(42 + idx)
+        example_input = torch.randn(input_meta.shape)
+
+        ops.append((f"{idx:03d}", mod, (example_input,)))
+        idx += 1
+
+    # --- CONV+SIGMOID+POOL op -------------------------------------------
+    # One case where the sigmoid output is internal (a 2x2 max pool reads
+    # it), so the reference compiler fuses the activation the way the driver
+    # does and the two fused streams can be compared.
+    for node in gm.graph.nodes:
+        if node.op != "call_function":
+            continue
+        if str(node.target) != "aten.sigmoid.default":
+            continue
+
+        conv_node = node.args[0]
+        if not isinstance(conv_node, torch.fx.Node):
+            continue
+        if str(conv_node.target) != "aten.conv2d.default":
+            continue
+        input_meta = conv_node.args[0].meta.get("val")
+        if input_meta is None or input_meta.dim() != 4:
+            continue
+
+        mod = _build_conv_sigmoid_maxpool_module(torch, gm, conv_node)
+        mod.eval()
+
+        torch.manual_seed(42 + idx)
+        example_input = torch.randn(input_meta.shape)
+
+        ops.append((f"{idx:03d}", mod, (example_input,)))
+        idx += 1
+        break
+
+    # --- UPSAMPLE ops ---------------------------------------------------
+    for node in gm.graph.nodes:
+        if node.op != "call_function":
+            continue
+        if str(node.target) != "aten.upsample_nearest2d.vec":
+            continue
+
+        input_node = node.args[0]
+        if not isinstance(input_node, torch.fx.Node):
+            continue
+        input_meta = input_node.meta.get("val")
+        output_meta = node.meta.get("val")
+        if input_meta is None or output_meta is None:
+            continue
+        if input_meta.dim() != 4 or output_meta.dim() != 4:
+            continue
+        if any(output_meta.shape[dim] != 2 * input_meta.shape[dim]
+               for dim in SPATIAL_DIMS):
+            continue
+
+        mod = _build_upsample_module(torch)
+        mod.eval()
+
+        torch.manual_seed(42 + idx)
+        example_input = torch.randn(input_meta.shape)
+
+        ops.append((f"{idx:03d}", mod, (example_input,)))
+        idx += 1
+
+    # --- MAX POOL ops ---------------------------------------------------
+    for node in gm.graph.nodes:
+        if node.op != "call_function":
+            continue
+        if str(node.target) != "aten.max_pool2d.default":
+            continue
+
+        input_meta = (node.args[0].meta.get("val")
+                      if isinstance(node.args[0], torch.fx.Node) else None)
+        if input_meta is None or input_meta.dim() != 4:
+            continue
+
+        mod = _build_max_pool_module(torch, node)
+        if mod is None:
+            continue
+        mod.eval()
+
+        torch.manual_seed(42 + idx)
+        example_input = torch.randn(input_meta.shape)
+
+        ops.append((f"{idx:03d}", mod, (example_input,)))
         idx += 1
 
     return ops
@@ -409,7 +656,7 @@ def main():
                 float_output = module(*example_inputs)
             flat_outs = _flatten_outputs(float_output)
             for i, out in enumerate(flat_outs):
-                out.numpy().tofile(str(output_dir / f"output-{i}.data"))
+                out.numpy().tofile(str(output_dir / f"float-output-{i}.data"))
 
     stamp_file.parent.mkdir(parents=True, exist_ok=True)
     stamp_file.write_text("done\n")

@@ -68,14 +68,14 @@ SUPPORTED_MODULES = {
     "VK_KHR_win32_surface": ["goldfish_vk_dispatch"],
     "VK_EXT_metal_surface": ["goldfish_vk_dispatch"],
     "VK_EXT_metal_objects": ["goldfish_vk_dispatch"],
-    "VK_EXT_external_memory_metal": ["goldfish_vk_dispatch"],
+    "VK_EXT_external_memory_metal": ["goldfish_vk_dispatch", "goldfish_vk_supported_extensions"],
     "VK_KHR_external_semaphore_win32" : ["goldfish_vk_dispatch"],
-    "VK_KHR_external_memory_win32" : ["goldfish_vk_dispatch"],
+    "VK_KHR_external_memory_win32" : ["goldfish_vk_dispatch", "goldfish_vk_supported_extensions"],
     "VK_MVK_macos_surface" : ["goldfish_vk_dispatch"],
     # Host dispatch for Linux hosts + and entrypoint for guests
-    "VK_KHR_external_memory_fd": ["goldfish_vk_dispatch", "func_table"],
+    "VK_KHR_external_memory_fd": ["goldfish_vk_dispatch", "func_table", "goldfish_vk_supported_extensions"],
     "VK_QNX_screen_surface": ["goldfish_vk_dispatch"],
-    "VK_QNX_external_memory_screen_buffer": ["goldfish_vk_dispatch"],
+    "VK_QNX_external_memory_screen_buffer": ["goldfish_vk_dispatch", "goldfish_vk_supported_extensions"],
     "VK_ANDROID_external_memory_android_hardware_buffer": ["goldfish_vk_dispatch", "func_table"],
     "VK_KHR_android_surface": ["func_table"],
     "VK_EXT_swapchain_maintenance1" : HOST_MODULES,
@@ -269,6 +269,16 @@ class IOStream;
 #include <string>
 #include <vector>
 
+#include "util/log.h"
+
+#ifndef GFXSTREAM_ERROR
+#define GFXSTREAM_ERROR(...) mesa_loge(__VA_ARGS__)
+#endif
+
+#ifndef GFXSTREAM_FATAL
+#define GFXSTREAM_FATAL(...) do {{ mesa_loge(__VA_ARGS__); abort(); }} while (0)
+#endif
+
 """ % VULKAN_STREAM_TYPE_GUEST
 
         functableImplInclude = """
@@ -419,6 +429,16 @@ using DlSymFunc = void* (void*, const char*);
 #include "goldfish_vk_private_defs.h"
 
 #include <cstring>
+
+#include "util/log.h"
+
+#ifndef GFXSTREAM_ERROR
+#define GFXSTREAM_ERROR(...) mesa_loge(__VA_ARGS__)
+#endif
+
+#ifndef GFXSTREAM_FATAL
+#define GFXSTREAM_FATAL(...) do { mesa_loge(__VA_ARGS__); abort(); } while (0)
+#endif
 """
         countingIncludes = """
 #include "vk_platform_compat.h"
@@ -433,6 +453,8 @@ using DlSymFunc = void* (void*, const char*);
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+
+#include "gfxstream/common/logging.h"
 """
 
         decoderSnapshotHeaderIncludes = f"""

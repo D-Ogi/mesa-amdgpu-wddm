@@ -1058,11 +1058,11 @@ static void gfx6_clear(struct pipe_context *ctx, unsigned buffers,
          si_set_barrier_flags(sctx, AC_BARRIER_SYNC_VS);
    }
 
-   if (unlikely(sctx->sqtt_enabled)) {
+   if (unlikely(si_is_sqtt_active(sctx))) {
       if (buffers & PIPE_CLEAR_COLOR)
-         sctx->sqtt_next_event = EventCmdClearColorImage;
+         sctx->sqtt.next_event = EventCmdClearColorImage;
       else if (buffers & PIPE_CLEAR_DEPTHSTENCIL)
-         sctx->sqtt_next_event = EventCmdClearDepthStencilImage;
+         sctx->sqtt.next_event = EventCmdClearDepthStencilImage;
    }
 
    si_blitter_begin(sctx, SI_CLEAR);
@@ -1109,11 +1109,11 @@ static void gfx12_clear(struct pipe_context *ctx, unsigned buffers,
    if (!buffers)
       return; /* all buffers have been cleared */
 
-   if (unlikely(sctx->sqtt_enabled)) {
+   if (unlikely(si_is_sqtt_active(sctx))) {
       if (buffers & PIPE_CLEAR_COLOR)
-         sctx->sqtt_next_event = EventCmdClearColorImage;
+         sctx->sqtt.next_event = EventCmdClearColorImage;
       else if (buffers & PIPE_CLEAR_DEPTHSTENCIL)
-         sctx->sqtt_next_event = EventCmdClearDepthStencilImage;
+         sctx->sqtt.next_event = EventCmdClearDepthStencilImage;
    }
 
    si_blitter_begin(sctx, SI_CLEAR);

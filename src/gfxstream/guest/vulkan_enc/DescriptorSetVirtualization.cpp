@@ -4,6 +4,10 @@
  */
 #include "DescriptorSetVirtualization.h"
 
+#include <algorithm>
+#include <cstring>
+#include <type_traits>
+
 #include "Resources.h"
 #include "util/log.h"
 
@@ -15,36 +19,171 @@ void clearReifiedDescriptorSet(ReifiedDescriptorSet* set) {
     set->setLayout = VK_NULL_HANDLE;
     set->poolId = -1;
     set->allocationPending = false;
-    set->allWrites.clear();
+    set->allWrites.bindings.clear();
     set->pendingWriteArrayRanges.clear();
 }
 
 void initDescriptorWriteTable(const std::vector<VkDescriptorSetLayoutBinding>& layoutBindings,
                               DescriptorWriteTable& table) {
     uint32_t highestBindingNumber = 0;
+    for (const VkDescriptorSetLayoutBinding& binding : layoutBindings) {
+        highestBindingNumber = std::max(highestBindingNumber, binding.binding);
+    }
 
-    for (uint32_t i = 0; i < layoutBindings.size(); ++i) {
-        if (layoutBindings[i].binding > highestBindingNumber) {
-            highestBindingNumber = layoutBindings[i].binding;
+    table.bindings.clear();
+    table.bindings.resize(highestBindingNumber + 1);
+
+    for (const VkDescriptorSetLayoutBinding& binding : layoutBindings) {
+        DescriptorBindingWrite& bindingWrite = table.bindings[binding.binding];
+        bindingWrite.descriptorType = binding.descriptorType;
+        if (isDescriptorTypeInlineUniformBlock(binding.descriptorType)) {
+            DescriptorInlineUniformBlockWrite blockWrite;
+            blockWrite.pendingWrite = false;
+            blockWrite.bytes.resize(binding.descriptorCount, 0);
+            bindingWrite.elements = std::move(blockWrite);
+        } else {
+            std::vector<DescriptorBindingElementWrite> elementWrites(binding.descriptorCount);
+            for (DescriptorBindingElementWrite& write : elementWrites) {
+                write.type = DescriptorWriteType::Empty;
+                write.dstArrayElement = 0;
+            }
+            bindingWrite.elements = std::move(elementWrites);
         }
     }
+}
 
-    std::vector<uint32_t> countsEachBinding(highestBindingNumber + 1, 0);
+enum class CopyDirection {
+    ReadFromTable,
+    WriteToTable,
+};
 
-    for (uint32_t i = 0; i < layoutBindings.size(); ++i) {
-        countsEachBinding[layoutBindings[i].binding] = layoutBindings[i].descriptorCount;
-    }
+// Handles either reading bytes from or writing bytes to inline uniform block
+// descriptors while handling spilling over into the next binding(s) as needed.
+//
+// See the `ConsecutiveBindingUpdates` section in
+// https://docs.vulkan.org/refpages/latest/refpages/source/VkWriteDescriptorSet.html
+template <CopyDirection Dir>
+static void copyInlineUniformBlockBytes(
+        // If reading from the table, `table` is const.
+        std::conditional_t<Dir == CopyDirection::WriteToTable,  //
+                           DescriptorWriteTable&,               //
+                           const DescriptorWriteTable&> table,
+        uint32_t startBinding,
+        uint32_t startByteOffset,
+        // If reading from the table, `data` is not const.
+        std::conditional_t<Dir == CopyDirection::WriteToTable,  //
+                           const void*,                         //
+                           void*> data,
+        uint32_t dataSize) {
+    auto* dataPtr = static_cast<
+        std::conditional_t<Dir == CopyDirection::WriteToTable, const uint8_t*, uint8_t*>>(data);
+    uint32_t remainingBytes = dataSize;
+    uint32_t currBinding = startBinding;
+    uint32_t currBindingByteOffset = startByteOffset;
 
-    table.resize(countsEachBinding.size());
-
-    for (uint32_t i = 0; i < table.size(); ++i) {
-        table[i].resize(countsEachBinding[i]);
-
-        for (uint32_t j = 0; j < countsEachBinding[i]; ++j) {
-            table[i][j].type = DescriptorWriteType::Empty;
-            table[i][j].dstArrayElement = 0;
+    while (remainingBytes > 0 && currBinding < table.bindings.size()) {
+        auto* blockWrite =
+            std::get_if<DescriptorInlineUniformBlockWrite>(&table.bindings[currBinding].elements);
+        if (!blockWrite) {
+            ++currBinding;
+            continue;
         }
+
+        if (currBindingByteOffset >= blockWrite->bytes.size()) {
+            currBindingByteOffset -= static_cast<uint32_t>(blockWrite->bytes.size());
+            ++currBinding;
+            continue;
+        }
+
+        const uint32_t maxBytesInBinding =
+            static_cast<uint32_t>(blockWrite->bytes.size()) - currBindingByteOffset;
+        const uint32_t bytesToCopy = std::min(remainingBytes, maxBytesInBinding);
+
+        if constexpr (Dir == CopyDirection::WriteToTable) {
+            memcpy(blockWrite->bytes.data() + currBindingByteOffset, dataPtr, bytesToCopy);
+            blockWrite->pendingWrite = true;
+            table.bindings[currBinding].descriptorType = VK_DESCRIPTOR_TYPE_INLINE_UNIFORM_BLOCK;
+        } else {
+            memcpy(dataPtr, blockWrite->bytes.data() + currBindingByteOffset, bytesToCopy);
+        }
+
+        dataPtr += bytesToCopy;
+        remainingBytes -= bytesToCopy;
+        currBindingByteOffset = 0;
+        ++currBinding;
     }
+}
+
+static void readInlineUniformBlockBytes(const DescriptorWriteTable& table, uint32_t srcBinding,
+                                        uint32_t srcArrayElement, void* pData, uint32_t dataSize) {
+    copyInlineUniformBlockBytes<CopyDirection::ReadFromTable>(table, srcBinding, srcArrayElement,
+                                                              pData, dataSize);
+}
+
+static void writeInlineUniformBlockBytes(DescriptorWriteTable& table, uint32_t dstBinding,
+                                         uint32_t dstArrayElement, const void* pData,
+                                         uint32_t dataSize) {
+    copyInlineUniformBlockBytes<CopyDirection::WriteToTable>(table, dstBinding, dstArrayElement,
+                                                             pData, dataSize);
+}
+
+// Handles either reading elements from or writing elements to non- inline uniform
+// block descriptors while handling spilling over into the next binding(s) as needed.
+//
+// See the `ConsecutiveBindingUpdates` section in
+// https://docs.vulkan.org/refpages/latest/refpages/source/VkWriteDescriptorSet.html
+template <CopyDirection Dir, typename Fn>
+static void forEachDescriptorBindingElement(
+        std::conditional_t<Dir == CopyDirection::WriteToTable,  //
+                           DescriptorWriteTable&,               //
+                           const DescriptorWriteTable&> table,
+        uint32_t startBinding,
+        uint32_t startArrayElement,
+        uint32_t count,
+        Fn&& fn) {
+    uint32_t currBinding = startBinding;
+    uint32_t currArrayElement = startArrayElement;
+    uint32_t i = 0;
+    while (i < count && currBinding < table.bindings.size()) {
+        auto* elements = std::get_if<std::vector<DescriptorBindingElementWrite>>(
+            &table.bindings[currBinding].elements);
+        if (!elements) {
+            ++currBinding;
+            continue;
+        }
+        if (currArrayElement >= elements->size()) {
+            currArrayElement -= static_cast<uint32_t>(elements->size());
+            ++currBinding;
+            continue;
+        }
+        fn(table.bindings[currBinding], (*elements)[currArrayElement], i);
+        ++i;
+        ++currArrayElement;
+    }
+}
+
+static void readDescriptorBindingElements(const DescriptorWriteTable& table, uint32_t srcBinding,
+                                          uint32_t srcArrayElement, uint32_t count,
+                                          DescriptorBindingElementWrite* outElements) {
+    forEachDescriptorBindingElement<CopyDirection::ReadFromTable>(
+        table, srcBinding, srcArrayElement, count,
+        [&](const DescriptorBindingWrite&,
+            const DescriptorBindingElementWrite& element,
+            uint32_t i) {
+            outElements[i] = element;
+        });
+}
+
+static void writeDescriptorBindingElements(DescriptorWriteTable& table, uint32_t dstBinding,
+                                           uint32_t dstArrayElement, uint32_t count,
+                                           const DescriptorBindingElementWrite* inElements) {
+    forEachDescriptorBindingElement<CopyDirection::WriteToTable>(
+        table, dstBinding, dstArrayElement, count,
+        [&](DescriptorBindingWrite&,
+            DescriptorBindingElementWrite& element,
+            uint32_t i) {
+            element = inElements[i];
+        });
 }
 
 static void initializeReifiedDescriptorSet(VkDescriptorPool pool, VkDescriptorSetLayout setLayout,
@@ -110,58 +249,16 @@ void doEmulatedDescriptorWrite(const VkWriteDescriptorSet* write, ReifiedDescrip
     uint32_t dstArrayElement = write->dstArrayElement;
     uint32_t descriptorCount = write->descriptorCount;
 
-    DescriptorWriteTable& table = toWrite->allWrites;
-
-    uint32_t arrOffset = dstArrayElement;
-
     if (isDescriptorTypeImageInfo(descType)) {
-        uint32_t i = 0;
-        while (i < descriptorCount) {
-            assert(dstBinding < table.size());
-            if (arrOffset >= table[dstBinding].size()) {
-                ++dstBinding;
-                arrOffset = 0;
-                continue;
-            }
-            auto& entry = table[dstBinding][arrOffset];
-            entry.imageInfo = write->pImageInfo[i];
-            entry.type = DescriptorWriteType::ImageInfo;
-            entry.descriptorType = descType;
-            ++i;
-            ++arrOffset;
-        }
+        doEmulatedDescriptorImageInfoWriteFromTemplate(descType, dstBinding, dstArrayElement,
+                                                       descriptorCount, write->pImageInfo, toWrite);
     } else if (isDescriptorTypeBufferInfo(descType)) {
-        uint32_t i = 0;
-        while (i < descriptorCount) {
-            assert(dstBinding < table.size());
-            if (arrOffset >= table[dstBinding].size()) {
-                ++dstBinding;
-                arrOffset = 0;
-                continue;
-            }
-            auto& entry = table[dstBinding][arrOffset];
-            entry.bufferInfo = write->pBufferInfo[i];
-            entry.type = DescriptorWriteType::BufferInfo;
-            entry.descriptorType = descType;
-            ++i;
-            ++arrOffset;
-        }
+        doEmulatedDescriptorBufferInfoWriteFromTemplate(
+            descType, dstBinding, dstArrayElement, descriptorCount, write->pBufferInfo, toWrite);
     } else if (isDescriptorTypeBufferView(descType)) {
-        uint32_t i = 0;
-        while (i < descriptorCount) {
-            assert(dstBinding < table.size());
-            if (arrOffset >= table[dstBinding].size()) {
-                ++dstBinding;
-                arrOffset = 0;
-                continue;
-            }
-            auto& entry = table[dstBinding][arrOffset];
-            entry.bufferView = write->pTexelBufferView[i];
-            entry.type = DescriptorWriteType::BufferView;
-            entry.descriptorType = descType;
-            ++i;
-            ++arrOffset;
-        }
+        doEmulatedDescriptorBufferViewWriteFromTemplate(descType, dstBinding, dstArrayElement,
+                                                        descriptorCount, write->pTexelBufferView,
+                                                        toWrite);
     } else if (isDescriptorTypeInlineUniformBlock(descType)) {
         const VkWriteDescriptorSetInlineUniformBlock* descInlineUniformBlock =
             static_cast<const VkWriteDescriptorSetInlineUniformBlock*>(write->pNext);
@@ -175,15 +272,9 @@ void doEmulatedDescriptorWrite(const VkWriteDescriptorSet* write, ReifiedDescrip
             mesa_loge("%s: did not find inline uniform block\n", __func__);
             return;
         }
-        auto& entry = table[dstBinding][0];
-        entry.inlineUniformBlock = *descInlineUniformBlock;
-        entry.inlineUniformBlockBuffer.assign(
-            static_cast<const uint8_t*>(descInlineUniformBlock->pData),
-            static_cast<const uint8_t*>(descInlineUniformBlock->pData) +
-                descInlineUniformBlock->dataSize);
-        entry.type = DescriptorWriteType::InlineUniformBlock;
-        entry.descriptorType = descType;
-        entry.dstArrayElement = dstArrayElement;
+        writeInlineUniformBlockBytes(toWrite->allWrites, dstBinding, dstArrayElement,
+                                     descInlineUniformBlock->pData,
+                                     descInlineUniformBlock->dataSize);
     } else if (isDescriptorTypeAccelerationStructure(descType)) {
         // TODO
         // Look for pNext inline uniform block or acceleration structure.
@@ -197,38 +288,27 @@ void doEmulatedDescriptorCopy(const VkCopyDescriptorSet* copy, const ReifiedDesc
     const DescriptorWriteTable& srcTable = src->allWrites;
     DescriptorWriteTable& dstTable = dst->allWrites;
 
+    if (copy->descriptorCount == 0 || copy->srcBinding >= srcTable.bindings.size()) {
+        return;
+    }
+
     // src/dst may be the same descriptor set, so we need to create a temporary array for that case.
     // (TODO: Maybe just notice the pointers are the same? can aliasing in any other way happen?)
 
-    std::vector<DescriptorWrite> toCopy;
-    uint32_t currBinding = copy->srcBinding;
-    uint32_t arrOffset = copy->srcArrayElement;
-    uint32_t i = 0;
-    while (i < copy->descriptorCount) {
-        assert(currBinding < srcTable.size());
-        if (arrOffset >= srcTable[currBinding].size()) {
-            ++currBinding;
-            arrOffset = 0;
-            continue;
-        }
-        toCopy.push_back(srcTable[currBinding][arrOffset]);
-        ++i;
-        ++arrOffset;
-    }
+    if (isDescriptorTypeInlineUniformBlock(srcTable.bindings[copy->srcBinding].descriptorType)) {
+        std::vector<uint8_t> bytesToCopy(copy->descriptorCount, 0);
+        readInlineUniformBlockBytes(srcTable, copy->srcBinding, copy->srcArrayElement,
+                                    bytesToCopy.data(), copy->descriptorCount);
 
-    currBinding = copy->dstBinding;
-    arrOffset = copy->dstArrayElement;
-    i = 0;
-    while (i < copy->descriptorCount) {
-        assert(currBinding < dstTable.size());
-        if (arrOffset >= dstTable[currBinding].size()) {
-            ++currBinding;
-            arrOffset = 0;
-            continue;
-        }
-        dstTable[currBinding][arrOffset] = toCopy[i];
-        ++i;
-        ++arrOffset;
+        writeInlineUniformBlockBytes(dstTable, copy->dstBinding, copy->dstArrayElement,
+                                     bytesToCopy.data(), copy->descriptorCount);
+    } else {
+        std::vector<DescriptorBindingElementWrite> elementsToCopy(copy->descriptorCount);
+        readDescriptorBindingElements(srcTable, copy->srcBinding, copy->srcArrayElement,
+                                    copy->descriptorCount, elementsToCopy.data());
+
+        writeDescriptorBindingElements(dstTable, copy->dstBinding, copy->dstArrayElement,
+                                    copy->descriptorCount, elementsToCopy.data());
     }
 }
 
@@ -236,88 +316,58 @@ void doEmulatedDescriptorImageInfoWriteFromTemplate(VkDescriptorType descType, u
                                                     uint32_t dstArrayElement, uint32_t count,
                                                     const VkDescriptorImageInfo* imageInfos,
                                                     ReifiedDescriptorSet* set) {
-    DescriptorWriteTable& table = set->allWrites;
-
-    uint32_t currBinding = binding;
-    uint32_t arrOffset = dstArrayElement;
-    uint32_t i = 0;
-    while (i < count) {
-        assert(currBinding < table.size());
-        if (arrOffset >= table[currBinding].size()) {
-            ++currBinding;
-            arrOffset = 0;
-            continue;
-        }
-        auto& entry = table[currBinding][arrOffset];
-        entry.imageInfo = imageInfos[i];
-        entry.type = DescriptorWriteType::ImageInfo;
-        entry.descriptorType = descType;
-        ++i;
-        ++arrOffset;
-    }
+    forEachDescriptorBindingElement<CopyDirection::WriteToTable>(
+        set->allWrites, binding, dstArrayElement, count,
+        [&](DescriptorBindingWrite& bindingWrite, DescriptorBindingElementWrite& entry,
+            uint32_t i) {
+            entry.imageInfo = imageInfos[i];
+            entry.type = DescriptorWriteType::ImageInfo;
+            bindingWrite.descriptorType = descType;
+            auto* imageView = gfxstream_vk_image_view_from_handle(entry.imageInfo.imageView);
+            entry.alive = imageView ? imageView->alive : std::weak_ptr<bool>();
+            auto* sampler = gfxstream_vk_sampler_from_handle(entry.imageInfo.sampler);
+            entry.samplerAlive = sampler ? sampler->alive : std::weak_ptr<bool>();
+        });
 }
 
 void doEmulatedDescriptorBufferInfoWriteFromTemplate(VkDescriptorType descType, uint32_t binding,
                                                      uint32_t dstArrayElement, uint32_t count,
                                                      const VkDescriptorBufferInfo* bufferInfos,
                                                      ReifiedDescriptorSet* set) {
-    DescriptorWriteTable& table = set->allWrites;
-
-    uint32_t currBinding = binding;
-    uint32_t arrOffset = dstArrayElement;
-    uint32_t i = 0;
-    while (i < count) {
-        assert(currBinding < table.size());
-        if (arrOffset >= table[currBinding].size()) {
-            ++currBinding;
-            arrOffset = 0;
-            continue;
-        }
-        auto& entry = table[currBinding][arrOffset];
-        entry.bufferInfo = bufferInfos[i];
-        entry.type = DescriptorWriteType::BufferInfo;
-        entry.descriptorType = descType;
-        ++i;
-        ++arrOffset;
-    }
+    forEachDescriptorBindingElement<CopyDirection::WriteToTable>(
+        set->allWrites, binding, dstArrayElement, count,
+        [&](DescriptorBindingWrite& bindingWrite, DescriptorBindingElementWrite& entry,
+            uint32_t i) {
+            entry.bufferInfo = bufferInfos[i];
+            entry.type = DescriptorWriteType::BufferInfo;
+            bindingWrite.descriptorType = descType;
+            auto* buffer = gfxstream_vk_buffer_from_handle(entry.bufferInfo.buffer);
+            entry.alive = buffer ? buffer->alive : std::weak_ptr<bool>();
+        });
 }
 
 void doEmulatedDescriptorBufferViewWriteFromTemplate(VkDescriptorType descType, uint32_t binding,
                                                      uint32_t dstArrayElement, uint32_t count,
                                                      const VkBufferView* bufferViews,
                                                      ReifiedDescriptorSet* set) {
-    DescriptorWriteTable& table = set->allWrites;
-
-    uint32_t currBinding = binding;
-    uint32_t arrOffset = dstArrayElement;
-    uint32_t i = 0;
-    while (i < count) {
-        assert(currBinding < table.size());
-        if (arrOffset >= table[currBinding].size()) {
-            ++currBinding;
-            arrOffset = 0;
-            continue;
-        }
-        auto& entry = table[currBinding][arrOffset];
-        entry.bufferView = bufferViews[i];
-        entry.type = DescriptorWriteType::BufferView;
-        entry.descriptorType = descType;
-        ++i;
-        ++arrOffset;
-    }
+    forEachDescriptorBindingElement<CopyDirection::WriteToTable>(
+        set->allWrites, binding, dstArrayElement, count,
+        [&](DescriptorBindingWrite& bindingWrite, DescriptorBindingElementWrite& entry,
+            uint32_t i) {
+            entry.bufferView = bufferViews[i];
+            entry.type = DescriptorWriteType::BufferView;
+            bindingWrite.descriptorType = descType;
+            auto* bufferView = gfxstream_vk_buffer_view_from_handle(entry.bufferView);
+            entry.alive = bufferView ? bufferView->alive : std::weak_ptr<bool>();
+        });
 }
 
 void doEmulatedDescriptorInlineUniformBlockFromTemplate(VkDescriptorType descType, uint32_t binding,
                                                         uint32_t dstArrayElement, uint32_t count,
                                                         const void* pData,
                                                         ReifiedDescriptorSet* set) {
-    DescriptorWriteTable& table = set->allWrites;
-    auto& entry = table[binding][0];
-    entry.dstArrayElement = dstArrayElement;
-    entry.inlineUniformBlockBuffer.assign(static_cast<const uint8_t*>(pData),
-                                          static_cast<const uint8_t*>(pData) + count);
-    entry.type = DescriptorWriteType::InlineUniformBlock;
-    entry.descriptorType = descType;
+    (void)descType;
+    writeInlineUniformBlockBytes(set->allWrites, binding, dstArrayElement, pData, count);
 }
 
 static bool isBindingFeasibleForAlloc(

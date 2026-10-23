@@ -9,6 +9,7 @@
 
 #include "compiler/gen/gen.h"
 #include "mda/debug_archiver.h"
+#include "util/memstream.h"
 #include "util/shader_stats.h"
 
 
@@ -394,7 +395,10 @@ get_shader_bind_map_text(const struct anv_device *device,
 {
    char *stream_data = NULL;
    size_t stream_size = 0;
-   FILE *stream = open_memstream(&stream_data, &stream_size);
+   struct u_memstream mem;
+   if (!u_memstream_open(&mem, &stream_data, &stream_size))
+      return NULL;
+   FILE *stream = u_memstream_get(&mem);
 
    const struct anv_pipeline_bind_map *bind_map = &shader->bind_map;
    uint32_t push_size = 0;
@@ -456,7 +460,7 @@ get_shader_bind_map_text(const struct anv_device *device,
       fprintf(stream, "\n");
    }
 
-   fclose(stream);
+   u_memstream_close(&mem);
 
    if (stream_size == 0) {
       free(stream_data);
@@ -473,7 +477,10 @@ get_shader_isa_text(struct anv_device *device,
 {
    char *stream_data = NULL;
    size_t stream_size = 0;
-   FILE *stream = open_memstream(&stream_data, &stream_size);
+   struct u_memstream mem;
+   if (!u_memstream_open(&mem, &stream_data, &stream_size))
+      return NULL;
+   FILE *stream = u_memstream_get(&mem);
 
    const struct intel_device_info *devinfo =
       device->physical->compiler->isa.devinfo;
@@ -503,7 +510,7 @@ get_shader_isa_text(struct anv_device *device,
                                program_size, 0, 0);
    }
 
-   fclose(stream);
+   u_memstream_close(&mem);
 
    return stream_data;
 }

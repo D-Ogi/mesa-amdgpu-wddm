@@ -2255,14 +2255,14 @@ wsi_display_acquire_next_image(struct wsi_swapchain *drv_chain,
          wsi_display_debug("image %d state %d\n", i, chain->images[i].state);
       }
 
-      if (ret == ETIMEDOUT) {
+      if (ret == thrd_timedout) {
          result = VK_TIMEOUT;
          goto done;
       }
 
       ret = wsi_display_wait_for_event(wsi, timeout);
 
-      if (ret && ret != ETIMEDOUT) {
+      if (ret && ret != thrd_timedout) {
          result = VK_ERROR_SURFACE_LOST_KHR;
          wsi_display_surface_error(chain, result);
          goto done;
@@ -2587,7 +2587,7 @@ wsi_display_fence_wait(struct wsi_display_fence *fence, uint64_t timeout)
          break;
       }
 
-      if (ret == ETIMEDOUT) {
+      if (ret == thrd_timedout) {
          wsi_display_debug("%9lu fence %lu timeout\n",
                            pthread_self(), fence->sequence);
          result = VK_TIMEOUT;
@@ -2599,7 +2599,7 @@ wsi_display_fence_wait(struct wsi_display_fence *fence, uint64_t timeout)
       else
          ret = wsi_display_wait_for_event(fence->wsi, timeout);
 
-      if (ret && ret != ETIMEDOUT) {
+      if (ret && ret != thrd_timedout) {
          wsi_display_debug("%9lu fence %lu error\n",
                            pthread_self(), fence->sequence);
          result = VK_ERROR_DEVICE_LOST;

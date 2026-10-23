@@ -1357,8 +1357,10 @@ void r300_init_render_functions(struct r300_context *r300)
     /* Set draw functions based on presence of HW TCL. */
     if (r300->screen->caps.has_tcl) {
         r300->context.draw_vbo = r300_draw_vbo;
+        r300->context.draw_vbo_buffers = util_draw_vbo_buffers;
     } else {
         r300->context.draw_vbo = r300_swtcl_draw_vbo;
+        r300->context.draw_vbo_buffers = util_draw_vbo_buffers;
     }
 
     /* Plug in the two-sided stencil reference value fallback if needed. */

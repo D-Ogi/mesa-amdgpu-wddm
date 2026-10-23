@@ -149,10 +149,8 @@ struct radv_device {
 
    struct radv_meta_state meta_state;
 
-   struct radv_queue *queues[RADV_MAX_QUEUE_FAMILIES];
-   struct radv_queue *queues_protected[RADV_MAX_QUEUE_FAMILIES];
-   int queue_count[RADV_MAX_QUEUE_FAMILIES];
-   int queue_count_protected[RADV_MAX_QUEUE_FAMILIES];
+   struct radv_queue *queues;
+   uint32_t queue_count;
 
    bool pbb_allowed;
    uint32_t scratch_waves;
@@ -177,6 +175,8 @@ struct radv_device {
 
    /* Whether to keep shader debug info, for debugging. */
    bool keep_shader_info;
+
+   bool debug_after_draw;
 
    /* Backup in-memory cache to be used if the app doesn't provide one */
    struct vk_pipeline_cache *mem_cache;
@@ -379,10 +379,12 @@ VkResult radv_device_acquire_performance_counters(struct radv_device *device, ui
 
 void radv_device_release_performance_counters(struct radv_device *device);
 
-bool radv_device_should_clear_vram(const struct radv_device *device);
-
 VkResult radv_device_init_utrace(struct radv_device *device);
 
 void radv_device_finish_utrace(struct radv_device *device);
+
+VkResult radv_device_init_anti_lag(struct radv_device *device);
+
+void radv_device_finish_anti_lag(struct radv_device *device);
 
 #endif /* RADV_DEVICE_H */

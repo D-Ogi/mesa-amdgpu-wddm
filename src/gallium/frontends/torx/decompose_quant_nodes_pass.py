@@ -13,13 +13,15 @@ import torch
 from executorch.exir.dialects._ops import ops as exir_ops
 from executorch.exir.pass_base import ExportPass, PassResult
 
+from .fold_qdq_with_annotated_qparams_pass import is_dequantize, is_quantize
+
 
 exir_ops = cast(Any, exir_ops)
 
 qd = exir_ops.edge.quantized_decomposed
 
-QUANT_PER_TENSOR_OP = qd.quantize_per_tensor.default
-DEQUANT_PER_TENSOR_OP = qd.dequantize_per_tensor.default
+QUANT_PER_CHANNEL_OP = qd.quantize_per_channel.default
+DEQUANT_PER_CHANNEL_OP = qd.dequantize_per_channel.default
 
 
 def create_node(
@@ -81,60 +83,41 @@ class DecomposeQuantNodesPass(ExportPass):
     def call(self, graph_module: torch.fx.GraphModule):
         modified = False
         for node in list(graph_module.graph.nodes):
-            if node.op != "call_function" or node.target not in (
-                QUANT_PER_TENSOR_OP,
-                DEQUANT_PER_TENSOR_OP,
+            if node.op != "call_function":
+                continue
+            if node.target in (QUANT_PER_CHANNEL_OP, DEQUANT_PER_CHANNEL_OP):
+                raise RuntimeError(
+                    f"Torx: '{node.name}' is a per-channel quantize or "
+                    f"dequantize reaching the decompose pass; only a "
+                    f"convolution's weights and biases are quantised per "
+                    f"channel and they stay inside the delegate")
+            if not (is_quantize(node) or is_dequantize(node)):
+                continue
+            if is_dequantize(node) and all(
+                is_quantize(user) for user in node.users
             ):
                 continue
-            if node.target == DEQUANT_PER_TENSOR_OP and all(
-                user.target == QUANT_PER_TENSOR_OP for user in node.users
-            ):
-                continue
-            elif (
-                node.target == QUANT_PER_TENSOR_OP
-                and node.all_input_nodes[0].target == DEQUANT_PER_TENSOR_OP
-            ):
+            elif is_quantize(node) and is_dequantize(node.all_input_nodes[0]):
                 continue
             modified = True
             args = node.args
-            input_rank = args[0].meta["val"].ndim
             x, scale, zero_point, qmin, qmax, dtype = args
             input_dtype = x.meta["val"].dtype
             output_dtype = node.meta["val"].dtype
             fp_dtype = (
-                output_dtype if node.target == DEQUANT_PER_TENSOR_OP else input_dtype
+                output_dtype if is_dequantize(node) else input_dtype
             )
             # Instead of dividing by scale in quantization, we multiply by 1/scale
             # when quantizing.
             scale = cast(float, scale)
-            scale = scale if node.target == DEQUANT_PER_TENSOR_OP else 1.0 / scale
+            scale = scale if is_dequantize(node) else 1.0 / scale
             with graph_module.graph.inserting_before(node):
-                scale_const = create_node(
-                    graph_module.graph,
-                    exir_ops.edge.aten.full.default,
-                    args=((1,) * input_rank, scale),
-                    kwargs={"dtype": fp_dtype},
-                    from_node=node,
-                )
-                zp_const = create_node(
-                    graph_module.graph,
-                    exir_ops.edge.aten.full.default,
-                    args=((1,) * input_rank, zero_point),
-                    kwargs={
-                        "dtype": (
-                            fp_dtype
-                            if node.target == QUANT_PER_TENSOR_OP
-                            else torch.int32
-                        )
-                    },
-                    from_node=node,
-                )
-                if node.target == QUANT_PER_TENSOR_OP:
+                if is_quantize(node):
                     # TODO MLETORCH-1587: Decompose quantization nodes using more integer arithmetic
                     scaled = create_node(
                         graph_module.graph,
-                        exir_ops.edge.aten.mul.Tensor,
-                        args=(x, scale_const),
+                        exir_ops.edge.aten.mul.Scalar,
+                        args=(x, scale),
                         from_node=node,
                     )
                     rounded = create_node(
@@ -145,8 +128,8 @@ class DecomposeQuantNodesPass(ExportPass):
                     )
                     shifted = create_node(
                         graph_module.graph,
-                        exir_ops.edge.aten.add.Tensor,
-                        args=(rounded, zp_const),
+                        exir_ops.edge.aten.add.Scalar,
+                        args=(rounded, zero_point),
                         from_node=node,
                     )
                     clamped = create_node(
@@ -173,8 +156,8 @@ class DecomposeQuantNodesPass(ExportPass):
                     )
                     shifted = create_node(
                         graph_module.graph,
-                        exir_ops.edge.aten.sub.Tensor,
-                        args=(input_casted_to_zp_dtype, zp_const),
+                        exir_ops.edge.aten.sub.Scalar,
+                        args=(input_casted_to_zp_dtype, zero_point),
                         from_node=node,
                     )
                     casted_to_float = create_node(
@@ -186,8 +169,8 @@ class DecomposeQuantNodesPass(ExportPass):
                     )
                     dequantized = create_node(
                         graph_module.graph,
-                        exir_ops.edge.aten.mul.Tensor,
-                        args=(casted_to_float, scale_const),
+                        exir_ops.edge.aten.mul.Scalar,
+                        args=(casted_to_float, scale),
                         from_node=node,
                     )
                     output = dequantized

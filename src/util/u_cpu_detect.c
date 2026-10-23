@@ -861,6 +861,12 @@ _util_cpu_detect_once(void)
    util_cpu_caps.max_cpus = total_cpus;
    util_cpu_caps.num_cpu_mask_bits = align(total_cpus, 32);
 
+   if (!util_get_current_thread_affinity(util_cpu_caps.initial_affinity_mask,
+                                         util_cpu_caps.num_cpu_mask_bits)) {
+      memset(util_cpu_caps.initial_affinity_mask, 0xff,
+             sizeof(util_cpu_caps.initial_affinity_mask));
+   }
+
    /* Make the fallback cacheline size nonzero so that it can be
     * safely passed to align().
     */

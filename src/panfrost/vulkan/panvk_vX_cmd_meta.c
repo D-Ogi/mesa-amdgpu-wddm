@@ -246,7 +246,6 @@ meta_gfx_end(struct panvk_cmd_buffer *cmdbuf,
    cmdbuf->state.gfx.vs.attrib_bufs = 0;
    cmdbuf->state.gfx.vs.indirect_attribs_infos = 0;
    cmdbuf->state.gfx.vs.indirect_attrib_bufs_infos = 0;
-   cmdbuf->state.gfx.vs.indirect_varying_bufs_infos = 0;
    cmdbuf->state.gfx.fs.rsd = 0;
 #else
    cmdbuf->state.gfx.fs.desc.res_table = 0;
@@ -731,6 +730,7 @@ panvk_per_arch(cmd_meta_resolve_attachments)(struct panvk_cmd_buffer *cmdbuf)
    unsigned color_att_count =
       util_last_bit(bound_atts & MESA_VK_RP_ATTACHMENT_ANY_COLOR_BITS);
    VkRenderingAttachmentInfo color_atts[MAX_RTS];
+   VkRenderingAttachmentFlagsInfoKHR color_att_flags[MAX_RTS];
    for (uint32_t i = 0; i < color_att_count; i++) {
 
       const struct panvk_resolve_attachment *resolve_info =
@@ -738,8 +738,14 @@ panvk_per_arch(cmd_meta_resolve_attachments)(struct panvk_cmd_buffer *cmdbuf)
       struct panvk_image_view *src_iview =
          cmdbuf->state.gfx.render.color_attachments.iviews[i];
 
+      color_att_flags[i] = (VkRenderingAttachmentFlagsInfoKHR){
+         .sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_FLAGS_INFO_KHR,
+         .flags = resolve_info->flags,
+      };
+
       color_atts[i] = (VkRenderingAttachmentInfo){
          .sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO,
+         .pNext = &color_att_flags[i],
          .imageView = panvk_image_view_to_handle(src_iview),
          .imageLayout = VK_IMAGE_LAYOUT_GENERAL,
          .resolveMode = resolve_info->mode,

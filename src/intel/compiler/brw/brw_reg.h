@@ -1477,6 +1477,15 @@ regions_overlap(const brw_reg &r, unsigned dr, const brw_reg &s, unsigned ds)
    if (r.file == VGRF) {
       return r.nr == s.nr &&
              !(r.offset + dr <= s.offset || s.offset + ds <= r.offset);
+   } else if (r.is_accumulator() || s.is_accumulator()) {
+      /* Prevent false positives with other ARFs. */
+      if (!r.is_accumulator() || !s.is_accumulator())
+         return false;
+
+      unsigned r_base = ((r.nr - BRW_ARF_ACCUMULATOR) * REG_SIZE) + r.subnr;
+      unsigned s_base = ((s.nr - BRW_ARF_ACCUMULATOR) * REG_SIZE) + s.subnr;
+
+      return !(r_base + dr <= s_base || s_base + ds <= r_base);
    } else {
       return !(reg_offset(r) + dr <= reg_offset(s) ||
                reg_offset(s) + ds <= reg_offset(r));

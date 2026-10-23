@@ -77,33 +77,11 @@ create_kmod_dev(struct panvk_physical_device *device,
                 const struct panvk_instance *instance, drmDevicePtr drm_device)
 {
    const char *path = drm_device->nodes[DRM_NODE_RENDER];
-   drmVersionPtr version;
-   int fd;
-
-   fd = open(path, O_RDWR | O_CLOEXEC);
+   int fd = open(path, O_RDWR | O_CLOEXEC);
    if (fd < 0) {
       return panvk_errorf(instance, VK_ERROR_INCOMPATIBLE_DRIVER,
-                          "failed to open device %s", path);
+                          "failed to open device '%s'", path);
    }
-
-   version = drmGetVersion(fd);
-   if (!version) {
-      close(fd);
-      return panvk_errorf(instance, VK_ERROR_INCOMPATIBLE_DRIVER,
-                          "failed to query kernel driver version for device %s",
-                          path);
-   }
-
-   if (strcmp(version->name, "panfrost") && strcmp(version->name, "panthor")) {
-      drmFreeVersion(version);
-      close(fd);
-      return VK_ERROR_INCOMPATIBLE_DRIVER;
-   }
-
-   drmFreeVersion(version);
-
-   if (PANVK_DEBUG(STARTUP))
-      mesa_logi("Found compatible device '%s'.", path);
 
    uint32_t flags = PAN_KMOD_DEV_FLAG_OWNS_FD;
 
@@ -111,12 +89,18 @@ create_kmod_dev(struct panvk_physical_device *device,
       flags |= PAN_KMOD_DEV_FLAG_MMAP_SYNC_THROUGH_KERNEL;
 
    device->kmod.dev = pan_kmod_dev_create(fd, flags, &instance->kmod.allocator);
-
    if (!device->kmod.dev) {
       close(fd);
+
+      if (errno != -ENOMEM)
+         return VK_ERROR_INCOMPATIBLE_DRIVER;
+
       return panvk_errorf(instance, VK_ERROR_OUT_OF_HOST_MEMORY,
                           "cannot create device");
    }
+
+   if (PANVK_DEBUG(STARTUP))
+      mesa_logi("Found compatible device '%s'.", path);
 
    return VK_SUCCESS;
 }
@@ -230,6 +214,60 @@ get_core_masks(struct panvk_physical_device *device,
    return result;
 }
 
+static simple_mtx_t heap_budgets_mutex = SIMPLE_MTX_INITIALIZER;
+static struct list_head heap_budgets = {&heap_budgets, &heap_budgets};
+
+static struct panvk_heap_budget *
+get_memory_budget(dev_t rdev)
+{
+   struct panvk_heap_budget *heap_budget = NULL;
+
+   simple_mtx_lock(&heap_budgets_mutex);
+
+   list_for_each_entry(struct panvk_heap_budget, b, &heap_budgets, link) {
+      if (b->rdev == rdev) {
+         heap_budget = b;
+         break;
+      }
+   }
+
+   if (!heap_budget) {
+      /* We can't use the instance's allocator, because this object gets
+       * shared among multiple instances with different lifetimes. So
+       * let's just use standard allocators instead here.
+       */
+      heap_budget = calloc(1, sizeof(*heap_budget));
+      if (!heap_budget) {
+         simple_mtx_unlock(&heap_budgets_mutex);
+         return NULL;
+      }
+
+      heap_budget->ref_count = 1;
+      heap_budget->rdev = rdev;
+      list_addtail(&heap_budget->link, &heap_budgets);
+   } else {
+      heap_budget->ref_count++;
+   }
+
+   simple_mtx_unlock(&heap_budgets_mutex);
+
+   return heap_budget;
+}
+
+static void
+release_memory_budget(struct panvk_heap_budget *heap_budget)
+{
+   simple_mtx_lock(&heap_budgets_mutex);
+
+   if (--heap_budget->ref_count == 0) {
+      list_del(&heap_budget->link);
+      free(heap_budget);
+   }
+
+   simple_mtx_unlock(&heap_budgets_mutex);
+}
+
+
 static VkResult
 get_device_heaps(struct panvk_physical_device *device,
                  struct panvk_instance *instance)
@@ -318,6 +356,10 @@ get_device_heaps(struct panvk_physical_device *device,
    device->memory.max_supported_va =
       pan_clamp_to_usable_va_range(device->kmod.dev, request_va);
 
+   device->memory.budget = get_memory_budget(device->drm.render_rdev);
+   if (!device->memory.budget)
+      return VK_ERROR_OUT_OF_HOST_MEMORY;
+
    return VK_SUCCESS;
 }
 
@@ -328,7 +370,8 @@ get_device_sync_types(struct panvk_physical_device *device,
    const unsigned arch = pan_arch(device->kmod.dev->props.gpu_id);
    uint32_t sync_type_count = 0;
 
-   device->drm_syncobj_type = vk_drm_syncobj_get_type(device->kmod.dev->fd);
+   device->drm_syncobj_type = vk_drm_syncobj_get_type_from_provider(device->kmod.dev->sync_ops);
+
    if (!device->drm_syncobj_type.features) {
       return vk_errorf(instance, VK_ERROR_INITIALIZATION_FAILED,
                        "failed to query syncobj features");
@@ -375,6 +418,8 @@ panvk_physical_device_finish(struct panvk_physical_device *device)
 
    pan_kmod_dev_destroy(device->kmod.dev);
 
+   release_memory_budget(device->memory.budget);
+
    vk_physical_device_finish(&device->vk);
 }
 
@@ -389,8 +434,12 @@ panvk_physical_device_init(struct panvk_physical_device *device,
    if (result != VK_SUCCESS)
       return result;
 
+   unsigned core_count =
+      pan_query_core_count(&device->kmod.dev->props);
    device->model = pan_get_model(device->kmod.dev->props.gpu_id,
-                                 device->kmod.dev->props.gpu_variant);
+                                 device->kmod.dev->props.gpu_variant,
+                                 core_count,
+                                 device->kmod.dev->props.gpu_features);
 
    unsigned arch = pan_arch(device->kmod.dev->props.gpu_id);
 
@@ -434,11 +483,7 @@ panvk_physical_device_init(struct panvk_physical_device *device,
    device->formats.all = pan_format_table(arch);
    device->formats.blendable = pan_blendable_format_table(arch);
 
-   unsigned core_count =
-      pan_query_core_count(&device->kmod.dev->props);
-
-   memset(device->name, 0, sizeof(device->name));
-   sprintf(device->name, "%s MC%u", device->model->name, core_count);
+   pan_model_device_name(device->name, sizeof(device->name), device->model, core_count, "");
 
    result = get_core_masks(device, instance);
    if (result != VK_SUCCESS)
@@ -500,6 +545,9 @@ panvk_physical_device_init(struct panvk_physical_device *device,
 
 fail:
    free_disk_cache(device);
+
+   if (device->memory.budget)
+      release_memory_budget(device->memory.budget);
 
    if (device->vk.instance)
       vk_physical_device_finish(&device->vk);
@@ -596,6 +644,12 @@ panvk_GetPhysicalDeviceQueueFamilyProperties2(
             vk_find_struct(p->pNext, QUEUE_FAMILY_GLOBAL_PRIORITY_PROPERTIES_KHR);
          if (prio)
             panvk_fill_global_priority(physical_device, family, prio);
+
+         VkQueueFamilyOptimalImageTransferGranularityPropertiesKHR *gran =
+            vk_find_struct(p->pNext,
+                           QUEUE_FAMILY_OPTIMAL_IMAGE_TRANSFER_GRANULARITY_PROPERTIES_KHR);
+         if (gran)
+            gran->optimalImageTransferGranularity = (VkExtent3D){1, 1, 1};
       }
    }
 }
@@ -733,7 +787,7 @@ panvk_GetPhysicalDeviceMemoryProperties2(
       case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MEMORY_BUDGET_PROPERTIES_EXT: {
          VkPhysicalDeviceMemoryBudgetPropertiesEXT *p = ext;
 
-         uint64_t used = p_atomic_read(&physical_device->memory.heap_used);
+         uint64_t used = p_atomic_read(&physical_device->memory.budget->heap_used);
          uint64_t heap_size = physical_device->memory.heaps[0].size;
 
          /* From the Vulkan 1.3.278 spec:
@@ -1220,16 +1274,14 @@ get_image_format_properties(struct panvk_physical_device *physical_device,
    uint32_t maxArraySize;
    VkSampleCountFlags sampleCounts = VK_SAMPLE_COUNT_1_BIT;
    enum pipe_format format = vk_format_to_pipe_format(info->format);
-
-   const VkImageStencilUsageCreateInfo *stencil_usage_info =
-      vk_find_struct_const(info->pNext, IMAGE_STENCIL_USAGE_CREATE_INFO);
-   VkImageUsageFlags stencil_usage =
-      stencil_usage_info ? stencil_usage_info->stencilUsage : info->usage;
-   VkImageUsageFlags all_usage = info->usage | stencil_usage;
+   const VkImageUsageFlags2KHR stencil_usage = vk_image_format_info_2_stencil_usage(info);
+   const VkImageUsageFlags2KHR image_usage = vk_image_format_info_2_usage(info);
+   VkImageUsageFlags2KHR all_usage = image_usage | stencil_usage;
    const struct vk_format_ycbcr_info *ycbcr_info =
       vk_format_get_ycbcr_info(info->format);
 
-   if (info->flags & VK_IMAGE_CREATE_SPARSE_BINDING_BIT) {
+   const VkImageCreateFlags2KHR image_flags = vk_image_format_info_2_flags(info);
+   if (image_flags & VK_IMAGE_CREATE_2_SPARSE_BINDING_BIT_KHR) {
       if (!physical_device->vk.supported_features.sparseBinding)
          goto unsupported;
 
@@ -1248,11 +1300,11 @@ get_image_format_properties(struct panvk_physical_device *physical_device,
        * CTS that expect a driver to implement host copies on sparse images is
        * exactly empty, so let's just not bother.
        */
-      if (info->usage & VK_IMAGE_USAGE_HOST_TRANSFER_BIT)
+      if (image_usage & VK_IMAGE_USAGE_2_HOST_TRANSFER_BIT_KHR)
          goto unsupported;
    }
 
-   if (info->flags & VK_IMAGE_CREATE_SPARSE_RESIDENCY_BIT) {
+   if (image_flags & VK_IMAGE_CREATE_2_SPARSE_RESIDENCY_BIT_KHR) {
       if (!((info->type == VK_IMAGE_TYPE_2D &&
              physical_device->vk.supported_features.sparseResidencyImage2D) ||
             (info->type == VK_IMAGE_TYPE_3D &&
@@ -1263,6 +1315,11 @@ get_image_format_properties(struct panvk_physical_device *physical_device,
       if (util_bitcount(vk_format_aspects(info->format)) != 1)
          goto unsupported;
 
+      /* YCbCr formats (including single-plane packed 422 like
+       * G8B8G8R8/B8G8R8G8) are subsampled and not supported for now */
+      if (ycbcr_info != NULL)
+         goto unsupported;
+
       if (info->tiling != VK_IMAGE_TILING_OPTIMAL)
          goto unsupported;
 
@@ -1270,14 +1327,14 @@ get_image_format_properties(struct panvk_physical_device *physical_device,
       if (!panvk_sparse_block_is_valid(sblock_desc))
          goto unsupported;
 
-      VkImageUsageFlags allowed_usages =
-         VK_IMAGE_USAGE_TRANSFER_SRC_BIT |
-         VK_IMAGE_USAGE_TRANSFER_DST_BIT |
-         VK_IMAGE_USAGE_SAMPLED_BIT |
-         VK_IMAGE_USAGE_STORAGE_BIT |
-         VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT |
-         VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT |
-         VK_IMAGE_USAGE_INPUT_ATTACHMENT_BIT;
+      VkImageUsageFlags2KHR allowed_usages =
+         VK_IMAGE_USAGE_2_TRANSFER_SRC_BIT_KHR |
+         VK_IMAGE_USAGE_2_TRANSFER_DST_BIT_KHR |
+         VK_IMAGE_USAGE_2_SAMPLED_BIT_KHR |
+         VK_IMAGE_USAGE_2_STORAGE_BIT_KHR |
+         VK_IMAGE_USAGE_2_COLOR_ATTACHMENT_BIT_KHR |
+         VK_IMAGE_USAGE_2_DEPTH_STENCIL_ATTACHMENT_BIT_KHR |
+         VK_IMAGE_USAGE_2_INPUT_ATTACHMENT_BIT_KHR;
       if (all_usage & ~allowed_usages)
          goto unsupported;
    }
@@ -1400,8 +1457,8 @@ get_image_format_properties(struct panvk_physical_device *physical_device,
        (format_feature_flags &
         (VK_FORMAT_FEATURE_2_COLOR_ATTACHMENT_BIT |
          VK_FORMAT_FEATURE_2_DEPTH_STENCIL_ATTACHMENT_BIT)) &&
-       !(info->flags & VK_IMAGE_CREATE_CUBE_COMPATIBLE_BIT) &&
-       !(all_usage & VK_IMAGE_USAGE_STORAGE_BIT)) {
+       !(image_flags & VK_IMAGE_CREATE_2_CUBE_COMPATIBLE_BIT_KHR) &&
+       !(all_usage & VK_IMAGE_USAGE_2_STORAGE_BIT_KHR)) {
       sampleCounts |=
          get_image_format_sample_counts(physical_device, info->format);
    }
@@ -1417,29 +1474,29 @@ get_image_format_properties(struct panvk_physical_device *physical_device,
    * different usage than the image so we can't always filter on usage.
    * There is one exception to this below for storage.
    */
-   if (!(info->flags & VK_IMAGE_CREATE_EXTENDED_USAGE_BIT)) {
-      if (all_usage & VK_IMAGE_USAGE_SAMPLED_BIT) {
+   if (!(image_flags & VK_IMAGE_CREATE_2_EXTENDED_USAGE_BIT_KHR)) {
+      if (all_usage & VK_IMAGE_USAGE_2_SAMPLED_BIT_KHR) {
          if (!(format_feature_flags & VK_FORMAT_FEATURE_2_SAMPLED_IMAGE_BIT)) {
             goto unsupported;
          }
       }
 
-      if (all_usage & VK_IMAGE_USAGE_STORAGE_BIT) {
+      if (all_usage & VK_IMAGE_USAGE_2_STORAGE_BIT_KHR) {
          if (!(format_feature_flags & VK_FORMAT_FEATURE_2_STORAGE_IMAGE_BIT)) {
             goto unsupported;
          }
       }
 
-      if (all_usage & VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT ||
-          ((all_usage & VK_IMAGE_USAGE_INPUT_ATTACHMENT_BIT) &&
+      if (all_usage & VK_IMAGE_USAGE_2_COLOR_ATTACHMENT_BIT_KHR ||
+          ((all_usage & VK_IMAGE_USAGE_2_INPUT_ATTACHMENT_BIT_KHR) &&
            !vk_format_is_depth_or_stencil(info->format))) {
          if (!(format_feature_flags & VK_FORMAT_FEATURE_2_COLOR_ATTACHMENT_BIT)) {
             goto unsupported;
          }
       }
 
-      if ((all_usage & VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT) ||
-          ((all_usage & VK_IMAGE_USAGE_INPUT_ATTACHMENT_BIT) &&
+      if ((all_usage & VK_IMAGE_USAGE_2_DEPTH_STENCIL_ATTACHMENT_BIT_KHR) ||
+          ((all_usage & VK_IMAGE_USAGE_2_INPUT_ATTACHMENT_BIT_KHR) &&
            vk_format_is_depth_or_stencil(info->format))) {
          if (!(format_feature_flags &
                VK_FORMAT_FEATURE_2_DEPTH_STENCIL_ATTACHMENT_BIT)) {
@@ -1740,18 +1797,20 @@ panvk_GetPhysicalDeviceImageFormatProperties2(
     *    VK_IMAGE_CREATE_ALIAS_BIT, flags must not contain
     *    VK_IMAGE_CREATE_DISJOINT_BIT"
     */
+   const VkImageCreateFlags2KHR image_flags = vk_image_format_info_2_flags(base_info);
    if (plane_count == 1 &&
-       !(base_info->flags & VK_IMAGE_CREATE_ALIAS_BIT) &&
-       (base_info->flags & VK_IMAGE_CREATE_DISJOINT_BIT))
+       !(image_flags & VK_IMAGE_CREATE_2_ALIAS_BIT_KHR) &&
+       (image_flags & VK_IMAGE_CREATE_2_DISJOINT_BIT_KHR))
       goto fail;
 
    if (ycbcr_info &&
-       ((base_info->flags & VK_IMAGE_CREATE_SPARSE_BINDING_BIT) ||
-       (base_info->flags & VK_IMAGE_CREATE_SPARSE_RESIDENCY_BIT)))
+       ((image_flags & VK_IMAGE_CREATE_2_SPARSE_BINDING_BIT_KHR) ||
+        (image_flags & VK_IMAGE_CREATE_2_SPARSE_RESIDENCY_BIT_KHR)))
       goto fail;
 
-   if ((base_info->flags & VK_IMAGE_CREATE_SPARSE_BINDING_BIT) &&
-       (base_info->usage & VK_IMAGE_USAGE_HOST_TRANSFER_BIT_EXT))
+   const VkImageUsageFlags2KHR image_usage = vk_image_format_info_2_usage(base_info);
+   if ((image_flags & VK_IMAGE_CREATE_2_SPARSE_BINDING_BIT_KHR) &&
+       (image_usage & VK_IMAGE_USAGE_2_HOST_TRANSFER_BIT_KHR))
       goto fail;
 
    if (ycbcr_props)
@@ -1782,14 +1841,21 @@ panvk_GetPhysicalDeviceSparseImageFormatProperties2(
 {
    VK_OUTARRAY_MAKE_TYPED(VkSparseImageFormatProperties2, out, pProperties, pPropertyCount);
 
+   VkImageCreateFlags2CreateInfoKHR img_info_flags2 = {
+      .sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_FLAGS_2_CREATE_INFO_KHR,
+      .flags = VK_IMAGE_CREATE_2_SPARSE_BINDING_BIT_KHR | VK_IMAGE_CREATE_2_SPARSE_RESIDENCY_BIT_KHR,
+   };
+   VkImageUsageFlags2CreateInfoKHR img_info_usage2 = {
+      .sType = VK_STRUCTURE_TYPE_IMAGE_USAGE_FLAGS_2_CREATE_INFO_KHR,
+      .pNext = &img_info_flags2,
+      .usage = vk_sparse_image_format_info_2_usage(pFormatInfo),
+   };
    VkPhysicalDeviceImageFormatInfo2 img_info = {
       .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_IMAGE_FORMAT_INFO_2,
+      .pNext = &img_info_usage2,
       .format = pFormatInfo->format,
       .type = pFormatInfo->type,
       .tiling = pFormatInfo->tiling,
-      .usage = pFormatInfo->usage,
-      .flags = VK_IMAGE_CREATE_SPARSE_BINDING_BIT |
-               VK_IMAGE_CREATE_SPARSE_RESIDENCY_BIT,
    };
    VkImageFormatProperties2 img_props = {};
    if (panvk_GetPhysicalDeviceImageFormatProperties2(physicalDevice, &img_info, &img_props) != VK_SUCCESS)

@@ -42,6 +42,10 @@
 #include <errno.h>
 #include <string.h>
 #include <fcntl.h>
+#include <arpa/inet.h>
+#include <netinet/in.h>
+#include <sys/socket.h>
+#include <sys/un.h>
 #include "drm-uapi/drm_fourcc.h"
 #include "util/libdrm.h"
 #include "util/cnd_monotonic.h"
@@ -97,6 +101,22 @@ struct wsi_x11_connection {
    bool has_xfixes;
 
    struct list_head screen_resources_list;
+
+   /* Secondary connection to the X server that swapchains select and read
+    * Present events on when vk_x11_dedicated_event_connection is set, so the
+    * event thread never reads the application's connection behind its back (an
+    * app sleeping in poll() on its fd would miss its own events). One per
+    * application connection within a single wsi_device, shared by all surfaces
+    * on it, and closed when the last of those surfaces is destroyed.
+    * Protected by wsi_x11::mutex.
+    */
+   xcb_connection_t *event_conn;
+   unsigned event_conn_refcount;
+   /* Display name used to open event_conn, kept to detect if the application
+    * closed its connection and a new connection to a different X server
+    * reused the same xcb_connection_t pointer.
+    */
+   char event_conn_display[64];
 };
 
 struct wsi_x11 {
@@ -113,6 +133,12 @@ struct wsi_x11_vk_surface {
       VkIcdSurfaceXcb xcb;
    };
    bool has_alpha;
+   /* Reference to the dedicated event connection held by this surface.
+    * event_wsi is kept alongside event_wsi_conn to access wsi_x11::mutex in
+    * vkDestroySurfaceKHR, where wsi_device is not available.
+    */
+   struct wsi_x11 *event_wsi;
+   struct wsi_x11_connection *event_wsi_conn;
 };
 #ifdef HAVE_X11_DRM
 /**
@@ -369,6 +395,9 @@ wsi_x11_connection_create(struct wsi_device *wsi_dev,
 
    list_inithead(&wsi_conn->screen_resources_list);
 
+   wsi_conn->event_conn = NULL;
+   wsi_conn->event_conn_refcount = 0;
+
    xcb_screen_iterator_t it = xcb_setup_roots_iterator(xcb_get_setup(conn));
    for (xcb_screen_t *screen = it.data; it.rem != 0; xcb_screen_next(&it), screen = it.data) {
       struct wsi_x11_screen_resources *link =
@@ -404,6 +433,8 @@ wsi_x11_connection_destroy(struct wsi_device *wsi_dev,
       mtx_destroy(&resources->mtx);
       vk_free(&wsi_dev->instance_alloc, resources);
    }
+   if (conn->event_conn)
+      xcb_disconnect(conn->event_conn);
    vk_free(&wsi_dev->instance_alloc, conn);
 }
 
@@ -1177,6 +1208,8 @@ wsi_CreateXcbSurfaceKHR(VkInstance _instance,
    surface->xcb.window = pCreateInfo->window;
 
    surface->has_alpha = visual_has_alpha(visual, visual_depth);
+   surface->event_wsi = NULL;
+   surface->event_wsi_conn = NULL;
 
    *pSurface = VkIcdSurfaceBase_to_handle(&surface->xcb.base);
    return VK_SUCCESS;
@@ -1209,6 +1242,8 @@ wsi_CreateXlibSurfaceKHR(VkInstance _instance,
    surface->xlib.window = pCreateInfo->window;
 
    surface->has_alpha = visual_has_alpha(visual, visual_depth);
+   surface->event_wsi = NULL;
+   surface->event_wsi_conn = NULL;
 
    *pSurface = VkIcdSurfaceBase_to_handle(&surface->xlib.base);
    return VK_SUCCESS;
@@ -1267,6 +1302,10 @@ struct x11_swapchain {
    bool                                         msc_estimate_is_stable;
 
    xcb_connection_t *                           conn;
+   /* Connection Present events are selected and read on: our own connection
+    * when we could open one, so the event thread never reads from the
+    * application's connection. Requests still go through conn. */
+   xcb_connection_t *                           event_conn;
    xcb_window_t                                 window;
    xcb_gc_t                                     gc;
    uint32_t                                     depth;
@@ -1662,7 +1701,11 @@ x11_handle_dri3_present_event(struct x11_swapchain *chain,
 
       assert(!chain->base.image_info.explicit_sync);
       for (unsigned i = 0; i < chain->base.image_count; i++) {
-         if (chain->images[i].pixmap == idle->pixmap) {
+         /* Match both client pixmap and our fence so we handle disconnects
+          * correctly
+          */
+         if (chain->images[i].pixmap == idle->pixmap &&
+             chain->images[i].sync_fence == idle->idle_fence) {
             chain->sent_image_count--;
             assert(chain->sent_image_count >= 0);
             wsi_queue_push(&chain->acquire_queue, i);
@@ -2299,6 +2342,7 @@ x11_manage_event_queue(void *state)
 {
    struct x11_swapchain *chain = state;
    u_thread_setname("WSI swapchain event");
+   util_set_current_thread_initial_affinity();
 
    /* While there is an outstanding IDLE we should wait for it.
     * In FLIP modes at most one image will not be driver owned eventually.
@@ -2334,7 +2378,7 @@ x11_manage_event_queue(void *state)
          /* Only yield lock when blocking on X11 event. */
          mtx_unlock(&chain->thread_state_lock);
          xcb_generic_event_t *event =
-               xcb_wait_for_special_event(chain->conn, chain->special_event);
+               xcb_wait_for_special_event(chain->event_conn, chain->special_event);
          mtx_lock(&chain->thread_state_lock);
 
          /* Re-check status since we dropped the lock while waiting for X. */
@@ -2518,6 +2562,8 @@ x11_manage_present_queue(void *state)
    struct wsi_x11_connection *wsi_conn =
          wsi_x11_get_connection((struct wsi_device*)chain->base.wsi, chain->conn);
    VkResult result = VK_SUCCESS;
+
+   util_set_current_thread_initial_affinity();
 
    u_thread_setname("WSI swapchain queue");
 
@@ -2980,6 +3026,150 @@ wsi_x11_swapchain_query_dri3_modifiers_changed(struct x11_swapchain *chain)
    return memcmp(hash, chain->dri3_modifier_hash, sizeof(hash)) != 0;
 }
 #endif
+/* Display name of the server the application's connection is talking to,
+ * from its socket, so we don't depend on $DISPLAY. */
+static bool
+x11_display_name_from_conn(xcb_connection_t *conn, char *name, size_t size)
+{
+   struct sockaddr_storage addr;
+   socklen_t len = sizeof(addr);
+   if (getpeername(xcb_get_file_descriptor(conn), (struct sockaddr *)&addr, &len))
+      return false;
+
+   if (addr.ss_family == AF_UNIX) {
+      const struct sockaddr_un *un = (const struct sockaddr_un *)&addr;
+      if (len <= offsetof(struct sockaddr_un, sun_path))
+         return false;
+      const char *path = un->sun_path;
+      size_t path_len = len - offsetof(struct sockaddr_un, sun_path);
+      /* Abstract sockets start with a NUL byte. */
+      if (path[0]) {
+         path_len = strnlen(path, path_len);
+      } else {
+         path++;
+         path_len--;
+      }
+
+      /* xcb_connect() for ":N" only connects to /tmp/.X11-unix/XN, so reject
+       * any other socket path to avoid connecting to a different X server.
+       */
+      static const char prefix[] = "/tmp/.X11-unix/X";
+      const size_t prefix_len = sizeof(prefix) - 1;
+      if (path_len <= prefix_len || memcmp(path, prefix, prefix_len) != 0)
+         return false;
+      for (size_t i = prefix_len; i < path_len; i++) {
+         if (path[i] < '0' || path[i] > '9')
+            return false;
+      }
+      return snprintf(name, size, "unix/:%.*s", (int)(path_len - prefix_len),
+                      path + prefix_len) < size;
+   }
+
+   char host[INET6_ADDRSTRLEN];
+   unsigned port;
+   if (addr.ss_family == AF_INET) {
+      const struct sockaddr_in *in = (const struct sockaddr_in *)&addr;
+      inet_ntop(AF_INET, &in->sin_addr, host, sizeof(host));
+      port = ntohs(in->sin_port);
+   } else if (addr.ss_family == AF_INET6) {
+      const struct sockaddr_in6 *in6 = (const struct sockaddr_in6 *)&addr;
+      inet_ntop(AF_INET6, &in6->sin6_addr, host, sizeof(host));
+      port = ntohs(in6->sin6_port);
+   } else {
+      return false;
+   }
+   /* X display N listens on TCP port 6000 + N. */
+   if (port < 6000)
+      return false;
+   return snprintf(name, size, addr.ss_family == AF_INET6 ? "[%s]:%u" : "%s:%u",
+                   host, port - 6000) < size;
+}
+
+/* Connection to select and read Present events on. Falls back to the
+ * application's connection if the option is off, or if the secondary
+ * connection can't be opened.
+ */
+static xcb_connection_t *
+x11_swapchain_get_event_connection(const struct wsi_device *wsi_device,
+                                   struct wsi_x11_connection *wsi_conn,
+                                   struct wsi_x11_vk_surface *surface,
+                                   xcb_connection_t *app_conn)
+{
+   if (!wsi_device->x11.dedicated_event_connection)
+      return app_conn;
+
+   /* Keep using the event connection first acquired by this surface, even if
+    * it is owned by a different physical device (wsi_device). This is safe
+    * because all physical devices live until vkDestroyInstance, so the pointer
+    * cannot dangle while the surface is alive.
+    */
+   if (surface->event_wsi_conn)
+      return surface->event_wsi_conn->event_conn;
+
+   char display[sizeof(wsi_conn->event_conn_display)];
+   if (!x11_display_name_from_conn(app_conn, display, sizeof(display)))
+      return app_conn;
+
+   struct wsi_x11 *wsi =
+      (struct wsi_x11 *)wsi_device->wsi[VK_ICD_WSI_PLATFORM_XCB];
+
+   mtx_lock(&wsi->mutex);
+   if (!wsi_conn->event_conn) {
+      mtx_unlock(&wsi->mutex);
+      xcb_connection_t *conn = xcb_connect(display, NULL);
+      if (xcb_connection_has_error(conn)) {
+         xcb_disconnect(conn);
+         return app_conn;
+      }
+      mtx_lock(&wsi->mutex);
+
+      if (wsi_conn->event_conn) {
+         xcb_disconnect(conn);
+      } else {
+         wsi_conn->event_conn = conn;
+         strcpy(wsi_conn->event_conn_display, display);
+      }
+   }
+
+   /* If the application closed its original connection and the xcb_connection_t
+    * pointer was reused for a connection to a different X server, fall back to
+    * the application's connection.
+    */
+   if (strcmp(wsi_conn->event_conn_display, display) != 0) {
+      mtx_unlock(&wsi->mutex);
+      return app_conn;
+   }
+
+   wsi_conn->event_conn_refcount++;
+   surface->event_wsi = wsi;
+   surface->event_wsi_conn = wsi_conn;
+   xcb_connection_t *conn = wsi_conn->event_conn;
+   mtx_unlock(&wsi->mutex);
+
+   return conn;
+}
+
+void
+wsi_x11_surface_destroy(VkIcdSurfaceBase *icd_surface, VkInstance _instance,
+                        const VkAllocationCallbacks *pAllocator)
+{
+   VK_FROM_HANDLE(vk_instance, instance, _instance);
+   struct wsi_x11_vk_surface *surface = (struct wsi_x11_vk_surface *)icd_surface;
+
+   if (surface->event_wsi) {
+      struct wsi_x11_connection *wsi_conn = surface->event_wsi_conn;
+
+      mtx_lock(&surface->event_wsi->mutex);
+      if (--wsi_conn->event_conn_refcount == 0) {
+         xcb_disconnect(wsi_conn->event_conn);
+         wsi_conn->event_conn = NULL;
+      }
+      mtx_unlock(&surface->event_wsi->mutex);
+   }
+
+   vk_free2(&instance->alloc, pAllocator, surface);
+}
+
 static VkResult
 x11_swapchain_destroy(struct wsi_swapchain *wsi_chain,
                       const VkAllocationCallbacks *pAllocator)
@@ -3004,12 +3194,13 @@ x11_swapchain_destroy(struct wsi_swapchain *wsi_chain,
       x11_image_finish(chain, pAllocator, &chain->images[i]);
 #ifdef HAVE_X11_DRM
    xcb_void_cookie_t cookie;
-   xcb_unregister_for_special_event(chain->conn, chain->special_event);
-   cookie = xcb_present_select_input_checked(chain->conn, chain->event_id,
+   xcb_unregister_for_special_event(chain->event_conn, chain->special_event);
+   cookie = xcb_present_select_input_checked(chain->event_conn, chain->event_id,
                                              chain->window,
                                              XCB_PRESENT_EVENT_MASK_NO_EVENT);
-   xcb_discard_reply(chain->conn, cookie.sequence);
+   xcb_discard_reply(chain->event_conn, cookie.sequence);
 #endif
+
    mtx_destroy(&chain->present_progress_mutex);
    u_cnd_monotonic_destroy(&chain->present_progress_cond);
    mtx_destroy(&chain->thread_state_lock);
@@ -3072,11 +3263,11 @@ static VkResult x11_wait_for_present(struct wsi_swapchain *wsi_chain,
       int ret = u_cnd_monotonic_timedwait(&chain->present_progress_cond,
                                           &chain->present_progress_mutex,
                                           &abs_timespec);
-      if (ret == ETIMEDOUT) {
+      if (ret == thrd_timedout) {
          result = VK_TIMEOUT;
          break;
       }
-      if (ret) {
+      if (ret != thrd_success) {
          result = VK_ERROR_DEVICE_LOST;
          break;
       }
@@ -3283,6 +3474,10 @@ x11_surface_create_swapchain(VkIcdSurfaceBase *icd_surface,
    chain->base.present_timing.time_domain = VK_TIME_DOMAIN_CLOCK_MONOTONIC_KHR;
 
    chain->conn = conn;
+   chain->event_conn =
+      x11_swapchain_get_event_connection(wsi_device, wsi_conn,
+                                         (struct wsi_x11_vk_surface *)icd_surface,
+                                         conn);
    chain->window = window;
    chain->depth = bit_depth;
    chain->extent = pCreateInfo->imageExtent;
@@ -3330,18 +3525,39 @@ x11_surface_create_swapchain(VkIcdSurfaceBase *icd_surface,
     * - Idle: An image from our swapchain is not anymore accessed by the X
     *         server and can be reused.
     */
-   chain->event_id = xcb_generate_id(chain->conn);
+   chain->event_id = xcb_generate_id(chain->event_conn);
    uint32_t event_mask = XCB_PRESENT_EVENT_MASK_CONFIGURE_NOTIFY |
                          XCB_PRESENT_EVENT_MASK_COMPLETE_NOTIFY;
    if (!chain->base.image_info.explicit_sync)
       event_mask |= XCB_PRESENT_EVENT_MASK_IDLE_NOTIFY;
-   xcb_present_select_input(chain->conn, chain->event_id, chain->window, event_mask);
+   if (chain->event_conn == chain->conn) {
+      xcb_present_select_input(chain->conn, chain->event_id, chain->window, event_mask);
+   } else {
+      /* The X server does not order requests across different client
+       * connections. Without a round-trip here, PresentPixmap on chain->conn
+       * could be processed by the server before PresentSelectInput on
+       * chain->event_conn, causing CompleteNotify/IdleNotify events for the
+       * first presents to be dropped and leaving the swapchain waiting
+       * forever. A simple xcb_flush() is not enough; we must wait for the
+       * server to process the request.
+       */
+      xcb_void_cookie_t select_cookie =
+         xcb_present_select_input_checked(chain->event_conn, chain->event_id,
+                                          chain->window, event_mask);
+      xcb_generic_error_t *error =
+         xcb_request_check(chain->event_conn, select_cookie);
+      if (error) {
+         free(error);
+         result = VK_ERROR_SURFACE_LOST_KHR;
+         goto fail_select_input;
+      }
+   }
 
    /* Create an XCB event queue to hold present events outside of the usual
     * application event queue
     */
    chain->special_event =
-      xcb_register_for_special_xge(chain->conn, &xcb_present_id,
+      xcb_register_for_special_xge(chain->event_conn, &xcb_present_id,
                                    chain->event_id, NULL);
 #endif
    /* Create the graphics context. */
@@ -3430,7 +3646,8 @@ fail_init_images:
 
 fail_register:
 #ifdef HAVE_X11_DRM
-   xcb_unregister_for_special_event(chain->conn, chain->special_event);
+   xcb_unregister_for_special_event(chain->event_conn, chain->special_event);
+fail_select_input:
 #endif
    wsi_swapchain_finish(&chain->base);
 
@@ -3491,6 +3708,10 @@ wsi_x11_init_wsi(struct wsi_device *wsi_device,
       if (driCheckOption(dri_options, "vk_x11_ignore_suboptimal", DRI_BOOL)) {
          wsi_device->x11.ignore_suboptimal =
             driQueryOptionb(dri_options, "vk_x11_ignore_suboptimal");
+      }
+      if (driCheckOption(dri_options, "vk_x11_dedicated_event_connection", DRI_BOOL)) {
+         wsi_device->x11.dedicated_event_connection =
+            driQueryOptionb(dri_options, "vk_x11_dedicated_event_connection");
       }
    }
 

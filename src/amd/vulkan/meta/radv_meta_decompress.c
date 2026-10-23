@@ -109,14 +109,6 @@ get_pipeline_gfx(struct radv_device *device, struct radv_image *image, VkPipelin
             .attachmentCount = 0,
             .pAttachments = NULL,
          },
-      .pDepthStencilState =
-         &(VkPipelineDepthStencilStateCreateInfo){
-            .sType = VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO,
-            .depthTestEnable = false,
-            .depthWriteEnable = false,
-            .depthBoundsTestEnable = false,
-            .stencilTestEnable = false,
-         },
       .pDynamicState =
          &(VkPipelineDynamicStateCreateInfo){
             .sType = VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO,
@@ -448,8 +440,9 @@ radv_expand_depth_stencil_compute(struct radv_cmd_buffer *cmd_buffer, struct rad
 }
 
 void
-radv_expand_depth_stencil(struct radv_cmd_buffer *cmd_buffer, struct radv_image *image,
-                          const VkImageSubresourceRange *subresourceRange, const VkSampleLocationsInfoEXT *sample_locs)
+radv_decompress_depth_stencil(struct radv_cmd_buffer *cmd_buffer, struct radv_image *image,
+                              const VkImageSubresourceRange *subresourceRange,
+                              const VkSampleLocationsInfoEXT *sample_locs)
 {
    const struct radv_device *device = radv_cmd_buffer_device(cmd_buffer);
    const struct radv_physical_device *pdev = radv_device_physical(device);
@@ -468,17 +461,39 @@ radv_expand_depth_stencil(struct radv_cmd_buffer *cmd_buffer, struct radv_image 
       cmd_buffer->state.flush_bits |=
          AC_BARRIER_SYNC_AND_INV_DB | (pdev->info.gfx_level < GFX10 ? AC_BARRIER_SYNC_AND_INV_DB_META : 0);
    } else {
-      radv_expand_depth_stencil_compute(cmd_buffer, image, subresourceRange);
+      u_foreach_bit (i, subresourceRange->aspectMask) {
+         VkImageSubresourceRange range = *subresourceRange;
+         range.aspectMask = 1 << i;
 
-      cmd_buffer->state.flush_bits |= AC_BARRIER_SYNC_CS | AC_BARRIER_INV_VMEM |
-                                      radv_src_access_flush(cmd_buffer, VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
-                                                            VK_ACCESS_2_SHADER_WRITE_BIT, 0, image, subresourceRange);
+         radv_expand_depth_stencil_compute(cmd_buffer, image, &range);
 
-      if (!radv_image_decompress_htile_on_image_stores(device, image)) {
-         /* Initialize the HTILE metadata as "fully expanded". */
-         uint32_t htile_value = radv_get_htile_initial_value(device, image);
-
-         cmd_buffer->state.flush_bits |= radv_clear_htile(cmd_buffer, image, subresourceRange, htile_value, false);
+         cmd_buffer->state.flush_bits |= AC_BARRIER_SYNC_CS | AC_BARRIER_INV_VMEM |
+                                         radv_src_access_flush(cmd_buffer, VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+                                                               VK_ACCESS_2_SHADER_WRITE_BIT, 0, image, &range);
       }
    }
+
+   enum radv_meta_htile_preserve_flags preserve = RADV_HTILE_PRESERVE_VRS | RADV_HTILE_DYNAMIC_ZRANGE_PRECISION;
+
+   if (cmd_buffer->qf == RADV_QUEUE_GENERAL) {
+      /* Z/S decompression via DB always sets the compression bits. */
+      preserve |= RADV_HTILE_PRESERVE_Z_COMPRESSION | RADV_HTILE_PRESERVE_STENCIL_COMPRESSION;
+   } else if (radv_image_decompress_htile_on_image_stores(device, image)) {
+      /* Clear the Z/S compression bits only if image stores don't decompress Z/S. */
+      preserve |= RADV_HTILE_PRESERVE_Z_COMPRESSION | RADV_HTILE_PRESERVE_STENCIL_COMPRESSION;
+
+      /* If image stores update HTILE, we must invalidate L2 metadata before clearing. Unfortunately,
+       * only VK_ACCESS_2_SHADER_STORAGE_READ_BIT sets that, while WRITE_BIT doesn't.
+       */
+      cmd_buffer->state.flush_bits |= radv_dst_access_flush(
+         cmd_buffer, VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+         VK_ACCESS_2_SHADER_STORAGE_READ_BIT | VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT, 0, image, subresourceRange);
+   }
+
+   /* Reset the HiZ range in HTILE to [0, 1] because the decompress pass doesn't do it.
+    *
+    * For compute-based decompression without image stores updating HTILE, we also need to clear the compression
+    * bits to uncompressed.
+    */
+   cmd_buffer->state.flush_bits |= radv_clear_htile_rmw_to_uncompressed(cmd_buffer, image, subresourceRange, preserve);
 }

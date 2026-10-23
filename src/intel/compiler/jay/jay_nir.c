@@ -15,6 +15,7 @@
 #include "nir_builder.h"
 #include "nir_builder_opcodes.h"
 #include "nir_intrinsics.h"
+#include "nir_shader_compiler_options.h"
 #include "shader_enums.h"
 
 #define JAY_NIR_SNAPSHOT(name)  BRW_NIR_SNAPSHOT(name)
@@ -580,12 +581,13 @@ alpha_to_coverage_enabled(nir_shader *shader, enum intel_sometimes alpha_to_cove
  */
 void
 jay_process_nir(const struct intel_device_info *devinfo,
-                nir_shader *nir,
-                union brw_any_prog_data *prog_data,
-                union brw_any_prog_key *key,
-                debug_archiver *archiver,
+                const struct jay_compile_params *params,
                 struct jay_fs_perprim_data *fs_perprim)
 {
+   nir_shader *nir = params->nir;
+   union brw_any_prog_data *prog_data = params->prog_data;
+   union brw_any_prog_key *key = params->key;
+
    enum mesa_shader_stage stage = nir->info.stage;
    struct brw_compiler compiler = { .devinfo = devinfo };
 
@@ -598,7 +600,7 @@ jay_process_nir(const struct intel_device_info *devinfo,
       .key = &key->base,
       .dispatch_width = 0,
       .compiler = &compiler,
-      .archiver = archiver,
+      .archiver = params->archiver,
    }, *pt = &pt_;
 
    JAY_NIR_SNAPSHOT("first");
@@ -917,7 +919,7 @@ jay_process_nir(const struct intel_device_info *devinfo,
       JAY_NIR_PASS(nir_lower_io_to_scalar, nir_var_shader_in, NULL, NULL);
 
       if (!brw_can_coherent_fb_fetch(devinfo))
-         JAY_NIR_PASS(brw_nir_lower_fs_load_output, &key->fs);
+         JAY_NIR_PASS(brw_nir_lower_fs_load_output, &key->fs, 0);
 
       /* Do this lowering before jay_populate_prog_data(). */
       JAY_NIR_PASS(nir_opt_frag_coord_to_pixel_coord);
@@ -1021,8 +1023,25 @@ jay_select_simd(const struct intel_device_info *devinfo, nir_shader *nir)
       if (nir->info.outputs_written & BITFIELD64_BIT(FRAG_RESULT_STENCIL))
          unsupported_modes |= 32;
 
-      if (nir->info.fs.color_is_dual_source)
-         unsupported_modes |= 32;
+      /* Following condition implements Wa_14017468336:
+       *
+       * "If dual source blend is enabled do not enable SIMD32 dispatch" and
+       * "For a thread dispatched as SIMD32, must not issue SIMD8 message with
+       *  Last Render Target Select set."
+       *
+       * The dual-source RT write messages fail to release the thread
+       * dependency on ICL and TGL with SIMD32 dispatch, leading to hangs.
+       *
+       * XXX - Emit an extra single-source NULL RT-write marked LastRT in
+       *       order to release the thread dependency without disabling SIMD32.
+       *
+       * The dual-source RT write messages may lead to hangs with SIMD16
+       * dispatch on ICL due some unknown reasons, see:
+       *
+       * https://gitlab.freedesktop.org/mesa/mesa/-/issues/2183
+       */
+      if (nir->info.fs.color_is_dual_source && devinfo->ver < 20)
+         unsupported_modes |= 16 | 32;
    }
 
    if (nir->info.min_subgroup_size) {
@@ -1043,13 +1062,18 @@ jay_select_simd(const struct intel_device_info *devinfo, nir_shader *nir)
       }
    }
 
+   /* jay_spill can't handle a single flag register. We should rework later. */
+   if (devinfo->ver < 20 &&
+       nir->info.stage == MESA_SHADER_FRAGMENT &&
+       nir->info.fs.uses_discard) {
+      unsupported_modes |= 32;
+   }
+
    /* Step 2: Apply heuristics to mark SIMD mode preferences */
 
    /* SIMD splitting of ray queries is inefficient, avoid it when possible */
    if (nir->info.ray_queries && nir->info.min_subgroup_size < 32) {
       undesirable_modes |= 32;
-      /* XXX: ray query SIMD splitting not implemented yet */
-      unsupported_modes |= 32;
    }
 
    /* If the entire workgroup fits in a SIMD, use that one. */
@@ -1085,20 +1109,19 @@ jay_select_simd(const struct intel_device_info *devinfo, nir_shader *nir)
  */
 void
 jay_process_nir_for_simd(const struct intel_device_info *devinfo,
-                         nir_shader *nir,
+                         const struct jay_compile_params *params,
                          unsigned simd_width,
-                         union brw_any_prog_data *prog_data,
-                         union brw_any_prog_key *key,
-                         debug_archiver *archiver,
                          bool *track_helpers)
 {
+   nir_shader *nir = params->nir;
+
    struct brw_compiler compiler = { .devinfo = devinfo };
    brw_pass_tracker pt_ = {
       .nir = nir,
-      .key = &key->base,
+      .key = &params->key->base,
       .dispatch_width = simd_width,
       .compiler = &compiler,
-      .archiver = archiver,
+      .archiver = params->archiver,
    }, *pt = &pt_;
 
    /* If the API subgroup size must be draw uniform, we handle it in
@@ -1122,6 +1145,24 @@ jay_process_nir_for_simd(const struct intel_device_info *devinfo,
 
    JAY_NIR_PASS(nir_opt_algebraic_late);
    JAY_NIR_PASS(intel_nir_opt_peephole_imul32x16);
+
+   /* If multi-polygon is used with this shader, we cannot set
+    * nir_divergence_single_prim_per_subgroup. However, if multi-polygon is
+    * disabled, we need to set nir_divergence_single_prim_per_subgroup to match
+    * the convergent definitions in the backend. Getting that wrong would result
+    * in nonsensical shuffles of convergent values after the backend optimizer
+    * runs - better just get the divergence correct in the first place.
+    *
+    * However, multi-polygon is a per-shader decision, while shader compiler
+    * options are global. Hence we override the settings on a per-shader basis.
+    *
+    * Also, we don't currently enable multi-polygon ever (but hopefully we will
+    * someday and we share options with brw) so we're just smashing it on here.
+    */
+   struct nir_shader_compiler_options options = *nir->options;
+   options.divergence_analysis_options |=
+      nir_divergence_single_prim_per_subgroup;
+   nir->options = &options;
 
    nir_divergence_analysis(nir);
    JAY_NIR_PASS(nir_shader_phi_pass, lower_after_lcssa,
@@ -1187,19 +1228,26 @@ jay_process_nir_for_simd(const struct intel_device_info *devinfo,
 
       /* ...but this is more subtle. nir_opt_load_skip_helpers flags texturing
        * operations that we can skip for bandwidth savings.  We need divergence
-       * info for this, so we run late.
-       *
-       * We may or may not want to force track_helpers on if this makes
-       * progress. Possibly driconf'ing on furmark makes sense.
+       * info for this, so we run late. Of course, if we don't spawn helper
+       * threads and we don't demote anything, there will never be helpers
+       * active so there's nothing to skip in software.
        */
       struct nir_opt_load_skip_helpers_options skip_helpers = {
          .no_add_divergence = true
       };
-      JAY_NIR_PASS(nir_opt_load_skip_helpers, &skip_helpers);
+      if (params->prog_data->fs.uses_vmask || nir->info.fs.uses_discard) {
+         *track_helpers |=
+            JAY_NIR_PASS(nir_opt_load_skip_helpers, &skip_helpers);
+      }
    } else {
-      jay_populate_prog_data(devinfo, nir, prog_data, key, NULL);
+      jay_populate_prog_data(devinfo, nir, params->prog_data, params->key, NULL);
    }
 
    /* This must be the very last pass since nir_print itself will reindex! */
    nj_index_ssa_defs(nir);
+
+   /* We set this to something on the stack, we're done using it but make
+    * sure we don't use-after-free.
+    */
+   nir->options = NULL;
 }

@@ -216,3 +216,108 @@ v3dX(tfu)(struct pipe_context *pctx,
         return true;
 }
 
+bool
+v3dX(tfu_sand)(struct pipe_context *pctx,
+               struct pipe_resource *pdst,
+               unsigned int dst_level,
+               struct pipe_resource *psrc,
+               unsigned int src_level)
+{
+#if V3D_VERSION >= 71
+        struct v3d_context *v3d = v3d_context(pctx);
+        struct v3d_screen *screen = v3d->screen;
+        struct v3d_resource *src = v3d_resource(psrc);
+        struct v3d_resource *dst = v3d_resource(pdst);
+        struct v3d_resource_slice *dst_slice = &dst->slices[dst_level];
+        uint32_t width = u_minify(pdst->width0, dst_level);
+        uint32_t height = u_minify(pdst->height0, dst_level);
+        enum V3DX(Texture_Data_Formats) tex_format;
+        uint32_t icfmt;
+
+        assert(psrc->format == pdst->format);
+
+        switch (psrc->format) {
+        case PIPE_FORMAT_R8_UNORM:
+        case PIPE_FORMAT_R8G8_UNORM:
+                tex_format = v3d_get_tex_format(&screen->devinfo, psrc->format);
+                icfmt = V3D71_TFU_ICFG_ICFMT_8BIT;
+                break;
+        /* P030 SAND planes arrive as R16/R16G16 here as V3D doesn't support
+         * sampling P030 directly. For a 10-bit SAND input, the TFU only
+         * allows R10x6/RG10x6 as its output type.
+         */
+        case PIPE_FORMAT_R16_UNORM:
+                tex_format = TEXTURE_DATA_FORMAT_R10X6;
+                icfmt = V3D71_TFU_ICFG_ICFMT_101010_2;
+                break;
+        case PIPE_FORMAT_R16G16_UNORM:
+                tex_format = TEXTURE_DATA_FORMAT_RG10X6;
+                icfmt = V3D71_TFU_ICFG_ICFMT_101010_2;
+                break;
+        default:
+                return false;
+        }
+
+        assert(dst_slice->tiling != V3D_TILING_RASTER);
+
+        /* With Sand Video input, image stride should be in multiple of 8. */
+        if (src->sand_col128_stride % 8 != 0 || src->sand_col128_stride > 0x7fff)
+                return false;
+
+        /* With Sand Video input, the source memory address must be 1KB aligned. */
+        uint32_t src_offset = src->bo->offset + v3d_layer_offset(psrc, src_level, 0);
+        if (src_offset % 1024 != 0)
+                return false;
+
+        MESA_TRACE_FUNC();
+
+        v3d_flush_jobs_writing_resource(v3d, psrc, V3D_FLUSH_DEFAULT, false);
+        v3d_flush_jobs_reading_resource(v3d, pdst, V3D_FLUSH_DEFAULT, false);
+
+        struct drm_v3d_submit_tfu tfu = {
+                .iia = src_offset,
+                .iis = src->sand_col128_stride,
+                .ioa = dst->bo->offset + v3d_layer_offset(pdst, dst_level, 0),
+                .ios = (height << 16) | width,
+                .bo_handles = {
+                        dst->bo->handle,
+                        src != dst ? src->bo->handle : 0
+                },
+                .in_sync = v3d->out_sync,
+                .out_sync = v3d->out_sync,
+        };
+
+        tfu.icfg = (V3D71_TFU_ICFG_SVSWIZ_NONE << V3D71_TFU_ICFG_SVSWIZ_SHIFT) |
+                   (V3D71_TFU_ICFG_SVTWID_128 << V3D71_TFU_ICFG_SVTWID_SHIFT) |
+                   (V3D71_TFU_ICFG_FORMAT_SAND << V3D71_TFU_ICFG_IFORMAT_SHIFT) |
+                   (tex_format << V3D71_TFU_ICFG_OTYPE_SHIFT) |
+                   (icfmt << V3D71_TFU_ICFG_ICFMT_SHIFT);
+
+        tfu.v71.ioc = (V3D71_TFU_IOC_FORMAT_LINEARTILE +
+                       (dst_slice->tiling - V3D_TILING_LINEARTILE)) <<
+                      V3D71_TFU_IOC_FORMAT_SHIFT;
+
+        if (dst_slice->tiling == V3D_TILING_UIF_NO_XOR ||
+            dst_slice->tiling == V3D_TILING_UIF_XOR) {
+                tfu.v71.ioc |=
+                        (dst_slice->padded_height / (2 * v3d_utile_height(dst->cpp))) <<
+                        V3D71_TFU_IOC_STRIDE_SHIFT;
+        }
+
+        int ret = v3d_ioctl(screen->fd, DRM_IOCTL_V3D_SUBMIT_TFU, &tfu);
+        if (ret != 0) {
+                mesa_loge("Failed to submit TFU job: %d", ret);
+                return false;
+        }
+        if (V3D_DBG(SYNC)) {
+                drmSyncobjWait(v3d->fd, &v3d->out_sync, 1, INT64_MAX,
+                               DRM_SYNCOBJ_WAIT_FLAGS_WAIT_ALL, NULL);
+        }
+
+        dst->writes++;
+
+        return true;
+#else
+        return false;
+#endif
+}

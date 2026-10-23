@@ -7,11 +7,11 @@ SPDX-License-Identifier: MIT
 <isa>
 
 <template name="INSTR_ALU">
-	{NAME}{DST_FULL}{SAT}{SKPHP}{UNK}{TYPE}{PMODE}{THREAD}{RMODE}
+	{NAME}{DST_FULL}{SAT}{SKPHP}{UNK}{DENORM}{TYPE}{PMODE}{THREAD}{RMODE}
 </template>
 
 <template name="INSTR_ALU_COND">
-	{NAME}{DST_FULL}{SAT}{COND}{SKPHP}{UNK}{TYPE}{PMODE}{THREAD}{RMODE}
+	{NAME}{DST_FULL}{SAT}{COND}{SKPHP}{UNK}{DENORM}{TYPE}{PMODE}{THREAD}{RMODE}
 </template>
 
 <template name="INSTR_TEX">
@@ -226,7 +226,9 @@ SPDX-License-Identifier: MIT
 
 	<pattern low="35" high="38">0000</pattern>
 	<field name="SKPHP" pos="39" type="bool" display=".skpHp"/>
-	<pattern low="40" high="42">000</pattern>
+	<pattern low="40" high="41">00</pattern>
+
+	<field name="DENORM" pos="42" type="bool" display=".denorm"/>
 
 	<field name="LOW_HALF" pos="109" type="bool"/>
 	<field name="HIGH_HALF" pos="120" type="bool"/>
@@ -1259,10 +1261,25 @@ SPDX-License-Identifier: MIT
 	<meta has_dest="true" valid_srcs="0|1|2"/>
 	<pattern low="6" high="10">00000</pattern>
 
-	<pattern low="12" high="16">xxxxx</pattern>
-	<pattern pos="17">x</pattern>
-	<pattern low="18" high="22">xxxxx</pattern>
+	<field name="DST_USE" pos="12" type="bool"/>
+	<field name="DST_AMODE" low="13" high="15" type="#reg_addressing_mode"/>
+	<field name="DST_REG" low="16" high="22" type="uint"/>
 	<field name="COMPS" low="23" high="26" type="#wrmask"/>
+
+	<encode type="struct etna_inst *" case-prefix="ISA_OPC_">
+		<map name="DST_REG">src->dst.reg</map>
+		<map name="DST_AMODE">src->dst.amode</map>
+	</encode>
+
+	<override>
+		<expr>
+			{DST_USE} == 1
+		</expr>
+		<display>
+			{INSTR_LOAD_STORE} {:align=18}t{DST_REG}{DST_AMODE}{COMPS}, {SRC0}, {SRC1}, {SRC2}
+		</display>
+	</override>
+
 	<pattern low="27" high="31">xxxxx</pattern>
 	<pattern low="32" high="33">xx</pattern>
 	<field name="PMODE" pos="34" type="bool_inv" display=".pack"/>
@@ -1785,9 +1802,29 @@ SPDX-License-Identifier: MIT
 	<pattern pos="80">1</pattern> <!-- OPCODE_BIT6 -->
 </bitset>
 
+<bitset name="img_load_3d" extends="#instruction-load">
+	<pattern low="0" high="5">110100</pattern> <!-- OPC -->
+	<pattern pos="80">0</pattern> <!-- OPCODE_BIT6 -->
+</bitset>
+
+<bitset name="img_addr" extends="#instruction-load">
+	<pattern low="0" high="5">110111</pattern> <!-- OPC -->
+	<pattern pos="80">0</pattern> <!-- OPCODE_BIT6 -->
+</bitset>
+
+<bitset name="img_addr_3d" extends="#instruction-load">
+	<pattern low="0" high="5">111000</pattern> <!-- OPC -->
+	<pattern pos="80">0</pattern> <!-- OPCODE_BIT6 -->
+</bitset>
+
 <bitset name="img_store" extends="#instruction-store">
 	<pattern low="0" high="5">111010</pattern> <!-- OPC -->
 	<pattern pos="80">1</pattern> <!-- OPCODE_BIT6 -->
+</bitset>
+
+<bitset name="img_store_3d" extends="#instruction-store">
+	<pattern low="0" high="5">110101</pattern> <!-- OPC -->
+	<pattern pos="80">0</pattern> <!-- OPCODE_BIT6 -->
 </bitset>
 
 <bitset name="tg4" extends="#instruction-tex-src0-src1">

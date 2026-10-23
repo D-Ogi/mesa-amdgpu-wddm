@@ -1224,7 +1224,8 @@ static bool
 lower_16bit_norm(nir_builder *b, nir_intrinsic_instr *intr, void *data)
 {
         if (intr->intrinsic != nir_intrinsic_load_output &&
-            intr->intrinsic != nir_intrinsic_store_output)
+            intr->intrinsic != nir_intrinsic_store_output &&
+            intr->intrinsic != nir_intrinsic_load_tile_image)
                 return false;
 
         nir_io_semantics sem = nir_intrinsic_io_semantics(intr);
@@ -1234,6 +1235,9 @@ lower_16bit_norm(nir_builder *b, nir_intrinsic_instr *intr, void *data)
         struct v3d_compile *c = data;
 
         unsigned rt = sem.location - FRAG_RESULT_DATA0;
+        if (intr->intrinsic == nir_intrinsic_load_tile_image)
+                rt += nir_src_as_uint(intr->src[0]);
+
         bool norm = c->fs_key->norm_16 & (1 << rt);
 
         if (!norm)
@@ -1302,7 +1306,7 @@ v3d_nir_lower_fs_early(struct v3d_compile *c)
 
         NIR_PASS(_, c->s, v3d_nir_lower_logic_ops, c);
         NIR_PASS(_, c->s, v3d_nir_lower_16bit_norm, c);
-        NIR_PASS(_, c->s, v3d_nir_lower_load_output, c);
+        NIR_PASS(_, c->s, v3d_nir_lower_tlb_loads, c);
 }
 
 static void
@@ -1469,9 +1473,9 @@ v3d_instr_delay_cb(nir_instr *instr, void *data)
       case nir_op_ushr: {
          nir_scalar s = nir_get_scalar(alu->src[1].src.ssa, 0);
          if (!nir_scalar_is_const(s))
-            return false;
+            return 1;
 
-         return nir_scalar_as_uint(s) == 16u;
+         return nir_scalar_as_uint(s) != 16u;
       }
 
       default:
@@ -2031,6 +2035,7 @@ v3d_attempt_compile(struct v3d_compile *c)
 
                 NIR_PASS(_, c->s, nir_lower_robust_access,
                          should_lower_robustness, c->key);
+                c->robust_access_lowered = true;
         }
 
         NIR_PASS(_, c->s, nir_lower_vars_to_scratch,
@@ -2093,6 +2098,8 @@ v3d_attempt_compile(struct v3d_compile *c)
                 NIR_PASS(_, c->s, nir_opt_dce);
                 NIR_PASS(_, c->s, nir_opt_cse);
         }
+
+        NIR_PASS(_, c->s, nir_opt_uadd_carry, 32);
 
         NIR_PASS(_, c->s, nir_lower_bool_to_int32);
         nir_divergence_analysis(c->s);

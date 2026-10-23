@@ -81,6 +81,26 @@ impl VaStatCount {
             }
         };
 
+        macro_rules! var_tex_case {
+            ($op: expr, $t: expr) => {{
+                let var_comps = $op.dim.coord_comps()
+                    + u8::from($op.projection_enable)
+                    + u8::from($op.array_enable)
+                    + u8::from($op.compare_enable);
+                self.v += f32::from(var_comps);
+                self.t += $t;
+            }};
+        }
+
+        macro_rules! var_tex_gradient_case {
+            ($op: expr) => {{
+                let var_comps =
+                    $op.dim.coord_comps() + u8::from($op.projection_enable);
+                self.v += f32::from(var_comps);
+                self.t += 1.0;
+            }};
+        }
+
         match model.op_exec_unit(&instr.op).unwrap() {
             ExecUnit::Cvt => self.cvt += f32::from(cycles),
             ExecUnit::Fma => self.fma += f32::from(cycles),
@@ -115,12 +135,23 @@ impl VaStatCount {
                     };
                     self.v += f32::from(total_bytes.div_ceil(4));
                 }
+                Op::TexDual(_) => {
+                    self.t += 2.0;
+                }
                 Op::TexFetch(_)
                 | Op::TexGather(_)
                 | Op::TexGradient(_)
                 | Op::TexSingle(_) => {
                     self.t += 1.0;
                 }
+                Op::VarTexBufDual(op) => var_tex_case!(op, 2.0),
+                Op::VarTexBufGather(op) => var_tex_case!(op, 1.0),
+                Op::VarTexBufGradient(op) => var_tex_gradient_case!(op),
+                Op::VarTexBufSingle(op) => var_tex_case!(op, 1.0),
+                Op::VarTexDual(op) => var_tex_case!(op, 2.0),
+                Op::VarTexGather(op) => var_tex_case!(op, 1.0),
+                Op::VarTexGradient(op) => var_tex_gradient_case!(op),
+                Op::VarTexSingle(op) => var_tex_case!(op, 1.0),
                 Op::ATest(_)
                 | Op::Barrier(_)
                 | Op::Blend(_)

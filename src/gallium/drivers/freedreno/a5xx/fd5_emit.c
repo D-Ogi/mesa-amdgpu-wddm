@@ -711,8 +711,16 @@ fd5_emit_state(struct fd_context *ctx, struct fd_ringbuffer *ring,
 
    if (dirty & (FD_DIRTY_FRAMEBUFFER | FD_DIRTY_RASTERIZER | FD_DIRTY_PROG)) {
       uint32_t posz_regid = ir3_find_output_regid(fp, FRAG_RESULT_DEPTH);
+      uint32_t smask_regid = ir3_find_output_regid(fp, FRAG_RESULT_SAMPLE_MASK);
+      bool writes_smask = fp->writes_smask;
       unsigned nr = pfb->nr_cbufs;
       bool dual = false;
+
+      /* gl_SampleMask is a multisample-only op; ignore it on single-sample. */
+      if (pfb->samples <= 1) {
+         smask_regid = regid(63, 0);
+         writes_smask = false;
+      }
 
       if (emit->binning_pass)
          nr = 0;
@@ -727,13 +735,15 @@ fd5_emit_state(struct fd_context *ctx, struct fd_ringbuffer *ring,
       OUT_RING(ring,
                A5XX_RB_FS_OUTPUT_CNTL_MRT(nr) |
                   COND(dual, A5XX_RB_FS_OUTPUT_CNTL_DUAL_COLOR_IN_ENABLE) |
-                  COND(fp->writes_pos, A5XX_RB_FS_OUTPUT_CNTL_FRAG_WRITES_Z));
+                  COND(fp->writes_pos, A5XX_RB_FS_OUTPUT_CNTL_FRAG_WRITES_Z) |
+                  COND(writes_smask,
+                       A5XX_RB_FS_OUTPUT_CNTL_FRAG_WRITES_SAMPMASK));
 
       OUT_PKT4(ring, REG_A5XX_SP_FS_OUTPUT_CNTL, 1);
       OUT_RING(ring, A5XX_SP_FS_OUTPUT_CNTL_MRT(nr) |
                         COND(dual, A5XX_SP_FS_OUTPUT_CNTL_DUAL_COLOR_IN_ENABLE) |
                         A5XX_SP_FS_OUTPUT_CNTL_DEPTH_REGID(posz_regid) |
-                        A5XX_SP_FS_OUTPUT_CNTL_SAMPLEMASK_REGID(regid(63, 0)));
+                        A5XX_SP_FS_OUTPUT_CNTL_SAMPLEMASK_REGID(smask_regid));
    }
 
    ir3_emit_vs_consts(vp, ring, ctx, emit->info, emit->indirect, emit->draw);

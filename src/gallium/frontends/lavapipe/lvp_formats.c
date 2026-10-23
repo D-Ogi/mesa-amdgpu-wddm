@@ -77,6 +77,19 @@ lvp_physical_device_get_format_properties(struct lvp_physical_device *physical_d
      return;
    }
 
+   if (lvp_is_compressed_format_emulated(format)) {
+      features |= (VK_FORMAT_FEATURE_2_SAMPLED_IMAGE_BIT |
+                   VK_FORMAT_FEATURE_2_BLIT_SRC_BIT |
+                   VK_FORMAT_FEATURE_2_TRANSFER_SRC_BIT |
+                   VK_FORMAT_FEATURE_2_TRANSFER_DST_BIT |
+                   VK_FORMAT_FEATURE_2_SAMPLED_IMAGE_FILTER_LINEAR_BIT |
+                   VK_FORMAT_FEATURE_2_HOST_IMAGE_TRANSFER_BIT_EXT);
+      out_properties->linearTilingFeatures = features;
+      out_properties->optimalTilingFeatures = features;
+      out_properties->bufferFeatures = buffer_features;
+      return;
+   }
+
    if (pscreen->is_format_supported(pscreen, pformat, PIPE_TEXTURE_2D, 0, 0,
                                     PIPE_BIND_DEPTH_STENCIL)) {
       out_properties->linearTilingFeatures = 0;
@@ -165,8 +178,7 @@ lvp_physical_device_get_format_properties(struct lvp_physical_device *physical_d
    if (pscreen->is_format_supported(pscreen, pformat, PIPE_TEXTURE_2D, 0, 0,
                                     PIPE_BIND_RENDER_TARGET)) {
       features |= VK_FORMAT_FEATURE_2_COLOR_ATTACHMENT_BIT;
-      if (!util_format_is_pure_integer(pformat) &&
-          !(util_format_is_snorm(pformat) && !physical_device->snorm_blend))
+      if (!util_format_is_pure_integer(pformat))
          features |= VK_FORMAT_FEATURE_2_COLOR_ATTACHMENT_BLEND_BIT;
    }
 
@@ -362,6 +374,19 @@ static VkResult lvp_get_image_format_properties(struct lvp_physical_device *phys
       maxArraySize = 1;
       break;
    }
+
+   /* We don't want emulated formats to gain unexpected usage (storage in
+    * particular) from its compatible view formats.
+    */
+   bool storage_not_supported =
+      ((info->usage & VK_IMAGE_USAGE_STORAGE_BIT) &&
+       !(format_feature_flags & VK_FORMAT_FEATURE_2_STORAGE_IMAGE_BIT));
+
+   if (((info->flags & VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT) ||
+        (info->flags & VK_IMAGE_CREATE_EXTENDED_USAGE_BIT)) &&
+       storage_not_supported &&
+       (lvp_is_compressed_format_emulated(info->format)))
+      goto unsupported;
 
    if (info->flags & VK_IMAGE_CREATE_EXTENDED_USAGE_BIT)
       goto skip_checks;

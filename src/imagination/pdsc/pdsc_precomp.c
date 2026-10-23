@@ -28,6 +28,11 @@ struct pdsc_precomp_info {
    pdsc_precomp_fn_t fn;
    enum pdsc_feature feature_variants;
 };
+#include "programs/pdsc_xfb_end.h"
+#include "programs/pdsc_xfb_init.h"
+#include "programs/pdsc_xfb_query_begin.h"
+#include "programs/pdsc_xfb_query_end.h"
+#include "programs/pdsc_xfb_vertex_count.h"
 
 #define PRECOMP(_name, _feature_variants)    \
    {                                         \
@@ -35,7 +40,13 @@ struct pdsc_precomp_info {
       .fn = pdsc_##_name##_gen,              \
       .feature_variants = _feature_variants, \
    }
-static const struct pdsc_precomp_info pdsc_precomp_infos[] = {};
+static const struct pdsc_precomp_info pdsc_precomp_infos[] = {
+   PRECOMP(xfb_end, 0),
+   PRECOMP(xfb_init, 0),
+   PRECOMP(xfb_query_begin, 0),
+   PRECOMP(xfb_query_end, 0),
+   PRECOMP(xfb_vertex_count, 0),
+};
 #undef PRECOMP
 
 static void pdsc_precomp_print_header(FILE *fp, const char *filename, bool hdr)

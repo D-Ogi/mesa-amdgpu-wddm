@@ -15,6 +15,7 @@
 #include "GfxStreamVulkanMapper.h"
 #include "VirtGpuKumquat.h"
 #include "util/log.h"
+#include "util/os_misc.h"
 
 #define PARAM(x) (struct VirtGpuParam){x, #x, 0}
 
@@ -40,6 +41,7 @@ VirtGpuKumquatDevice::VirtGpuKumquatDevice(enum VirtGpuCapset capset, int32_t de
     struct drm_kumquat_context_init init = {0};
     struct drm_kumquat_context_set_param ctx_set_params[3] = {{0}};
     const char* processName = nullptr;
+    const char* gpu_socket_path_option = os_get_option("VIRTGPU_KUMQUAT_SOCKET_PATH");
     std::string gpu_socket_path = "/tmp/kumquat-gpu-";
 
     memset(&mCaps, 0, sizeof(struct VirtGpuCaps));
@@ -49,8 +51,13 @@ VirtGpuKumquatDevice::VirtGpuKumquatDevice(enum VirtGpuCapset capset, int32_t de
 #endif
 
     if (descriptor >= 0) {
-        gpu_socket_path.append(std::to_string(descriptor));
         mDescriptor = descriptor;
+    }
+
+    if (gpu_socket_path_option && *gpu_socket_path_option) {
+        gpu_socket_path = gpu_socket_path_option;
+    } else if (descriptor >= 0) {
+        gpu_socket_path.append(std::to_string(descriptor));
     } else {
         gpu_socket_path.append("0");
     }

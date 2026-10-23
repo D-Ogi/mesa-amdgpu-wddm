@@ -126,13 +126,11 @@ load_meta(const std::filesystem::path &meta_path)
     size_t num_outputs = (size_t)json_object_get_number(obj, "num_outputs");
     JSON_Array *scales_arr = json_object_get_array(obj, "output_scales");
     JSON_Array *zps_arr = json_object_get_array(obj, "output_zero_points");
-    JSON_Array *errors_arr = json_object_get_array(obj, "max_quant_errors");
 
-    if (num_outputs > 0 && scales_arr && zps_arr && errors_arr) {
+    if (num_outputs > 0 && scales_arr && zps_arr) {
         for (size_t i = 0; i < num_outputs; i++) {
             meta.output_scales.push_back((float)json_array_get_number(scales_arr, i));
             meta.output_zero_points.push_back((int)json_array_get_number(zps_arr, i));
-            meta.max_quant_errors.push_back((float)json_array_get_number(errors_arr, i));
         }
         meta.ok = true;
     } else {

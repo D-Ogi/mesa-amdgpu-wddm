@@ -95,7 +95,6 @@ Linux, FreeBSD, and other operating systems.
    drivers/venus
    drivers/virgl
    drivers/zink
-   xlibdriver
 
 .. toctree::
    :maxdepth: 1

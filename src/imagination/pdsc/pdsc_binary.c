@@ -199,6 +199,7 @@ void pdsc_serialize(struct blob *blob, const pdsc_program *p)
    blob_write_uint16(blob, p->num_doutis);
    blob_write_uint16(blob, p->num_doutcs);
    blob_write_uint16(blob, p->num_lds);
+   blob_write_uint16(blob, p->num_sts);
 
    pdsc_serialize_names(blob, &p->const_names);
    pdsc_serialize_names(blob, &p->temp_names);
@@ -308,6 +309,7 @@ pdsc_program *pdsc_deserialize(void *mem_ctx, struct blob_reader *blob)
    p->num_doutis = blob_read_uint16(blob);
    p->num_doutcs = blob_read_uint16(blob);
    p->num_lds = blob_read_uint16(blob);
+   p->num_sts = blob_read_uint16(blob);
 
    pdsc_deserialize_names(blob, p, &p->const_names);
    pdsc_deserialize_names(blob, p, &p->temp_names);

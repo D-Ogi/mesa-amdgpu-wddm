@@ -500,7 +500,6 @@ populate_vs_prog_data(nir_shader *nir,
       bool *data;
       gl_system_value val;
    } bool_sysvals[] = {
-      { &prog_data->uses_is_indexed_draw, SYSTEM_VALUE_IS_INDEXED_DRAW     },
       { &prog_data->uses_firstvertex,     SYSTEM_VALUE_FIRST_VERTEX        },
       { &prog_data->uses_baseinstance,    SYSTEM_VALUE_BASE_INSTANCE       },
       { &prog_data->uses_vertexid,        SYSTEM_VALUE_VERTEX_ID_ZERO_BASE },

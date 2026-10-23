@@ -1321,8 +1321,11 @@ preprocess_shader(const struct pipe_screen *screen,
    nir_shader_gather_info(prog->nir, nir_shader_get_entrypoint(prog->nir));
 
    if (prog->info.stage == MESA_SHADER_FRAGMENT && consts->HasFBFetch) {
+      unsigned modes = prog->nir->info.fs.advanced_blend_modes &
+                       ~consts->NativeAdvancedBlendModes;
+
       NIR_PASS(_, prog->nir, gl_nir_lower_blend_equation_advanced,
-                 exts->KHR_blend_equation_advanced_coherent);
+                 exts->KHR_blend_equation_advanced_coherent, modes);
    }
 
    /* Set the next shader stage hint for VS and TES. */

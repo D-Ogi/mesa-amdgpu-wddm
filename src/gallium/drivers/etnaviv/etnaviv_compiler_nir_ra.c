@@ -151,7 +151,7 @@ etna_ra_assign(struct etna_compile *c, nir_shader *shader)
       unsigned comp = def->num_components - 1;
 
       if (instr->type == nir_instr_type_alu &&
-          c->specs->has_new_transcendentals) {
+         etna_core_has_feature(c->info, ETNA_FEATURE_HAS_FAST_TRANSCENDENTALS)) {
          switch (nir_instr_as_alu(instr)->op) {
          case nir_op_fdiv:
          case nir_op_flog2:

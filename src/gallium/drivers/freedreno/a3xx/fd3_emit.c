@@ -72,6 +72,13 @@ fd3_emit_const_bo(struct fd_ringbuffer *ring,
 
    emit_const_asserts(v, regid, sizedwords);
 
+   /* indirect const loads can wedge the FD307 when following other const
+    * loads, unless we guard with a WFI here. earlier we tried a
+    * HLSQ_FLUSH here, which fixed some hangcheck reproducers but caused
+    * new ones. see mesa#12634 + mesa!44653
+    */
+   OUT_WFI(ring);
+
    OUT_PKT3(ring, CP_LOAD_STATE, 2);
    OUT_RING(ring, CP_LOAD_STATE_0_DST_OFF(dst_off) |
                      CP_LOAD_STATE_0_STATE_SRC(SS_INDIRECT) |

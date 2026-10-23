@@ -94,6 +94,7 @@
 #include "util/format/u_format.h"
 #include "util/half_float.h"
 #include "util/u_dual_blend.h"
+#include "util/u_draw.h"
 #include "util/u_framebuffer.h"
 #include "util/u_helpers.h"
 #include "util/u_inlines.h"
@@ -9291,6 +9292,7 @@ genX(crocus_init_state)(struct crocus_context *ice)
    ctx->sampler_view_release = u_default_sampler_view_release;
    ctx->resource_release = u_default_resource_release;
    ctx->draw_vbo = crocus_draw_vbo;
+   ctx->draw_vbo_buffers = util_draw_vbo_buffers;
    ctx->launch_grid = crocus_launch_grid;
 
    ctx->set_frontend_noop = crocus_set_frontend_noop;

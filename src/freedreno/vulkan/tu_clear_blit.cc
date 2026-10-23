@@ -50,8 +50,8 @@ tu_pack_float32_for_unorm(float val, int bits)
    if (val >= 1.0f)
       return BITFIELD_MASK(bits);
 
-   float scaled = nextafterf(val * (float) m, INFINITY) + 0.5f;
-   uint32_t result = MIN2((uint32_t) floorf(scaled), m);
+   float scaled = nextafterf(val * static_cast<float>(m), INFINITY) + 0.5f;
+   uint32_t result = MIN2(static_cast<uint32_t>(floorf(scaled)), m);
 
    if (bits < 8)
       result >>= (8 - bits);
@@ -61,7 +61,8 @@ tu_pack_float32_for_unorm(float val, int bits)
 static float
 tu_quantize_float32_for_unorm(float val, int bits)
 {
-   return (float) tu_pack_float32_for_unorm(val, bits) / (float) ((1 << bits) - 1);
+   return static_cast<float>(tu_pack_float32_for_unorm(val, bits)) /
+          static_cast<float>((1 << bits) - 1);
 }
 
 static int32_t
@@ -70,21 +71,22 @@ tu_pack_float32_for_snorm(float val, int bits)
    val = CLAMP(val, -1.0f, 1.0f);
 
    int32_t m = BITFIELD_MASK(bits - 1);
-   float scale = nextafterf((float) m, INFINITY);
+   float scale = nextafterf(static_cast<float>(m), INFINITY);
 
    if (val >= 0.0f) {
-      double scaled = (double) val * (double) scale + 0.5;
-      return MIN2((int32_t) floor(scaled), m);
+      double scaled = static_cast<double>(val) * static_cast<double>(scale) + 0.5;
+      return MIN2(static_cast<int32_t>(floor(scaled)), m);
    } else {
-      double scaled = (double) val * (double) scale - 0.5;
-      return MAX2((int32_t) ceil(scaled), -m);
+      double scaled = static_cast<double>(val) * static_cast<double>(scale) - 0.5;
+      return MAX2(static_cast<int32_t>(ceil(scaled)), -m);
    }
 }
 
 static float
 tu_quantize_float32_for_snorm(float val, int bits)
 {
-   return (float) tu_pack_float32_for_snorm(val, bits) / (float) BITFIELD_MASK(bits - 1);
+   return static_cast<float>(tu_pack_float32_for_snorm(val, bits)) /
+          static_cast<float>(BITFIELD_MASK(bits - 1));
 }
 
 static bool
@@ -124,17 +126,17 @@ tu_pack_float32_for_color(enum pipe_format format, const float src[4], uint32_t 
       if (is_normalized && ch->type == UTIL_FORMAT_TYPE_UNSIGNED) {
          packed_ch = tu_pack_float32_for_unorm(src[i], ch->size);
       } else if (is_normalized && ch->type == UTIL_FORMAT_TYPE_SIGNED) {
-         packed_ch = (uint32_t) tu_pack_float32_for_snorm(src[i], ch->size) & BITFIELD_MASK(ch->size);
+         packed_ch = static_cast<uint32_t>(tu_pack_float32_for_snorm(src[i], ch->size)) & BITFIELD_MASK(ch->size);
       } else if (is_float16) {
          packed_ch = _mesa_float_to_float16_rtz(src[i]);
       } else {
          UNREACHABLE("unsupported format");
       }
-      packed |= (uint64_t) packed_ch << ch->shift;
+      packed |= static_cast<uint64_t>(packed_ch) << ch->shift;
    }
 
-   clear_value[0] = (uint32_t) packed;
-   clear_value[1] = (uint32_t) (packed >> 32);
+   clear_value[0] = static_cast<uint32_t>(packed);
+   clear_value[1] = static_cast<uint32_t>(packed >> 32);
    clear_value[2] = 0;
    clear_value[3] = 0;
    return true;
@@ -150,15 +152,16 @@ tu_pack_float32_for_unorm_depth(float val, unsigned bits)
    if (val >= 1.0f)
       return m;
 
-   double bias = 1.0 / (double) (m + 1ull);
-   double scaled = (double) val * (double) m + 0.5 + bias;
-   return MIN2((uint32_t) floor(scaled), m);
+   double bias = 1.0 / static_cast<double>(m + 1ull);
+   double scaled = static_cast<double>(val) * static_cast<double>(m) + 0.5 + bias;
+   return MIN2(static_cast<uint32_t>(floor(scaled)), m);
 }
 
 static float
 tu_quantize_float32_for_unorm_depth(float val, int bits)
 {
-   return (float) tu_pack_float32_for_unorm_depth(val, bits) / (float) BITFIELD_MASK(bits);
+   return static_cast<float>(tu_pack_float32_for_unorm_depth(val, bits)) /
+          static_cast<float>(BITFIELD_MASK(bits));
 }
 
 static uint32_t
@@ -301,6 +304,125 @@ r2d_coords(struct tu_cmd_buffer *cmd,
                    GRAS_A2D_SRC_YMAX(CHIP, src.y + extent.height - 1));
 }
 
+/* VK_QCOM_rotated_copy_commands. ROTATE_90 is clockwise, same as Vulkan. */
+static enum a6xx_rotation
+tu_copy_transform_rotation(const void *pnext)
+{
+   const VkCopyCommandTransformInfoQCOM *transform_info =
+      vk_find_struct_const(pnext, COPY_COMMAND_TRANSFORM_INFO_QCOM);
+   if (!transform_info)
+      return ROTATE_0;
+   switch (transform_info->transform) {
+   case VK_SURFACE_TRANSFORM_ROTATE_90_BIT_KHR:
+      return ROTATE_90;
+   case VK_SURFACE_TRANSFORM_ROTATE_180_BIT_KHR:
+      return ROTATE_180;
+   case VK_SURFACE_TRANSFORM_ROTATE_270_BIT_KHR:
+      return ROTATE_270;
+   default:
+      return ROTATE_0;
+   }
+}
+
+static inline bool
+tu_rotation_transposes(enum a6xx_rotation rot)
+{
+   return rot == ROTATE_90 || rot == ROTATE_270;
+}
+
+static inline enum a6xx_rotation
+tu_rotation_inverse(enum a6xx_rotation rot)
+{
+   return rot == ROTATE_90 ? ROTATE_270 : rot == ROTATE_270 ? ROTATE_90 : rot;
+}
+
+/* The 2d rotation for a rotated blit, if the transform plus any mirroring
+ * from reversed offsets is something the 2d engine can do.
+ */
+static bool
+tu_blit_2d_rotation(enum a6xx_rotation rot, const VkImageBlit2 *info, enum a6xx_rotation *out)
+{
+   static const enum a6xx_rotation rotate_180_mirrored[2][2] = {
+      {ROTATE_180, ROTATE_VFLIP},
+      {ROTATE_HFLIP, ROTATE_0},
+   };
+   const bool src_x_reversed = info->srcOffsets[1].x < info->srcOffsets[0].x;
+   const bool src_y_reversed = info->srcOffsets[1].y < info->srcOffsets[0].y;
+   const bool dst_x_reversed = info->dstOffsets[1].x < info->dstOffsets[0].x;
+   const bool dst_y_reversed = info->dstOffsets[1].y < info->dstOffsets[0].y;
+
+   const bool transposes = tu_rotation_transposes(rot);
+   const bool mirror_x = src_x_reversed != (transposes ? dst_y_reversed : dst_x_reversed);
+   const bool mirror_y = src_y_reversed != (transposes ? dst_x_reversed : dst_y_reversed);
+
+   if (!transposes) {
+      /* 180 is both flips */
+      assert(rot == ROTATE_180);
+      *out = rotate_180_mirrored[mirror_y][mirror_x];
+      return true;
+   }
+
+   /* 90 or 270 with both axes reversed is the other one, with one reversed
+    * it's a transpose, which the 2d engine can't do
+    */
+   if (mirror_x != mirror_y)
+      return false;
+   *out = mirror_x ? tu_rotation_inverse(rot) : rot;
+   return true;
+}
+
+/* Top-left of the copied region, which the spec rotates around imageOffset. */
+static VkOffset2D
+tu_rotated_region_origin(enum a6xx_rotation rot, VkOffset3D offset, VkExtent3D extent)
+{
+   switch (rot) {
+   case ROTATE_90:
+      return (VkOffset2D) { offset.x - (int32_t) extent.height, offset.y };
+   case ROTATE_180:
+      return (VkOffset2D) { offset.x - (int32_t) extent.width, offset.y - (int32_t) extent.height };
+   case ROTATE_270:
+      return (VkOffset2D) { offset.x, offset.y - (int32_t) extent.width };
+   default:
+      return (VkOffset2D) { offset.x, offset.y };
+   }
+}
+
+/* Where texels [row_x, row_x + count) of buffer row y land in the rotated region. */
+static VkOffset2D
+tu_rotated_strip(enum a6xx_rotation rot, uint32_t y, uint32_t row_x, uint32_t count, uint32_t width, uint32_t height,
+                 VkExtent2D *strip_extent)
+{
+   switch (rot) {
+   case ROTATE_90:
+      *strip_extent = (VkExtent2D) { 1, count };
+      return (VkOffset2D) { (int32_t) (height - 1 - y), (int32_t) row_x };
+   case ROTATE_180:
+      *strip_extent = (VkExtent2D) { count, 1 };
+      return (VkOffset2D) { (int32_t) (width - row_x - count), (int32_t) (height - 1 - y) };
+   case ROTATE_270:
+      *strip_extent = (VkExtent2D) { 1, count };
+      return (VkOffset2D) { (int32_t) y, (int32_t) (width - row_x - count) };
+   default:
+      *strip_extent = (VkExtent2D) { count, 1 };
+      return (VkOffset2D) { (int32_t) row_x, (int32_t) y };
+   }
+}
+
+/* Like r2d_coords, but src and dst sizes can differ (swapped for 90/270). */
+template <chip CHIP>
+static void
+r2d_coords_ex(struct tu_cs *cs,
+              const VkOffset2D dst,
+              const VkExtent2D dst_extent,
+              const VkOffset2D src,
+              const VkExtent2D src_extent)
+{
+   tu_cs_emit_regs(cs, GRAS_A2D_DEST_TL(CHIP, .x = dst.x, .y = dst.y),
+                   GRAS_A2D_DEST_BR(CHIP, .x = dst.x + dst_extent.width - 1, .y = dst.y + dst_extent.height - 1));
+   tu_cs_emit_regs(cs, GRAS_A2D_SRC_XMIN(CHIP, src.x), GRAS_A2D_SRC_XMAX(CHIP, src.x + src_extent.width - 1),
+                   GRAS_A2D_SRC_YMIN(CHIP, src.y), GRAS_A2D_SRC_YMAX(CHIP, src.y + src_extent.height - 1));
+}
+
 static void
 r2d_clear_value(struct tu_cmd_buffer *cmd,
                 struct tu_cs *cs,
@@ -425,8 +547,8 @@ r2d_src(struct tu_cmd_buffer *cmd,
    if (filter != VK_FILTER_NEAREST)
       src_info |= A6XX_TPL1_A2D_SRC_TEXTURE_INFO_FILTER;
 
-   enum a6xx_format fmt = (enum a6xx_format) pkt_field_get(
-      A6XX_TPL1_A2D_SRC_TEXTURE_INFO_COLOR_FORMAT, src_info);
+   enum a6xx_format fmt = static_cast<enum a6xx_format>(pkt_field_get(
+      A6XX_TPL1_A2D_SRC_TEXTURE_INFO_COLOR_FORMAT, src_info));
    enum pipe_format src_format = iview->format;
    fixup_src_format(&src_format, dst_format, &fmt);
 
@@ -516,8 +638,8 @@ r2d_dst(struct tu_cs *cs, const struct fdl6_view *iview, uint32_t layer,
         enum pipe_format src_format)
 {
    uint32_t dst_info = iview->RB_A2D_DEST_BUFFER_INFO;
-   enum a6xx_format fmt = (enum a6xx_format) pkt_field_get(
-      A6XX_RB_A2D_DEST_BUFFER_INFO_COLOR_FORMAT, dst_info);
+   enum a6xx_format fmt = static_cast<enum a6xx_format>(pkt_field_get(
+      A6XX_RB_A2D_DEST_BUFFER_INFO_COLOR_FORMAT, dst_info));
    enum pipe_format dst_format = iview->format;
    fixup_dst_format(src_format, &dst_format, &fmt);
 
@@ -599,7 +721,7 @@ r2d_setup_common(struct tu_cmd_buffer *cmd,
    ));
 
    tu_cs_emit_regs(cs, A6XX_RB_A2D_BLT_CNTL(
-      .rotate = (enum a6xx_rotation) blit_param,
+      .rotate = static_cast<enum a6xx_rotation>(blit_param),
       .solid_color = clear,
       .color_format = fmt,
       .scissor = scissor,
@@ -609,7 +731,7 @@ r2d_setup_common(struct tu_cmd_buffer *cmd,
    ));
 
    tu_cs_emit_regs(cs, GRAS_A2D_BLT_CNTL(CHIP,
-      .rotate = (enum a6xx_rotation) blit_param,
+      .rotate = static_cast<enum a6xx_rotation>(blit_param),
       .solid_color = clear,
       .color_format = fmt,
       .scissor = scissor,
@@ -674,13 +796,12 @@ r2d_teardown(struct tu_cmd_buffer *cmd,
 static void
 r2d_run(struct tu_cmd_buffer *cmd, struct tu_cs *cs)
 {
-   if (cmd->device->physical_device->info->magic.RB_DBG_ECO_CNTL_blit !=
-       cmd->device->physical_device->info->magic.RB_DBG_ECO_CNTL) {
-      /* This a non-context register, so we have to WFI before changing. */
+   if (FD_QUIRK(cmd->device->physical_device->info, QCTDD04536579)) {
       tu_cs_emit_wfi(cs);
-      tu_cs_emit_write_reg(
-         cs, REG_A6XX_RB_DBG_ECO_CNTL,
-         cmd->device->physical_device->info->magic.RB_DBG_ECO_CNTL_blit);
+      cs->rmw(A6XX_RB_DBG_ECO_CNTL(), {
+         .src0 = ~BITFIELD_BIT(24),
+         .src1 =  BITFIELD_BIT(24),
+      });
    }
 
    /* TODO: try to track when there has been a draw without any intervening
@@ -692,12 +813,12 @@ r2d_run(struct tu_cmd_buffer *cmd, struct tu_cs *cs)
    tu_cs_emit_pkt7(cs, CP_BLIT, 1);
    tu_cs_emit(cs, CP_BLIT_0_OP(BLIT_OP_SCALE));
 
-   if (cmd->device->physical_device->info->magic.RB_DBG_ECO_CNTL_blit !=
-       cmd->device->physical_device->info->magic.RB_DBG_ECO_CNTL) {
+   if (FD_QUIRK(cmd->device->physical_device->info, QCTDD04536579)) {
       tu_cs_emit_wfi(cs);
-      tu_cs_emit_write_reg(
-         cs, REG_A6XX_RB_DBG_ECO_CNTL,
-         cmd->device->physical_device->info->magic.RB_DBG_ECO_CNTL);
+      cs->rmw(A6XX_RB_DBG_ECO_CNTL(), {
+         .src0 = ~BITFIELD_BIT(24),
+         .src1 =  0,
+      });
    }
 }
 
@@ -832,7 +953,7 @@ build_clear_vs_shader(void)
 }
 
 static nir_shader *
-build_blit_fs_shader(bool zscale)
+build_blit_fs_shader(bool zscale, bool swap_coords)
 {
    nir_builder _b =
       nir_builder_init_simple_shader(MESA_SHADER_FRAGMENT, NULL,
@@ -852,8 +973,14 @@ build_blit_fs_shader(bool zscale)
    b->shader->info.num_textures = 1;
    BITSET_SET(b->shader->info.textures_used, 0);
 
+   /* rotated blits: source x and y follow destination y and x */
+   static const unsigned swapped[] = { 1, 0, 2 };
+   nir_def *coords = nir_load_var(b, in_coords);
+   if (swap_coords)
+      coords = nir_swizzle(b, coords, swapped, coord_components);
+
    nir_def *res =
-      nir_tex(b, nir_load_var(b, in_coords),
+      nir_tex(b, coords,
               .texture_index = 0, .sampler_index = 0,
               .dim = zscale ? GLSL_SAMPLER_DIM_3D : GLSL_SAMPLER_DIM_2D,
 
@@ -870,7 +997,7 @@ build_blit_fs_shader(bool zscale)
  * variant for them.
  */
 static nir_shader *
-build_ms_copy_fs_shader(void)
+build_ms_copy_fs_shader(bool half_float)
 {
    nir_builder _b =
       nir_builder_init_simple_shader(MESA_SHADER_FRAGMENT, NULL,
@@ -879,7 +1006,8 @@ build_ms_copy_fs_shader(void)
 
    nir_variable *out_color =
       nir_create_variable_with_location(b->shader, nir_var_shader_out,
-                                        FRAG_RESULT_DATA0, glsl_vec4_type());
+                                        FRAG_RESULT_DATA0,
+                                        half_float ? glsl_f16vec_type(4) : glsl_vec4_type());
    nir_variable *in_coords =
       nir_create_variable_with_location(b->shader, nir_var_shader_in,
                                         VARYING_SLOT_VAR0, glsl_vec_type(2));
@@ -897,7 +1025,7 @@ build_ms_copy_fs_shader(void)
                              /* Note: since we're just copying data, we rely on
                               * the HW ignoring the dest_type.
                                */
-                             .dest_type = nir_type_int32);
+                             .dest_type = half_float ? nir_type_float16 : nir_type_int32);
 
    nir_store_var(b, out_color, tex, 0xf);
    return b->shader;
@@ -1008,17 +1136,20 @@ tu_init_clear_blit_shaders(struct tu_device *dev)
    compile_shader(dev, build_blit_vs_shader(), 3, &offset, GLOBAL_SH_VS_BLIT);
    compile_shader(dev, build_multi_blit_vs_shader(), 3, &offset, GLOBAL_SH_VS_MULTI_BLIT);
    compile_shader(dev, build_clear_vs_shader(), 2, &offset, GLOBAL_SH_VS_CLEAR);
-   compile_shader(dev, build_blit_fs_shader(false), 0, &offset, GLOBAL_SH_FS_BLIT);
-   compile_shader(dev, build_blit_fs_shader(true), 0, &offset, GLOBAL_SH_FS_BLIT_ZSCALE);
-   compile_shader(dev, build_ms_copy_fs_shader(), 0, &offset, GLOBAL_SH_FS_COPY_MS);
+   compile_shader(dev, build_blit_fs_shader(false, false), 0, &offset, GLOBAL_SH_FS_BLIT);
+   compile_shader(dev, build_blit_fs_shader(true, false), 0, &offset, GLOBAL_SH_FS_BLIT_ZSCALE);
+   compile_shader(dev, build_blit_fs_shader(false, true), 0, &offset, GLOBAL_SH_FS_BLIT_SWAP_COORDS);
+   compile_shader(dev, build_blit_fs_shader(true, true), 0, &offset, GLOBAL_SH_FS_BLIT_ZSCALE_SWAP_COORDS);
+   compile_shader(dev, build_ms_copy_fs_shader(false), 0, &offset, GLOBAL_SH_FS_COPY_MS);
+   compile_shader(dev, build_ms_copy_fs_shader(true), 0, &offset, GLOBAL_SH_FS_COPY_MS_HALF);
    for (unsigned i = 0; i < 3; i++) {
       compile_shader(dev, build_ms_resolve_fs_shader(2 << i), 0, &offset,
-                     (enum global_shader) (GLOBAL_SH_FS_RESOLVE_MS2 + i));
+                     static_cast<enum global_shader>(GLOBAL_SH_FS_RESOLVE_MS2 + i));
    }
 
    for (uint32_t num_rts = 0; num_rts <= MAX_RTS; num_rts++) {
       compile_shader(dev, build_clear_fs_shader(num_rts), num_rts, &offset,
-                     (enum global_shader) (GLOBAL_SH_FS_CLEAR0 + num_rts));
+                     static_cast<enum global_shader>(GLOBAL_SH_FS_CLEAR0 + num_rts));
    }
 }
 
@@ -1035,13 +1166,14 @@ enum r3d_type {
    R3D_CLEAR,
    R3D_BLIT,
    R3D_MULTI_BLIT,
+   R3D_COPY_HALF,
 };
 
 template <chip CHIP>
 static void
 r3d_common(struct tu_cmd_buffer *cmd, struct tu_cs *cs, enum r3d_type type,
            uint32_t rts_mask, bool z_scale, VkSampleCountFlagBits src_samples,
-           VkSampleCountFlagBits dst_samples)
+           VkSampleCountFlagBits dst_samples, bool swap_coords = false)
 {
    enum global_shader vs_id =
       type == R3D_CLEAR ? GLOBAL_SH_VS_CLEAR :
@@ -1053,18 +1185,23 @@ r3d_common(struct tu_cmd_buffer *cmd, struct tu_cs *cs, enum r3d_type type,
    enum global_shader fs_id = GLOBAL_SH_FS_BLIT;
 
    if (z_scale) {
-      fs_id = GLOBAL_SH_FS_BLIT_ZSCALE;
+      fs_id = swap_coords ? GLOBAL_SH_FS_BLIT_ZSCALE_SWAP_COORDS : GLOBAL_SH_FS_BLIT_ZSCALE;
+   } else if (type == R3D_COPY_HALF) {
+      /* Avoid canonicalizing NaNs due to implicit conversions in the shader. */
+      fs_id = GLOBAL_SH_FS_COPY_MS_HALF;
+   } else if (swap_coords) {
+      fs_id = GLOBAL_SH_FS_BLIT_SWAP_COORDS;
    } else if (src_samples != VK_SAMPLE_COUNT_1_BIT) {
       /* COPY_MS reads load_sample_id, which is 0 on a 1x destination. */
       fs_id = dst_samples == VK_SAMPLE_COUNT_1_BIT
-                 ? (enum global_shader) (GLOBAL_SH_FS_RESOLVE_MS2 +
+                 ? static_cast<enum global_shader>(GLOBAL_SH_FS_RESOLVE_MS2 +
                                          util_logbase2(src_samples) - 1)
                  : GLOBAL_SH_FS_COPY_MS;
    }
 
    unsigned num_rts = util_bitcount(rts_mask);
    if (type == R3D_CLEAR)
-      fs_id = (enum global_shader) (GLOBAL_SH_FS_CLEAR0 + num_rts);
+      fs_id = static_cast<enum global_shader>(GLOBAL_SH_FS_CLEAR0 + num_rts);
 
    struct ir3_shader_variant *fs = cmd->device->global_shader_variants[fs_id];
    uint64_t fs_iova = cmd->device->global_shader_va[fs_id];
@@ -1171,7 +1308,8 @@ r3d_common(struct tu_cmd_buffer *cmd, struct tu_cs *cs, enum r3d_type type,
          unsigned regid = 0;
          if (rts_mask & (1u << i))
             regid = ir3_find_output_regid(fs, FRAG_RESULT_DATA0 + rt++);
-         tu_cs_emit(cs, A6XX_SP_PS_OUTPUT_REG_REGID(regid));
+         tu_cs_emit(cs, A6XX_SP_PS_OUTPUT_REG_REGID(regid) |
+                        COND(regid & HALF_REG_ID, A6XX_SP_PS_OUTPUT_REG_HALF_PRECISION));
       }
    }
 
@@ -1291,7 +1429,7 @@ r3d_coords_multi(struct tu_cmd_buffer *cmd,
    tu_cs_emit(cs, CP_LOAD_STATE6_2_EXT_SRC_ADDR_HI(0));
    tu_cs_emit_qw(cs,
                  coords_ubo.iova |
-                 (uint64_t)A6XX_UBO_1_SIZE(count * 2) << 32);
+                 static_cast<uint64_t>(A6XX_UBO_1_SIZE(count * 2)) << 32);
 }
 
 static void
@@ -1601,8 +1739,8 @@ r3d_dst(struct tu_cs *cs, const struct fdl6_view *iview, uint32_t layer,
 {
    uint32_t mrt_buf_info = iview->RB_MRT_BUF_INFO;
 
-   enum a6xx_format fmt = (enum a6xx_format) pkt_field_get(
-      A6XX_RB_MRT_BUF_INFO_COLOR_FORMAT, mrt_buf_info);
+   enum a6xx_format fmt = static_cast<enum a6xx_format>(pkt_field_get(
+      A6XX_RB_MRT_BUF_INFO_COLOR_FORMAT, mrt_buf_info));
    enum pipe_format dst_format = iview->format;
    fixup_dst_format(src_format, &dst_format, &fmt);
    mrt_buf_info =
@@ -1687,8 +1825,8 @@ r3d_dst_gmem(struct tu_cmd_buffer *cmd, struct tu_cs *cs,
                    A6XX_RB_MRT_BASE(0, 0),
                    A6XX_RB_MRT_BASE_GMEM(0, gmem_offset));
 
-   enum a6xx_format color_format = (enum a6xx_format) pkt_field_get(
-      A6XX_RB_MRT_BUF_INFO_COLOR_FORMAT, RB_MRT_BUF_INFO);
+   enum a6xx_format color_format = static_cast<enum a6xx_format>(pkt_field_get(
+      A6XX_RB_MRT_BUF_INFO_COLOR_FORMAT, RB_MRT_BUF_INFO));
    tu_cs_emit_regs(
       cs, GRAS_LRZ_MRT_BUFFER_INFO_0(CHIP, .color_format = color_format));
 
@@ -1738,6 +1876,7 @@ enum r3d_blit_param {
    R3D_USE_MULTI_BLIT = 1 << 3,
    R3D_OUTSIDE_PASS = 1 << 4,
    R3D_OVERLAPPING = 1 << 5,
+   R3D_SWAP_COORDS = 1 << 6,
 };
 
 template <chip CHIP>
@@ -1795,10 +1934,20 @@ r3d_setup(struct tu_cmd_buffer *cmd,
       }
    }
 
-   const enum r3d_type type = (clear) ? R3D_CLEAR :
-      ((blit_param & R3D_USE_MULTI_BLIT) ? R3D_MULTI_BLIT : R3D_BLIT);
+   enum r3d_type type;
+   if (clear) {
+      type = R3D_CLEAR;
+   } else if ((blit_param & R3D_COPY) && util_format_is_float16(src_format) &&
+              dst_samples != VK_SAMPLE_COUNT_1_BIT) {
+      /* Avoid canonicalizing NaNs in copies by using the special half-float
+       * path that uses half regs.
+       */
+      type = R3D_COPY_HALF;
+   } else {
+      type = (blit_param & R3D_USE_MULTI_BLIT) ? R3D_MULTI_BLIT : R3D_BLIT;
+   }
    r3d_common<CHIP>(cmd, cs, type, 1, blit_param & R3D_Z_SCALE, src_samples,
-                    dst_samples);
+                    dst_samples, blit_param & R3D_SWAP_COORDS);
 
    tu_cs_emit_regs(cs, A6XX_SP_PS_MRT_CNTL(.mrt = 1));
    tu_cs_emit_regs(cs, A6XX_RB_PS_MRT_CNTL(.mrt = 1));
@@ -2003,6 +2152,36 @@ coords(const struct blit_ops *ops,
                (VkExtent2D) {extent.width, extent.height});
 }
 
+/* Sets blit coordinates to copy a 1D horizontal strip of a row
+ * between a buffer and an image, handling any rotation.
+ */
+template <chip CHIP>
+static void
+buffer_row_coords(const struct blit_ops *ops, struct tu_cmd_buffer *cmd, struct tu_cs *cs, bool to_image,
+                  enum a6xx_rotation rot, VkOffset3D offset, VkExtent3D extent,
+                  uint32_t y, uint32_t buf_x, uint32_t row_x, uint32_t count)
+{
+   const VkOffset2D buf = { (int32_t) buf_x, 0 };
+   const VkExtent2D buf_extent = { count, 1 };
+
+   if (rot == ROTATE_0) {
+      const VkOffset2D img = { offset.x + (int32_t) row_x, offset.y + (int32_t) y };
+      ops->coords(cmd, cs, to_image ? img : buf, to_image ? buf : img, buf_extent);
+      return;
+   }
+
+   assert(ops != &r3d_ops<CHIP>);
+
+   VkExtent2D img_extent;
+   const VkOffset2D origin = tu_rotated_region_origin(rot, offset, extent);
+   const VkOffset2D strip = tu_rotated_strip(rot, y, row_x, count, extent.width, extent.height, &img_extent);
+   const VkOffset2D img = { origin.x + strip.x, origin.y + strip.y };
+   if (to_image)
+      r2d_coords_ex<CHIP>(cs, img, img_extent, buf, buf_extent);
+   else
+      r2d_coords_ex<CHIP>(cs, buf, buf_extent, img, img_extent);
+}
+
 /* Decides the VK format to treat our data as for a memcpy-style blit. We have
  * to be a bit careful because we have to pick a format with matching UBWC
  * compression behavior, so no just returning R8_UINT/R16_UINT/R32_UINT for
@@ -2081,7 +2260,7 @@ pack_blit_event_clear_value(const VkClearValue *val, enum pipe_format format, ui
       return;
 
 #define PACK_F(type) util_format_##type##_pack_rgba_float \
-   ( (uint8_t*) &clear_value[0], 0, tmp, 0, 1, 1)
+   (reinterpret_cast<uint8_t *>(&clear_value[0]), 0, tmp, 0, 1, 1)
    switch (util_format_get_component_bits(format, UTIL_FORMAT_COLORSPACE_RGB, PIPE_SWIZZLE_X)) {
    case 4:
       PACK_F(r4g4b4a4_unorm);
@@ -2376,8 +2555,8 @@ tu6_clear_lrz_partial(struct tu_cmd_buffer *cmd,
           */
          uint64_t iova = image->iova + lrz->lrz_offset +
                          i * lrz->lrz_buffer_size +
-                         (uint64_t) layer * lrz->lrz_layer_size +
-                         (uint64_t) first;
+                         static_cast<uint64_t>(layer) * lrz->lrz_layer_size +
+                         static_cast<uint64_t>(first);
          uint64_t size_remaining =
             lrz->lrz_layer_size - first;
          assert(size_remaining % clear_block_bytes == 0);
@@ -2573,6 +2752,21 @@ tu6_blit_image(struct tu_cmd_buffer *cmd,
       blit_param = z_scale ? R3D_Z_SCALE : 0;
    }
 
+   /* rotated blits: the 2d path when the result is a plain rotation or flip,
+    * otherwise the 3d path with the source coords rotated
+    */
+   const enum a6xx_rotation copy_rot = tu_copy_transform_rotation(info->pNext);
+   if (copy_rot != ROTATE_0) {
+      enum a6xx_rotation rot_2d;
+      if (ops == &r2d_ops<CHIP> && tu_blit_2d_rotation(copy_rot, info, &rot_2d)) {
+         blit_param = rot_2d;
+      } else {
+         ops = &r3d_ops<CHIP>;
+         blit_param = (z_scale ? R3D_Z_SCALE : 0) |
+                      (tu_rotation_transposes(copy_rot) ? R3D_SWAP_COORDS : 0);
+      }
+   }
+
    /* use the right format in setup() for D32_S8 */
    enum pipe_format src_format = tu_aspects_to_plane(
       src_image->vk.format, info->srcSubresource.aspectMask);
@@ -2583,14 +2777,36 @@ tu6_blit_image(struct tu_cmd_buffer *cmd,
 
    ops->setup(cmd, cs, src_format, dst_format, info->dstSubresource.aspectMask,
               blit_param, false, dst_image->layout[0].ubwc,
-              (VkSampleCountFlagBits) src_image->layout[0].nr_samples,
-              (VkSampleCountFlagBits) dst_image->layout[0].nr_samples);
+              static_cast<VkSampleCountFlagBits>(src_image->layout[0].nr_samples),
+              static_cast<VkSampleCountFlagBits>(dst_image->layout[0].nr_samples));
 
    if (ops == &r3d_ops<CHIP>) {
+      /* for rotated blits the corners get rotated source coords, and the
+       * shader swaps them back for 90 and 270
+       */
+      const VkOffset3D *src_offsets = info->srcOffsets;
+      float u0 = src_offsets[0].x, v0 = src_offsets[0].y;
+      float u1 = src_offsets[1].x, v1 = src_offsets[1].y;
+      if (copy_rot == ROTATE_90) {
+         u0 = src_offsets[1].y;
+         v0 = src_offsets[0].x;
+         u1 = src_offsets[0].y;
+         v1 = src_offsets[1].x;
+      } else if (copy_rot == ROTATE_180) {
+         u0 = src_offsets[1].x;
+         v0 = src_offsets[1].y;
+         u1 = src_offsets[0].x;
+         v1 = src_offsets[0].y;
+      } else if (copy_rot == ROTATE_270) {
+         u0 = src_offsets[0].y;
+         v0 = src_offsets[1].x;
+         u1 = src_offsets[1].y;
+         v1 = src_offsets[0].x;
+      }
       const float coords[] = { info->dstOffsets[0].x, info->dstOffsets[0].y,
-                               info->srcOffsets[0].x, info->srcOffsets[0].y,
+                               u0, v0,
                                info->dstOffsets[1].x, info->dstOffsets[1].y,
-                               info->srcOffsets[1].x, info->srcOffsets[1].y };
+                               u1, v1 };
       r3d_coords_raw(cmd, cs, coords);
    } else {
       tu_cs_emit_regs(cs,
@@ -2620,7 +2836,7 @@ tu6_blit_image(struct tu_cmd_buffer *cmd,
 
    for (uint32_t i = 0; i < layers; i++) {
       if (z_scale) {
-         float t = ((float) i + 0.5f) / (float) layers;
+         float t = (static_cast<float>(i) + 0.5f) / static_cast<float>(layers);
          r3d_coord_z(cmd, cs, t * (src1_z - src0_z) + src0_z);
       } else {
          ops->src(cmd, cs, &src, i, filter, dst_format);
@@ -2737,10 +2953,21 @@ tu_copy_buffer_to_image(struct tu_cmd_buffer *cmd,
    uint32_t pitch = src_width * block_size;
    uint32_t layer_size = src_height * pitch;
 
+   /* only the 2d path can rotate, a6xx still needs the per-row loop for unaligned buffers */
+   const enum a6xx_rotation copy_rot = tu_copy_transform_rotation(info->pNext);
+   const VkOffset2D rot_origin = tu_rotated_region_origin(copy_rot, offset, extent);
+   VkExtent2D img_extent = { extent.width, extent.height };
+   if (copy_rot != ROTATE_0) {
+      blit_param = copy_rot;
+      ops = &r2d_ops<CHIP>;
+      if (tu_rotation_transposes(copy_rot))
+         img_extent = (VkExtent2D) { extent.height, extent.width };
+   }
+
    ops->setup(cmd, cs, src_format, dst_format,
               info->imageSubresource.aspectMask, blit_param, false, dst_image->layout[0].ubwc,
-              (VkSampleCountFlagBits) dst_image->layout[0].nr_samples,
-              (VkSampleCountFlagBits) dst_image->layout[0].nr_samples);
+              static_cast<VkSampleCountFlagBits>(dst_image->layout[0].nr_samples),
+              static_cast<VkSampleCountFlagBits>(dst_image->layout[0].nr_samples));
 
    struct fdl6_view dst;
    tu_image_view_copy<CHIP>(&dst, dst_image, dst_format,
@@ -2766,8 +2993,7 @@ tu_copy_buffer_to_image(struct tu_cmd_buffer *cmd,
 
             ops->src_buffer(cmd, cs, src_format, src_va & ~63, pitch,
                             x + clamped_width, 1, dst_format);
-            ops->coords(cmd, cs, (VkOffset2D) {offset.x, offset.y + y},  (VkOffset2D) {x},
-                        (VkExtent2D) {clamped_width, 1});
+            buffer_row_coords<CHIP>(ops, cmd, cs, true, copy_rot, offset, extent, y, x, 0, clamped_width);
             ops->run(cmd, cs);
 
             if (excess_width) {
@@ -2776,10 +3002,8 @@ tu_copy_buffer_to_image(struct tu_cmd_buffer *cmd,
                assert((src_va_overflow & 63) == 0);
                ops->src_buffer(cmd, cs, src_format, src_va_overflow & ~63,
                                pitch, excess_width, 1, dst_format);
-               ops->coords(
-                  cmd, cs,
-                  (VkOffset2D) { offset.x + clamped_width, offset.y + y },
-                  (VkOffset2D) { 0 }, (VkExtent2D) { excess_width, 1 });
+               buffer_row_coords<CHIP>(ops, cmd, cs, true, copy_rot, offset, extent, y, 0, clamped_width,
+                                       excess_width);
                ops->run(cmd, cs);
             }
             src_va += pitch;
@@ -2799,7 +3023,12 @@ tu_copy_buffer_to_image(struct tu_cmd_buffer *cmd,
             ops->src_buffer(cmd, cs, src_format, src_va, pitch, extent.width,
                             extent.height, dst_format);
          }
-         coords(ops, cmd, cs, offset, (VkOffset3D) {}, extent);
+         if (copy_rot != ROTATE_0) {
+            r2d_coords_ex<CHIP>(cs, rot_origin, img_extent, (VkOffset2D) { 0, 0 },
+                                (VkExtent2D) { extent.width, extent.height });
+         } else {
+            coords(ops, cmd, cs, offset, (VkOffset3D) {}, extent);
+         }
          ops->run(cmd, cs);
       }
    }
@@ -2870,8 +3099,8 @@ tu_copy_memory_to_image(struct tu_device *device,
    bool tiled =
       fdl_tile_mode(layout, info->imageSubresource.mipLevel) != 0;
 
-   const char *src = (const char *) info->pHostPointer;
-   char *dst = (char *) dst_image->map + image_offset;
+   const char *src = static_cast<const char *>(info->pHostPointer);
+   char *dst = static_cast<char *>(dst_image->map) + image_offset;
    for (unsigned layer = 0; layer < layers; layer++,
         src += src_layer_stride, dst += dst_layer_stride) {
       if (copy_memcpy) {
@@ -2959,6 +3188,17 @@ tu_copy_image_to_buffer(struct tu_cmd_buffer *cmd,
    uint32_t pitch = dst_width * block_size;
    uint32_t layer_size = pitch * dst_height;
 
+   /* only the 2d path can rotate, reading back into the buffer needs the inverse */
+   const enum a6xx_rotation copy_rot = tu_copy_transform_rotation(info->pNext);
+   const VkOffset2D rot_origin = tu_rotated_region_origin(copy_rot, offset, extent);
+   VkExtent2D img_extent = { extent.width, extent.height };
+   if (copy_rot != ROTATE_0) {
+      blit_param = tu_rotation_inverse(copy_rot);
+      ops = &r2d_ops<CHIP>;
+      if (tu_rotation_transposes(copy_rot))
+         img_extent = (VkExtent2D) { extent.height, extent.width };
+   }
+
    handle_buffer_unaligned_store<CHIP>(cmd,
                                        vk_buffer_address(&dst_buffer->vk, info->bufferOffset),
                                        layer_size * layers, unaligned_store);
@@ -2988,17 +3228,15 @@ tu_copy_image_to_buffer(struct tu_cmd_buffer *cmd,
             uint32_t clamped_width = extent.width - excess_width;
 
             ops->dst_buffer(cs, dst_format, dst_va & ~63, 0, src_format);
-            ops->coords(cmd, cs, (VkOffset2D) {x}, (VkOffset2D) {offset.x, offset.y + y},
-                        (VkExtent2D) {clamped_width, 1});
+            buffer_row_coords<CHIP>(ops, cmd, cs, false, copy_rot, offset, extent, y, x, 0, clamped_width);
             ops->run(cmd, cs);
 
             if (excess_width) {
                uint64_t dst_va_overflow = (dst_va + clamped_width * block_size);
                assert((dst_va_overflow & 63) == 0);
                ops->dst_buffer(cs, dst_format, dst_va_overflow, 0, src_format);
-               ops->coords(cmd, cs, (VkOffset2D) { 0 },
-                           (VkOffset2D) { offset.x + clamped_width, offset.y + y },
-                           (VkExtent2D) { excess_width, 1 });
+               buffer_row_coords<CHIP>(ops, cmd, cs, false, copy_rot, offset, extent, y, 0, clamped_width,
+                                       excess_width);
                ops->run(cmd, cs);
             }
 
@@ -3006,7 +3244,12 @@ tu_copy_image_to_buffer(struct tu_cmd_buffer *cmd,
          }
       } else {
          ops->dst_buffer(cs, dst_format, dst_va, pitch, src_format);
-         coords(ops, cmd, cs, (VkOffset3D) {0, 0}, offset, extent);
+         if (copy_rot != ROTATE_0) {
+            r2d_coords_ex<CHIP>(cs, (VkOffset2D) { 0, 0 }, (VkExtent2D) { extent.width, extent.height }, rot_origin,
+                                img_extent);
+         } else {
+            coords(ops, cmd, cs, (VkOffset3D) { 0, 0 }, offset, extent);
+         }
          ops->run(cmd, cs);
       }
    }
@@ -3076,8 +3319,8 @@ tu_copy_image_to_memory(struct tu_device *device,
    bool tiled =
       fdl_tile_mode(layout, info->imageSubresource.mipLevel) != 0;
 
-   const char *src = (const char *) src_image->map + image_offset;
-   char *dst = (char *) info->pHostPointer;
+   const char *src = static_cast<const char *>(src_image->map) + image_offset;
+   char *dst = static_cast<char *>(info->pHostPointer);
    for (unsigned layer = 0; layer < layers; layer++,
         src += src_layer_stride, dst += dst_layer_stride) {
       if (src_image->mem->bo->cached_non_coherent) {
@@ -3162,8 +3405,9 @@ tu_copy_image_to_image(struct tu_cmd_buffer *cmd,
 {
    const struct blit_ops *ops = &r2d_ops<CHIP>;
    struct tu_cs *cs = &cmd->cs;
+   const bool is_msaa = dst_image->layout[0].nr_samples > 1;
 
-   if (dst_image->layout[0].nr_samples > 1)
+   if (is_msaa)
       ops = &r3d_ops<CHIP>;
 
    VkOffset3D src_offset = info->srcOffset;
@@ -3198,7 +3442,9 @@ tu_copy_image_to_image(struct tu_cmd_buffer *cmd,
    /* note: could use "R8_UNORM" when no UBWC */
    unsigned blit_param = 0;
    if (dst_format == PIPE_FORMAT_Y8_UNORM ||
-       src_format == PIPE_FORMAT_Y8_UNORM) {
+       src_format == PIPE_FORMAT_Y8_UNORM ||
+       (is_msaa && (util_format_is_float16(src_format) ||
+                    util_format_is_float16(dst_format)))) {
       ops = &r3d_ops<CHIP>;
       blit_param = R3D_COPY;
    }
@@ -3309,8 +3555,8 @@ tu_copy_image_to_image(struct tu_cmd_buffer *cmd,
       fdl6_view_init<CHIP>(&staging, &staging_layout_ptr, &copy_to_args, false);
 
       ops->setup(cmd, cs, src_format, src_format, VK_IMAGE_ASPECT_COLOR_BIT, blit_param, false, false,
-                 (VkSampleCountFlagBits) dst_image->layout[0].nr_samples,
-                 (VkSampleCountFlagBits) dst_image->layout[0].nr_samples);
+                 static_cast<VkSampleCountFlagBits>(dst_image->layout[0].nr_samples),
+                 static_cast<VkSampleCountFlagBits>(dst_image->layout[0].nr_samples));
       coords(ops, cmd, cs, staging_offset, src_offset, extent);
 
       for (uint32_t i = 0; i < layers_to_copy; i++) {
@@ -3348,8 +3594,8 @@ tu_copy_image_to_image(struct tu_cmd_buffer *cmd,
 
       ops->setup(cmd, cs, dst_format, dst_format, info->dstSubresource.aspectMask,
                  blit_param, false, dst_image->layout[0].ubwc,
-                 (VkSampleCountFlagBits) dst_image->layout[0].nr_samples,
-                 (VkSampleCountFlagBits) dst_image->layout[0].nr_samples);
+                 static_cast<VkSampleCountFlagBits>(dst_image->layout[0].nr_samples),
+                 static_cast<VkSampleCountFlagBits>(dst_image->layout[0].nr_samples));
       coords(ops, cmd, cs, dst_offset, staging_offset, extent);
 
       for (uint32_t i = 0; i < layers_to_copy; i++) {
@@ -3363,8 +3609,8 @@ tu_copy_image_to_image(struct tu_cmd_buffer *cmd,
 
       ops->setup(cmd, cs, src_format, dst_format, info->dstSubresource.aspectMask,
                  blit_param, false, dst_image->layout[0].ubwc,
-                 (VkSampleCountFlagBits) dst_image->layout[0].nr_samples,
-                 (VkSampleCountFlagBits) dst_image->layout[0].nr_samples);
+                 static_cast<VkSampleCountFlagBits>(dst_image->layout[0].nr_samples),
+                 static_cast<VkSampleCountFlagBits>(dst_image->layout[0].nr_samples));
       coords(ops, cmd, cs, dst_offset, src_offset, extent);
 
       for (uint32_t i = 0; i < layers_to_copy; i++) {
@@ -3467,8 +3713,8 @@ tu_copy_image_to_image_cpu(struct tu_device *device,
    bool dst_tiled =
       fdl_tile_mode(dst_layout, info->dstSubresource.mipLevel) != 0;
 
-   const char *src = (const char *) src_image->map + src_image_offset;
-   char *dst = (char *) dst_image->map + dst_image_offset;
+   const char *src = static_cast<const char *>(src_image->map) + src_image_offset;
+   char *dst = static_cast<char *>(dst_image->map) + dst_image_offset;
    for (unsigned layer = 0; layer < layers_to_copy; layer++,
         src += src_layer_stride, dst += dst_layer_stride) {
       if (src_image->mem->bo->cached_non_coherent) {
@@ -3845,7 +4091,7 @@ tu_CmdResolveImage2(VkCommandBuffer commandBuffer,
       vk_format_to_pipe_format(dst_image->vk.format);
 
    VkSampleCountFlagBits src_samples =
-      (VkSampleCountFlagBits) src_image->layout[0].nr_samples;
+      static_cast<VkSampleCountFlagBits>(src_image->layout[0].nr_samples);
    bool shader_resolve = !r2d_can_resolve(cmd->device, src_image->vk.format);
    const struct blit_ops *ops =
       shader_resolve ? &r3d_ops<CHIP> : &r2d_ops<CHIP>;
@@ -3926,8 +4172,8 @@ resolve_sysmem(struct tu_cmd_buffer *cmd,
 
    ops->setup(cmd, cs, src_format, dst_format,
               VK_IMAGE_ASPECT_COLOR_BIT, 0, false, dst_fdl_view->ubwc_enabled,
-              (VkSampleCountFlagBits)src->image->layout[0].nr_samples,
-              (VkSampleCountFlagBits)dst->image->layout[0].nr_samples);
+              static_cast<VkSampleCountFlagBits>(src->image->layout[0].nr_samples),
+              static_cast<VkSampleCountFlagBits>(dst->image->layout[0].nr_samples));
 
    if (!per_layer_rect)
       ops->coords(cmd, cs, rect->offset, rect->offset, rect->extent);
@@ -4068,8 +4314,8 @@ clear_image_cp_blit(struct tu_cmd_buffer *cmd,
    }
 
    ops->setup(cmd, cs, format, format, aspect_mask, 0, true, image->layout[0].ubwc,
-              (VkSampleCountFlagBits) image->layout[0].nr_samples,
-              (VkSampleCountFlagBits) image->layout[0].nr_samples);
+              static_cast<VkSampleCountFlagBits>(image->layout[0].nr_samples),
+              static_cast<VkSampleCountFlagBits>(image->layout[0].nr_samples));
    if (e5b9g9r9_as_u32)
       ops->clear_value(cmd, cs, PIPE_FORMAT_R9G9B9E5_FLOAT, clear_value);
    else
@@ -4236,7 +4482,8 @@ tu_CmdClearColorImage(VkCommandBuffer commandBuffer,
 
    for (unsigned i = 0; i < rangeCount; i++) {
       uint32_t buffer_id = tu_resolve_group_include_buffer<CHIP>(&resolve_group, image->vk.format);
-      clear_image<CHIP>(cmd, image, buffer_id, (const VkClearValue*) pColor, pRanges + i, VK_IMAGE_ASPECT_COLOR_BIT);
+      clear_image<CHIP>(cmd, image, buffer_id, reinterpret_cast<const VkClearValue*>(pColor),
+                        pRanges + i, VK_IMAGE_ASPECT_COLOR_BIT);
    }
 
    tu_emit_resolve_group<CHIP>(cmd, &cmd->cs, &resolve_group);
@@ -4290,13 +4537,15 @@ tu_CmdClearDepthStencilImage(VkCommandBuffer commandBuffer,
             if (BIT(b) == VK_IMAGE_ASPECT_STENCIL_BIT)
                buffer_id = tu_resolve_group_include_buffer<CHIP>(&resolve_group, VK_FORMAT_S8_UINT);
 
-            clear_image<CHIP>(cmd, image, buffer_id, (const VkClearValue*) pDepthStencil, range, BIT(b));
+            clear_image<CHIP>(cmd, image, buffer_id, reinterpret_cast<const VkClearValue*>(pDepthStencil),
+                              range, BIT(b));
          }
          continue;
       }
 
       uint32_t buffer_id = tu_resolve_group_include_buffer<CHIP>(&resolve_group, image->vk.format);
-      clear_image<CHIP>(cmd, image, buffer_id, (const VkClearValue*) pDepthStencil, range, range->aspectMask);
+      clear_image<CHIP>(cmd, image, buffer_id, reinterpret_cast<const VkClearValue*>(pDepthStencil),
+                        range, range->aspectMask);
    }
 
    tu_emit_resolve_group<CHIP>(cmd, &cmd->cs, &resolve_group);
@@ -4354,7 +4603,7 @@ fdm_apply_sysmem_clear_coords(struct tu_cmd_buffer *cmd,
                               bool binning)
 {
    const struct apply_sysmem_clear_coords_state *state =
-      (const struct apply_sysmem_clear_coords_state *)data;
+      static_cast<const struct apply_sysmem_clear_coords_state *>(data);
 
    VkExtent2D frag_area = tile->frag_areas[MIN2(state->view, views - 1)];
    VkRect2D bin = bins[MIN2(state->view, views - 1)];
@@ -4666,7 +4915,7 @@ fdm_apply_gmem_clear_coords(struct tu_cmd_buffer *cmd,
                             bool binning)
 {
    const struct apply_gmem_clear_coords_state *state =
-      (const struct apply_gmem_clear_coords_state *)data;
+      static_cast<const struct apply_gmem_clear_coords_state *>(data);
 
    VkExtent2D frag_area = tile->frag_areas[MIN2(state->view, views - 1)];
    VkRect2D bin = bins[MIN2(state->view, views - 1)];
@@ -5021,6 +5270,8 @@ tu_clear_attachments_generic(struct tu_cmd_buffer *cmd,
    }
 
    tu_emit_resolve_group<A7XX>(cmd, cs, &resolve_group);
+
+   TU_CALLX(cmd->device, tu_flush_for_access)(&cmd->state.renderpass_cache, TU_ACCESS_BLIT_WRITE_GMEM, TU_ACCESS_NONE);
 }
 
 template <chip CHIP>
@@ -5310,7 +5561,7 @@ fdm_apply_blit_scissor(struct tu_cmd_buffer *cmd,
 {
    struct tu_physical_device *phys_dev = cmd->device->physical_device;
    const struct apply_blit_scissor_state *state =
-      (const struct apply_blit_scissor_state *)data;
+      static_cast<const struct apply_blit_scissor_state *>(data);
    unsigned view = MIN2(state->view, views - 1);
 
    VkRect2D subsampled_render_area =
@@ -5497,7 +5748,7 @@ fdm_apply_load_coords(struct tu_cmd_buffer *cmd,
                       bool binning)
 {
    const struct apply_load_coords_state *state =
-      (const struct apply_load_coords_state *)data;
+      static_cast<const struct apply_load_coords_state *>(data);
    VkExtent2D frag_area = tile->frag_areas[MIN2(state->view, views - 1)];
    VkRect2D bin = bins[MIN2(state->view, views - 1)];
    /* On a7xx, GRAS_BIN_FOVEAT_OFFSET_* is applied per-viewport. We only use
@@ -5544,7 +5795,7 @@ load_3d_blit(struct tu_cmd_buffer *cmd,
    enum pipe_format format = fdl_view->format;
    r3d_setup<CHIP>(cmd, cs, format, format, VK_IMAGE_ASPECT_COLOR_BIT,
                    R3D_DST_GMEM, false, fdl_view->ubwc_enabled,
-                   (VkSampleCountFlagBits)iview->image->layout[0].nr_samples,
+                   static_cast<VkSampleCountFlagBits>(iview->image->layout[0].nr_samples),
                    att->samples);
 
    if (!cmd->state.pass->has_fdm) {
@@ -5987,7 +6238,7 @@ fdm_apply_store_coords(struct tu_cmd_buffer *cmd,
                        bool binning)
 {
    const struct apply_store_coords_state *state =
-      (const struct apply_store_coords_state *)data;
+      static_cast<const struct apply_store_coords_state *>(data);
    unsigned view = MIN2(state->view, views - 1);
    VkExtent2D frag_area = tile->frag_areas[view];
    VkRect2D bin = bins[view];
@@ -6054,7 +6305,7 @@ fdm_apply_render_area(struct tu_cmd_buffer *cmd,
                       bool binning)
 {
    struct apply_render_area_state *state =
-      (struct apply_render_area_state *)data;
+      static_cast<struct apply_render_area_state *>(data);
 
    unsigned view = MIN2(state->view, views - 1);
 

@@ -1,6 +1,8 @@
 # Lots of timeouts
 dEQP-VK.texture.filtering.*.combinations.*
 dEQP-VK.binding_model.buffer_device_address.set3.depth3.*
+dEQP-VK.memory.allocation.basic.percent_1.forward.count_12
+dEQP-VK.memory.allocation.basic.percent_1.reverse.count_12
 dEQP-VK.ssbo.layout.*instance_array
 dEQP-VK.ssbo.layout.random.8bit.all_per_block_buffers.6
 dEQP-VK.ssbo.layout.random.all_shared_buffer.5

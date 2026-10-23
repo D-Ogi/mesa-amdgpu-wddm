@@ -96,25 +96,10 @@ dEQP-GLES2.functional.shaders.indexing.vector_subscript.vec2_dynamic_loop_subscr
 dEQP-GLES2.functional.shaders.indexing.vector_subscript.vec2_dynamic_loop_subscript_write_static_loop_subscript_read_vertex,Fail
 dEQP-GLES2.functional.shaders.indexing.vector_subscript.vec2_dynamic_loop_subscript_write_static_subscript_read_fragment,Fail
 dEQP-GLES2.functional.shaders.indexing.vector_subscript.vec2_dynamic_loop_subscript_write_static_subscript_read_vertex,Fail
-dEQP-GLES2.functional.shaders.indexing.vector_subscript.vec2_dynamic_subscript_write_component_read_vertex,Fail
-dEQP-GLES2.functional.shaders.indexing.vector_subscript.vec2_dynamic_subscript_write_direct_read_vertex,Fail
 dEQP-GLES2.functional.shaders.indexing.vector_subscript.vec2_dynamic_subscript_write_dynamic_loop_subscript_read_fragment,Fail
 dEQP-GLES2.functional.shaders.indexing.vector_subscript.vec2_dynamic_subscript_write_dynamic_loop_subscript_read_vertex,Fail
-dEQP-GLES2.functional.shaders.indexing.vector_subscript.vec2_dynamic_subscript_write_dynamic_subscript_read_vertex,Fail
-dEQP-GLES2.functional.shaders.indexing.vector_subscript.vec2_dynamic_subscript_write_static_loop_subscript_read_vertex,Fail
-dEQP-GLES2.functional.shaders.indexing.vector_subscript.vec2_dynamic_subscript_write_static_subscript_read_vertex,Fail
-dEQP-GLES2.functional.shaders.indexing.vector_subscript.vec2_static_loop_subscript_write_component_read_fragment,Fail
-dEQP-GLES2.functional.shaders.indexing.vector_subscript.vec2_static_loop_subscript_write_component_read_vertex,Fail
-dEQP-GLES2.functional.shaders.indexing.vector_subscript.vec2_static_loop_subscript_write_direct_read_fragment,Fail
-dEQP-GLES2.functional.shaders.indexing.vector_subscript.vec2_static_loop_subscript_write_direct_read_vertex,Fail
 dEQP-GLES2.functional.shaders.indexing.vector_subscript.vec2_static_loop_subscript_write_dynamic_loop_subscript_read_fragment,Fail
 dEQP-GLES2.functional.shaders.indexing.vector_subscript.vec2_static_loop_subscript_write_dynamic_loop_subscript_read_vertex,Fail
-dEQP-GLES2.functional.shaders.indexing.vector_subscript.vec2_static_loop_subscript_write_dynamic_subscript_read_fragment,Fail
-dEQP-GLES2.functional.shaders.indexing.vector_subscript.vec2_static_loop_subscript_write_dynamic_subscript_read_vertex,Fail
-dEQP-GLES2.functional.shaders.indexing.vector_subscript.vec2_static_loop_subscript_write_static_loop_subscript_read_fragment,Fail
-dEQP-GLES2.functional.shaders.indexing.vector_subscript.vec2_static_loop_subscript_write_static_loop_subscript_read_vertex,Fail
-dEQP-GLES2.functional.shaders.indexing.vector_subscript.vec2_static_loop_subscript_write_static_subscript_read_fragment,Fail
-dEQP-GLES2.functional.shaders.indexing.vector_subscript.vec2_static_loop_subscript_write_static_subscript_read_vertex,Fail
 dEQP-GLES2.functional.shaders.indexing.vector_subscript.vec2_static_subscript_write_dynamic_loop_subscript_read_fragment,Fail
 dEQP-GLES2.functional.shaders.indexing.vector_subscript.vec2_static_subscript_write_dynamic_loop_subscript_read_vertex,Fail
 dEQP-GLES2.functional.shaders.indexing.vector_subscript.vec3_component_write_dynamic_loop_subscript_read_fragment,Fail
@@ -133,25 +118,10 @@ dEQP-GLES2.functional.shaders.indexing.vector_subscript.vec3_dynamic_loop_subscr
 dEQP-GLES2.functional.shaders.indexing.vector_subscript.vec3_dynamic_loop_subscript_write_static_loop_subscript_read_vertex,Fail
 dEQP-GLES2.functional.shaders.indexing.vector_subscript.vec3_dynamic_loop_subscript_write_static_subscript_read_fragment,Fail
 dEQP-GLES2.functional.shaders.indexing.vector_subscript.vec3_dynamic_loop_subscript_write_static_subscript_read_vertex,Fail
-dEQP-GLES2.functional.shaders.indexing.vector_subscript.vec3_dynamic_subscript_write_component_read_vertex,Fail
-dEQP-GLES2.functional.shaders.indexing.vector_subscript.vec3_dynamic_subscript_write_direct_read_vertex,Fail
 dEQP-GLES2.functional.shaders.indexing.vector_subscript.vec3_dynamic_subscript_write_dynamic_loop_subscript_read_fragment,Fail
 dEQP-GLES2.functional.shaders.indexing.vector_subscript.vec3_dynamic_subscript_write_dynamic_loop_subscript_read_vertex,Fail
-dEQP-GLES2.functional.shaders.indexing.vector_subscript.vec3_dynamic_subscript_write_dynamic_subscript_read_vertex,Fail
-dEQP-GLES2.functional.shaders.indexing.vector_subscript.vec3_dynamic_subscript_write_static_loop_subscript_read_vertex,Fail
-dEQP-GLES2.functional.shaders.indexing.vector_subscript.vec3_dynamic_subscript_write_static_subscript_read_vertex,Fail
-dEQP-GLES2.functional.shaders.indexing.vector_subscript.vec3_static_loop_subscript_write_component_read_fragment,Fail
-dEQP-GLES2.functional.shaders.indexing.vector_subscript.vec3_static_loop_subscript_write_component_read_vertex,Fail
-dEQP-GLES2.functional.shaders.indexing.vector_subscript.vec3_static_loop_subscript_write_direct_read_fragment,Fail
-dEQP-GLES2.functional.shaders.indexing.vector_subscript.vec3_static_loop_subscript_write_direct_read_vertex,Fail
 dEQP-GLES2.functional.shaders.indexing.vector_subscript.vec3_static_loop_subscript_write_dynamic_loop_subscript_read_fragment,Fail
 dEQP-GLES2.functional.shaders.indexing.vector_subscript.vec3_static_loop_subscript_write_dynamic_loop_subscript_read_vertex,Fail
-dEQP-GLES2.functional.shaders.indexing.vector_subscript.vec3_static_loop_subscript_write_dynamic_subscript_read_fragment,Fail
-dEQP-GLES2.functional.shaders.indexing.vector_subscript.vec3_static_loop_subscript_write_dynamic_subscript_read_vertex,Fail
-dEQP-GLES2.functional.shaders.indexing.vector_subscript.vec3_static_loop_subscript_write_static_loop_subscript_read_fragment,Fail
-dEQP-GLES2.functional.shaders.indexing.vector_subscript.vec3_static_loop_subscript_write_static_loop_subscript_read_vertex,Fail
-dEQP-GLES2.functional.shaders.indexing.vector_subscript.vec3_static_loop_subscript_write_static_subscript_read_fragment,Fail
-dEQP-GLES2.functional.shaders.indexing.vector_subscript.vec3_static_loop_subscript_write_static_subscript_read_vertex,Fail
 dEQP-GLES2.functional.shaders.indexing.vector_subscript.vec3_static_subscript_write_dynamic_loop_subscript_read_fragment,Fail
 dEQP-GLES2.functional.shaders.indexing.vector_subscript.vec3_static_subscript_write_dynamic_loop_subscript_read_vertex,Fail
 dEQP-GLES2.functional.shaders.indexing.vector_subscript.vec4_component_write_dynamic_loop_subscript_read_fragment,Fail
@@ -170,25 +140,10 @@ dEQP-GLES2.functional.shaders.indexing.vector_subscript.vec4_dynamic_loop_subscr
 dEQP-GLES2.functional.shaders.indexing.vector_subscript.vec4_dynamic_loop_subscript_write_static_loop_subscript_read_vertex,Fail
 dEQP-GLES2.functional.shaders.indexing.vector_subscript.vec4_dynamic_loop_subscript_write_static_subscript_read_fragment,Fail
 dEQP-GLES2.functional.shaders.indexing.vector_subscript.vec4_dynamic_loop_subscript_write_static_subscript_read_vertex,Fail
-dEQP-GLES2.functional.shaders.indexing.vector_subscript.vec4_dynamic_subscript_write_component_read_vertex,Fail
-dEQP-GLES2.functional.shaders.indexing.vector_subscript.vec4_dynamic_subscript_write_direct_read_vertex,Fail
 dEQP-GLES2.functional.shaders.indexing.vector_subscript.vec4_dynamic_subscript_write_dynamic_loop_subscript_read_fragment,Fail
 dEQP-GLES2.functional.shaders.indexing.vector_subscript.vec4_dynamic_subscript_write_dynamic_loop_subscript_read_vertex,Fail
-dEQP-GLES2.functional.shaders.indexing.vector_subscript.vec4_dynamic_subscript_write_dynamic_subscript_read_vertex,Fail
-dEQP-GLES2.functional.shaders.indexing.vector_subscript.vec4_dynamic_subscript_write_static_loop_subscript_read_vertex,Fail
-dEQP-GLES2.functional.shaders.indexing.vector_subscript.vec4_dynamic_subscript_write_static_subscript_read_vertex,Fail
-dEQP-GLES2.functional.shaders.indexing.vector_subscript.vec4_static_loop_subscript_write_component_read_fragment,Fail
-dEQP-GLES2.functional.shaders.indexing.vector_subscript.vec4_static_loop_subscript_write_component_read_vertex,Fail
-dEQP-GLES2.functional.shaders.indexing.vector_subscript.vec4_static_loop_subscript_write_direct_read_fragment,Fail
-dEQP-GLES2.functional.shaders.indexing.vector_subscript.vec4_static_loop_subscript_write_direct_read_vertex,Fail
 dEQP-GLES2.functional.shaders.indexing.vector_subscript.vec4_static_loop_subscript_write_dynamic_loop_subscript_read_fragment,Fail
 dEQP-GLES2.functional.shaders.indexing.vector_subscript.vec4_static_loop_subscript_write_dynamic_loop_subscript_read_vertex,Fail
-dEQP-GLES2.functional.shaders.indexing.vector_subscript.vec4_static_loop_subscript_write_dynamic_subscript_read_fragment,Fail
-dEQP-GLES2.functional.shaders.indexing.vector_subscript.vec4_static_loop_subscript_write_dynamic_subscript_read_vertex,Fail
-dEQP-GLES2.functional.shaders.indexing.vector_subscript.vec4_static_loop_subscript_write_static_loop_subscript_read_fragment,Fail
-dEQP-GLES2.functional.shaders.indexing.vector_subscript.vec4_static_loop_subscript_write_static_loop_subscript_read_vertex,Fail
-dEQP-GLES2.functional.shaders.indexing.vector_subscript.vec4_static_loop_subscript_write_static_subscript_read_fragment,Fail
-dEQP-GLES2.functional.shaders.indexing.vector_subscript.vec4_static_loop_subscript_write_static_subscript_read_vertex,Fail
 dEQP-GLES2.functional.shaders.indexing.vector_subscript.vec4_static_subscript_write_dynamic_loop_subscript_read_fragment,Fail
 dEQP-GLES2.functional.shaders.indexing.vector_subscript.vec4_static_subscript_write_dynamic_loop_subscript_read_vertex,Fail
 dEQP-GLES2.functional.shaders.loops.do_while_constant_iterations.101_iterations_vertex,Fail
@@ -395,14 +350,6 @@ dEQP-GLES2.functional.shaders.loops.while_uniform_iterations.single_iteration_ve
 dEQP-GLES2.functional.shaders.loops.while_uniform_iterations.single_statement_vertex,Fail
 dEQP-GLES2.functional.shaders.loops.while_uniform_iterations.unconditional_continue_vertex,Fail
 dEQP-GLES2.functional.shaders.loops.while_uniform_iterations.vector_counter_vertex,Fail
-
-dEQP-GLES2.functional.shaders.operator.angle_and_trigonometry.atan2.highp_vec2_fragment,Fail
-dEQP-GLES2.functional.shaders.operator.angle_and_trigonometry.atan2.highp_vec2_vertex,Fail
-dEQP-GLES2.functional.shaders.operator.angle_and_trigonometry.atan2.mediump_vec2_fragment,Fail
-dEQP-GLES2.functional.shaders.operator.angle_and_trigonometry.atan2.mediump_vec2_vertex,Fail
-
-# More loops
-
 dEQP-GLES2.functional.shaders.return.return_in_dynamic_loop_dynamic_vertex,Fail
 dEQP-GLES2.functional.shaders.return.return_in_dynamic_loop_never_vertex,Fail
 dEQP-GLES2.functional.shaders.struct.local.dynamic_loop_assignment_fragment,Fail
@@ -413,7 +360,6 @@ dEQP-GLES2.functional.shaders.struct.local.nested_dynamic_loop_assignment_fragme
 dEQP-GLES2.functional.shaders.struct.local.nested_dynamic_loop_assignment_vertex,Fail
 dEQP-GLES2.functional.shaders.struct.uniform.dynamic_loop_nested_struct_array_fragment,Fail
 dEQP-GLES2.functional.shaders.struct.uniform.dynamic_loop_nested_struct_array_vertex,Fail
-
 
 dEQP-GLES2.functional.shaders.texture_functions.fragment.texture2d_bias,Fail
 dEQP-GLES2.functional.shaders.texture_functions.fragment.texture2dproj_vec3_bias,Fail
@@ -537,12 +483,11 @@ KHR-GLES2.core.internalformat.renderbuffer.rgba8,Fail
 
 KHR-GLES2.texture_3d.filtering.combinations.negative,Fail
 
-# results from piglit egl with nv30_transfer_rect_cpu
+# results from piglit egl
 
 shaders@glsl-bug-110796,Fail
 shaders@glsl-fs-fragcoord-zw-ortho,Fail
 shaders@glsl-fs-fragcoord-zw-perspective,Fail
-shaders@glsl-fs-loop,Fail
 shaders@glsl-fs-loop-nested,Fail
 shaders@glsl-lod-bias,Fail
 shaders@glsl-novertexdata,Fail
@@ -551,9 +496,6 @@ shaders@glsl-uniform-interstage-limits@subdivide 5- statechanges,Fail
 shaders@glsl-vs-loop,Fail
 shaders@glsl-vs-loop-nested,Fail
 shaders@glsl-vs-point-size,Fail
-shaders@ssa@fs-lost-copy-problem,Fail
-shaders@ssa@fs-swap-problem,Fail
-shaders@ssa@fs-while-loop-rotate-value,Fail
 spec@!opengl 1.0@gl-1.0-dlist-materials,Fail
 spec@!opengl 1.0@gl-1.0-dlist-shademodel,Fail
 spec@!opengl 1.0@gl-1.0-edgeflag,Fail
@@ -561,11 +503,13 @@ spec@!opengl 1.0@gl-1.0-edgeflag-quads,Fail
 spec@!opengl 1.0@gl-1.0-scissor-many,Fail
 spec@!opengl 1.0@gl-1.0-swapbuffers-behavior,Fail
 spec@!opengl 1.0@gl-1.0-user-clip-all-planes,Fail
+spec@!opengl 1.1@copypixels-draw-sync,Fail
 spec@!opengl 1.1@depthstencil-default_fb-clear,Fail
 spec@!opengl 1.1@depthstencil-default_fb-drawpixels-float-and-ushort,Fail
 spec@!opengl 1.1@dlist-clear,Fail
 spec@!opengl 1.1@dlist-fdo3129-01,Fail
 spec@!opengl 1.1@dlist-fdo3129-02,Fail
+spec@!opengl 1.1@draw-copypixels-sync,Fail
 spec@!opengl 1.1@draw-pixels,Fail
 spec@!opengl 1.1@gl-1.1-color-material-array,Fail
 spec@!opengl 1.1@line-smooth-coverage,Fail
@@ -573,8 +517,7 @@ spec@!opengl 1.1@line-smooth-stipple,Fail
 spec@!opengl 1.1@max-texture-size,Crash
 spec@!opengl 1.1@read-front,Fail
 spec@!opengl 1.1@read-front clear-front-first,Fail
-spec@!opengl 1.1@streaming-texture-leak,Timeout
-spec@!opengl 1.1@texsubimage,Timeout
+spec@!opengl 1.1@texsubimage-unpack,Fail
 spec@!opengl 1.1@texwrap formats bordercolor,Fail
 spec@!opengl 1.1@texwrap formats bordercolor-swizzled,Fail
 spec@!opengl 1.1@texwrap formats bordercolor-swizzled@GL_ALPHA12- swizzled- border color only,Fail
@@ -595,6 +538,7 @@ spec@!opengl 2.0@gl-2.0-active-sampler-conflict,Crash
 spec@!opengl 2.0@gl-2.0-edgeflag,Fail
 spec@!opengl 2.0@gl-2.0-edgeflag-immediate,Fail
 spec@!opengl 2.0@gl-2.0-shader-materials,Fail
+spec@!opengl 2.0@tex3d-npot,Fail
 spec@!opengl 2.1@polygon-stipple-fs,Fail
 spec@!opengl es 2.0@glsl-fs-pointcoord,Fail
 spec@apple_sync@clientwaitsync-errors,Crash
@@ -646,7 +590,7 @@ spec@arb_internalformat_query2@all internalformat_<x>_type pname checks@GL_INTER
 spec@arb_internalformat_query2@max dimensions related pname checks,Crash
 spec@arb_internalformat_query2@max dimensions related pname checks@GL_MAX_WIDTH,Fail
 spec@arb_pixel_buffer_object@fbo-pbo-readpixels-small,Fail
-spec@arb_pixel_buffer_object@texsubimage pbo,Timeout
+spec@arb_pixel_buffer_object@texsubimage-unpack pbo,Fail
 spec@arb_point_parameters@arb_point_parameters-point-attenuation,Fail
 spec@arb_point_parameters@arb_point_parameters-point-attenuation@Aliased combinations,Fail
 spec@arb_point_parameters@arb_point_parameters-point-attenuation@Antialiased combinations,Fail
@@ -690,7 +634,10 @@ spec@ext_disjoint_timer_query@simple,Fail
 spec@ext_framebuffer_object@fbo-3d,Fail
 spec@ext_framebuffer_object@fbo-blending-formats,Fail
 spec@ext_framebuffer_object@fbo-cubemap,Fail
-spec@ext_framebuffer_object@fbo-depthtex,Crash
+
+# recent regression probably due to shader swizzles
+spec@ext_framebuffer_object@fbo-depth-sample-compare,Fail
+
 spec@ext_framebuffer_object@fbo-flushing-2,Fail
 spec@ext_framebuffer_object@fbo-readpixels-depth-formats,Fail
 spec@ext_framebuffer_object@fbo-readpixels-depth-formats@GL_DEPTH24_STENCIL8/GL_UNSIGNED_SHORT,Fail
@@ -733,7 +680,7 @@ spec@ext_packed_depth_stencil@texwrap formats bordercolor-swizzled@GL_DEPTH24_ST
 spec@ext_packed_depth_stencil@texwrap formats bordercolor@GL_DEPTH24_STENCIL8- border color only,Fail
 spec@ext_texture_compression_rgtc@fbo-generatemipmap-formats,Fail
 spec@ext_texture_compression_rgtc@rgtc-teximage-01,Fail
-spec@ext_texture_compression_rgtc@rgtc-teximage-02,Crash
+spec@ext_texture_compression_rgtc@rgtc-teximage-02,Fail
 spec@ext_texture_compression_rgtc@texwrap formats bordercolor,Fail
 spec@ext_texture_compression_rgtc@texwrap formats bordercolor-swizzled,Fail
 spec@ext_texture_compression_rgtc@texwrap formats bordercolor-swizzled@GL_COMPRESSED_RED_RGTC1- swizzled- border color only,Fail
@@ -809,23 +756,16 @@ spec@ext_texture_srgb@texwrap formats-s3tc bordercolor@GL_COMPRESSED_SRGB_ALPHA_
 spec@ext_texture_srgb@texwrap formats-s3tc bordercolor@GL_COMPRESSED_SRGB_ALPHA_S3TC_DXT5_EXT- border color only,Fail
 spec@ext_texture_srgb@texwrap formats-s3tc bordercolor@GL_COMPRESSED_SRGB_S3TC_DXT1_EXT- border color only,Fail
 spec@ext_timer_query@time-elapsed,Fail
-spec@ext_timer_query@timer_query,Fail
 spec@glsl-1.10@execution@built-in-functions@vs-op-selection-bool-bvec4-bvec4,Fail
-spec@glsl-1.10@execution@copy-propagation@glsl-copy-propagation-loop-1,Fail
 spec@glsl-1.10@execution@copy-propagation@glsl-vs-copy-propagation-1,Fail
-spec@glsl-1.10@execution@discard@glsl-fs-discard-04,Fail
-spec@glsl-1.10@execution@glsl-fs-convolution-2,Fail
-spec@glsl-1.10@execution@glsl-fs-if-nested-loop,Fail
 spec@glsl-1.10@execution@glsl-fs-texture2d-mipmap-const-bias-01,Fail
 spec@glsl-1.10@execution@glsl-fs-texture2d-mipmap-const-bias-02.shader_test,Fail
 spec@glsl-1.10@execution@glsl-fs-texture2d-mipmap-const-bias-03,Fail
 spec@glsl-1.10@execution@glsl-fs-texture2d-mipmap-const-bias-05,Fail
-spec@glsl-1.10@execution@glsl-fs-uniform-sampler-array,Crash
 spec@glsl-1.10@execution@glsl-vs-if-nested-loop,Fail
 spec@glsl-1.10@execution@glsl-vs-large-uniform-array,Fail
 spec@glsl-1.10@execution@glsl-vs-vectorize-between-basic-blocks-loop,Fail
 spec@glsl-1.10@execution@loops@glsl-fs-loop-300,Fail
-spec@glsl-1.10@execution@loops@glsl-fs-loop-vec4-counter,Fail
 spec@glsl-1.10@execution@loops@glsl-vs-loop-300,Fail
 spec@glsl-1.10@execution@temp-array-indexing@glsl-fs-vec4-indexing-temp-dst-in-nested-loop-combined,Fail
 spec@glsl-1.10@execution@temp-array-indexing@glsl-fs-vec4-indexing-temp-src-in-nested-loop-combined,Fail
@@ -842,12 +782,8 @@ spec@glsl-1.10@execution@vs-loop-partial-unroll-multiple-breaks-loop-phi,Fail
 spec@glsl-1.10@execution@vs-loop-variable-iteration-limit-unroll4,Fail
 spec@glsl-1.10@execution@vs-nested-return-sibling-loop,Fail
 spec@glsl-1.10@execution@vs-nested-return-sibling-loop2,Fail
-spec@glsl-1.20@execution@fs-function-inout-array-of-structs,Fail
 spec@glsl-1.20@execution@fs-nan-builtin-max,Fail
 spec@glsl-1.20@execution@fs-nan-builtin-min,Fail
-spec@glsl-1.20@execution@out-parameter-indexing@fs-inout-index-two-level,Fail
-spec@glsl-1.20@execution@vs-nan-builtin-max,Fail
-spec@glsl-1.20@execution@vs-nan-builtin-min,Fail
 spec@glsl-es-1.00@execution@glsl-no-vertex-attribs,Fail
 spec@intel_performance_query@intel_performance_query-issue_2235,Fail
 spec@nv_conditional_render@blitframebuffer,Fail
@@ -858,6 +794,3 @@ spec@nv_half_float@attribs-half-float,Fail
 spec@nv_primitive_restart@dlist,Fail
 spec@oes_draw_elements_base_vertex@oes_draw_elements_base_vertex-drawelements,Fail
 spec@oes_draw_elements_base_vertex@oes_draw_elements_base_vertex-multidrawelements,Fail
-
-# recent regression probably due to shader swizzles
-spec@ext_framebuffer_object@fbo-depth-sample-compare,Fail
