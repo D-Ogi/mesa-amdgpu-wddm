@@ -29,6 +29,7 @@
 #include "util/ralloc.h"
 #include "util/hash_table.h"
 #include "util/u_upload_mgr.h"
+#include "util/u_dual_blend.h"
 #include "tgsi/tgsi_dump.h"
 #include "compiler/nir/nir.h"
 #include "compiler/nir/nir_builder.h"
@@ -663,6 +664,10 @@ v3d_update_compiled_fs(struct v3d_context *v3d, enum mesa_prim prim_mode)
                 !(v3d->active_queries && v3d->current_oq);
 
         key->software_blend = v3d->framebuffer_soft_blend || v3d->blend->use_software;
+        key->force_dual_color_blend =
+                v3d->screen->dual_color_blend_by_location &&
+                v3d->blend->base.rt[0].blend_enable &&
+                util_blend_state_is_dual(&v3d->blend->base, 0);
 
         for (int i = 0; i < v3d->framebuffer.nr_cbufs; i++) {
                 const struct pipe_surface *cbuf = &v3d->framebuffer.cbufs[i];

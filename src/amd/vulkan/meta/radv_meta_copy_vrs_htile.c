@@ -77,8 +77,7 @@ get_pipeline(struct radv_device *device, struct radv_image *image, VkPipeline *p
 
 void
 radv_copy_vrs_htile(struct radv_cmd_buffer *cmd_buffer, struct radv_image_view *vrs_iview, const VkRect2D *rect,
-                    struct radv_image *dst_image, uint32_t base_array_layer, uint64_t htile_va,
-                    bool read_htile_value)
+                    struct radv_image *dst_image, uint32_t base_array_layer, uint64_t htile_va, bool read_htile_value)
 {
    struct radv_device *device = radv_cmd_buffer_device(cmd_buffer);
    VkPipelineLayout layout;

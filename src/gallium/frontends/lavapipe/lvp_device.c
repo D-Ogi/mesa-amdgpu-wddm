@@ -128,7 +128,7 @@ static const struct vk_instance_extension_table lvp_instance_extensions_supporte
 #ifdef VK_USE_PLATFORM_METAL_EXT
    .EXT_metal_surface                        = true,
 #endif
-#ifndef VK_USE_PLATFORM_WIN32_KHR
+#if defined(LVP_USE_WSI_PLATFORM) && !defined(VK_USE_PLATFORM_WIN32_KHR)
    .EXT_headless_surface                     = true,
 #endif
 };
@@ -276,7 +276,9 @@ static const struct vk_device_extension_table lvp_device_extensions_supported = 
 #endif
    .EXT_mesh_shader                       = true,
    .EXT_multisampled_render_to_single_sampled = true,
-   .EXT_multisampled_render_to_swapchain = true,
+#ifdef LVP_USE_WSI_PLATFORM
+   .EXT_multisampled_render_to_swapchain  = true,
+#endif
    .EXT_multi_draw                        = true,
    .EXT_mutable_descriptor_type           = true,
    .EXT_nested_command_buffer             = true,
@@ -459,8 +461,8 @@ lvp_get_features(const struct lvp_physical_device *pdevice,
       .alphaToOne                               = true,
       .multiViewport                            = true,
       .samplerAnisotropy                        = true,
-      .textureCompressionETC2                   = false,
-      .textureCompressionASTC_LDR               = false,
+      .textureCompressionETC2                   = true,
+      .textureCompressionASTC_LDR               = true,
       .textureCompressionBC                     = true,
       .occlusionQueryPrecise                    = true,
       .pipelineStatisticsQuery                  = true,
@@ -634,8 +636,10 @@ lvp_get_features(const struct lvp_physical_device *pdevice,
       /* VK_EXT_multisampled_render_to_single_sampled */
       .multisampledRenderToSingleSampled = true,
 
+#ifdef LVP_USE_WSI_PLATFORM
       /* VK_EXT_multisampled_render_to_swapchain */
       .multisampledRenderToSwapchain = true,
+#endif
 
       /* VK_EXT_mutable_descriptor_type */
       .mutableDescriptorType = true,
@@ -1521,6 +1525,8 @@ lvp_physical_device_init(struct lvp_physical_device *device,
    device->pscreen = pipe_loader_create_screen_vk(device->pld, true, false);
    if (!device->pscreen)
       return vk_error(instance, VK_ERROR_OUT_OF_HOST_MEMORY);
+   device->drv_pscreen = device->pscreen->get_driver_pipe_screen ?
+      device->pscreen->get_driver_pipe_screen(device->pscreen) : device->pscreen;
    for (unsigned i = 0; i < ARRAY_SIZE(device->drv_options); i++)
       device->drv_options[i] = device->pscreen->nir_options[MIN2(i, MESA_SHADER_COMPUTE)];
 
@@ -1551,9 +1557,6 @@ lvp_physical_device_init(struct lvp_physical_device *device,
    if (supported_dmabuf_bits & DRM_PRIME_CAP_IMPORT)
       device->vk.supported_extensions.ANDROID_external_memory_android_hardware_buffer = true;
 #endif
-
-   /* SNORM blending on llvmpipe fails CTS - disable by default */
-   device->snorm_blend = debug_get_bool_option("LVP_SNORM_BLEND", false);
 
    lvp_get_features(device, &device->vk.supported_features);
    lvp_get_properties(device, &device->vk.properties);
@@ -1833,7 +1836,7 @@ VKAPI_ATTR void VKAPI_CALL lvp_GetPhysicalDeviceMemoryProperties2(
       LIST_FOR_EACH_ENTRY(instance, &instance_list, link) {
          struct lvp_physical_device *device;
          LIST_FOR_EACH_ENTRY(device, &instance->vk.physical_devices.list, vk.link) {
-            uint64_t mem_file_size = llvmpipe_get_mem_file_size(device->pscreen);
+            uint64_t mem_file_size = llvmpipe_get_mem_file_size(device->drv_pscreen);
             props->heapUsage[0] += mem_file_size;
          }
       }
@@ -2014,6 +2017,7 @@ VKAPI_ATTR VkResult VKAPI_CALL lvp_CreateDevice(
    device->vk.command_buffer_ops = &lvp_cmd_buffer_ops;
 
    device->pscreen = physical_device->pscreen;
+   device->drv_pscreen = physical_device->drv_pscreen;
 
    device->shader_destroys = UTIL_DYNARRAY_INIT;
    simple_mtx_init(&device->shader_destroys_lock, mtx_plain);
@@ -2064,9 +2068,9 @@ VKAPI_ATTR VkResult VKAPI_CALL lvp_CreateDevice(
       .seamless_cube_map = 1,
       .max_lod = 0.25,
    };
-   device->null_texture_handle = llvmpipe_create_texture_handle(device->pscreen,
+   device->null_texture_handle = llvmpipe_create_texture_handle(device->drv_pscreen,
       &(struct pipe_sampler_view){ 0 }, &null_sampler);
-   device->null_image_handle = llvmpipe_create_image_handle(device->pscreen,
+   device->null_image_handle = llvmpipe_create_image_handle(device->drv_pscreen,
       &(struct pipe_image_view){ 0 });
 
    device->bda_texture_handles = UTIL_DYNARRAY_INIT;
@@ -2085,8 +2089,8 @@ VKAPI_ATTR VkResult VKAPI_CALL lvp_CreateDevice(
    return VK_SUCCESS;
 
 fail_meta:
-   llvmpipe_delete_image_handle(device->pscreen, device->null_image_handle);
-   llvmpipe_delete_texture_handle(device->pscreen, device->null_texture_handle);
+   llvmpipe_delete_image_handle(device->drv_pscreen, device->null_image_handle);
+   llvmpipe_delete_texture_handle(device->drv_pscreen, device->null_texture_handle);
    pipe_resource_reference(&device->zero_buffer, NULL);
    simple_mtx_destroy(&device->bda_lock);
    _mesa_hash_table_fini(&device->bda, NULL);
@@ -2114,17 +2118,17 @@ VKAPI_ATTR void VKAPI_CALL lvp_DestroyDevice(
    vk_meta_device_finish(&device->vk, &device->meta);
 
    util_dynarray_foreach(&device->bda_texture_handles, struct lp_texture_handle *, handle)
-      llvmpipe_delete_texture_handle(device->pscreen, *handle);
+      llvmpipe_delete_texture_handle(device->drv_pscreen, *handle);
 
    util_dynarray_fini(&device->bda_texture_handles);
 
    util_dynarray_foreach(&device->bda_image_handles, struct lp_texture_handle *, handle)
-      llvmpipe_delete_image_handle(device->pscreen, *handle);
+      llvmpipe_delete_image_handle(device->drv_pscreen, *handle);
 
    util_dynarray_fini(&device->bda_image_handles);
 
-   llvmpipe_delete_texture_handle(device->pscreen, device->null_texture_handle);
-   llvmpipe_delete_image_handle(device->pscreen, device->null_image_handle);
+   llvmpipe_delete_texture_handle(device->drv_pscreen, device->null_texture_handle);
+   llvmpipe_delete_image_handle(device->drv_pscreen, device->null_image_handle);
 
    device->queue[0].ctx->delete_fs_state(device->queue[0].ctx, device->noop_fs);
 
@@ -2804,9 +2808,9 @@ lvp_sampler_init(struct lvp_device *device, struct lp_sampler_descriptor *desc, 
    state.reduction_mode = (enum pipe_tex_reduction_mode)vk_state->reduction_mode;
    memcpy(&state.border_color, &vk_state->border_color_value, sizeof(vk_state->border_color_value));
 
-   struct lp_texture_handle *texture_handle = llvmpipe_create_texture_handle(device->pscreen, NULL, &state);
+   struct lp_texture_handle *texture_handle = llvmpipe_create_texture_handle(device->drv_pscreen, NULL, &state);
    desc->sampler_index = texture_handle->sampler_index;
-   llvmpipe_delete_texture_handle(device->pscreen, texture_handle);
+   llvmpipe_delete_texture_handle(device->drv_pscreen, texture_handle);
 
    lp_jit_sampler_from_pipe(&desc->jit, &state);
 }

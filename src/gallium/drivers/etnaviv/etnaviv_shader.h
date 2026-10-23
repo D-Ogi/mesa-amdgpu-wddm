@@ -105,6 +105,7 @@ struct etna_shader {
    struct etna_screen *screen;
 
    uint16_t tex_lod_samplers;
+   uint32_t textures_used;
 
    struct util_shader_variant_list variants;
 

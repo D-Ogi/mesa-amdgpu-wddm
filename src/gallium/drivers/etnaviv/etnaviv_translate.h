@@ -24,6 +24,7 @@
 #ifndef H_TRANSLATE
 #define H_TRANSLATE
 
+#include "layout/eil_format.h"
 #include "pipe/p_defines.h"
 #include "util/format/u_formats.h"
 #include "pipe/p_state.h"
@@ -281,7 +282,7 @@ translate_depth_format(enum pipe_format fmt)
 static inline uint32_t
 translate_ts_format(enum pipe_format fmt)
 {
-   fmt = translate_emulated_format_z32f(fmt);
+   fmt = eil_format_emulated(fmt);
 
    /* Note: Pipe format convention is LSB to MSB, VIVS is MSB to LSB */
    switch (fmt) {
@@ -319,7 +320,7 @@ static inline uint32_t
 translate_rs_format(enum pipe_format fmt, bool halti5)
 {
    fmt = util_format_linear(fmt);
-   fmt = translate_emulated_format_z32f(fmt);
+   fmt = eil_format_emulated(fmt);
 
    /* Note: Pipe format convention is LSB to MSB, VIVS is MSB to LSB */
    switch (fmt) {
@@ -373,7 +374,7 @@ static inline uint32_t
 translate_blt_format(enum pipe_format fmt)
 {
    fmt = util_format_linear(fmt);
-   fmt = translate_emulated_format_z32f(fmt);
+   fmt = eil_format_emulated(fmt);
 
    /* Note: Pipe format convention is LSB to MSB, VIVS is MSB to LSB */
    switch (fmt) {
@@ -550,7 +551,7 @@ static inline uint32_t
 translate_clear_depth_stencil(enum pipe_format format, double depth,
                               uint8_t stencil)
 {
-   format = translate_emulated_format_z32f(format);
+   format = eil_format_emulated(format);
 
    uint32_t clear_value = util_pack_z_stencil(format, depth, stencil);
 

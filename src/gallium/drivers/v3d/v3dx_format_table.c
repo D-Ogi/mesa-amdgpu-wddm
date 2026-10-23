@@ -137,12 +137,12 @@ static const struct v3d_format format_table[] = {
         FORMAT(R32G32B32A32_SINT, RGBA32I,      RGBA32I,     SWIZ_XYZW, 32, 4, false),
         FORMAT(R32G32B32A32_UINT, RGBA32UI,     RGBA32UI,    SWIZ_XYZW, 32, 4, false),
 
-        FORMAT(A8_SINT,           R8I,          R8I,         SWIZ_000X, 16, 0, false),
-        FORMAT(A8_UINT,           R8UI,         R8UI,        SWIZ_000X, 16, 0, false),
-        FORMAT(A16_SINT,          R16I,         R16I,        SWIZ_000X, 16, 0, false),
-        FORMAT(A16_UINT,          R16UI,        R16UI,       SWIZ_000X, 16, 0, false),
-        FORMAT(A32_SINT,          R32I,         R32I,        SWIZ_000X, 32, 1, false),
-        FORMAT(A32_UINT,          R32UI,        R32UI,       SWIZ_000X, 32, 1, false),
+        FORMAT(A8_SINT,           NO,           R8I,         SWIZ_000X, 16, 0, false),
+        FORMAT(A8_UINT,           NO,           R8UI,        SWIZ_000X, 16, 0, false),
+        FORMAT(A16_SINT,          NO,           R16I,        SWIZ_000X, 16, 0, false),
+        FORMAT(A16_UINT,          NO,           R16UI,       SWIZ_000X, 16, 0, false),
+        FORMAT(A32_SINT,          NO,           R32I,        SWIZ_000X, 32, 1, false),
+        FORMAT(A32_UINT,          NO,           R32UI,       SWIZ_000X, 32, 1, false),
 
         FORMAT(R11G11B10_FLOAT,   R11F_G11F_B10F, R11F_G11F_B10F, SWIZ_XYZ1, 16, 0, true),
         FORMAT(R9G9B9E5_FLOAT,    NO,             RGB9_E5,        SWIZ_XYZ1, 16, 0, true),

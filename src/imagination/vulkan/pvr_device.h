@@ -34,6 +34,7 @@
 #include "pvr_winsys.h"
 
 typedef struct _pco_ctx pco_ctx;
+typedef struct _pdsc_program pdsc_program;
 
 struct pvr_border_color_table;
 struct pvr_device_static_clear_state;
@@ -149,6 +150,22 @@ struct pvr_device {
    } null_state;
 
    struct pvr_border_color_table *border_color_table;
+
+   /* Render target state for geometry-only kicks outside a render pass. */
+   struct {
+      struct pvr_rt_dataset *rt_dataset;
+      struct pvr_suballoc_bo *ppp_state_bo;
+      size_t ppp_state_size;
+   } dummy_rt;
+
+   struct {
+      pdsc_program *xfb_init;
+      pdsc_program *xfb_main;
+      pdsc_program *xfb_end;
+      pdsc_program *xfb_vertex_count;
+      pdsc_program *xfb_query_begin;
+      pdsc_program *xfb_query_end;
+   } pdsc_precomp_programs;
 
    simple_mtx_t rs_mtx;
    struct list_head render_states;

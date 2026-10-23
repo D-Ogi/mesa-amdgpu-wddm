@@ -2071,6 +2071,20 @@ static const struct {
    { "add (8) r0.4<2>:b r2<16;2,4>:w r4:w",   SAME_ERROR, { .ge = 200 } },
    { "add (8) r0.4<2>:b r2.2<16;2,4>:w r4:w", SAME_ERROR, { .ge = 200 } },
 
+   /* Source 0. Packed B->B cases. */
+   { "mov (16) r40.0<1>:ub r20.0<8;2,4>:ub",  VALID, { .ge = 200 } },
+   { "mov (16) r40.16<1>:ub r21.0<8;2,4>:ub", VALID, { .ge = 200 } },
+   { "mov (16) r40.32<1>:ub r22.0<8;2,4>:ub", VALID, { .ge = 200 } },
+   { "mov (16) r40.48<1>:ub r23.0<8;2,4>:ub", VALID, { .ge = 200 } },
+   { "mov (16) r40.0<1>:ub r20.0<4;1,0>:ub",  VALID, { .ge = 200 } },
+   { "mov (16) r40.16<1>:ub r21.0<4;1,0>:ub", VALID, { .ge = 200 } },
+   { "mov (16) r40.32<1>:ub r22.0<4;1,0>:ub", VALID, { .ge = 200 } },
+   { "mov (16) r40.48<1>:ub r23.0<4;1,0>:ub", VALID, { .ge = 200 } },
+   { "mov (16) r40.4<1>:ub r20.0<8;2,4>:ub",
+     "Invalid register region for source 0. See special restrictions section.", { .ge = 200 }
+   },
+   { "mov (16) r40.20<1>:ub r21.0<8;2,4>:ub", SAME_ERROR, { .ge = 200 } },
+
    /* Source 1. One element per dword channel. */
    { "add (8) r0:d r2:d r4:w",    VALID, { .ge = 200, .lt = 350 } },
    { "add (8) r0<2>:w r2:d r4:w", VALID, { .ge = 200, .lt = 350 } },

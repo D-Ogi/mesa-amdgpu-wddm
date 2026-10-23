@@ -1064,8 +1064,8 @@ panfrost_create_screen(int fd, const struct pipe_screen_config *config,
 
    unsigned core_count = pan_query_core_count(&dev->kmod.dev->props);
 
-   snprintf(screen->renderer_string, sizeof(screen->renderer_string),
-            "%s MC%u (Panfrost)", dev->model->name, core_count);
+   pan_model_device_name(screen->renderer_string, sizeof(screen->renderer_string),
+                         dev->model, core_count, " (Panfrost)");
 
    screen->heap_memory_percent =
       driQueryOptionf(config->options, "heap_memory_percent");

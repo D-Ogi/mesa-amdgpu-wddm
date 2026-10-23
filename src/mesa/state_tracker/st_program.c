@@ -658,8 +658,6 @@ static const struct nir_shader_compiler_options draw_nir_options = {
    .lower_extract_word = true,
    .lower_insert_byte = true,
    .lower_insert_word = true,
-   .lower_uadd_carry = true,
-   .lower_usub_borrow = true,
    .lower_mul_2x32_64 = true,
    .lower_ifind_msb = true,
    .lower_int64_options = nir_lower_imul_2x32_64,
@@ -863,6 +861,7 @@ st_create_common_variant(struct st_context *st,
       tex_opts.saturate_s = key->gl_clamp[0];
       tex_opts.saturate_t = key->gl_clamp[1];
       tex_opts.saturate_r = key->gl_clamp[2];
+      tex_opts.saturate_lod_zero = key->gl_clamp[3];
       NIR_PASS(finalize, state.ir.nir, nir_lower_tex, &tex_opts);
    }
 
@@ -1150,6 +1149,7 @@ st_create_fp_variant(struct st_context *st,
       tex_opts.saturate_s = key->gl_clamp[0];
       tex_opts.saturate_t = key->gl_clamp[1];
       tex_opts.saturate_r = key->gl_clamp[2];
+      tex_opts.saturate_lod_zero = key->gl_clamp[3];
       NIR_PASS(finalize, state.ir.nir, nir_lower_tex, &tex_opts);
    }
 

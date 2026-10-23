@@ -204,14 +204,12 @@ dri2_get_image(struct dri_drawable *read, int x, int y, int w, int h, char *data
 /* HACK: technically we should have swrast_null, instead of these.
  */
 const __DRIswrastLoaderExtension swrast_pbuffer_loader_extension = {
-   .base = {__DRI_SWRAST_LOADER, 1},
    .getDrawableInfo = dri2_get_pbuffer_drawable_info,
    .putImage = dri2_put_image,
    .getImage = dri2_get_image,
 };
 
 const __DRIkopperLoaderExtension kopper_pbuffer_loader_extension = {
-   .base = {__DRI_KOPPER_LOADER, 1},
    .GetDrawableInfo = dri2_kopper_get_pbuffer_drawable_info,
    .SetSurfaceCreateInfo = NULL,
 };
@@ -562,8 +560,6 @@ dri2_lookup_egl_image_validated(void *image, void *data)
 }
 
 const __DRIimageLookupExtension image_lookup_extension = {
-   .base = {__DRI_IMAGE_LOOKUP, 2},
-
    .validateEGLImage = dri2_validate_egl_image,
    .lookupEGLImageValidated = dri2_lookup_egl_image_validated,
 };
@@ -821,7 +817,7 @@ dri2_create_screen(_EGLDisplay *disp)
           */
          if (strcmp(dri2_dpy->driver_name, driver_name_display_gpu) == 0) {
             dri2_dpy->dri_screen_display_gpu = driCreateNewScreen3(
-               0, dri2_dpy->fd_display_gpu, dri2_dpy->loader_extensions,
+               0, dri2_dpy->fd_display_gpu, dri2_dpy->loader_funcs,
                type, &dri2_dpy->driver_configs, false, dri2_dpy->multibuffers_available, disp);
          }
          free(driver_name_display_gpu);
@@ -830,7 +826,7 @@ dri2_create_screen(_EGLDisplay *disp)
 
    int screen_fd = dri2_dpy->swrast_not_kms ? -1 : dri2_dpy->fd_render_gpu;
    dri2_dpy->dri_screen_render_gpu = driCreateNewScreen3(
-      0, screen_fd, dri2_dpy->loader_extensions, type,
+      0, screen_fd, dri2_dpy->loader_funcs, type,
       &dri2_dpy->driver_configs, false, dri2_dpy->multibuffers_available, disp);
 
    if (dri2_dpy->dri_screen_render_gpu == NULL) {
@@ -953,8 +949,6 @@ dri2_initialize(_EGLDisplay *disp)
    dri2_dpy = dri2_egl_display(disp);
    p_atomic_inc(&dri2_dpy->ref_count);
 
-   mtx_init(&dri2_dpy->lock, mtx_plain);
-
    return EGL_TRUE;
 }
 
@@ -1041,6 +1035,7 @@ dri2_display_destroy(_EGLDisplay *disp)
          free((struct dri_config *)dri2_dpy->driver_configs[i]);
       free(dri2_dpy->driver_configs);
    }
+   mtx_destroy(&dri2_dpy->lock);
    free(dri2_dpy);
    disp->DriverData = NULL;
 }
@@ -1053,6 +1048,8 @@ dri2_display_create(_EGLDisplay *disp)
       _eglError(EGL_BAD_ALLOC, "eglInitialize");
       return NULL;
    }
+
+   mtx_init(&dri2_dpy->lock, mtx_plain);
 
    dri2_dpy->fd_render_gpu = -1;
    dri2_dpy->fd_display_gpu = -1;
@@ -1476,8 +1473,8 @@ dri2_make_current(_EGLDisplay *disp, _EGLSurface *dsurf, _EGLSurface *rsurf,
          dri2_surf_update_fence_fd(old_ctx, old_disp, old_dsurf);
    }
 
-   ddraw = (dsurf) ? dri2_dpy->vtbl->get_dri_drawable(dsurf) : NULL;
-   rdraw = (rsurf) ? dri2_dpy->vtbl->get_dri_drawable(rsurf) : NULL;
+   ddraw = (dsurf) ? dri2_surface_get_dri_drawable(dsurf) : NULL;
+   rdraw = (rsurf) ? dri2_surface_get_dri_drawable(rsurf) : NULL;
    cctx = (dri2_ctx) ? dri2_ctx->dri_context : NULL;
 
    if (cctx) {
@@ -1505,9 +1502,9 @@ dri2_make_current(_EGLDisplay *disp, _EGLSurface *dsurf, _EGLSurface *rsurf,
          _eglPutContext(old_ctx);
 
          ddraw =
-            (old_dsurf) ? dri2_dpy->vtbl->get_dri_drawable(old_dsurf) : NULL;
+            (old_dsurf) ? dri2_surface_get_dri_drawable(old_dsurf) : NULL;
          rdraw =
-            (old_rsurf) ? dri2_dpy->vtbl->get_dri_drawable(old_rsurf) : NULL;
+            (old_rsurf) ? dri2_surface_get_dri_drawable(old_rsurf) : NULL;
          cctx = (old_ctx) ? dri2_egl_context(old_ctx)->dri_context : NULL;
 
          /* undo the previous driUnbindContext */
@@ -1644,7 +1641,7 @@ dri2_flush_drawable_for_swapbuffers_flags(
    enum __DRI2throttleReason throttle_reason)
 {
    struct dri2_egl_display *dri2_dpy = dri2_egl_display(disp);
-   struct dri_drawable *dri_drawable = dri2_dpy->vtbl->get_dri_drawable(draw);
+   struct dri_drawable *dri_drawable = dri2_surface_get_dri_drawable(draw);
 
    /* flush not available for swrast */
    if (dri2_dpy->swrast_not_kms)
@@ -1676,16 +1673,17 @@ dri2_flush_drawable_for_swapbuffers(_EGLDisplay *disp, _EGLSurface *draw)
 }
 
 static EGLBoolean
-dri2_swap_buffers(_EGLDisplay *disp, _EGLSurface *surf)
+dri2_swap_buffers_with_damage(_EGLDisplay *disp, _EGLSurface *surf,
+                              const EGLint *rects, EGLint n_rects)
 {
    struct dri2_egl_display *dri2_dpy = dri2_egl_display(disp);
-   struct dri_drawable *dri_drawable = dri2_dpy->vtbl->get_dri_drawable(surf);
+   struct dri_drawable *dri_drawable = dri2_surface_get_dri_drawable(surf);
    _EGLContext *ctx = _eglGetCurrentContext();
    EGLBoolean ret;
 
    if (ctx && surf)
       dri2_surf_update_fence_fd(ctx, disp, surf);
-   ret = dri2_dpy->vtbl->swap_buffers(disp, surf);
+   ret = dri2_dpy->vtbl->swap_buffers(disp, surf, rects, n_rects);
 
    /* SwapBuffers marks the end of the frame; reset the damage region for
     * use again next time.
@@ -1697,29 +1695,9 @@ dri2_swap_buffers(_EGLDisplay *disp, _EGLSurface *surf)
 }
 
 static EGLBoolean
-dri2_swap_buffers_with_damage(_EGLDisplay *disp, _EGLSurface *surf,
-                              const EGLint *rects, EGLint n_rects)
+dri2_swap_buffers(_EGLDisplay *disp, _EGLSurface *surf)
 {
-   struct dri2_egl_display *dri2_dpy = dri2_egl_display(disp);
-   struct dri_drawable *dri_drawable = dri2_dpy->vtbl->get_dri_drawable(surf);
-   _EGLContext *ctx = _eglGetCurrentContext();
-   EGLBoolean ret;
-
-   if (ctx && surf)
-      dri2_surf_update_fence_fd(ctx, disp, surf);
-   if (dri2_dpy->vtbl->swap_buffers_with_damage)
-      ret =
-         dri2_dpy->vtbl->swap_buffers_with_damage(disp, surf, rects, n_rects);
-   else
-      ret = dri2_dpy->vtbl->swap_buffers(disp, surf);
-
-   /* SwapBuffers marks the end of the frame; reset the damage region for
-    * use again next time.
-    */
-   if (ret && disp->Extensions.KHR_partial_update)
-      dri_set_damage_region(dri_drawable, 0, NULL);
-
-   return ret;
+   return dri2_swap_buffers_with_damage(disp, surf, NULL, 0);
 }
 
 static EGLBoolean
@@ -1727,7 +1705,7 @@ dri2_set_damage_region(_EGLDisplay *disp, _EGLSurface *surf, EGLint *rects,
                        EGLint n_rects)
 {
    struct dri2_egl_display *dri2_dpy = dri2_egl_display_lock(disp);
-   struct dri_drawable *drawable = dri2_dpy->vtbl->get_dri_drawable(surf);
+   struct dri_drawable *drawable = dri2_surface_get_dri_drawable(surf);
 
    if (!disp->Extensions.KHR_partial_update) {
       mtx_unlock(&dri2_dpy->lock);
@@ -1767,7 +1745,7 @@ dri2_wait_client(_EGLDisplay *disp, _EGLContext *ctx)
 {
    struct dri2_egl_display *dri2_dpy = dri2_egl_display(disp);
    _EGLSurface *surf = ctx->DrawSurface;
-   struct dri_drawable *dri_drawable = dri2_dpy->vtbl->get_dri_drawable(surf);
+   struct dri_drawable *dri_drawable = dri2_surface_get_dri_drawable(surf);
 
    /* FIXME: If EGL allows frontbuffer rendering for window surfaces,
     * we need to copy fake to real here.*/
@@ -1795,7 +1773,7 @@ dri2_bind_tex_image(_EGLDisplay *disp, _EGLSurface *surf, EGLint buffer)
    struct dri2_egl_context *dri2_ctx;
    _EGLContext *ctx;
    GLint format, target;
-   struct dri_drawable *dri_drawable = dri2_dpy->vtbl->get_dri_drawable(surf);
+   struct dri_drawable *dri_drawable = dri2_surface_get_dri_drawable(surf);
 
    ctx = _eglGetCurrentContext();
    dri2_ctx = dri2_egl_context(ctx);
@@ -2192,7 +2170,8 @@ dri2_check_dma_buf_attribs(const _EGLImageAttribs *attrs)
 static unsigned
 dri2_num_fourcc_format_planes(EGLint format)
 {
-   switch (format) {
+   /* The driver decides which formats it takes in big-endian form. */
+   switch (format & ~DRM_FORMAT_BIG_ENDIAN) {
    case DRM_FORMAT_R8:
    case DRM_FORMAT_RG88:
    case DRM_FORMAT_GR88:

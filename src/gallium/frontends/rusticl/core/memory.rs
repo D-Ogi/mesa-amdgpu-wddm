@@ -834,7 +834,8 @@ impl MemBase {
         //   valid non-zero buffer object as long as the size argument is no larger than the size
         //   argument passed in the original clSVMAlloc call. The new buffer object returned has the
         //   shared memory as the underlying storage.
-        let svm = bit_check(flags, CL_MEM_USE_HOST_PTR)
+        let svm = flags
+            .are_any_bits_set(CL_MEM_USE_HOST_PTR)
             .then(|| context.get_svm_alloc(host_ptr as usize))
             .flatten();
 
@@ -843,9 +844,9 @@ impl MemBase {
             let offset = unsafe { host_ptr.byte_offset_from(svm_ptr) } as usize;
             Allocation::new_svm(Arc::clone(svm_alloc), offset)
         } else {
-            let res_type = if bit_check(flags, CL_MEM_ALLOC_HOST_PTR) {
+            let res_type = if flags.are_any_bits_set(CL_MEM_ALLOC_HOST_PTR) {
                 ResourceType::Staging
-            } else if bit_check(flags, CL_MEM_IMMUTABLE_EXT) {
+            } else if flags.are_any_bits_set(CL_MEM_IMMUTABLE_EXT) {
                 ResourceType::Immutable
             } else {
                 ResourceType::Normal
@@ -854,13 +855,13 @@ impl MemBase {
             let buffer = context.create_buffer(
                 size,
                 host_ptr,
-                bit_check(flags, CL_MEM_COPY_HOST_PTR),
+                flags.are_any_bits_set(CL_MEM_COPY_HOST_PTR),
                 bda,
                 res_type,
             )?;
 
             // We can only keep the host_ptr when `CL_MEM_USE_HOST_PTR` is set.
-            if !bit_check(flags, CL_MEM_USE_HOST_PTR) {
+            if flags.are_no_bits_set(CL_MEM_USE_HOST_PTR) {
                 host_ptr = ptr::null_mut()
             }
 
@@ -968,9 +969,9 @@ impl MemBase {
             image_desc.image_array_size = 1;
         }
 
-        let res_type = if bit_check(flags, CL_MEM_ALLOC_HOST_PTR) {
+        let res_type = if flags.are_any_bits_set(CL_MEM_ALLOC_HOST_PTR) {
             ResourceType::Staging
-        } else if bit_check(flags, CL_MEM_IMMUTABLE_EXT) {
+        } else if flags.are_any_bits_set(CL_MEM_IMMUTABLE_EXT) {
             ResourceType::Immutable
         } else {
             ResourceType::Normal
@@ -983,7 +984,7 @@ impl MemBase {
                 &image_desc,
                 image_format,
                 host_ptr,
-                bit_check(flags, CL_MEM_COPY_HOST_PTR),
+                flags.are_any_bits_set(CL_MEM_COPY_HOST_PTR),
                 res_type,
             );
 
@@ -994,13 +995,13 @@ impl MemBase {
                     &image_desc,
                     image_format,
                     host_ptr,
-                    bit_check(flags, CL_MEM_COPY_HOST_PTR),
+                    flags.are_any_bits_set(CL_MEM_COPY_HOST_PTR),
                     ResourceType::Normal,
                 )
             }
 
             // We can only keep the host_ptr when `CL_MEM_USE_HOST_PTR` is set.
-            if !bit_check(flags, CL_MEM_USE_HOST_PTR) {
+            if flags.are_no_bits_set(CL_MEM_USE_HOST_PTR) {
                 host_ptr = ptr::null_mut()
             }
 
@@ -1170,7 +1171,7 @@ impl MemBase {
         self.context
             .find_svm_alloc(self.host_ptr() as usize)
             .is_some()
-            && bit_check(self.flags, CL_MEM_USE_HOST_PTR)
+            && self.flags.are_any_bits_set(CL_MEM_USE_HOST_PTR)
     }
 
     pub fn get_res_for_access(

@@ -3870,6 +3870,19 @@ bi_shader_stage_name(bi_context *ctx)
 }
 
 static void
+bi_normalize_stats(struct bifrost_stats *stats, const bi_context *ctx)
+{
+   const struct pan_model *model = ctx->inputs->model;
+   if (model) {
+      assert(model->rates.fma && model->rates.texel);
+      stats->arith /= model->rates.fma;
+      stats->t /= model->rates.texel;
+   }
+   stats->v /= 16.0;
+   stats->ldst /= 1.0;
+}
+
+static void
 bi_gather_stats(bi_context *ctx, unsigned size, struct bifrost_stats *out)
 {
    struct bi_stats counts = {0};
@@ -3895,23 +3908,14 @@ bi_gather_stats(bi_context *ctx, unsigned size, struct bifrost_stats *out)
    /* Thread count and register pressure are traded off only on v7 */
    bool full_threads = (ctx->arch == 7 && ctx->info.work_reg_count <= 32);
 
-   const struct pan_model *model =
-      pan_get_model(ctx->inputs->gpu_id, ctx->inputs->gpu_variant);
-   if (model == NULL) {
-      /* Get G52 by default: */
-      model = pan_get_model(((uint64_t)0x7202) << 16, 0);
-      assert(model);
-   }
-   assert(model->rates.fma && model->rates.texel);
-
    *out = (struct bifrost_stats){
       .instrs = counts.nr_ins,
       .tuples = counts.nr_tuples,
       .clauses = counts.nr_clauses,
-      .arith = ((float)counts.nr_arith) / model->rates.fma,
-      .t = ((float)counts.nr_texture) / model->rates.texel,
-      .v = ((float)counts.nr_varying) / 16.0,
-      .ldst = ((float)counts.nr_ldst) / 1.0,
+      .arith = ((float)counts.nr_arith),
+      .t = ((float)counts.nr_texture),
+      .v = ((float)counts.nr_varying),
+      .ldst = ((float)counts.nr_ldst),
       .code_size = size,
       .preloads = ctx->arch == 7 ? bi_count_preload_cost(ctx) : 0,
       .threads = full_threads ? 2 : 1,
@@ -3922,7 +3926,7 @@ bi_gather_stats(bi_context *ctx, unsigned size, struct bifrost_stats *out)
       .registers_used = util_bitcount64(counts.reg_mask),
       .uniforms_used = counts.nr_fau_uniforms,
    };
-
+   bi_normalize_stats(out, ctx);
    out->cycles = MAX2(out->arith, MAX3(out->t, out->v, out->ldst));
 }
 
@@ -3973,19 +3977,29 @@ pan_va_compute_alu_bound(uint8_t arch, float fma, float cvt, float sfu)
 }
 
 static void
+va_normalize_stats(struct valhall_stats *stats, const bi_context *ctx)
+{
+   const struct pan_model *model = ctx->inputs->model;
+   if (!model)
+      return;
+
+   assert(model->rates.fma != 0 && model->rates.cvt != 0 &&
+          model->rates.sfu != 0 && model->rates.varying != 0 &&
+          model->rates.texel != 0);
+   stats->fma /= model->rates.fma;
+   stats->cvt /= model->rates.cvt;
+   stats->sfu /= model->rates.sfu;
+   stats->v /= model->rates.varying;
+   stats->t /= model->rates.texel;
+   stats->ls /= 1.0;
+}
+
+static void
 va_count_stats(bi_context *ctx, unsigned nr_ins, unsigned size,
                const struct va_stats *counts,
                struct valhall_stats *out)
 {
-   const struct pan_model *model =
-      pan_get_model(ctx->inputs->gpu_id, ctx->inputs->gpu_variant);
-
-   if (model == NULL) {
-      /* Get G57 by default: */
-      model = pan_get_model(((uint64_t)0x9001) << 16, 0);
-      assert(model);
-   }
-   unsigned arch = pan_arch(ctx->inputs->gpu_id);
+   assert(ctx->arch == ctx->inputs->arch);
 
    struct valhall_stats stats = {
       .instrs = nr_ins,
@@ -4008,21 +4022,12 @@ va_count_stats(bi_context *ctx, unsigned nr_ins, unsigned size,
 
    /* v14 doesn't have rates anymore */
    const bool output_normalized =
-      !(arch >= 14 || !!(bifrost_debug & BIFROST_DBG_STATSABS));
+      !(ctx->arch >= 14 || !!(bifrost_debug & BIFROST_DBG_STATSABS));
 
-   if (output_normalized) {
-      assert(model->rates.fma != 0 && model->rates.cvt != 0 &&
-             model->rates.sfu != 0 && model->rates.varying != 0 &&
-             model->rates.texel != 0);
-      stats.fma /= model->rates.fma;
-      stats.cvt /= model->rates.cvt;
-      stats.sfu /= model->rates.sfu;
-      stats.v /= model->rates.varying;
-      stats.t /= model->rates.texel;
-      stats.ls /= 1.0;
-   }
+   if (output_normalized)
+      va_normalize_stats(&stats, ctx);
 
-   stats.alu = pan_va_compute_alu_bound(arch, stats.fma, stats.cvt, stats.sfu);
+   stats.alu = pan_va_compute_alu_bound(ctx->arch, stats.fma, stats.cvt, stats.sfu);
    stats.cycles = MAX4(stats.alu, stats.v, stats.t, stats.ls);
 
    *out = stats;
@@ -4243,8 +4248,8 @@ bi_compile_variant_nir(nir_shader *nir,
    ctx->inputs = inputs;
    ctx->nir = nir;
    ctx->stage = nir->info.stage;
-   ctx->quirks = bifrost_get_quirks(inputs->gpu_id);
-   ctx->arch = pan_arch(inputs->gpu_id);
+   ctx->quirks = bifrost_get_quirks(inputs->arch, inputs->model);
+   ctx->arch = inputs->arch; // TODO: remove duplication
    ctx->info = info;
    ctx->idvs = idvs;
    ctx->malloc_idvs = (ctx->arch >= 9) && !inputs->no_idvs;
@@ -4496,6 +4501,7 @@ bi_compile_variant_nir(nir_shader *nir,
    }
 
    if (bifrost_debug & BIFROST_DBG_SHADERS && !skip_internal) {
+#ifdef WITH_PANFROST_DISASSEMBLE
       if (ctx->arch <= 8) {
          disassemble_bifrost(stderr, binary->data + offset,
                              binary->size - offset,
@@ -4505,6 +4511,7 @@ bi_compile_variant_nir(nir_shader *nir,
                              binary->size - offset,
                              bifrost_debug & BIFROST_DBG_VERBOSE);
       }
+#endif
 
       if (ctx->constant_pool_size_B) {
          fprintf(stderr, "constant pool (%u bytes at offset %u):\n",
@@ -4530,7 +4537,7 @@ bi_compile_variant_nir(nir_shader *nir,
       va_gather_hsr_info(ctx, pinfo);
 
    /* update info struct */
-   pan_shader_update_info(pinfo, ctx->nir, inputs);
+   pan_shader_update_info(pinfo, ctx->nir, ctx->arch);
 
    if ((bifrost_debug & (BIFROST_DBG_SHADERDB|BIFROST_DBG_STATSFULL))
        && !skip_internal) {
@@ -4691,8 +4698,8 @@ static void
 pan_stats_verbose(FILE *f, const char *prefix, bi_context *ctx, const struct pan_stats *stats,
                   const struct pan_shader_info *info)
 {
-   pan_stats_verbose_prologue(f, prefix, ctx->inputs->gpu_id,
-                              ctx->inputs->gpu_variant, ctx->arch);
+   pan_stats_verbose_prologue(f, prefix, ctx->inputs->arch,
+                              ctx->inputs->model);
 
    switch (stats->isa) {
    case PAN_STAT_VALHALL: {

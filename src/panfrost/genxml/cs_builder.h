@@ -237,7 +237,6 @@ cs_builder_init(struct cs_builder *b, const struct cs_builder_conf *conf,
                 struct cs_buffer root_buffer)
 {
    memset(b, 0, sizeof(*b));
-   util_dynarray_init(&b->blocks.instrs, NULL);
    b->conf = *conf;
    b->root_chunk.buffer = root_buffer;
    b->cur_chunk.buffer = root_buffer;
@@ -2253,6 +2252,12 @@ cs_req_res(struct cs_builder *b, uint32_t res_mask)
       I.tiler = res_mask & CS_TILER_RES;
       I.idvs = res_mask & CS_IDVS_RES;
       I.fragment = res_mask & CS_FRAG_RES;
+#if PAN_ARCH >= 11
+      I.rt = false;
+#endif
+#if PAN_ARCH >= 14
+      I.neural = false;
+#endif
    }
 }
 

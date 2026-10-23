@@ -11,6 +11,7 @@
 #include <executorch/runtime/backend/interface.h>
 #include <executorch/runtime/core/error.h>
 #include <executorch/runtime/core/evalue.h>
+#include <executorch/runtime/core/exec_aten/util/dim_order_util.h>
 #include <executorch/runtime/core/result.h>
 #include <executorch/runtime/executor/pte_data_map.h>
 
@@ -29,6 +30,7 @@ using executorch::runtime::ArrayRef;
 using executorch::runtime::Error;
 using executorch::runtime::EValue;
 using executorch::runtime::FreeableBuffer;
+using executorch::runtime::is_contiguous_dim_order;
 using executorch::runtime::Result;
 using executorch::runtime::Span;
 
@@ -46,6 +48,10 @@ class TorxBackend final
       unsigned num_outputs = 0;
       unsigned inputs[MAX_IO_TENSORS];
       unsigned outputs[MAX_IO_TENSORS];
+      /* Scratch for the NCHW boundary path, sized on the first execute()
+       * and freed in destroy(); unused on the pass-through path. */
+      void *in_bufs[MAX_IO_TENSORS];
+      void *out_bufs[MAX_IO_TENSORS];
    };
 
    bool ensure_backend() const
@@ -118,6 +124,8 @@ class TorxBackend final
       if (handle == nullptr) {
          return Error::MemoryAllocationFailed;
       }
+      for (unsigned i = 0; i < MAX_IO_TENSORS; i++)
+         handle->in_bufs[i] = handle->out_bufs[i] = nullptr;
 
       /* Layout defined by torx_blob_header/torx_io_map in torx_backend.h. */
       const uint8_t *blob = static_cast<const uint8_t *>(processed->data());
@@ -195,16 +203,11 @@ class TorxBackend final
    {
       auto ehandle = static_cast<ExecutionHandle *>(handle);
 
-      /* TODO: In the future, tensors should carry information about their
-       * memory layout so the backend can avoid these explicit transposes.
-       */
-
-      /* --- Prepare and transpose inputs (NCHW -> NHWC) --- */
+      /* --- Prepare inputs (transpose NCHW -> NHWC, else pass through) --- */
       unsigned gallium_in_count = 0;
       unsigned input_idxs[MAX_IO_TENSORS];
       void    *input_data[MAX_IO_TENSORS];
       bool     input_signed[MAX_IO_TENSORS];
-      void    *in_nhwc_bufs[MAX_IO_TENSORS];
 
       for (unsigned i = 0; i < ehandle->num_inputs; i++) {
          unsigned gallium_idx = ehandle->inputs[i];
@@ -213,28 +216,31 @@ class TorxBackend final
             continue;
 
          auto &t = args[i]->toTensor();
-         if (t.dim() != 4) {
-            fprintf(stderr, "TorxBackend: expected 4-D input tensor, got %zd-D\n",
-                    (ssize_t)t.dim());
-            for (unsigned j = 0; j < gallium_in_count; j++)
-               free(in_nhwc_bufs[j]);
-            return Error::InvalidArgument;
+         void *data = t.mutable_data_ptr();
+
+         /* Only a rank-4 contiguous (NCHW) tensor is transposed at the
+          * boundary: a channels-last one is already NHWC in memory, and a
+          * tensor of any other rank keeps its own memory order. */
+         bool needs_transpose = t.dim() == 4 &&
+            is_contiguous_dim_order(t.dim_order().data(), t.dim_order().size());
+         if (needs_transpose) {
+            ssize_t N = t.sizes()[0], C = t.sizes()[1];
+            ssize_t H = t.sizes()[2], W = t.sizes()[3];
+            if (!ehandle->in_bufs[i]) {
+               ehandle->in_bufs[i] = malloc(N * C * H * W);
+               if (!ehandle->in_bufs[i])
+                  return Error::MemoryAllocationFailed;
+            }
+            transpose_nchw_nhwc(static_cast<int8_t *>(ehandle->in_bufs[i]),
+                                static_cast<const int8_t *>(t.data_ptr()),
+                                N, C, H, W, true);
+            data = ehandle->in_bufs[i];
          }
-
-         ssize_t N = t.sizes()[0], C = t.sizes()[1];
-         ssize_t H = t.sizes()[2], W = t.sizes()[3];
-         auto *nhwc = static_cast<int8_t *>(malloc(N * C * H * W));
-
-         /* Direct int8 — just transpose */
-         const int8_t *sdata = static_cast<const int8_t *>(t.data_ptr());
-         transpose_nchw_nhwc(nhwc, sdata,
-                             N, C, H, W, true);
 
          unsigned gi = gallium_in_count++;
          input_idxs[gi] = gallium_idx;
          input_signed[gi] = true;
-         in_nhwc_bufs[gi] = nhwc;
-         input_data[gi] = nhwc;
+         input_data[gi] = data;
       }
 
       /* --- Execute on NPU (skip for Q/DQ-only delegates) --- */
@@ -244,15 +250,13 @@ class TorxBackend final
             gallium_in_count, input_idxs, input_data, input_signed);
       }
 
-      for (unsigned i = 0; i < gallium_in_count; i++)
-         free(in_nhwc_bufs[i]);
-
-      /* --- Read and transpose outputs (NHWC -> NCHW) --- */
+      /* --- Read outputs (into the EValue on the pass-through path, into
+       * the handle's scratch on the NCHW path) --- */
       unsigned gallium_out_count = 0;
       unsigned output_idxs[MAX_IO_TENSORS];
       void    *output_data[MAX_IO_TENSORS];
       bool     output_signed[MAX_IO_TENSORS];
-      void    *out_nhwc_bufs[MAX_IO_TENSORS];
+      bool     out_transpose[MAX_IO_TENSORS];
       /* Track which output index maps to which args entry. */
       unsigned out_args_idx[MAX_IO_TENSORS];
 
@@ -265,20 +269,23 @@ class TorxBackend final
          }
 
          auto &t = args[ehandle->num_inputs + i]->toTensor();
-         if (t.dim() != 4) {
-            fprintf(stderr, "TorxBackend: expected 4-D output tensor, got %zd-D\n",
-                    (ssize_t)t.dim());
-            return Error::InvalidArgument;
+         unsigned gi = gallium_out_count++;
+
+         out_transpose[gi] = t.dim() == 4 &&
+            is_contiguous_dim_order(t.dim_order().data(), t.dim_order().size());
+         if (out_transpose[gi]) {
+            if (!ehandle->out_bufs[i]) {
+               ehandle->out_bufs[i] = malloc(t.numel());
+               if (!ehandle->out_bufs[i])
+                  return Error::MemoryAllocationFailed;
+            }
+            output_data[gi] = ehandle->out_bufs[i];
+         } else {
+            output_data[gi] = t.mutable_data_ptr();
          }
 
-         ssize_t N = t.sizes()[0], C = t.sizes()[1];
-         ssize_t H = t.sizes()[2], W = t.sizes()[3];
-
-         unsigned gi = gallium_out_count++;
          output_idxs[gi] = gallium_idx;
          output_signed[gi] = true;
-         out_nhwc_bufs[gi] = malloc(N * C * H * W);
-         output_data[gi] = out_nhwc_bufs[gi];
          out_args_idx[gi] = i;
       }
 
@@ -289,16 +296,16 @@ class TorxBackend final
       }
 
       for (unsigned gi = 0; gi < gallium_out_count; gi++) {
+         if (!out_transpose[gi])
+            continue;
          unsigned i = out_args_idx[gi];
          auto &t = args[ehandle->num_inputs + i]->toTensor();
          ssize_t N = t.sizes()[0], C = t.sizes()[1];
          ssize_t H = t.sizes()[2], W = t.sizes()[3];
 
-         /* Direct int8 → just transpose NHWC→NCHW */
          transpose_nchw_nhwc(static_cast<int8_t *>(t.mutable_data_ptr()),
-                             static_cast<const int8_t *>(out_nhwc_bufs[gi]),
+                             static_cast<const int8_t *>(ehandle->out_bufs[i]),
                              N, C, H, W, false);
-         free(out_nhwc_bufs[gi]);
       }
 
       return Error::Ok;
@@ -307,7 +314,15 @@ class TorxBackend final
    void destroy(DelegateHandle *handle) const override
    {
       auto ehandle = static_cast<ExecutionHandle *>(handle);
-      if (ehandle && ehandle->subgraph && torx_backend && torx_backend->ml_dev)
+      if (!ehandle)
+         return;
+
+      for (unsigned i = 0; i < MAX_IO_TENSORS; i++) {
+         free(ehandle->in_bufs[i]);
+         free(ehandle->out_bufs[i]);
+      }
+
+      if (ehandle->subgraph && torx_backend && torx_backend->ml_dev)
          torx_backend->ml_dev->ml_subgraph_destroy(
             torx_backend->ml_dev, ehandle->subgraph);
    }

@@ -35,6 +35,7 @@
 #include "main/shaderobj.h"
 #include "main/state.h"
 #include "main/version.h"
+#include "main/varray.h"
 #include "main/hash.h"
 #include "program/prog_cache.h"
 #include "vbo/vbo.h"
@@ -501,6 +502,13 @@ st_create_context_priv(struct gl_context *ctx, struct pipe_context *pipe,
    st->cso_context = cso_create_context(pipe, cso_flags);
    ctx->cso_context = st->cso_context;
 
+   for (unsigned i = 0; i < PIPE_FORMAT_COUNT; i++) {
+      if (cso_vertex_format_needs_vbuf(st->cso_context, (enum pipe_format)i))
+         BITSET_SET(ctx->Array.VertexFormatFallbacks, i);
+   }
+   _mesa_update_vao_format_fallbacks(ctx, &ctx->Array.DefaultVAOState);
+   _mesa_update_vao_format_fallbacks(ctx, ctx->Array.DefaultVAO);
+
 #define ST_STATE(FLAG, st_update) st->update_functions[FLAG] = st_update;
 #include "st_atom_list.h"
 #undef ST_STATE
@@ -779,14 +787,7 @@ st_init_driver_functions(struct pipe_screen *screen,
    st_init_draw_functions(screen, functions);
 
    functions->NewProgram = _mesa_new_program;
-   st_init_flush_functions(screen, functions);
-
-   /* GL_ARB_get_program_binary */
    functions->ShaderCacheSerializeDriverBlob =  st_serialise_nir_program;
-   functions->ProgramBinarySerializeDriverBlob =
-      st_serialise_nir_program_binary;
-   functions->ProgramBinaryDeserializeDriverBlob =
-      st_deserialise_nir_program;
 }
 
 

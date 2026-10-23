@@ -17,7 +17,8 @@
           (version 1 to 4 : "1:4") -->
 
 <!ATTLIST engine       engine_name_match CDATA #REQUIRED
-                       engine_versions CDATA #IMPLIED>
+                       engine_versions CDATA #IMPLIED
+                       application_versions CDATA #IMPLIED>
 
 <!ELEMENT shader       (option+)>
 <!ATTLIST shader       type CDATA #REQUIRED

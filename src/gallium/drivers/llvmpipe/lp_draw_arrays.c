@@ -177,4 +177,5 @@ void
 llvmpipe_init_draw_funcs(struct llvmpipe_context *llvmpipe)
 {
    llvmpipe->pipe.draw_vbo = llvmpipe_draw_vbo;
+   llvmpipe->pipe.draw_vbo_buffers = util_draw_vbo_buffers;
 }

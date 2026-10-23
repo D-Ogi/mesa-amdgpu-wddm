@@ -1776,9 +1776,16 @@ blorp_emit_hiz_op(struct blorp_batch *batch,
     *    D32_FLOAT, then +/-DENORM values are also allowed.
     *
     * Set the bounds to match our hardware limits.
+    *
+    * On GFX35+, it is possible to skip the viewport emission.
+    * (HSD 14022502615).
     */
-   if (params->depth.enabled && params->hiz_op == ISL_AUX_OP_FAST_CLEAR)
-      blorp_emit_cc_viewport(batch);
+   if (params->depth.enabled && params->hiz_op == ISL_AUX_OP_FAST_CLEAR) {
+      if (batch->flags & BLORP_BATCH_NO_HIZ_EMIT_DEPTH_CLEAR_VIEWPORT)
+         assert(batch->blorp->isl_dev->info->ver >= 35);
+      else
+         blorp_emit_cc_viewport(batch);
+   }
 
    /* Make sure to disable fragment shader, a previous draw might have enabled
     * a SIMD32 shader and we could be dispatching threads here with MSAA 16x
@@ -2254,8 +2261,8 @@ blorp_exec_compute(struct blorp_batch *batch, const struct blorp_params *params)
    assert(cs_prog_data->local_size[2] == 1);
    uint32_t push_const_offset;
    uint32_t push_const_size;
-   uint32_t surfaces_offset;
-   uint32_t sampler_offset;
+   uint32_t surfaces_offset = 0;
+   uint32_t sampler_offset = 0;
 
    UNUSED void *push_const_ptr =
       blorp_get_compute_push_const(batch, params, dispatch.threads,

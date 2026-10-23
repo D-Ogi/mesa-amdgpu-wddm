@@ -96,7 +96,10 @@ impl Format {
         self.supports_texturing(dev) && !self.is_integer()
     }
 
-    pub fn supports_buffer(&self) -> bool {
+    pub fn supports_buffer(&self, dev: &nv_device_info) -> bool {
+        if dev.cls_eng3d < clb097::MAXWELL_A && self.is_srgb() {
+            return false;
+        }
         self.info().support() & NIL_FORMAT_SUPPORTS_BUFFER_BIT != 0
     }
 
@@ -142,10 +145,10 @@ pub extern "C" fn nil_format_supports_filtering(
 
 #[unsafe(no_mangle)]
 pub extern "C" fn nil_format_supports_buffer(
-    _dev: &nv_device_info,
+    dev: &nv_device_info,
     p_format: pipe_format,
 ) -> bool {
-    Format::try_from(p_format).is_ok_and(|f| f.supports_buffer())
+    Format::try_from(p_format).is_ok_and(|f| f.supports_buffer(dev))
 }
 
 #[unsafe(no_mangle)]

@@ -1834,20 +1834,34 @@ fn test_op_ldsm() {
 fn expected_render_enable(
     mode: cl90b5::SetRenderEnableCMode,
     data: &[u64],
+    sm: u8,
 ) -> bool {
     use cl90b5::SetRenderEnableCMode::*;
+
+    let data_u32: &[u32] = unsafe {
+        core::slice::from_raw_parts(data.as_ptr() as *const u32, data.len() * 2)
+    };
+
     match mode {
         True => true,
         False => false,
-        Conditional => data[0] > u32::MAX.into(),
-        RenderIfEqual => data[0] == data[2],
-        RenderIfNotEqual => data[0] != data[2],
+
+        // New generation behaviors
+        Conditional if sm >= 70 => data[0] > u32::MAX.into(),
+        RenderIfEqual if sm >= 75 => data[0] == data[2],
+        RenderIfNotEqual if sm >= 75 => data[0] != data[2],
+
+        // Old generation behaviors
+        Conditional => data_u32[0] != 0,
+        RenderIfEqual => data_u32[0] == data_u32[4],
+        RenderIfNotEqual => data_u32[0] != data_u32[4],
     }
 }
 
 #[test]
 fn test_render_enable() -> io::Result<()> {
     let run = RunSingleton::get();
+    let sm = run.sm.sm();
     let dev = run.run.device();
     let ctx = Context::new(dev.clone()).expect("Failed to create context");
 
@@ -1960,7 +1974,7 @@ fn test_render_enable() -> io::Result<()> {
     for &mode in modes {
         let check = |data: &[u64]| -> io::Result<()> {
             let actual = run(mode, data)?;
-            let expected = expected_render_enable(mode, data);
+            let expected = expected_render_enable(mode, data, sm);
             if actual != expected {
                 println!("input: {mode:?} {data:?}");
             }

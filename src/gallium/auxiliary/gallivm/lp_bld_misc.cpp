@@ -316,7 +316,7 @@ void
 lp_build_fill_mattrs(std::vector<std::string> &MAttrs)
 {
 
-#if DETECT_ARCH_ARM
+#if DETECT_ARCH_ARM || DETECT_ARCH_AARCH64
    /* llvm-3.3+ implements sys::getHostCPUFeatures for Arm,
     * which allows us to enable/disable code generation based
     * on the results of cpuid on these architectures.
@@ -378,7 +378,7 @@ lp_build_fill_mattrs(std::vector<std::string> &MAttrs)
    MAttrs.push_back(util_get_cpu_caps()->has_avx512vbmi ? "+avx512vbmi"  : "-avx512vbmi");
    MAttrs.push_back(util_get_cpu_caps()->has_avx512fp16 ? "+avx512fp16"  : "-avx512fp16");
 #endif
-#if DETECT_ARCH_ARM
+#if DETECT_ARCH_ARM || DETECT_ARCH_AARCH64
    if (!util_get_cpu_caps()->has_neon) {
       MAttrs.push_back("-neon");
       MAttrs.push_back("-crypto");
@@ -401,6 +401,15 @@ lp_build_fill_mattrs(std::vector<std::string> &MAttrs)
    if (util_get_cpu_caps()->has_altivec) {
       MAttrs.push_back(util_get_cpu_caps()->has_vsx ? "+vsx" : "-vsx");
    }
+#if !DETECT_ARCH_PPC_64
+   /*
+    * RuntimeDyld implements only the ADDR16 relocations on 32-bit PowerPC,
+    * so it can't resolve the R_PPC_REL24 of a direct call to a function
+    * outside of the module. A long call loads the address of the callee with
+    * a pair of ADDR16 relocations instead.
+    */
+   MAttrs.push_back("+longcall");
+#endif
 #endif
 
 #if DETECT_ARCH_MIPS64

@@ -195,7 +195,9 @@ impl Platform {
         }
 
         // No need to check system SVM devices
-        let devs = devs.iter().filter(|dev| !dev.system_svm_supported());
+        let devs = devs
+            .iter()
+            .filter(|dev| !dev.system_svm_supported() && dev.svm_supported());
 
         let (start, end) = devs.clone().filter_map(|dev| dev.vm_alloc_range()).reduce(
             |(min_a, max_a), (min_b, max_b)| (cmp::max(min_a, min_b), cmp::min(max_a, max_b)),

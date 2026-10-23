@@ -382,8 +382,8 @@ struct v3dv_device {
     */
    struct v3dv_bo *default_attribute_float;
 
-   /* When nullDescriptor is enabled, this BO provides valid zeroed memory
-    * for null descriptor paths.
+   /* Zeroed BO used for null descriptors (nullDescriptor) and as the
+    * backing for null index buffers (maintenance6).
     */
    struct v3dv_bo *null_bo;
 

@@ -1390,6 +1390,20 @@ ntq_emit_alu(struct v3d_compile *c, nir_alu_instr *instr)
 
         struct qreg result;
 
+        if (instr->op == nir_op_uadd_with_carry_out ||
+            instr->op == nir_op_usub_with_borrow_out) {
+                if (instr->op == nir_op_uadd_with_carry_out)
+                        result = vir_ADD(c, src[0], src[1]);
+                else
+                        result = vir_SUB(c, src[0], src[1]);
+
+                vir_set_pf(c, c->defs[result.index], V3D_QPU_PF_PUSHC);
+                ntq_store_def(c, &instr->def, 0, result);
+                ntq_store_def(c, &instr->def, 1, ntq_emit_cond_to_int(c, V3D_QPU_COND_IFA));
+                return;
+        }
+
+
         switch (instr->op) {
         case nir_op_mov:
                 result = vir_MOV(c, src[0]);
@@ -1792,18 +1806,6 @@ ntq_emit_alu(struct v3d_compile *c, nir_alu_instr *instr)
                 result = vir_MAX(c, src[0], vir_NEG(c, src[0]));
                 break;
 
-        case nir_op_uadd_carry:
-                vir_set_pf(c, vir_ADD_dest(c, vir_nop_reg(), src[0], src[1]),
-                           V3D_QPU_PF_PUSHC);
-                result = ntq_emit_cond_to_int(c, V3D_QPU_COND_IFA);
-                break;
-
-        case nir_op_usub_borrow:
-                vir_set_pf(c, vir_SUB_dest(c, vir_nop_reg(), src[0], src[1]),
-                           V3D_QPU_PF_PUSHC);
-                result = ntq_emit_cond_to_int(c, V3D_QPU_COND_IFA);
-                break;
-
         case nir_op_pack_half_2x16_split:
                 result = vir_VFPACK(c, src[0], src[1]);
                 break;
@@ -2190,6 +2192,17 @@ mem_vectorize_callback(unsigned align_mul, unsigned align_offset,
         if (hole_size > 0 || !nir_num_components_valid(num_components))
                 return false;
 
+        /* Keep robust SSBO stores scalar before robustness lowering, so each
+         * one gets an independent bounds check. Once the lowering runs out of
+         * bounds stores will be dropped and we can safely vectorize any
+         * survivors.
+         */
+        const struct v3d_compile *c = data;
+        if (c->key->robust_storage_access && !c->robust_access_lowered &&
+            low->intrinsic == nir_intrinsic_store_ssbo) {
+                return false;
+        }
+
         /* TMU general access only supports 32-bit vectors */
         if (bit_size > 32)
                 return false;
@@ -2304,6 +2317,7 @@ v3d_optimize_nir(struct v3d_compile *c, struct nir_shader *s)
                                  nir_var_mem_push_const | nir_var_mem_shared |
                                  nir_var_mem_global,
                         .callback = mem_vectorize_callback,
+                        .cb_data = c,
                         .robust_modes = 0,
                 };
                 bool vectorize_progress = false;

@@ -84,8 +84,10 @@ panvk_per_arch(dispatch_precomp)(struct panvk_precomp_ctx *ctx,
       uint64_t fau_ptr = push_uniforms.gpu | (fau_count << 56);
       cs_move64_to(b, cs_reg64(b, PANVK_PRECOMP_FAU), fau_ptr);
 
-      cs_move64_to(b, cs_reg64(b, PANVK_PRECOMP_SPD),
-                   panvk_priv_mem_dev_addr(shader->spd));
+      uint64_t spd_addr =
+         pan_shader_get_spd_addr(&shader->info,
+	                         panvk_priv_mem_dev_addr(shader->spd));
+      cs_move64_to(b, cs_reg64(b, PANVK_PRECOMP_SPD), spd_addr);
 
       cs_move64_to(b, cs_reg64(b, PANVK_PRECOMP_TSD), tsd);
 

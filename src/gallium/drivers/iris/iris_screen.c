@@ -760,6 +760,10 @@ iris_screen_create(int fd, const struct pipe_screen_config *config)
    screen->driconf.force_compute_surface_prefetch =
       driQueryOptionb(config->options, "intel_force_compute_surface_prefetch");
    screen->driconf.enable_tbimr =
+      /* Keep TBIMR disabled until HSDs 14024498401, 14022484703 and 14020415808
+       * are implemented.
+       */
+      (screen->devinfo->verx10 < 350) &&
       driQueryOptionb(config->options, "intel_tbimr");
    screen->driconf.enable_vf_distribution =
       driQueryOptionb(config->options, "intel_vf_distribution");

@@ -169,8 +169,16 @@ static unsigned int get_screen_supported_va_rt_formats(struct pipe_screen *pscre
                                           entrypoint) ||
        pscreen->is_video_format_supported(pscreen, PIPE_FORMAT_YUYV,
                                           profile,
+                                          entrypoint) ||
+       pscreen->is_video_format_supported(pscreen, PIPE_FORMAT_NV16,
+                                          profile,
                                           entrypoint))
       supported_rt_formats |= VA_RT_FORMAT_YUV422;
+
+   if (pscreen->is_video_format_supported(pscreen, PIPE_FORMAT_P210,
+                                          profile,
+                                          entrypoint))
+      supported_rt_formats |= VA_RT_FORMAT_YUV422_10;
 
    if (pscreen->is_video_format_supported(pscreen, PIPE_FORMAT_R8G8B8A8_UNORM,
                                           profile,

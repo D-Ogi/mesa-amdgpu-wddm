@@ -75,6 +75,7 @@ dEQP-VK.compute.shader_object_binary.cooperative_matrix.khr_b.subgroupscope.spac
 dEQP-VK.compute.shader_object_binary.cooperative_matrix.khr_r.subgroupscope.spacetodepth.float16_float16.buffer.rowmajor.tensorlayout
 dEQP-VK.compute.shader_object_spirv.cooperative_matrix.khr_b.subgroupscope.spacetodepth.sint8_sint8.buffer.rowmajor.tensorlayout
 dEQP-VK.compute.shader_object_spirv.cooperative_matrix.khr_r.subgroupscope.spacetodepth.float16_float16.buffer.rowmajor.tensorlayout
+dEQP-VK.memory.allocation.basic.percent_1.forward.count_12
 dEQP-VK.memory.allocation.basic.percent_1.reverse.count_12
 dEQP-VK.rasterization.primitives_multisample_4_bit.static_stipple.bresenham_line_strip_wide
 dEQP-VK.ray_query.builtin.instanceid.tese.aabbs

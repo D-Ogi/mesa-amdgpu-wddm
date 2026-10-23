@@ -394,8 +394,8 @@ emit_set_mode_block(fp_mode_ctx* ctx, Block* block)
             instr->opcode = aco_opcode::v_cvt_f16_f32;
          else
             instr->opcode = aco_opcode::s_cvt_f16_f32;
-      } else if (instr->opcode ==  aco_opcode::p_v_cvt_f16_f32_rtpi ||
-                 instr->opcode ==  aco_opcode::p_v_cvt_f16_f32_rtni) {
+      } else if (instr->opcode == aco_opcode::p_v_cvt_f16_f32_rtpi ||
+                 instr->opcode == aco_opcode::p_v_cvt_f16_f32_rtni) {
          instr_state.require(mode_round16_64, instr->opcode == aco_opcode::p_v_cvt_f16_f32_rtpi
                                                  ? fp_round_pi
                                                  : fp_round_ni);

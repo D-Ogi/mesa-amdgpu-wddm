@@ -49,25 +49,6 @@
 
 struct stw_device *stw_dev = NULL;
 
-static int
-stw_get_param(struct pipe_frontend_screen *fscreen,
-              enum st_manager_param param)
-{
-   switch (param) {
-   case ST_MANAGER_BROKEN_INVALIDATE:
-      /*
-       * Force framebuffer validation on glViewport.
-       *
-       * Certain applications, like Rhinoceros 4, uses glReadPixels
-       * exclusively (never uses SwapBuffers), so framebuffers never get
-       * resized unless we check on glViewport.
-       */
-      return 1;
-   default:
-      return 0;
-   }
-}
-
 
 /** Get the refresh rate for the monitor, in Hz */
 static int
@@ -159,7 +140,14 @@ stw_init(const struct stw_winsys *stw_winsys)
    if (!stw_dev->fscreen)
       goto error1;
 
-   stw_dev->fscreen->get_param = stw_get_param;
+   /*
+    * Force framebuffer validation on glViewport.
+    *
+    * Certain applications, like Rhinoceros 4, uses glReadPixels
+    * exclusively (never uses SwapBuffers), so framebuffers never get
+    * resized unless we check on glViewport.
+    */
+   stw_dev->fscreen->broken_invalidate = true;
 
    InitializeCriticalSection(&stw_dev->screen_mutex);
    InitializeCriticalSection(&stw_dev->ctx_mutex);

@@ -1603,7 +1603,7 @@ class AlgebraicPass(object):
 
             if fp_math_ctrl:
                 xform_defs.append(
-                    f"fp_math_ctrl = (nir_fp_math_control) (fp_math_ctrl & ~({' | '.join(fp_math_ctrl)}));")
+                    f"fp_math_ctrl = (nir_fp_math_control) (fp_math_ctrl & ~({' | '.join(sorted(fp_math_ctrl))}));")
 
             # Do a little setup before our unit_test_assert_eq so some top-level expression conditions pass and
             # we get better coverage.

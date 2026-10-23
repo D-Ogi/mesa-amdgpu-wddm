@@ -631,10 +631,17 @@ emit_scaled_op(isel_context* ctx, Builder& bld, Definition dst, Temp val, aco_op
                                   ->valu();
       valu.neg[0] = true;
       valu.abs[0] = true;
-      scale = bld.vop2_e64(aco_opcode::v_cndmask_b32, bld.def(v1), Operand::c32(0x3f800000),
-                           bld.copy(bld.def(s1), Operand::c32(0x4b800000u)), is_denormal);
-      unscale = bld.vop2_e64(aco_opcode::v_cndmask_b32, bld.def(v1), Operand::c32(0x3f800000),
-                             bld.copy(bld.def(s1), Operand::c32(undo)), is_denormal);
+      if (ctx->options->gfx_level >= GFX10) {
+         scale = bld.vop2_e64(aco_opcode::v_cndmask_b32, bld.def(v1), Operand::c32(0x3f800000),
+                              bld.copy(bld.def(s1), Operand::c32(0x4b800000u)), is_denormal);
+         unscale = bld.vop2_e64(aco_opcode::v_cndmask_b32, bld.def(v1), Operand::c32(0x3f800000),
+                                bld.copy(bld.def(s1), Operand::c32(undo)), is_denormal);
+      } else {
+         scale = bld.vop2(aco_opcode::v_cndmask_b32, bld.def(v1), Operand::c32(0x3f800000),
+                          bld.copy(bld.def(v1), Operand::c32(0x4b800000u)), is_denormal);
+         unscale = bld.vop2(aco_opcode::v_cndmask_b32, bld.def(v1), Operand::c32(0x3f800000),
+                            bld.copy(bld.def(v1), Operand::c32(undo)), is_denormal);
+      }
    } else {
       Temp abs = bld.sop2(aco_opcode::s_and_b32, bld.def(s1), bld.def(s1, scc), val,
                           bld.copy(bld.def(s1), Operand::c32(0x7fffffff)));
@@ -1488,17 +1495,22 @@ visit_alu_instr(isel_context* ctx, nir_alu_instr* instr)
       }
       break;
    }
-   case nir_op_uadd_carry: {
+   case nir_op_uadd_with_carry_out: {
       Temp src0 = get_alu_src(ctx, instr->src[0]);
       Temp src1 = get_alu_src(ctx, instr->src[1]);
-      if (dst.regClass() == s1) {
-         bld.sop2(aco_opcode::s_add_u32, bld.def(s1), bld.scc(Definition(dst)), src0, src1);
+      if (dst.regClass() == s2) {
+         Temp carry = bld.tmp(s1);
+         Temp res =
+            bld.sop2(aco_opcode::s_add_u32, bld.def(s1), bld.scc(Definition(carry)), src0, src1);
+         bld.pseudo(aco_opcode::p_create_vector, Definition(dst), res, carry);
          break;
       }
-      if (dst.regClass() == v1) {
-         Temp carry = bld.vadd32(bld.def(v1), src0, src1, true).def(1).getTemp();
-         bld.vop2_e64(aco_opcode::v_cndmask_b32, Definition(dst), Operand::zero(), Operand::c32(1u),
-                      carry);
+      if (dst.regClass() == v2) {
+         Temp res = bld.tmp(v1);
+         Temp carry = bld.vadd32(Definition(res), src0, src1, true).def(1).getTemp();
+         carry = bld.vop2_e64(aco_opcode::v_cndmask_b32, bld.def(v1), Operand::zero(),
+                              Operand::c32(1u), carry);
+         bld.pseudo(aco_opcode::p_create_vector, Definition(dst), res, carry);
          break;
       }
 
@@ -1508,20 +1520,27 @@ visit_alu_instr(isel_context* ctx, nir_alu_instr* instr)
       Temp src10 = bld.tmp(src1.type(), 1);
       Temp src11 = bld.tmp(dst.type(), 1);
       bld.pseudo(aco_opcode::p_split_vector, Definition(src10), Definition(src11), src1);
-      if (dst.regClass() == s2) {
+      if (dst.regClass() == s4) {
+         Temp carry_lo = bld.tmp(s1);
+         Temp res0 = bld.sop2(aco_opcode::s_add_u32, bld.def(s1), bld.scc(Definition(carry_lo)),
+                              src00, src10);
+
          Temp carry = bld.tmp(s1);
-         bld.sop2(aco_opcode::s_add_u32, bld.def(s1), bld.scc(Definition(carry)), src00, src10);
-         carry = bld.sop2(aco_opcode::s_addc_u32, bld.def(s1), bld.scc(bld.def(s1)), src01, src11,
-                          bld.scc(carry))
-                    .def(1)
-                    .getTemp();
-         bld.pseudo(aco_opcode::p_create_vector, Definition(dst), carry, Operand::zero());
-      } else if (dst.regClass() == v2) {
-         Temp carry = bld.vadd32(bld.def(v1), src00, src10, true).def(1).getTemp();
-         carry = bld.vadd32(bld.def(v1), src01, src11, true, carry).def(1).getTemp();
+         Temp res1 = bld.sop2(aco_opcode::s_addc_u32, bld.def(s1), bld.scc(Definition(carry)),
+                              src01, src11, bld.scc(carry_lo));
+
+         bld.pseudo(aco_opcode::p_create_vector, Definition(dst), res0, res1, carry,
+                    Operand::zero());
+      } else if (dst.regClass() == v4) {
+         Temp res0 = bld.tmp(v1);
+         Temp carry = bld.vadd32(Definition(res0), src00, src10, true).def(1).getTemp();
+
+         Temp res1 = bld.tmp(v1);
+         carry = bld.vadd32(Definition(res1), src01, src11, true, carry).def(1).getTemp();
          carry = bld.vop2_e64(aco_opcode::v_cndmask_b32, bld.def(v1), Operand::zero(),
                               Operand::c32(1u), carry);
-         bld.pseudo(aco_opcode::p_create_vector, Definition(dst), carry, Operand::zero());
+         bld.pseudo(aco_opcode::p_create_vector, Definition(dst), res0, res1, carry,
+                    Operand::zero());
       } else {
          isel_err(&instr->instr, "Unimplemented NIR instr bit size");
       }
@@ -1579,16 +1598,22 @@ visit_alu_instr(isel_context* ctx, nir_alu_instr* instr)
       }
       break;
    }
-   case nir_op_usub_borrow: {
+   case nir_op_usub_with_borrow_out: {
       Temp src0 = get_alu_src(ctx, instr->src[0]);
       Temp src1 = get_alu_src(ctx, instr->src[1]);
-      if (dst.regClass() == s1) {
-         bld.sop2(aco_opcode::s_sub_u32, bld.def(s1), bld.scc(Definition(dst)), src0, src1);
+      if (dst.regClass() == s2) {
+         Temp borrow = bld.tmp(s1);
+         Temp res =
+            bld.sop2(aco_opcode::s_sub_u32, bld.def(s1), bld.scc(Definition(borrow)), src0, src1);
+         bld.pseudo(aco_opcode::p_create_vector, Definition(dst), res, borrow);
          break;
-      } else if (dst.regClass() == v1) {
-         Temp borrow = bld.vsub32(bld.def(v1), src0, src1, true).def(1).getTemp();
-         bld.vop2_e64(aco_opcode::v_cndmask_b32, Definition(dst), Operand::zero(), Operand::c32(1u),
-                      borrow);
+      }
+      if (dst.regClass() == v2) {
+         Temp res = bld.tmp(v1);
+         Temp borrow = bld.vsub32(Definition(res), src0, src1, true).def(1).getTemp();
+         borrow = bld.vop2_e64(aco_opcode::v_cndmask_b32, bld.def(v1), Operand::zero(),
+                               Operand::c32(1u), borrow);
+         bld.pseudo(aco_opcode::p_create_vector, Definition(dst), res, borrow);
          break;
       }
 
@@ -1598,20 +1623,27 @@ visit_alu_instr(isel_context* ctx, nir_alu_instr* instr)
       Temp src10 = bld.tmp(src1.type(), 1);
       Temp src11 = bld.tmp(dst.type(), 1);
       bld.pseudo(aco_opcode::p_split_vector, Definition(src10), Definition(src11), src1);
-      if (dst.regClass() == s2) {
+      if (dst.regClass() == s4) {
+         Temp borrow_lo = bld.tmp(s1);
+         Temp res0 = bld.sop2(aco_opcode::s_sub_u32, bld.def(s1), bld.scc(Definition(borrow_lo)),
+                              src00, src10);
+
          Temp borrow = bld.tmp(s1);
-         bld.sop2(aco_opcode::s_sub_u32, bld.def(s1), bld.scc(Definition(borrow)), src00, src10);
-         borrow = bld.sop2(aco_opcode::s_subb_u32, bld.def(s1), bld.scc(bld.def(s1)), src01, src11,
-                           bld.scc(borrow))
-                     .def(1)
-                     .getTemp();
-         bld.pseudo(aco_opcode::p_create_vector, Definition(dst), borrow, Operand::zero());
-      } else if (dst.regClass() == v2) {
-         Temp borrow = bld.vsub32(bld.def(v1), src00, src10, true).def(1).getTemp();
-         borrow = bld.vsub32(bld.def(v1), src01, src11, true, Operand(borrow)).def(1).getTemp();
+         Temp res1 = bld.sop2(aco_opcode::s_subb_u32, bld.def(s1), bld.scc(Definition(borrow)),
+                              src01, src11, bld.scc(borrow_lo));
+
+         bld.pseudo(aco_opcode::p_create_vector, Definition(dst), res0, res1, borrow,
+                    Operand::zero());
+      } else if (dst.regClass() == v4) {
+         Temp res0 = bld.tmp(v1);
+         Temp borrow = bld.vsub32(Definition(res0), src00, src10, true).def(1).getTemp();
+
+         Temp res1 = bld.tmp(v1);
+         borrow = bld.vsub32(Definition(res1), src01, src11, true, borrow).def(1).getTemp();
          borrow = bld.vop2_e64(aco_opcode::v_cndmask_b32, bld.def(v1), Operand::zero(),
                                Operand::c32(1u), borrow);
-         bld.pseudo(aco_opcode::p_create_vector, Definition(dst), borrow, Operand::zero());
+         bld.pseudo(aco_opcode::p_create_vector, Definition(dst), res0, res1, borrow,
+                    Operand::zero());
       } else {
          isel_err(&instr->instr, "Unimplemented NIR instr bit size");
       }
@@ -2072,7 +2104,8 @@ visit_alu_instr(isel_context* ctx, nir_alu_instr* instr)
       Temp src2 = get_alu_src(ctx, instr->src[2], 1);
 
       unsigned opsel_lo = (instr->src[0].swizzle[0] & 1) | ((instr->src[1].swizzle[0] & 1) << 1);
-      unsigned opsel_hi = (instr->src[0].swizzle[1] & 1) | ((instr->src[1].swizzle[1] & 1) << 1) | 0x4;
+      unsigned opsel_hi =
+         (instr->src[0].swizzle[1] & 1) | ((instr->src[1].swizzle[1] & 1) << 1) | 0x4;
 
       bld.vop3p(aco_opcode::v_dot2_f32_bf16, Definition(dst), src0, src1, src2, opsel_lo, opsel_hi);
       break;
@@ -2098,9 +2131,11 @@ visit_alu_instr(isel_context* ctx, nir_alu_instr* instr)
          Temp src2 = get_alu_src(ctx, instr->src[2], 1);
 
          unsigned opsel_lo = (instr->src[0].swizzle[0] & 1) | ((instr->src[1].swizzle[0] & 1) << 1);
-         unsigned opsel_hi = (instr->src[0].swizzle[1] & 1) | ((instr->src[1].swizzle[1] & 1) << 1) | 0x4;
+         unsigned opsel_hi =
+            (instr->src[0].swizzle[1] & 1) | ((instr->src[1].swizzle[1] & 1) << 1) | 0x4;
 
-         bld.vop3p(aco_opcode::v_dot2_f32_f16, Definition(dst), src0, src1, src2, opsel_lo, opsel_hi);
+         bld.vop3p(aco_opcode::v_dot2_f32_f16, Definition(dst), src0, src1, src2, opsel_lo,
+                   opsel_hi);
       } else {
          isel_err(&instr->instr, "Unimplemented NIR instr bit size");
       }

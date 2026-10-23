@@ -1639,21 +1639,6 @@ VkResult anv_EnumerateInstanceLayerProperties(
    return vk_error(NULL, VK_ERROR_LAYER_NOT_PRESENT);
 }
 
-VkResult
-anv_device_wait(struct anv_device *device, struct anv_bo *bo,
-                int64_t timeout)
-{
-   int ret = anv_gem_wait(device, bo->gem_handle, &timeout);
-   if (ret == -1 && errno == ETIME) {
-      return VK_TIMEOUT;
-   } else if (ret == -1) {
-      /* We don't know the real error. */
-      return vk_device_set_lost(&device->vk, "gem wait failed: %m");
-   } else {
-      return VK_SUCCESS;
-   }
-}
-
 static struct util_vma_heap *
 anv_vma_heap_for_flags(struct anv_device *device,
                        enum anv_bo_alloc_flags alloc_flags)
@@ -1922,7 +1907,7 @@ VkResult anv_AllocateMemory(
           * wait for render complete.
           */
          if (pdevice->drirc.debug.external_memory_implicit_sync &&
-             (image->vk.usage & VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT))
+             (image->vk.usage & VK_IMAGE_USAGE_2_COLOR_ATTACHMENT_BIT_KHR))
             alloc_flags |= ANV_BO_ALLOC_IMPLICIT_WRITE;
       }
    }

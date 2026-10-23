@@ -128,9 +128,14 @@
 #define RADV_NUM_SMOOTH_AA_SAMPLES 4
 
 /* Size of the temporary buffer allocated for transfer queue copy command workarounds.
- * The size is chosen so that it can fit two lines of (1 << 14) blocks at 16 bpp.
+ * The size is chosen so that it can fit two lines of (1 << 14) blocks at 16 bytes per pixel.
  */
 #define RADV_SDMA_TRANSFER_TEMP_BYTES (2 * (1 << 14) * 16)
+
+/* Padding for the temporary buffer size before the actual contents on SDMA2-3.
+ * The size is chosen to be 1 microtile at 16 bytes per pixel.
+ */
+#define RADV_SDMA_TRANSFER_TEMP_PAD_BYTES_SDMA2 (8 * 8 * 16)
 
 #define RADV_VERT_ATTRIB_MAX MAX2(VERT_ATTRIB_MAX, VERT_ATTRIB_GENERIC0 + MAX_VERTEX_ATTRIBS)
 
@@ -141,8 +146,8 @@
 #define RADV_ACCEL_STRUCT_DESC_SIZE  16
 
 /* Descriptor heaps */
-#define RADV_HEAP_RESOURCE  0
-#define RADV_HEAP_SAMPLER   1
+#define RADV_HEAP_RESOURCE 0
+#define RADV_HEAP_SAMPLER  1
 
 /* Number of descriptor heaps */
 #define RADV_MAX_HEAPS (RADV_HEAP_SAMPLER + 1)

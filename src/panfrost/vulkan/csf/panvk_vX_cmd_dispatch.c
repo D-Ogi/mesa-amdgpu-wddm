@@ -29,6 +29,7 @@
 #include "pan_desc.h"
 #include "pan_encoder.h"
 #include "pan_props.h"
+#include "pan_shader.h"
 
 #include <vulkan/vulkan_core.h>
 
@@ -227,9 +228,12 @@ panvk_per_arch(cmd_dispatch_shader)(
          cs_move64_to(b, cs_reg64(b, PANVK_COMPUTE_FAU), fau_ptr);
       }
 
-      if (compute_state_dirty(cmdbuf, CS))
-         cs_move64_to(b, cs_reg64(b, PANVK_COMPUTE_SPD),
-                      panvk_priv_mem_dev_addr(cs->spd));
+      if (compute_state_dirty(cmdbuf, CS)) {
+         uint64_t spd_addr =
+	    pan_shader_get_spd_addr(&cs->info,
+	                            panvk_priv_mem_dev_addr(cs->spd));
+         cs_move64_to(b, cs_reg64(b, PANVK_COMPUTE_SPD), spd_addr);
+      }
 
       cs_move64_to(b, cs_reg64(b, PANVK_COMPUTE_TSD), tsd);
 

@@ -174,13 +174,25 @@ pub fn create_and_queue(
     deps: Vec<Arc<Event>>,
     event: *mut cl_event,
     block: bool,
-    work: EventSig,
+    work: Option<EventSig>,
+) -> CLResult<()> {
+    create_and_queue_with_cleanup(q, cmd_type, deps, event, block, work, None)
+}
+
+pub fn create_and_queue_with_cleanup(
+    q: Arc<Queue>,
+    cmd_type: cl_command_type,
+    deps: Vec<Arc<Event>>,
+    event: *mut cl_event,
+    block: bool,
+    work: Option<EventSig>,
+    cleanup: Option<CleanupSig>,
 ) -> CLResult<()> {
     if deps.iter().any(|dep| dep.is_error()) {
         return Err(CL_EXEC_STATUS_ERROR_FOR_EVENTS_IN_WAIT_LIST);
     }
 
-    let e = Event::new(&q, cmd_type, deps, work)?;
+    let e = Event::new(&q, cmd_type, deps, work, cleanup)?;
     if !event.is_null() {
         // SAFETY: we check for null and valid API use is to pass in a valid pointer
         unsafe {

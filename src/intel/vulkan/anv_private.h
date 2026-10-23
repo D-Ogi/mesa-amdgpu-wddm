@@ -594,6 +594,20 @@ anv_address_add(struct anv_address addr, uint64_t offset)
 }
 
 static inline struct anv_address
+anv_address_align_down(struct anv_address addr, uint64_t alignment)
+{
+   addr.offset -= (int64_t)(anv_address_physical(addr) & (alignment - 1));
+   return addr;
+}
+
+static inline struct anv_address
+anv_address_align(struct anv_address addr, uint64_t alignment)
+{
+   addr.offset += (int64_t)(-anv_address_physical(addr) & (alignment - 1));
+   return addr;
+}
+
+static inline struct anv_address
 anv_address_add_aligned(struct anv_address addr, uint64_t offset, uint32_t alignment)
 {
    addr.offset = align(addr.offset + offset, alignment);
@@ -1117,7 +1131,7 @@ struct anv_pipeline_bind_map {
     * anv_push_constants, we can index up to 1024 bytes minus a few values
     * reserved, see ANV_INLINE_PARAM_* above) to inline data parameters.
     */
-   uint8_t                                      inline_dwords[8];
+   uint8_t                                      inline_dwords[ANV_MAX_INLINE_DWORDS];
 
    /* Bitfield of sets for which the surfaces are accessed */
    uint8_t                                      used_surface_sets;
@@ -2562,6 +2576,7 @@ enum anv_internal_kernel_name {
    ANV_INTERNAL_KERNEL_MEMCPY_COMPUTE,
    ANV_INTERNAL_KERNEL_DGC_GFX_COMPUTE,
    ANV_INTERNAL_KERNEL_DGC_GFX_FRAGMENT,
+   ANV_INTERNAL_KERNEL_DGC_GFX_POSTPROCESS_FRAGMENT,
    ANV_INTERNAL_KERNEL_DGC_CS_COMPUTE,
    ANV_INTERNAL_KERNEL_DGC_CS_FRAGMENT,
    ANV_INTERNAL_KERNEL_DGC_CS_POSTPROCESS_COMPUTE,
@@ -3170,9 +3185,6 @@ anv_device_lookup_bo(struct anv_device *device, uint32_t gem_handle)
    return util_sparse_array_get(&device->bo_cache.bo_map, gem_handle);
 }
 
-VkResult anv_device_wait(struct anv_device *device, struct anv_bo *bo,
-                         int64_t timeout);
-
 VkResult anv_device_print_init(struct anv_device *device);
 void anv_device_print_fini(struct anv_device *device);
 
@@ -3212,7 +3224,6 @@ anv_queue_post_submit(struct anv_queue *queue, VkResult submit_result)
    return result;
 }
 
-int anv_gem_wait(struct anv_device *device, uint32_t gem_handle, int64_t *timeout_ns);
 int anv_gem_set_tiling(struct anv_device *device, uint32_t gem_handle,
                        uint32_t stride, uint32_t tiling);
 int anv_gem_get_tiling(struct anv_device *device, uint32_t gem_handle);
@@ -3574,93 +3585,6 @@ struct anv_vue_header {
    uint32_t RTAIndex; /* RenderTargetArrayIndex */
    uint32_t ViewportIndex;
    float PointWidth;
-};
-
-/** Struct representing a sampled image descriptor
- *
- * This descriptor layout is used for sampled images, bare sampler, and
- * combined image/sampler descriptors.
- */
-struct anv_sampled_image_descriptor {
-   /** Bindless image handle
-    *
-    * This is expected to already be shifted such that the 20-bit
-    * SURFACE_STATE table index is in the top 20 bits.
-    */
-   uint32_t image;
-
-   /** Bindless sampler handle
-    *
-    * This is assumed to be a 32B-aligned SAMPLER_STATE pointer relative
-    * to the dynamic state base address.
-    */
-   uint32_t sampler;
-};
-
-/** Struct representing a storage image descriptor */
-struct anv_storage_image_descriptor {
-   /** Bindless image handles
-    *
-    * These are expected to already be shifted such that the 20-bit
-    * SURFACE_STATE table index is in the top 20 bits.
-    */
-   uint32_t vanilla;
-
-   /** Image depth
-    *
-    * By default the HW RESINFO message allows us to query the depth of an image :
-    *
-    * From the Kaby Lake docs for the RESINFO message:
-    *
-    *    "Surface Type | ... | Blue
-    *    --------------+-----+----------------
-    *    SURFTYPE_3D  | ... | (Depth+1)»LOD"
-    *
-    * With VK_EXT_sliced_view_of_3d, we have to support a slice of a 3D image,
-    * meaning at a depth offset with a new depth value potentially reduced
-    * from the original image. Unfortunately if we change the Depth value of
-    * the image, we then run into issues with Yf/Ys tilings where the HW fetch
-    * data at incorrect locations.
-    *
-    * To solve this, we put the slice depth in the descriptor and recompose
-    * the vec3 (width, height, depth) using this field for z and xy using the
-    * RESINFO result.
-    */
-   uint32_t image_depth;
-
-   /** Image address */
-   uint64_t image_address;
-
-   /** Image tiling mode
-    *
-    * 0 for linear, ~0 otherwise.
-    */
-   uint32_t tile_mode;
-
-   /** Image row pitch in bytes */
-   uint32_t row_pitch_B;
-
-   /** Image Q pitch (rows between array slices) */
-   uint32_t qpitch;
-
-   /** Image Format (enum isl_format) */
-   uint32_t format;
-
-   /** Image View VkImageSubresourceRange::baseArrayLayer */
-   uint32_t min_array_element;
-};
-
-/** Struct representing a address/range descriptor
- *
- * The fields of this struct correspond directly to the data layout of
- * nir_address_format_64bit_bounded_global addresses.  The last field is the
- * offset in the NIR address so it must be zero so that when you load the
- * descriptor you get a pointer to the start of the range.
- */
-struct anv_address_range_descriptor {
-   uint64_t address;
-   uint32_t range;
-   uint32_t zero;
 };
 
 enum anv_descriptor_data {
@@ -4891,6 +4815,13 @@ struct anv_cmd_state {
        * the command streamer or a shader.
        */
       enum anv_pipe_bits                        clear_bits;
+
+      /**
+       * Tracks query pool copy synchronization bits that will need to be
+       * flushed before doing work in vkCmdQueryReset. If a copy operation is
+       * in flight, we need for it complete before resetting the query pool.
+       */
+      enum anv_pipe_bits                        copy_bits;
    } queries;
 
    /**
@@ -6100,8 +6031,12 @@ struct anv_image {
    /* Array pitch of video coding private surfaces */
    uint32_t vid_dmv_top_surface_pitch_B;
    uint32_t av1_cdf_table_pitch_B;
+   uint32_t vid_ds_8x_array_pitch_B;
+   uint32_t vid_ds_4x_array_pitch_B;
 
    struct anv_image_memory_range vid_dmv_top_surface;
+   struct anv_image_memory_range vid_ds_8x_surface;
+   struct anv_image_memory_range vid_ds_4x_surface;
 
    /* Link in the anv_device.image_private_objects list */
    struct list_head link;
@@ -6552,8 +6487,8 @@ isl_surf_usage_flags_t
 anv_image_choose_isl_surf_usage(struct anv_physical_device *device,
                                 VkFormat vk_format,
                                 const VkImageFormatListCreateInfo *format_list_info,
-                                VkImageCreateFlags vk_create_flags,
-                                VkImageUsageFlags vk_usage,
+                                VkImageCreateFlags2KHR vk_create_flags,
+                                VkImageUsageFlags2KHR vk_usage,
                                 isl_surf_usage_flags_t isl_extra_usage,
                                 VkImageAspectFlagBits aspect,
                                 VkImageCompressionFlagsEXT comp_flags);
@@ -6637,7 +6572,7 @@ enum isl_aux_usage ATTRIBUTE_PURE
 anv_layout_to_aux_usage(const struct intel_device_info * const devinfo,
                         const struct anv_image *image,
                         const VkImageAspectFlagBits aspect,
-                        const VkImageUsageFlagBits usage,
+                        const VkImageUsageFlagBits2KHR usage,
                         const VkImageLayout layout,
                         const VkQueueFlagBits queue_flags);
 
@@ -6710,6 +6645,29 @@ struct anv_image_view {
        * RENDER_SURFACE_STATE when using image as a storage image.
        */
       struct anv_surface_state storage;
+
+      /**
+       * Indirect descriptor data written in descriptor sets for sampled
+       * images, with general/local-read layout.
+       *
+       * Only used pre Gfx12.5.
+       */
+      struct anv_image_descriptor general_indirect_descriptor;
+
+      /**
+       * Indirect descriptor data written in descriptor sets for sampled
+       * images, with non general/local-read layout.
+       *
+       * Only used pre Gfx12.5.
+       */
+      struct anv_image_descriptor optimal_indirect_descriptor;
+
+      /**
+       * Indirect descriptor data written in descriptor sets for storage images.
+       *
+       * Only used pre Gfx12.5.
+       */
+      struct anv_image_descriptor storage_indirect_descriptor;
    } planes[3];
 };
 
@@ -6725,7 +6683,8 @@ void anv_image_fill_surface_state(struct anv_device *device,
                                   enum isl_aux_usage aux_usage,
                                   const union isl_color_value *clear_color,
                                   enum anv_image_view_state_flags flags,
-                                  struct anv_surface_state *state_inout);
+                                  struct anv_surface_state *state_inout,
+                                  struct anv_image_descriptor *out_indirect_desc);
 
 
 static inline const struct anv_surface_state *
@@ -6736,6 +6695,16 @@ anv_image_view_texture_surface_state(const struct anv_image_view *iview,
            layout == VK_IMAGE_LAYOUT_RENDERING_LOCAL_READ_KHR) ?
           &iview->planes[plane].general_sampler :
           &iview->planes[plane].optimal_sampler;
+}
+
+static inline const struct anv_image_descriptor *
+anv_image_view_texture_indirect_descriptor(const struct anv_image_view *iview,
+                                           uint32_t plane, VkImageLayout layout)
+{
+   return (layout == VK_IMAGE_LAYOUT_GENERAL ||
+           layout == VK_IMAGE_LAYOUT_RENDERING_LOCAL_READ_KHR) ?
+          &iview->planes[plane].general_indirect_descriptor :
+          &iview->planes[plane].optimal_indirect_descriptor;
 }
 
 static inline const struct anv_surface_state *
@@ -7079,6 +7048,13 @@ enum anv_vid_mem_h265_types {
    ANV_VID_MEM_H265_PAK_STREAMOUT,
    ANV_VID_MEM_H265_SAO_STREAMOUT,
    ANV_VID_MEM_H265_VDENC_INTRA_ROW_STORE,
+   ANV_VID_MEM_H265_VDENC_STATS_STREAMOUT,
+   ANV_VID_MEM_H265_VDENC_TILE_ROW_STORE,
+   ANV_VID_MEM_H265_VDENC_CU_COUNT_STREAMOUT,
+   ANV_VID_MEM_H265_MB_CODE,
+   ANV_VID_MEM_H265_FRAME_STATS_STREAMOUT,
+   ANV_VID_MEM_H265_LCU_ILDB_STREAMOUT,
+   ANV_VID_MEM_H265_LCU_BASE_ADDR,
    ANV_VID_MEM_H265_ENC_MAX,
 };
 
@@ -7150,6 +7126,29 @@ enum anv_vid_mem_av1_types {
    ANV_VID_MEM_AV1_MAX,
 };
 
+/* HuC BRC session buffers, shared by the encode codecs. Based past every
+ * per-codec range so they never collide in vid_mem[].
+ */
+enum anv_vid_mem_brc_types {
+   ANV_VID_MEM_BRC_HISTORY = ANV_VID_MEM_AV1_MAX,
+   ANV_VID_MEM_BRC_VDENC_STATS,
+   ANV_VID_MEM_BRC_EXEC_SLB,
+   ANV_VID_MEM_BRC_WP_DATA,
+   ANV_VID_MEM_BRC_PAK_INFO,
+   ANV_VID_MEM_BRC_PAK_STATS,
+   ANV_VID_MEM_BRC_DEBUG,
+   ANV_VID_MEM_BRC_PAK_MMIO_SEM,
+   ANV_VID_MEM_BRC_HUC_ERR_SEM,
+   ANV_VID_MEM_BRC_MAX,
+};
+
+static_assert((unsigned)ANV_VID_MEM_H264_MAX <= (unsigned)ANV_VID_MEM_AV1_MAX,
+              "H.264 video memory range overlaps the BRC range");
+static_assert((unsigned)ANV_VID_MEM_H265_ENC_MAX <= (unsigned)ANV_VID_MEM_AV1_MAX,
+              "H.265 video memory range overlaps the BRC range");
+static_assert((unsigned)ANV_VID_MEM_VP9_DEC_MAX <= (unsigned)ANV_VID_MEM_AV1_MAX,
+              "VP9 video memory range overlaps the BRC range");
+
 #define ANV_VID_MEM_ADDR(vid_, type_)                                        \
    (struct anv_address) { (vid_)->vid_mem[type_].mem->bo,                    \
                           (vid_)->vid_mem[type_].offset }
@@ -7193,14 +7192,32 @@ struct anv_vp9_last_frame_info {
    uint32_t height;
 };
 
+struct anv_video_rc_state {
+   uint64_t average_bitrate;
+   uint64_t max_bitrate;
+   uint32_t frame_rate_num;
+   uint32_t frame_rate_den;
+   uint32_t vbv_size_bits;
+   uint32_t vbv_initial_fullness_bits;
+   uint8_t min_qp;
+   uint8_t max_qp;
+   uint32_t gop_frame_count;
+   uint32_t idr_period;
+   uint32_t consecutive_b_frames;
+   /* H.264 and H.265 rate control flag bits share the same values. */
+   uint32_t rc_flags;
+   uint32_t frame_counter;
+};
+
 struct anv_video_session {
    struct vk_video_session vk;
 
    bool cdf_initialized;
    VkVideoEncodeRateControlModeFlagBitsKHR rc_mode;
+   struct anv_video_rc_state rc;
 
    /* the decoder needs some private memory allocations */
-   struct anv_vid_mem vid_mem[ANV_VID_MEM_AV1_MAX];
+   struct anv_vid_mem vid_mem[ANV_VID_MEM_BRC_MAX];
    struct anv_av1_video_refs_info prev_refs[ANV_VIDEO_AV1_MAX_DPB_SLOTS];
 
    /* For VP9 decoding from here */
@@ -7257,6 +7274,33 @@ uint32_t anv_video_get_image_mv_size(struct anv_device *device,
                                      struct anv_image *image,
                                      const struct VkVideoProfileListInfoKHR *profile_list);
 
+/* Down-Scaled image layout for video encoding */
+struct anv_video_enc_ds_layout {
+   uint32_t w8, h8, pitch8;
+   uint32_t w4, h4, pitch4;
+   uint32_t slice8_B;
+   uint32_t slice4_B;
+};
+
+static inline struct anv_video_enc_ds_layout
+anv_video_get_enc_ds_layout(uint32_t width, uint32_t height)
+{
+   struct anv_video_enc_ds_layout l;
+
+   l.w4 = DIV_ROUND_UP(width, 4 * ANV_MB_WIDTH) * ANV_MB_WIDTH;
+   l.h4 = align(((DIV_ROUND_UP(height, 4 * ANV_MB_HEIGHT) + 1) >> 1) *
+                ANV_MB_HEIGHT, 32) * 2;
+   l.pitch4 = align(l.w4, 128);
+   l.slice4_B = align(l.pitch4 * l.h4 * 3 / 2, 4096);
+
+   l.w8 = l.w4 >> 1;
+   l.h8 = align(l.h4 >> 1, 32) * 2;
+   l.pitch8 = align(l.w8, 128);
+   l.slice8_B = align(l.pitch8 * l.h8 * 3 / 2, 4096);
+
+   return l;
+}
+
 uint32_t
 anv_h265_slice_size(const VkVideoDecodeInfoKHR *frame_info,
                     const VkVideoDecodeH265PictureInfoKHR *h265_pic_info,
@@ -7303,6 +7347,40 @@ anv_image_dmv_top_address(const struct anv_image_view *iv,
       return addr;
 
    return anv_address_add(addr, iv->image->vid_dmv_top_surface_pitch_B *
+                                    ((uint64_t)iv->vk.base_array_layer + arrayLayer));
+}
+
+static inline struct anv_address MUST_CHECK
+anv_image_ds_8x_address(const struct anv_image_view *iv,
+                        uint32_t arrayLayer)
+{
+   assert(iv->vk.base_mip_level == 0);
+   assert(iv->vk.layer_count > arrayLayer);
+
+   struct anv_address addr = anv_image_address(iv->image,
+                                               &iv->image->vid_ds_8x_surface);
+
+   if (anv_address_is_null(addr))
+      return addr;
+
+   return anv_address_add(addr, iv->image->vid_ds_8x_array_pitch_B *
+                                    ((uint64_t)iv->vk.base_array_layer + arrayLayer));
+}
+
+static inline struct anv_address MUST_CHECK
+anv_image_ds_4x_address(const struct anv_image_view *iv,
+                        uint32_t arrayLayer)
+{
+   assert(iv->vk.base_mip_level == 0);
+   assert(iv->vk.layer_count > arrayLayer);
+
+   struct anv_address addr = anv_image_address(iv->image,
+                                               &iv->image->vid_ds_4x_surface);
+
+   if (anv_address_is_null(addr))
+      return addr;
+
+   return anv_address_add(addr, iv->image->vid_ds_4x_array_pitch_B *
                                     ((uint64_t)iv->vk.base_array_layer + arrayLayer));
 }
 

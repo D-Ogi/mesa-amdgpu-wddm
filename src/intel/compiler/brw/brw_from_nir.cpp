@@ -1201,12 +1201,6 @@ brw_from_nir_emit_alu(nir_to_brw_state &ntb, nir_alu_instr *instr,
       bld.INT_QUOTIENT(result, op[0], op[1]);
       break;
 
-   case nir_op_uadd_carry:
-      UNREACHABLE("Should have been lowered by carry_to_arith().");
-
-   case nir_op_usub_borrow:
-      UNREACHABLE("Should have been lowered by borrow_to_arith().");
-
    case nir_op_umod:
    case nir_op_irem:
       /* According to the sign table for INT DIV in the Ivy Bridge PRM, it
@@ -4071,14 +4065,23 @@ brw_from_nir_emit_fs_intrinsic(nir_to_brw_state &ntb,
       if (!nir_src_is_undef(instr->src[2]))
           sources[FB_WRITE_LOGICAL_SRC_COLOR1] = get_nir_src(ntb, instr->src[2], -1);
 
-      /* If our alpha happens to match src0_alpha, we can skip sending it, as
-       * the hardware will use our alpha in that case.
-       */
-      if (!nir_src_is_undef(instr->src[3]) &&
-          nir_intrinsic_target(instr) != 0 &&
-          !scalars_equal(nir_scalar_resolved(instr->src[3].ssa, 0),
-                         nir_scalar_resolved(instr->src[1].ssa, 3)))
-         sources[FB_WRITE_LOGICAL_SRC_SRC0_ALPHA] = get_nir_src(ntb, instr->src[3], 0);
+      signed target = (signed) nir_intrinsic_target(instr);
+      if (ntb.s.key->use_efficient_64bit) {
+         /* Refer to the programming notes in HSD 14023691226. */
+         if (!nir_src_is_undef(instr->src[3]) &&
+             fs_prog_data->alpha_to_coverage != INTEL_NEVER && target != 0)
+            sources[FB_WRITE_LOGICAL_SRC_SRC0_ALPHA] =
+               get_nir_src(ntb, instr->src[3], 0);
+      } else {
+         /* If our alpha happens to match src0_alpha, we can skip sending it,
+          * as the hardware will use our alpha in that case.
+          */
+         if (!nir_src_is_undef(instr->src[3]) && target != 0 &&
+             !scalars_equal(nir_scalar_resolved(instr->src[3].ssa, 0),
+                            nir_scalar_resolved(instr->src[1].ssa, 3)))
+            sources[FB_WRITE_LOGICAL_SRC_SRC0_ALPHA] =
+               get_nir_src(ntb, instr->src[3], 0);
+      }
 
       if (!nir_src_is_undef(instr->src[4]) && fs_prog_data->uses_omask)
          sources[FB_WRITE_LOGICAL_SRC_OMASK] = get_nir_src(ntb, instr->src[4], 0);
@@ -4089,7 +4092,7 @@ brw_from_nir_emit_fs_intrinsic(nir_to_brw_state &ntb,
 
       brw_fb_write_inst *write = bld.emit(FS_OPCODE_FB_WRITE_LOGICAL, brw_reg(),
                                           sources, ARRAY_SIZE(sources))->as_fb_write();
-      write->target     = MAX2(0, (signed) nir_intrinsic_target(instr));
+      write->target     = MAX2(0, target);
       write->components = 4;
       /* Enable null_rt if the shader doesn't write any relevant output. */
       write->null_rt    = fs_prog_data->alpha_to_coverage == INTEL_NEVER &&
@@ -4097,7 +4100,7 @@ brw_from_nir_emit_fs_intrinsic(nir_to_brw_state &ntb,
                           !(s.nir->info.outputs_written &
                             (BITFIELD64_BIT(FRAG_RESULT_DEPTH) |
                              BITFIELD64_BIT(FRAG_RESULT_STENCIL))) &&
-                          ((signed) nir_intrinsic_target(instr) < 0);
+                          target < 0;
       write->last_rt    = !nir_instr_next(&instr->instr);
       write->eot        = !nir_instr_next(&instr->instr);
 
@@ -5688,7 +5691,9 @@ brw_from_nir_emit_intrinsic(nir_to_brw_state &ntb,
        *    a Ray Query. This message requires a write-back message indicating
        *    RayQuery for all valid Rays (SIMD lanes) have completed."
        */
-      brw_reg dst = synchronous ? bld.vgrf(BRW_TYPE_UD) : bld.null_reg_ud();
+      brw_reg dst = synchronous ?
+         retype(dest, devinfo->ver >= 35 ? BRW_TYPE_UW : BRW_TYPE_UD) :
+         bld.null_reg_ud();
 
       brw_inst *inst = bld.emit(RT_OPCODE_TRACE_RAY_LOGICAL, dst, srcs, RT_LOGICAL_NUM_SRCS);
       inst->synchronous = synchronous;
@@ -5775,6 +5780,8 @@ brw_from_nir_emit_memory_access(nir_to_brw_state &ntb,
    const bool fused_eu_disable = nir_intrinsic_has_access(instr) &&
       (nir_intrinsic_access(instr) & ACCESS_FUSED_EU_DISABLE_INTEL);
    const bool can_reorder = nir_intrinsic_can_reorder(instr);
+   const bool non_temporal = nir_intrinsic_has_access(instr) &&
+      (nir_intrinsic_access(instr) & ACCESS_NON_TEMPORAL);
    const unsigned alignment =
       nir_intrinsic_has_align(instr) ? nir_intrinsic_align(instr) : 0;
    uint8_t flags =
@@ -5782,7 +5789,8 @@ brw_from_nir_emit_memory_access(nir_to_brw_state &ntb,
       (volatile_access ? MEMORY_FLAG_VOLATILE_ACCESS : 0) |
       (coherent_access ? MEMORY_FLAG_COHERENT_ACCESS : 0) |
       (fused_eu_disable ? MEMORY_FLAG_FUSED_EU_DISABLE : 0) |
-      (can_reorder ? MEMORY_FLAG_CAN_REORDER : 0);
+      (can_reorder ? MEMORY_FLAG_CAN_REORDER : 0) |
+      (non_temporal ? MEMORY_FLAG_NON_TEMPORAL : 0);
    bool no_mask_handle = false;
 
    uint8_t coord_components = 1;

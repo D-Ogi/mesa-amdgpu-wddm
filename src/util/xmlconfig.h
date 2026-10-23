@@ -68,7 +68,8 @@ typedef struct driOptionRange {
 typedef struct driOptionInfo {
    char *name;             /**< \brief Name */
    driOptionType type;     /**< \brief Type */
-   driOptionRange range;   /**< \brief Valid range of the option (or 0:0) */
+   bool has_range;
+   driOptionRange range;   /**< \brief Valid range of the option */
 } driOptionInfo;
 
 /** \brief Option cache

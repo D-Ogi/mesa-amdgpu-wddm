@@ -489,12 +489,6 @@ spec@glsl-1.20@execution@fs-function-inout-array-of-structs,Fail
 spec@glsl-1.20@execution@fs-nan-builtin-max,Fail
 spec@glsl-1.20@execution@fs-nan-builtin-min,Fail
 
-# piglit bug, requires GLSL >= 1.20 but specifies #version 130
-spec@glsl-1.20@execution@vs-loop-uint-induction-var-1,Fail
-spec@glsl-1.20@execution@vs-loop-uint-induction-var-2,Fail
-spec@glsl-1.20@execution@vs-loop-uint-induction-var-3,Fail
-spec@glsl-1.20@execution@vs-loop-uint-induction-var-4,Fail
-
 spec@glsl-1.20@execution@tex-miplevel-selection gl2:texture() cube,Fail
 spec@glsl-1.20@execution@tex-miplevel-selection gl2:texture(bias) cube,Fail
 spec@glsl-1.20@execution@tex-miplevel-selection gl2:textureproj(bias) 1d_projvec4,Fail

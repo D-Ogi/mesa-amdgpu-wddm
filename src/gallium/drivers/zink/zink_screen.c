@@ -35,6 +35,7 @@
 #include "zink_query.h"
 #include "zink_resource.h"
 #include "zink_state.h"
+#include "zink_video.h"
 #include "nir_to_spirv/nir_to_spirv.h" // for SPIRV_VERSION
 
 #include "util/u_debug.h"
@@ -49,6 +50,8 @@
 #include "util/xmlconfig.h"
 
 #include "util/u_cpu_detect.h"
+
+#include "vl/vl_video_buffer.h"
 
 #ifdef HAVE_LIBDRM
 #include <xf86drm.h>
@@ -80,14 +83,14 @@ bool zink_tracing = false;
 #endif
 #endif
 
-#ifdef __APPLE__
+#ifdef HAVE_MOLTENVK
 #include "MoltenVK/mvk_vulkan.h"
 // Source of MVK_VERSION
 #include "MoltenVK/mvk_config.h"
 #define VK_NO_PROTOTYPES
 #include "MoltenVK/mvk_deprecated_api.h"
 #include "MoltenVK/mvk_private_api.h"
-#endif /* __APPLE__ */
+#endif /* HAVE_MOLTENVK */
 
 #ifdef HAVE_LIBDRM
 #include "drm-uapi/dma-buf.h"
@@ -265,7 +268,7 @@ static void
 zink_set_max_shader_compiler_threads(struct pipe_screen *pscreen, unsigned max_threads)
 {
    struct zink_screen *screen = zink_screen(pscreen);
-   util_queue_adjust_num_threads(&screen->cache_get_thread, max_threads, false);
+   util_queue_adjust_num_threads(&screen->cache_get_thread, max_threads);
 }
 
 static bool
@@ -372,7 +375,7 @@ disk_cache_init(struct zink_screen *screen)
    if (!screen->disk_cache)
       return true;
 
-   if (!util_queue_init(&screen->cache_put_thread, "zcq", 8, 1, UTIL_QUEUE_INIT_RESIZE_IF_FULL, screen)) {
+   if (!util_queue_init(&screen->cache_put_thread, "zcq", 8, 1, UTIL_QUEUE_INIT_RESIZE_IF_FULL | UTIL_QUEUE_INIT_SET_FULL_THREAD_AFFINITY, screen)) {
       mesa_loge("zink: Failed to create disk cache queue\n");
 
       disk_cache_destroy(screen->disk_cache);
@@ -1303,7 +1306,13 @@ zink_init_screen_caps(struct zink_screen *screen)
          caps->shader_subgroup_supported_stages = screen->info.subgroup.supportedStages & BITFIELD_MASK(MESA_SHADER_MESH_STAGES);
       else
          caps->shader_subgroup_supported_stages = screen->info.subgroup.supportedStages & BITFIELD_MASK(MESA_SHADER_STAGES);
-      caps->shader_subgroup_supported_features = screen->info.subgroup.supportedOperations & PIPE_SHADER_SUBGROUP_FEATURE_MASK;
+      uint32_t subgroup_ops = screen->info.subgroup.supportedOperations;
+      /* rotates can only be used if their features are enabled */
+      if (!screen->info.subgroup_rotate_feats.shaderSubgroupRotate)
+         subgroup_ops &= ~VK_SUBGROUP_FEATURE_ROTATE_BIT_KHR;
+      if (!screen->info.subgroup_rotate_feats.shaderSubgroupRotateClustered)
+         subgroup_ops &= ~VK_SUBGROUP_FEATURE_ROTATE_CLUSTERED_BIT_KHR;
+      caps->shader_subgroup_supported_features = subgroup_ops & PIPE_SHADER_SUBGROUP_FEATURE_MASK;
       caps->shader_subgroup_quad_all_stages = screen->info.subgroup.quadOperationsInAllStages;
    }
 
@@ -1324,6 +1333,11 @@ zink_init_screen_caps(struct zink_screen *screen)
       caps->device_type = PIPE_DEVICE_TYPE_UNKNOWN;
       break;
    }
+
+   caps->map_client_pointer =
+      (screen->info.have_EXT_map_memory_placed &&
+       screen->info.map_memory_placed_feats.memoryMapPlaced &&
+       screen->info.map_memory_placed_feats.memoryUnmapReserve);
 }
 
 static VkSampleCountFlagBits
@@ -1385,6 +1399,9 @@ zink_is_format_supported(struct pipe_screen *pscreen,
           format != PIPE_FORMAT_R32_UINT)
          return false;
    }
+
+   if (format == PIPE_FORMAT_NV12 || format == PIPE_FORMAT_P010)
+      return false;
 
    /* always use superset to determine feature support */
    VkFormat vkformat = zink_get_format(screen, format == PIPE_FORMAT_A8_UNORM ? zink_format_get_emulated_alpha(format) : format);
@@ -1468,7 +1485,7 @@ zink_is_format_supported(struct pipe_screen *pscreen,
          info.type = VK_IMAGE_TYPE_3D;
          if (bind & (PIPE_BIND_RENDER_TARGET | PIPE_BIND_DEPTH_STENCIL))
             info.flags |= VK_IMAGE_CREATE_2D_ARRAY_COMPATIBLE_BIT;
-         if (screen->info.have_EXT_image_2d_view_of_3d)
+         if (screen->info.have_EXT_image_2d_view_of_3d && bind & PIPE_BIND_SHADER_IMAGE)
             info.flags |= VK_IMAGE_CREATE_2D_VIEW_COMPATIBLE_BIT_EXT;
          break;
 
@@ -1703,6 +1720,8 @@ zink_destroy_screen(struct pipe_screen *pscreen)
       VKSCR(DestroySemaphore)(screen->dev, util_dynarray_pop(&screen->semaphores, VkSemaphore), NULL);
    while (util_dynarray_contains(&screen->fd_semaphores, VkSemaphore))
       VKSCR(DestroySemaphore)(screen->dev, util_dynarray_pop(&screen->fd_semaphores, VkSemaphore), NULL);
+   util_dynarray_fini(&screen->semaphores);
+   util_dynarray_fini(&screen->fd_semaphores);
    if (screen->bindless_layout)
       VKSCR(DestroyDescriptorSetLayout)(screen->dev, screen->bindless_layout, NULL);
 
@@ -1733,6 +1752,14 @@ zink_destroy_screen(struct pipe_screen *pscreen)
 
    util_idalloc_mt_fini(&screen->buffer_ids);
 
+   for (unsigned i = 0; i < 2; i++) {
+      for (unsigned j = 0; j < 2; j++) {
+         util_idalloc_fini(&screen->bindless_handles.table[i][j].slots);
+         _mesa_hash_table_fini(&screen->bindless_handles.table[i][j].handles, NULL);
+      }
+   }
+   simple_mtx_destroy(&screen->bindless_handles.lock);
+
    if (screen->loader_lib)
       util_dl_close(screen->loader_lib);
 
@@ -1744,6 +1771,10 @@ zink_destroy_screen(struct pipe_screen *pscreen)
    if (screen->drm_fd != -1)
       close(screen->drm_fd);
 
+   for (unsigned i = 0; i < ARRAY_SIZE(screen->video_format_prop_dpb); i++) {
+      free(screen->video_format_prop_dpb[i].pVideoFormatProperties);
+      free(screen->video_format_prop_output[i].pVideoFormatProperties);
+   }
    slab_destroy_parent(&screen->transfer_pool);
    ralloc_free(screen);
    glsl_type_singleton_decref();
@@ -1935,20 +1966,29 @@ update_queue_props(struct zink_screen *screen)
 
    bool found_gfx = false;
    uint32_t sparse_only = UINT32_MAX;
+   uint32_t video_only = UINT32_MAX;
    screen->sparse_queue = UINT32_MAX;
+   screen->video_decode_queue = UINT32_MAX;
    for (uint32_t i = 0; i < num_queues; i++) {
       if (props[i].queueFlags & VK_QUEUE_GRAPHICS_BIT) {
          if (found_gfx)
             continue;
          screen->sparse_queue = screen->gfx_queue = i;
+         screen->video_decode_queue = screen->gfx_queue = i;
          screen->max_queues = props[i].queueCount;
          screen->timestamp_valid_bits = props[i].timestampValidBits;
          found_gfx = true;
-      } else if (props[i].queueFlags & VK_QUEUE_SPARSE_BINDING_BIT)
-         sparse_only = i;
+      } else {
+         if (props[i].queueFlags & VK_QUEUE_SPARSE_BINDING_BIT)
+            sparse_only = i;
+         if (props[i].queueFlags & VK_QUEUE_VIDEO_DECODE_BIT_KHR)
+            video_only = i;
+      }
    }
    if (sparse_only != UINT32_MAX)
       screen->sparse_queue = sparse_only;
+   if (video_only != UINT32_MAX)
+      screen->video_decode_queue = video_only;
    free(props);
 }
 
@@ -1960,6 +2000,10 @@ init_queue(struct zink_screen *screen)
       VKSCR(GetDeviceQueue)(screen->dev, screen->sparse_queue, 0, &screen->queue_sparse);
    else
       screen->queue_sparse = screen->queue;
+   if (screen->video_decode_queue != screen->gfx_queue)
+      VKSCR(GetDeviceQueue)(screen->dev, screen->video_decode_queue, 0, &screen->queue_video_decode);
+   else
+      screen->queue_video_decode = screen->queue;
 }
 
 static void
@@ -1983,7 +2027,8 @@ zink_flush_frontbuffer(struct pipe_screen *pscreen,
 
    if (!zink_kopper_acquired(res->obj->dt, res->obj->dt_idx)) {
       /* swapbuffers to an undefined surface: acquire and present garbage */
-      zink_kopper_acquire(ctx, res, UINT64_MAX);
+      if (!zink_kopper_acquire(ctx, res, UINT64_MAX))
+         return;
       zink_resource_reference(&ctx->needs_present, res);
       /* set batch usage to submit acquire semaphore */
       zink_batch_resource_usage_set(ctx->bs, res, true, false);
@@ -1995,10 +2040,6 @@ zink_flush_frontbuffer(struct pipe_screen *pscreen,
    if (ctx->swapchain || ctx->needs_present) {
       ctx->bs->has_work = true;
       pctx->flush(pctx, NULL, PIPE_FLUSH_END_OF_FRAME);
-      if (ctx->last_batch_state && screen->threaded_submit) {
-         struct zink_batch_state *bs = ctx->last_batch_state;
-         util_queue_fence_wait(&bs->flush_completed);
-      }
    }
    res->use_damage = false;
 
@@ -2055,6 +2096,11 @@ zink_get_format(struct zink_screen *screen, enum pipe_format format)
 
    if (format == PIPE_FORMAT_R4A4_UNORM)
       return VK_FORMAT_R4G4_UNORM_PACK8;
+
+   if (format == PIPE_FORMAT_NV12)
+      return VK_FORMAT_G8_B8R8_2PLANE_420_UNORM;
+   if (format == PIPE_FORMAT_P010)
+      return VK_FORMAT_G10X6_B10X6R10X6_2PLANE_420_UNORM_3PACK16;
 
    return ret;
 }
@@ -2296,11 +2342,13 @@ retry:
       }
 
       if (screen->info.have_EXT_image_drm_format_modifier && mod_props.drmFormatModifierCount) {
+         simple_mtx_lock(&screen->ralloc_lock);
          /* The A8_UNORM workaround below can retry this query for the same pformat. */
          ralloc_free(screen->modifier_props[pformat].pDrmFormatModifierProperties);
 
          screen->modifier_props[pformat].drmFormatModifierCount = mod_props.drmFormatModifierCount;
          screen->modifier_props[pformat].pDrmFormatModifierProperties = ralloc_array(screen, VkDrmFormatModifierPropertiesEXT, mod_props.drmFormatModifierCount);
+         simple_mtx_unlock(&screen->ralloc_lock);
          if (mod_props.pDrmFormatModifierProperties) {
             for (unsigned j = 0; j < mod_props.drmFormatModifierCount; j++)
                screen->modifier_props[pformat].pDrmFormatModifierProperties[j] = mod_props.pDrmFormatModifierProperties[j];
@@ -2539,13 +2587,16 @@ zink_resource_get_dma_buf(struct zink_screen *screen, struct zink_resource *res)
 }
 #endif
 
+/* Returns a semaphore that signals once the dma-buf can be accessed: after
+ * its write fences for a read, or after all of its fences for a write.
+ */
 VkSemaphore
-zink_screen_export_dmabuf_semaphore(struct zink_screen *screen, struct zink_resource *res)
+zink_screen_export_dmabuf_semaphore(struct zink_screen *screen, struct zink_resource *res, bool write)
 {
    VkSemaphore sem = VK_NULL_HANDLE;
 #if defined(HAVE_LIBDRM) && (DETECT_OS_LINUX || DETECT_OS_BSD)
    struct dma_buf_export_sync_file export = {
-      .flags = DMA_BUF_SYNC_RW,
+      .flags = write ? DMA_BUF_SYNC_RW : DMA_BUF_SYNC_READ,
       .fd = -1,
    };
 
@@ -2586,8 +2637,11 @@ zink_screen_export_dmabuf_semaphore(struct zink_screen *screen, struct zink_reso
    return sem;
 }
 
+/* Adds sem to the dma-buf's fences: as a write fence if the access wrote
+ * the buffer, otherwise as a read fence.
+ */
 bool
-zink_screen_import_dmabuf_semaphore(struct zink_screen *screen, struct zink_resource *res, VkSemaphore sem)
+zink_screen_import_dmabuf_semaphore(struct zink_screen *screen, struct zink_resource *res, VkSemaphore sem, bool write)
 {
 #if defined(HAVE_LIBDRM) && (DETECT_OS_LINUX || DETECT_OS_BSD)
    const VkSemaphoreGetFdInfoKHR get_fd_info = {
@@ -2605,7 +2659,7 @@ zink_screen_import_dmabuf_semaphore(struct zink_screen *screen, struct zink_reso
    int fd = zink_resource_get_dma_buf(screen, res);
    if (fd != -1) {
       struct dma_buf_import_sync_file import = {
-         .flags = DMA_BUF_SYNC_RW,
+         .flags = write ? DMA_BUF_SYNC_RW : DMA_BUF_SYNC_READ,
          .fd = sync_file_fd,
       };
       int ioctl_ret = drmIoctl(fd, DMA_BUF_IOCTL_IMPORT_SYNC_FILE, &import);
@@ -2893,22 +2947,21 @@ get_device(struct zink_screen *screen, VkDeviceCreateInfo *dci)
 static struct zink_device*
 zink_create_logical_device(struct zink_screen *screen)
 {
-   VkDeviceQueueCreateInfo qci[2] = {0};
-   uint32_t queues[3] = {
-      screen->gfx_queue,
-      screen->sparse_queue,
-   };
+   VkDeviceQueueCreateInfo qci[3] = {0};
    float dummy = 0.0f;
    for (unsigned i = 0; i < ARRAY_SIZE(qci); i++) {
       qci[i].sType = VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO;
-      qci[i].queueFamilyIndex = queues[i];
       qci[i].queueCount = 1;
       qci[i].pQueuePriorities = &dummy;
    }
 
-   unsigned num_queues = 1;
+   unsigned num_queues = 0;
+   qci[num_queues++].queueFamilyIndex = screen->gfx_queue;
    if (screen->sparse_queue != screen->gfx_queue)
-      num_queues++;
+      qci[num_queues++].queueFamilyIndex = screen->sparse_queue;
+   if (screen->video_decode_queue != screen->gfx_queue &&
+       screen->video_decode_queue != screen->sparse_queue)
+      qci[num_queues++].queueFamilyIndex = screen->video_decode_queue;
 
    VkDeviceCreateInfo dci = {0};
    dci.sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO;
@@ -2967,6 +3020,23 @@ check_base_requirements(struct zink_screen *screen)
    }
 }
 
+static bool
+check_video_requirements(struct zink_screen *screen)
+{
+   if (!screen->info.have_KHR_video_queue ||
+       !screen->info.have_KHR_video_decode_queue)
+      return false;
+
+   if (!screen->info.have_KHR_video_decode_h264)
+      return false;
+
+   /* video barriers use synchronization2 stages */
+   if (!screen->info.have_KHR_synchronization2)
+      return false;
+
+   return true;
+}
+
 static void
 zink_get_sample_pixel_grid(struct pipe_screen *pscreen, unsigned sample_count,
                            unsigned *width, unsigned *height)
@@ -2976,6 +3046,93 @@ zink_get_sample_pixel_grid(struct pipe_screen *pscreen, unsigned sample_count,
    assert(idx < ARRAY_SIZE(screen->maxSampleLocationGridSize));
    *width = screen->maxSampleLocationGridSize[idx].width;
    *height = screen->maxSampleLocationGridSize[idx].height;
+}
+
+static int
+zink_get_video_param(struct pipe_screen *screen,
+                     enum pipe_video_profile profile,
+                     enum pipe_video_entrypoint entrypoint,
+                     enum pipe_video_cap param)
+{
+   struct zink_video_caps_info caps_info = { 0 };
+   bool is_supported = false;
+   if (entrypoint == PIPE_VIDEO_ENTRYPOINT_ENCODE) {
+      return 0;
+   }
+
+   switch (profile) {
+   case PIPE_VIDEO_PROFILE_MPEG4_AVC_MAIN:
+   case PIPE_VIDEO_PROFILE_MPEG4_AVC_HIGH:
+   case PIPE_VIDEO_PROFILE_MPEG4_AVC_BASELINE:
+   case PIPE_VIDEO_PROFILE_MPEG4_AVC_CONSTRAINED_BASELINE:
+      is_supported = true;
+      break;
+   default:
+      break;
+   }
+
+   switch (param) {
+   case PIPE_VIDEO_CAP_SUPPORTS_PROGRESSIVE:
+      return true;
+   default:
+      break;
+   }
+
+   if (!is_supported)
+      return 0;
+
+   if (!zink_video_fill_caps(zink_screen(screen), profile, entrypoint, false, &caps_info))
+      return 0;
+   switch (param) {
+   case PIPE_VIDEO_CAP_SUPPORTED:
+      return true;
+   case PIPE_VIDEO_CAP_MAX_WIDTH:
+      return caps_info.caps.maxCodedExtent.width;
+   case PIPE_VIDEO_CAP_MAX_HEIGHT:
+      return caps_info.caps.maxCodedExtent.height;
+   default:
+      break;
+   }
+   return 0;
+}
+
+static bool
+zink_is_video_format_supported(struct pipe_screen *pscreen,
+                               enum pipe_format format,
+                               enum pipe_video_profile profile,
+                               enum pipe_video_entrypoint entrypoint)
+{
+   struct zink_screen *screen = zink_screen(pscreen);
+
+   if (entrypoint == PIPE_VIDEO_ENTRYPOINT_ENCODE) {
+      return false;
+   }
+
+   uint32_t bit_depth = zink_video_get_format_bit_depth(format);
+   if (bit_depth == 0)
+      return false;
+
+   /* no video support */
+   if (!screen->video_output_usage)
+      return false;
+
+   struct zink_video_format_prop prop_obj;
+   VkResult ret = zink_fill_video_format_props(screen,
+                                               screen->video_output_usage,
+                                               profile,
+                                               bit_depth, &prop_obj);
+
+   if (ret != VK_SUCCESS)
+      return false;
+
+   for (unsigned i = 0; i < prop_obj.videoFormatPropertyCount; i++) {
+      if (prop_obj.pVideoFormatProperties[i].format == zink_get_format(screen, format)) {
+         free(prop_obj.pVideoFormatProperties);
+         return true;
+      }
+   }
+   free(prop_obj.pVideoFormatProperties);
+   return false;
 }
 
 static void
@@ -3018,9 +3175,24 @@ init_driver_workarounds(struct zink_screen *screen)
    /* EXT_vertex_input_dynamic_state is only used with EDS2 and above */
    if (!screen->info.have_EXT_extended_dynamic_state2)
       screen->info.have_EXT_vertex_input_dynamic_state = false;
-   if (screen->info.line_rast_feats.stippledRectangularLines &&
-       screen->info.line_rast_feats.stippledBresenhamLines &&
-       screen->info.line_rast_feats.stippledSmoothLines &&
+   if ((!screen->info.have_EXT_line_rasterization ||
+        !screen->info.line_rast_feats.stippledBresenhamLines) &&
+       screen->info.feats.features.geometryShader &&
+       screen->info.feats.features.sampleRateShading) {
+      /* we're using stippledBresenhamLines as a proxy for all of these, to
+       * avoid accidentally changing behavior on VK-drivers where we don't
+       * want to add emulation.
+       */
+      screen->driver_workarounds.no_linestipple = true;
+   }
+
+   /* hardware line stipple needs a dynamic enable, since EDS3 pipelines keep the enable
+    * they were created with
+    */
+   if (!screen->driver_workarounds.no_linestipple &&
+       (screen->info.line_rast_feats.stippledRectangularLines ||
+        screen->info.line_rast_feats.stippledBresenhamLines ||
+        screen->info.line_rast_feats.stippledSmoothLines) &&
        !screen->info.dynamic_state3_feats.extendedDynamicState3LineStippleEnable)
       screen->info.have_EXT_extended_dynamic_state3 = false;
    if (!screen->info.dynamic_state3_feats.extendedDynamicState3PolygonMode ||
@@ -3054,17 +3226,6 @@ init_driver_workarounds(struct zink_screen *screen)
    if (zink_driverid(screen) == VK_DRIVER_ID_MESA_TURNIP) {
       /* performance */
       screen->info.border_color_feats.customBorderColorWithoutFormat = VK_FALSE;
-   }
-
-   if ((!screen->info.have_EXT_line_rasterization ||
-        !screen->info.line_rast_feats.stippledBresenhamLines) &&
-       screen->info.feats.features.geometryShader &&
-       screen->info.feats.features.sampleRateShading) {
-      /* we're using stippledBresenhamLines as a proxy for all of these, to
-       * avoid accidentally changing behavior on VK-drivers where we don't
-       * want to add emulation.
-       */
-      screen->driver_workarounds.no_linestipple = true;
    }
 
    if (zink_driverid(screen) ==
@@ -3292,6 +3453,8 @@ static void
 disable_features(struct zink_screen *screen)
 {
    screen->info.mesh_feats.primitiveFragmentShadingRateMeshShader = false;
+   /* if this is used anywhere it should just be enabled with driconf */
+   screen->info.view2d_feats.sampler2DViewOf3D = false;
 }
 
 static void
@@ -3488,6 +3651,7 @@ zink_internal_create_screen(const struct pipe_screen_config *config, int64_t dev
 
    screen->driver_name_is_inferred = config && config->driver_name_is_inferred;
    screen->drm_fd = -1;
+   simple_mtx_init(&screen->ralloc_lock, mtx_plain);
 
    glsl_type_singleton_init_or_ref();
    zink_debug = debug_get_option_zink_debug();
@@ -3804,9 +3968,15 @@ zink_internal_create_screen(const struct pipe_screen_config *config, int64_t dev
       goto fail;
    }
    if (!util_queue_init(&screen->cache_get_thread, "zcfq", 8, 4,
-                        UTIL_QUEUE_INIT_RESIZE_IF_FULL, screen))
+                        UTIL_QUEUE_INIT_RESIZE_IF_FULL | UTIL_QUEUE_INIT_SET_FULL_THREAD_AFFINITY, screen))
       goto fail;
    populate_format_props(screen);
+
+   if (check_video_requirements(screen)) {
+      screen->base.get_video_param = zink_get_video_param;
+      zink_video_init_format_props(screen);
+   }
+   screen->base.is_video_format_supported = zink_is_video_format_supported;
 
    slab_create_parent(&screen->transfer_pool, sizeof(struct zink_transfer), 16);
 
@@ -3885,14 +4055,25 @@ zink_internal_create_screen(const struct pipe_screen_config *config, int64_t dev
    }
 
    simple_mtx_init(&screen->free_batch_states_lock, mtx_plain);
+   simple_mtx_init(&screen->submit_lock, mtx_plain);
    simple_mtx_init(&screen->active_batch_states_lock, mtx_plain);
    simple_mtx_init(&screen->dt_lock, mtx_plain);
 
    util_idalloc_mt_init_tc(&screen->buffer_ids);
 
+   simple_mtx_init(&screen->bindless_handles.lock, mtx_plain);
+   for (unsigned i = 0; i < 2; i++) {
+      for (unsigned j = 0; j < 2; j++) {
+         _mesa_hash_table_init(&screen->bindless_handles.table[i][j].handles, NULL, _mesa_hash_pointer, _mesa_key_pointer_equal);
+         /* allocate 1024 slots and reserve slot 0 */
+         util_idalloc_init(&screen->bindless_handles.table[i][j].slots, ZINK_MAX_BINDLESS_HANDLES);
+         util_idalloc_alloc(&screen->bindless_handles.table[i][j].slots);
+      }
+   }
+
    simple_mtx_init(&screen->semaphores_lock, mtx_plain);
-   util_dynarray_init(&screen->semaphores, screen);
-   util_dynarray_init(&screen->fd_semaphores, screen);
+   util_dynarray_init(&screen->semaphores, NULL);
+   util_dynarray_init(&screen->fd_semaphores, NULL);
 
    util_vertex_state_cache_init(&screen->vertex_state_cache,
                                 zink_create_vertex_state, zink_vertex_state_destroy);

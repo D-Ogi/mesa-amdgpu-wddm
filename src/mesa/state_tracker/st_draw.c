@@ -139,9 +139,44 @@ st_prepare_draw(struct gl_context *ctx, const st_state_bitset state_mask)
    st_context_add_work(st);
 }
 
+bool
+st_prepare_index_bounds(struct gl_context *ctx,
+                        struct pipe_draw_info *info,
+                        const struct pipe_draw_indirect_info *indirect,
+                        const struct pipe_draw_start_count_bias *draws,
+                        unsigned num_draws)
+{
+   if (likely(!info->index_size || info->index_bounds_valid || indirect ||
+              !ctx->st->draw_needs_minmax_index))
+      return true;
+
+   /* Return if this fails, which means all draws have count == 0. */
+   if (!vbo_get_minmax_indices_gallium(ctx, info, draws, num_draws))
+      return false;
+
+   info->index_bounds_valid = true;
+   return true;
+}
+
+void
+st_draw_gallium_prepared(struct gl_context *ctx,
+                         struct pipe_draw_info *info,
+                         unsigned drawid_offset,
+                         const struct pipe_draw_indirect_info *indirect,
+                         const struct pipe_draw_start_count_bias *draws,
+                         unsigned num_draws)
+{
+   struct st_context *st = st_context(ctx);
+
+   if (!st_prepare_index_bounds(ctx, info, indirect, draws, num_draws))
+      return;
+
+   cso_draw_vbo(st->cso_context, info, drawid_offset, indirect, draws, num_draws);
+}
+
 void
 st_draw_gallium(struct gl_context *ctx,
-                const struct pipe_draw_info *info,
+                struct pipe_draw_info *info,
                 unsigned drawid_offset,
                 const struct pipe_draw_indirect_info *indirect,
                 const struct pipe_draw_start_count_bias *draws,
@@ -149,17 +184,15 @@ st_draw_gallium(struct gl_context *ctx,
 {
    MESA_TRACE_FUNC();
 
-   struct st_context *st = st_context(ctx);
-
    ST_PIPELINE_RENDER_STATE_MASK(mask);
    st_prepare_draw(ctx, mask);
 
-   cso_draw_vbo(st->cso_context, info, drawid_offset, indirect, draws, num_draws);
+   st_draw_gallium_prepared(ctx, info, drawid_offset, indirect, draws, num_draws);
 }
 
 static void
 st_draw_gallium_stipple(struct gl_context *ctx,
-                const struct pipe_draw_info *info,
+                struct pipe_draw_info *info,
                 unsigned drawid_offset,
                 const struct pipe_draw_indirect_info *indirect,
                 const struct pipe_draw_start_count_bias *draws,
@@ -212,6 +245,7 @@ st_draw_gallium_multimode_stipple(struct gl_context *ctx,
 {
    for (unsigned i = 0; i < num_draws; i++) {
       info->mode = mode[i];
+      info->index_bounds_valid = false;
       st_draw_gallium_stipple(ctx, info, i, NULL, &draws[i], 1);
    }
 }
@@ -468,7 +502,7 @@ st_draw_quad(struct st_context *st,
 
 static void
 st_hw_select_draw_gallium(struct gl_context *ctx,
-                          const struct pipe_draw_info *info,
+                          struct pipe_draw_info *info,
                           unsigned drawid_offset,
                           const struct pipe_draw_indirect_info *indirect,
                           const struct pipe_draw_start_count_bias *draws,
@@ -476,22 +510,24 @@ st_hw_select_draw_gallium(struct gl_context *ctx,
 {
    struct st_context *st = st_context(ctx);
    struct pipe_resource *releasebuf = NULL;
-   enum mesa_prim old_mode = info->mode;
 
    ST_PIPELINE_RENDER_STATE_MASK(mask);
    st_prepare_draw(ctx, mask);
 
+   if (!st_prepare_index_bounds(ctx, info, indirect, draws, num_draws))
+      return;
+
+   enum mesa_prim old_mode = info->mode;
+
    if (st_draw_hw_select_prepare_common(ctx, &releasebuf) &&
-       /* Removing "const" is fine because we restore the changed mode
-        * at the end. */
-       st_draw_hw_select_prepare_mode(ctx, ((struct pipe_draw_info*)info))) {
+       st_draw_hw_select_prepare_mode(ctx, info)) {
       cso_draw_vbo(st->cso_context, info, drawid_offset, indirect, draws,
                    num_draws);
    }
 
    pipe_resource_release(st->pipe, releasebuf);
 
-   ((struct pipe_draw_info*)info)->mode = old_mode;
+   info->mode = old_mode;
 }
 
 static void

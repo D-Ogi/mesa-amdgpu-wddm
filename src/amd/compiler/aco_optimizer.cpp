@@ -111,13 +111,13 @@ struct ssa_info {
    {
       if (new_label & temp_labels) {
          label &= ~temp_labels;
-         label &= ~val_labels; /* temp and val alias */
+         label &= ~val_labels;     /* temp and val alias */
          label &= ~label_phys_reg; /* temp and phys_reg alias */
       }
 
       if (new_label & val_labels) {
          label &= ~val_labels;
-         label &= ~temp_labels; /* temp and val alias */
+         label &= ~temp_labels;    /* temp and val alias */
          label &= ~label_phys_reg; /* phys_reg and val alias */
       }
 
@@ -3104,7 +3104,8 @@ label_instruction(opt_ctx& ctx, aco_ptr<Instruction>& instr)
       if (instr->operands[0].constantEquals((unsigned)-1) && instr->operands[1].constantEquals(0)) {
          /* Found a cselect that operates on a uniform bool that comes from eg. s_cmp */
          ctx.info[instr->definitions[0].tempId()].set_uniform_bool(instr->operands[2].getTemp());
-      } else if (instr->operands[2].isTemp() && ctx.info[instr->operands[2].tempId()].is_scc_invert()) {
+      } else if (instr->operands[2].isTemp() &&
+                 ctx.info[instr->operands[2].tempId()].is_scc_invert()) {
          /* Flip the operands to get rid of the scc_invert instruction */
          std::swap(instr->operands[0], instr->operands[1]);
          instr->operands[2].setTemp(ctx.info[instr->operands[2].tempId()].temp);
@@ -3117,6 +3118,34 @@ label_instruction(opt_ctx& ctx, aco_ptr<Instruction>& instr)
    case aco_opcode::p_insert: {
       if (parse_extract(instr.get(), instr->definitions[0].getTemp()))
          ctx.info[instr->definitions[0].tempId()].set_extract();
+      break;
+   }
+   case aco_opcode::v_cmp_lg_i32: {
+      /* (a ? #c : 0) != 0 -> a */
+      if (!instr->usesModifiers() && instr->operands[0].constantEquals(0) &&
+          instr->operands[1].isTemp()) {
+         Instruction* parent = ctx.info[instr->operands[1].tempId()].parent_instr;
+
+         if (parent->opcode == aco_opcode::v_cndmask_b32 && !parent->usesModifiers() &&
+             parent->operands[0].constantEquals(0) && parent->operands[1].isConstant() &&
+             parent->operands[1].constantValue() != 0 && parent->operands[2].isTemp()) {
+            ctx.info[instr->definitions[0].tempId()].set_temp(parent->operands[2].getTemp());
+         }
+      }
+      break;
+   }
+   case aco_opcode::s_cmp_lg_i32: {
+      /* a != 0 -> a if a is already a scalar condition result.*/
+      for (unsigned i = 0; i < 2; i++) {
+         if (instr->operands[!i].constantEquals(0) && instr->operands[i].isTemp()) {
+            Definition def = ctx.info[instr->operands[i].tempId()].parent_instr->definitions.back();
+
+            if (def.isFixed() && def.physReg() == scc &&
+                def.getTemp() == instr->operands[i].getTemp()) {
+               ctx.info[instr->definitions[0].tempId()].set_temp(instr->operands[i].getTemp());
+            }
+         }
+      }
       break;
    }
    default: break;
@@ -3840,8 +3869,12 @@ apply_load_extract(opt_ctx& ctx, aco_ptr<Instruction>& extract, Instruction* loa
       case aco_opcode::global_load_ushort: load->opcode = aco_opcode::global_load_short_d16; break;
       case aco_opcode::scratch_load_sbyte: load->opcode = aco_opcode::scratch_load_sbyte_d16; break;
       case aco_opcode::scratch_load_ubyte: load->opcode = aco_opcode::scratch_load_ubyte_d16; break;
-      case aco_opcode::scratch_load_sshort: load->opcode = aco_opcode::scratch_load_short_d16; break;
-      case aco_opcode::scratch_load_ushort: load->opcode = aco_opcode::scratch_load_short_d16; break;
+      case aco_opcode::scratch_load_sshort:
+         load->opcode = aco_opcode::scratch_load_short_d16;
+         break;
+      case aco_opcode::scratch_load_ushort:
+         load->opcode = aco_opcode::scratch_load_short_d16;
+         break;
       default: break;
       }
    }
@@ -5988,7 +6021,9 @@ validate_opt_ctx(opt_ctx& ctx, bool incorrect_uses_lits)
       abort();
 }
 
-void rename_loop_header_phis(opt_ctx& ctx) {
+void
+rename_loop_header_phis(opt_ctx& ctx)
+{
    for (Block& block : ctx.program->blocks) {
       if (!(block.kind & block_kind_loop_header))
          continue;

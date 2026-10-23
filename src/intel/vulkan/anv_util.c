@@ -454,28 +454,29 @@ anv_device_init_rt_shaders(struct anv_device *device)
       struct brw_cs_prog_data trampoline_prog_data = {
          .uses_btd_stack_ids = true,
       };
-      struct brw_compile_cs_params params = {
-         .base = {
+
+      const unsigned *tramp_data = NULL;
+      if (intel_use_jay(device->info, trampoline_nir)) {
+         struct jay_compile_params params = {
+            .mem_ctx = tmp_ctx,
+            .nir = trampoline_nir,
+            .prog_data = (union brw_any_prog_data *)&trampoline_prog_data,
+            .key = (union brw_any_prog_key *)&trampoline_key.key,
+            .archiver = debug_archiver,
+         };
+         struct jay_shader_bin *bin = jay_compile(device->info, &params);
+         tramp_data = bin->kernel;
+      } else {
+         struct brw_compile_params params = {
+            .mem_ctx = tmp_ctx,
             .nir = trampoline_nir,
             .key = &trampoline_key.key.base,
             .prog_data = (struct brw_stage_prog_data *)&trampoline_prog_data,
             .log_data = device,
-            .mem_ctx = tmp_ctx,
             .archiver = debug_archiver,
-         },
-      };
+         };
 
-      const unsigned *tramp_data = NULL;
-      if (intel_use_jay(device->info, trampoline_nir)) {
-         struct jay_shader_bin *bin =
-            jay_compile(device->info, tmp_ctx, trampoline_nir,
-                        (union brw_any_prog_data *)&trampoline_prog_data,
-                        (union brw_any_prog_key *)&trampoline_key.key.base,
-                        debug_archiver, NULL);
-
-         tramp_data = bin->kernel;
-      } else {
-         tramp_data = brw_compile(device->physical->compiler, &params.base);
+         tramp_data = brw_compile(device->physical->compiler, &params);
       }
 
       struct anv_shader_upload_params upload_params = {
@@ -530,28 +531,28 @@ anv_device_init_rt_shaders(struct anv_device *device)
                  &return_key.key.base, device->info);
 
       struct brw_bs_prog_data return_prog_data = { 0, };
-      struct brw_compile_bs_params params = {
-         .base = {
+      const unsigned *return_data = NULL;
+      if (intel_use_jay(device->info, trivial_return_nir)) {
+         struct jay_compile_params params = {
+            .mem_ctx = tmp_ctx,
+            .nir = trivial_return_nir,
+            .key = (union brw_any_prog_key *)&return_key.key,
+            .prog_data = (union brw_any_prog_data *)&return_prog_data,
+            .archiver = debug_archiver,
+         };
+         struct jay_shader_bin *bin = jay_compile(device->info, &params);
+         return_data = bin->kernel;
+      } else {
+         struct brw_compile_params params = {
+            .mem_ctx = tmp_ctx,
             .nir = trivial_return_nir,
             .key = &return_key.key.base,
             .prog_data = (struct brw_stage_prog_data *)&return_prog_data,
             .log_data = device,
-            .mem_ctx = tmp_ctx,
             .archiver = debug_archiver,
-         },
-      };
+         };
 
-      const unsigned *return_data = NULL;
-      if (intel_use_jay(device->info, trivial_return_nir)) {
-         struct jay_shader_bin *bin =
-            jay_compile(device->info, tmp_ctx, trivial_return_nir,
-                        (union brw_any_prog_data *)&return_prog_data,
-                        (union brw_any_prog_key *)&return_key.key.base,
-                        debug_archiver, NULL);
-
-         return_data = bin->kernel;
-      } else {
-         return_data = brw_compile(device->physical->compiler, &params.base);
+         return_data = brw_compile(device->physical->compiler, &params);
       }
 
       struct anv_shader_upload_params upload_params = {
@@ -605,26 +606,26 @@ anv_device_init_rt_shaders(struct anv_device *device)
                  &null_return_key.key.base, device->info);
 
       struct brw_bs_prog_data return_prog_data = { 0, };
-      struct brw_compile_bs_params params = {
-         .base = {
+      const unsigned *return_data = NULL;
+      if (intel_use_jay(device->info, null_ahs_nir)) {
+         struct jay_compile_params params = {
+            .mem_ctx = tmp_ctx,
+            .nir = null_ahs_nir,
+            .key = (union brw_any_prog_key *)&null_return_key.key,
+            .prog_data = (union brw_any_prog_data *)&return_prog_data,
+            .archiver = debug_archiver,
+         };
+         struct jay_shader_bin *bin = jay_compile(device->info, &params);
+         return_data = bin->kernel;
+      } else {
+         struct brw_compile_params params = {
+            .mem_ctx = tmp_ctx,
             .nir = null_ahs_nir,
             .key = &null_return_key.key.base,
             .prog_data = (struct brw_stage_prog_data *)&return_prog_data,
             .log_data = device,
-            .mem_ctx = tmp_ctx,
-         },
-      };
-      const unsigned *return_data = NULL;
-      if (intel_use_jay(device->info, null_ahs_nir)) {
-         struct jay_shader_bin *bin =
-            jay_compile(device->info, tmp_ctx, null_ahs_nir,
-                        (union brw_any_prog_data *)&return_prog_data,
-                        (union brw_any_prog_key *)&null_return_key.key.base,
-                        debug_archiver, NULL);
-
-         return_data = bin->kernel;
-      } else {
-         return_data = brw_compile(device->physical->compiler, &params.base);
+         };
+         return_data = brw_compile(device->physical->compiler, &params);
       }
 
 

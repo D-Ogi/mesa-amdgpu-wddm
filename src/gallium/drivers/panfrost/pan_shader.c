@@ -19,6 +19,7 @@
 #include "pan_nir.h"
 #include "pan_trace.h"
 #include "compiler/bifrost/bifrost_compile.h"
+#include "panfrost/compiler/midgard/midgard_quirks.h"
 #include "shader_enums.h"
 
 static struct panfrost_uncompiled_shader *
@@ -111,12 +112,12 @@ panfrost_shader_compile(struct panfrost_screen *screen, const nir_shader *ir,
     * happens at CSO create time regardless.
     */
    if (mesa_shader_stage_is_compute(s->info.stage)) {
-      pan_preprocess_nir(s, panfrost_device_gpu_id(dev));
+      pan_preprocess_nir(s, dev->arch);
    }
 
    struct pan_compile_inputs inputs = {
-      .gpu_id = panfrost_device_gpu_id(dev),
-      .gpu_variant = dev->kmod.dev->props.gpu_variant,
+      .arch = dev->arch,
+      .model = dev->model,
    };
 
    /* Lower this early so the backends don't have to worry about it */
@@ -170,11 +171,11 @@ panfrost_shader_compile(struct panfrost_screen *screen, const nir_shader *ir,
 
       NIR_PASS(_, s, pan_nir_lower_framebuffer, key->fs.rt_formats,
                pan_raw_format_mask_midgard(key->fs.rt_formats), 0,
-               panfrost_device_gpu_prod_id(dev) < 0x700);
+               midgard_get_quirks(dev->model->gpu_prod_id) & MIDGARD_BROKEN_BLEND_LOADS);
    }
 
    /* Lower resource indices */
-   NIR_PASS(_, s, panfrost_nir_lower_res_indices, inputs.gpu_id);
+   NIR_PASS(_, s, panfrost_nir_lower_res_indices, dev->arch);
 
    pan_postprocess_nir(s, &inputs, &out->info);
 
@@ -565,7 +566,7 @@ panfrost_create_shader_state(struct pipe_context *pctx,
    }
 
    /* Then run the suite of lowering and optimization, including I/O lowering */
-   pan_preprocess_nir(nir, panfrost_device_gpu_id(dev));
+   pan_preprocess_nir(nir, dev->arch);
 
    /* Usually IO is lowered by gallium, but TTN doesn't */
    if (!nir->info.io_lowered) {
@@ -594,10 +595,8 @@ panfrost_create_shader_state(struct pipe_context *pctx,
 
    if (nir->info.stage == MESA_SHADER_VERTEX) {
       struct pan_varying_layout *varying_layout = &so->vs_varying_layout;
-      pan_varying_collect_formats(varying_layout, nir,
-                                  panfrost_device_gpu_id(dev));
-      pan_build_varying_layout_compact(varying_layout, nir,
-                                       panfrost_device_gpu_id(dev));
+      pan_varying_collect_formats(varying_layout, nir, dev->arch);
+      pan_build_varying_layout_compact(varying_layout, nir, dev->arch);
    }
 
    /* If this shader uses transform feedback, compile the transform

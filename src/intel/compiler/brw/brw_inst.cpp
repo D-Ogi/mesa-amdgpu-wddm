@@ -199,6 +199,7 @@ brw_inst_kind_for_opcode(enum opcode opcode)
    case BRW_OPCODE_SENDC:
    case BRW_OPCODE_SENDSC:
    case BRW_OPCODE_SENDG:
+   case BRW_OPCODE_SENDGC:
    case SHADER_OPCODE_SEND:
    case SHADER_OPCODE_SEND_GATHER:
    case SHADER_OPCODE_BARRIER:
@@ -619,22 +620,15 @@ brw_inst::size_read(const struct intel_device_info *devinfo, int arg) const
       break;
 
    case BRW_OPCODE_DPAS: {
-      /* This is a little bit sketchy. There's no way to get at devinfo from
-       * here, so the regular reg_unit() cannot be used. However, on
-       * reg_unit() == 1 platforms, DPAS exec_size must be 8, and on known
-       * reg_unit() == 2 platforms, DPAS exec_size must be 16. This is not a
-       * coincidence, so this isn't so bad.
-       */
-      const unsigned reg_unit = this->exec_size / 8;
       const unsigned type_size = brw_type_size_bytes(src[arg].type);
       const brw_dpas_inst *dpas = as_dpas();
 
       switch (arg) {
       case 0:
          assert(type_size == 4 || type_size == 2);
-         return dpas->rcount * reg_unit * 8 * type_size;
+         return dpas->rcount * reg_unit(devinfo) * 8 * type_size;
       case 1:
-         return dpas->sdepth * reg_unit * REG_SIZE;
+         return dpas->sdepth * reg_unit(devinfo) * REG_SIZE;
       case 2:
          /* This is simpler than the formula described in the Bspec, but it
           * covers all of the cases that we support. Each inner sdepth

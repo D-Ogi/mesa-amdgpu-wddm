@@ -176,6 +176,8 @@ struct radv_device {
    /* Whether to keep shader debug info, for debugging. */
    bool keep_shader_info;
 
+   bool debug_after_draw;
+
    /* Backup in-memory cache to be used if the app doesn't provide one */
    struct vk_pipeline_cache *mem_cache;
 
@@ -380,5 +382,9 @@ void radv_device_release_performance_counters(struct radv_device *device);
 VkResult radv_device_init_utrace(struct radv_device *device);
 
 void radv_device_finish_utrace(struct radv_device *device);
+
+VkResult radv_device_init_anti_lag(struct radv_device *device);
+
+void radv_device_finish_anti_lag(struct radv_device *device);
 
 #endif /* RADV_DEVICE_H */

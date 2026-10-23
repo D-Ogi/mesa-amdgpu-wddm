@@ -135,7 +135,7 @@ update_gl_clamp(struct st_context *st, struct gl_program *prog, uint32_t *gl_cla
    if (!st->ctx->Texture.NumSamplersWithClamp)
       return;
 
-   gl_clamp[0] = gl_clamp[1] = gl_clamp[2] = 0;
+   gl_clamp[0] = gl_clamp[1] = gl_clamp[2] = gl_clamp[3] = 0;
    GLbitfield samplers_used = prog->SamplersUsed;
    unsigned unit;
    /* same as st_atom_sampler.c */
@@ -157,6 +157,9 @@ update_gl_clamp(struct st_context *st, struct gl_program *prog, uint32_t *gl_cla
             gl_clamp[1] |= BITFIELD64_BIT(unit);
          if (is_wrap_gl_clamp(msamp->Attrib.WrapR))
             gl_clamp[2] |= BITFIELD64_BIT(unit);
+         if ((msamp->Attrib.MinFilter == GL_NEAREST || msamp->Attrib.MinFilter == GL_LINEAR) &&
+             msamp->Attrib.MinFilter == msamp->Attrib.MagFilter && msamp->Attrib.MaxAnisotropy <= 1.0f)
+            gl_clamp[3] |= BITFIELD64_BIT(unit);
       }
    }
 }

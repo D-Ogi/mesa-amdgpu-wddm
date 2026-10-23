@@ -26,6 +26,7 @@
 
 #include "etnaviv_texture_state.h"
 
+#include "layout/eil_format.h"
 #include "hw/common.xml.h"
 
 #include "etnaviv_clear_blit.h"
@@ -286,7 +287,7 @@ etna_create_sampler_view_state(struct pipe_context *pctx, struct pipe_resource *
    /* 128-bit formats are emulated as two stacked G32R32 planes. The companion
     * sampler reads the second (BA) plane, starting halfway into each level.
     */
-   if (format_is_128bit(so->format)) {
+   if (eil_format_is_emulated_128bit(so->format)) {
       for (int lod = 0; lod <= res->base.last_level; ++lod) {
          sv->lod_addr_128bit[lod].bo = res->bo;
          sv->lod_addr_128bit[lod].offset = res->levels[lod].offset +
@@ -497,7 +498,7 @@ etna_emit_new_texture_state(struct etna_context *ctx)
          }
       }
    }
-   if (unlikely(screen->specs.tex_astc && (dirty & (ETNA_DIRTY_SAMPLER_VIEWS)))) {
+   if (unlikely(VIV_FEATURE(screen, ETNA_FEATURE_TEXTURE_ASTC) && (dirty & (ETNA_DIRTY_SAMPLER_VIEWS)))) {
       for (int x = 0; x < VIVS_NTE_SAMPLER__LEN; ++x) {
          if ((1 << x) & active_samplers) {
             struct etna_sampler_view *sv = etna_sampler_view(ctx->sampler_view[x]);
@@ -537,7 +538,7 @@ etna_emit_new_texture_state(struct etna_context *ctx)
             continue;
 
          struct etna_sampler_view *sv = etna_sampler_view(ctx->sampler_view[x]);
-         if (!format_is_128bit(sv->base.format))
+         if (!eil_format_is_emulated_128bit(sv->base.format))
             continue;
 
          const unsigned y = companion_slot(ctx, x);

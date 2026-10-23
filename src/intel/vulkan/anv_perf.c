@@ -466,6 +466,7 @@ VkResult anv_InitializePerformanceApiINTEL(
    if (!intel_perf_init_metrics_library(device->physical->perf, device->fd)) {
       /* Do not use Metrics Library if it fails to initialize */
       device->physical->perf->use_metrics_library = false;
+      return VK_ERROR_INITIALIZATION_FAILED;
    }
 
    /* Not much to do here */

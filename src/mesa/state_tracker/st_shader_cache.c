@@ -240,11 +240,3 @@ st_load_nir_from_disk_cache(struct gl_context *ctx,
 
    return true;
 }
-
-void
-st_serialise_nir_program_binary(struct gl_context *ctx,
-                                struct gl_shader_program *shProg,
-                                struct gl_program *prog)
-{
-   st_serialise_nir_program(ctx, prog);
-}

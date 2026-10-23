@@ -78,6 +78,8 @@ jay_dag_transpose(struct jay_dag *out, const struct jay_dag *in)
             };
       }
    }
+
+   free(count);
 }
 
 static inline void

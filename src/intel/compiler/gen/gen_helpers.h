@@ -887,7 +887,7 @@ gen_swsb_src_dep(gen_swsb swsb)
 static inline int
 gen_inst_send_src0_len(const gen_inst *inst)
 {
-   if (inst->opcode == GEN_OP_SENDG)
+   if (inst->opcode == GEN_OP_SENDG || inst->opcode == GEN_OP_SENDGC)
       return inst->send.src0_len;
 
    if (inst->send.desc_is_reg)
@@ -918,7 +918,7 @@ gen_is_lsc_translated_sfid(const struct intel_device_info *devinfo, gen_sfid sfi
 static inline int
 gen_inst_send_dst_len(const struct intel_device_info *devinfo, const gen_inst *inst)
 {
-   if (inst->opcode == GEN_OP_SENDG) {
+   if (inst->opcode == GEN_OP_SENDG || inst->opcode == GEN_OP_SENDGC) {
       if (gen_is_lsc_translated_sfid(devinfo, inst->send.sfid)) {
          enum lsc_data_size data_size = gen_lsc_64bit_msg_desc_get_data_size(inst->send.combined_desc);
          uint32_t data_size_bytes = lsc_data_size_register_bytes(data_size);
@@ -938,7 +938,7 @@ static inline int
 gen_inst_send_src1_len(const struct intel_device_info *devinfo,
                        const gen_inst *inst)
 {
-   if (inst->opcode == GEN_OP_SENDG)
+   if (inst->opcode == GEN_OP_SENDG || inst->opcode == GEN_OP_SENDGC)
       return inst->send.src1_len;
 
    if (inst->send.src1_len)

@@ -82,7 +82,7 @@ KosmicKrisp specific environment variables:
 - ``MESA_KK_EXPERIMENTAL``: Enables advertising experimental features which may not provide full correctness or may negatively impact performance when enabled. Provide ``all`` to advertise all listed features.
   - ``custom_border`` to advertise ``VK_EXT_custom_border_color`` and ``VK_EXT_border_color_swizzle``.
   - ``image_view_min_lod`` to advertise ``VK_EXT_image_view_min_lod``.
-  - ``m5_optimize_e5r9g9b9`` to use allowGPUOptimizedContents on M5 with this format, which causes some CTS tests for vkCmdCopyImage() to fail
+  - ``optimize_e5r9g9b9`` to use allowGPUOptimizedContents with this format, which causes some CTS tests for vkCmdCopyImage() to fail
 
 Metal workarounds
 *****************

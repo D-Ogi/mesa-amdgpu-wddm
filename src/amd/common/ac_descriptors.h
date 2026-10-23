@@ -194,6 +194,28 @@ enum {
    #define FMASK_EQAA_16S_8F_EXPANDED 0x8888888876543210ull /* 8-byte clear value */
 };
 
+/* HTILE definitions:
+ * - Z/S decompression: Read compressed tiles and write them uncompressed. zmask (for Z) and smem
+ *   (for stencil) are cleared to ~0 in HTILE, meaning "uncompressed". This is what Z/S decompression
+ *   via DB seems to do. It doesn't seem to change any other HTILE fields.
+ * - Z expansion (for HiZ): Set the Z bounds to [0, 1], which represent the minimum and maximum Z
+ *   present in each tile of the Z image and are encoded in minz/maxz or zbase/zdelta HTILE fields.
+ *   No change to image data. It only affects subsequent Z tests. Setting FORCE_FULL_Z_RANGE during
+ *   Z tests makes the HW ignore the Z bounds in HTILE.
+ * - Stencil expansion (for HiS): Set sr0 and sr1 to neutral values in HTILE. No change to image
+ *   data. It only affects subsequent stencil tests. (note that we don't use this in Mesa)
+ *
+ * When image stores ignore HTILE and such image stores touch any compressed 8x8 tile
+ * (represented by 1 HTILE dword), that whole 8x8 tile can get corrupted because even one
+ * changed byte can affect the content of all 8x8 pixels in the tile.
+ *
+ * The best thing to do is:
+ * - Partially overwritten 8x8 tiles: Decompress them before image stores.
+ * - Fully overwritten 8x8 tiles: Only set the HTILE dword of that tile to uncompressed.
+ * - For both of the above: Recompute the Z bounds of each touched tile and write them
+ *   to the HTILE dword.
+ * - Untouched tiles: Leave them alone.
+ */
 typedef union {
    /* Z only */
    struct {
@@ -373,11 +395,6 @@ void
 ac_build_texture_descriptor(const struct radeon_info *info,
                             const struct ac_texture_state *state,
                             uint32_t desc[8]);
-
-uint32_t
-ac_tile_mode_index(const struct radeon_surf *surf,
-                   unsigned level,
-                   bool stencil);
 
 struct ac_mutable_tex_state {
    const struct radeon_surf *surf;

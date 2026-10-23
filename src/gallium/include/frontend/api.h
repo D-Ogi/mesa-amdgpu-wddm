@@ -114,20 +114,6 @@ enum st_attachment_type {
 #define ST_INVALIDATE_SAMPLE_SHADING      (1 << 17)
 #define ST_INVALIDATE_FS_IMAGES           (1 << 18)
 
-/**
- * Value to pipe_frontend_streen::get_param function.
- */
-enum st_manager_param {
-   /**
-    * The DRI frontend on old libGL's doesn't do the right thing
-    * with regards to invalidating the framebuffers.
-    *
-    * For the GL gallium frontend that means that it needs to invalidate
-    * the framebuffer in glViewport itself.
-    */
-   ST_MANAGER_BROKEN_INVALIDATE
-};
-
 struct pipe_resource;
 struct util_queue_monitoring;
 
@@ -340,10 +326,13 @@ struct pipe_frontend_screen
                               void *egl_image);
 
    /**
-    * Query a feature or property from the DRI/GLX/WGL frontend.
+    * The DRI frontend on old libGL's doesn't do the right thing
+    * with regards to invalidating the framebuffers.
+    *
+    * For the GL gallium frontend that means that it needs to invalidate
+    * the framebuffer in glViewport itself.
     */
-   int (*get_param)(struct pipe_frontend_screen *fscreen,
-                    enum st_manager_param param);
+   bool broken_invalidate;
 
    /**
     * Call the loader function setBackgroundContext. Called from the worker

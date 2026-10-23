@@ -86,6 +86,7 @@ struct v3d_screen {
         bool has_cache_flush;
         bool has_perfmon;
         bool nonmsaa_texture_size_limit;
+        bool dual_color_blend_by_location;
         bool has_cpu_queue;
         bool has_multisync;
 

@@ -35,6 +35,8 @@ struct mme_tu104_sim {
    uint32_t loop_count;
    uint16_t loop_start;
    uint16_t loop_end;
+
+   uint32_t cls_eng3d;
 };
 
 static bool
@@ -190,7 +192,7 @@ eval_alu(struct mme_tu104_sim *sim,
          uint32_t alu_idx)
 {
    const struct mme_tu104_alu *alu = &inst->alu[alu_idx];
-   const uint32_t x = load_reg(sim, inst, alu_idx, alu->src[0]);
+   uint32_t x = load_reg(sim, inst, alu_idx, alu->src[0]);
    const uint32_t y = load_reg(sim, inst, alu_idx, alu->src[1]);
 
    uint32_t res = 0;
@@ -325,12 +327,22 @@ eval_alu(struct mme_tu104_sim *sim,
    }
    case MME_TU104_ALU_OP_DREAD: {
       assert(inst->alu[alu_idx].src[1] == MME_TU104_REG_ZERO);
+
+      if (mme_tu104_alu_op_has_implicit_imm(sim->cls_eng3d,
+                                            inst->alu[alu_idx].op))
+         x += inst->imm[alu_idx];
+
       uint32_t *dram = sim->state_ops->map_dram(sim->state_handler, x);
       res = *dram;
       break;
    }
    case MME_TU104_ALU_OP_DWRITE: {
       assert(inst->alu[alu_idx].dst == MME_TU104_REG_ZERO);
+
+      if (mme_tu104_alu_op_has_implicit_imm(sim->cls_eng3d,
+                                            inst->alu[alu_idx].op))
+         x += inst->imm[alu_idx];
+
       uint32_t *dram = sim->state_ops->map_dram(sim->state_handler, x);
       *dram = y;
       break;
@@ -396,11 +408,12 @@ eval_out(struct mme_tu104_sim *sim,
 void
 mme_tu104_sim_core(uint32_t inst_count, const struct mme_tu104_inst *insts,
                    const struct mme_sim_state_ops *state_ops,
-                   void *state_handler)
+                   void *state_handler, uint32_t cls_eng3d)
 {
    struct mme_tu104_sim sim = {
       .state_ops = state_ops,
       .state_handler = state_handler,
+      .cls_eng3d = cls_eng3d,
    };
 
    bool end_next = false;
@@ -632,8 +645,8 @@ static const struct mme_sim_state_ops mme_tu104_state_sim_ops = {
 
 void
 mme_tu104_sim(uint32_t inst_count, const struct mme_tu104_inst *insts,
-              uint32_t param_count, const uint32_t *params,
-              uint32_t mem_count, struct mme_tu104_sim_mem *mems)
+              uint32_t param_count, const uint32_t *params, uint32_t mem_count,
+              struct mme_tu104_sim_mem *mems, uint32_t cls_eng3d)
 {
    struct mme_tu104_state_sim state_sim = {
       .param_count = param_count,
@@ -642,5 +655,6 @@ mme_tu104_sim(uint32_t inst_count, const struct mme_tu104_inst *insts,
       .mems = mems,
    };
 
-   mme_tu104_sim_core(inst_count, insts, &mme_tu104_state_sim_ops, &state_sim);
+   mme_tu104_sim_core(inst_count, insts, &mme_tu104_state_sim_ops, &state_sim,
+                      cls_eng3d);
 }

@@ -1893,6 +1893,8 @@ anv_device_unmap_bo(struct anv_device *device,
       assert(((uintptr_t)map & (page_size - 1)) == 0);
    }
 
+   VG(VALGRIND_FREELIKE_BLOCK(map, 0));
+
    if (replace) {
       map = mmap(map, map_size, PROT_NONE,
                  MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED, -1, 0);
@@ -1901,7 +1903,6 @@ anv_device_unmap_bo(struct anv_device *device,
                           "Failed to map over original mapping");
       }
    } else {
-      VG(VALGRIND_FREELIKE_BLOCK(map, 0));
       munmap(map, map_size);
    }
    return VK_SUCCESS;

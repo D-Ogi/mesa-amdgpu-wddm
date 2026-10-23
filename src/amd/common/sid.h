@@ -93,6 +93,7 @@
 #define   WAIT_REG_MEM_GREATER_OR_EQUAL               5
 #define   WAIT_REG_MEM_MEM_SPACE(x)                   (((unsigned)(x)&0x3) << 4)
 #define   WAIT_REG_MEM_PFP                            (1 << 8)
+#define   WAIT_REG_MEM_UNCACHED_VI_MEC                (1 << 10)
 #define PKT3_MEM_WRITE                             0x3D /* GFX6 only */
 #define PKT3_INDIRECT_BUFFER                       0x3F /* GFX6+ */
 #define PKT3_COPY_DATA                             0x40
@@ -366,34 +367,69 @@
 #define SDMA_5_2_COPY_T2T_SUB_WINDOW_CPV(x)        (((unsigned)(x) & 0x1) << 28)
 #define SDMA_5_2_COPY_T2T_SUB_WINDOW_SRC_CP(x)     (((unsigned)(x) & 0x7) << 26)
 #define SDMA_5_2_COPY_T2T_SUB_WINDOW_DST_CP(x)     (((unsigned)(x) & 0x7) << 18)
+#define SDMA_5_2_COPY_LINEAR_CPV(x)                (((unsigned)(x) & 0x1) << 19)
+#define SDMA_5_2_COPY_LINEAR_DST_CP(x)             (((unsigned)(x) & 0x7) << 18)
+#define SDMA_5_2_COPY_LINEAR_SRC_CP(x)             (((unsigned)(x) & 0x7) << 26)
+#define SDMA_5_2_COPY_LINEAR_SUB_WINDOW_CPV(x)     (((unsigned)(x) & 0x1) << 19)
+#define SDMA_5_2_COPY_LINEAR_SUB_WINDOW_DST_CP(x)  (((unsigned)(x) & 0x7) << 18)
+#define SDMA_5_2_COPY_LINEAR_SUB_WINDOW_SRC_CP(x)  (((unsigned)(x) & 0x7) << 26)
+#define SDMA_5_2_WRITE_LINEAR_CPV(x)               (((unsigned)(x) & 0x1) << 28)
+#define SDMA_5_2_WRITE_LINEAR_CP(x)                (((unsigned)(x) & 0x7) << 26)
+#define SDMA_5_2_FENCE_CPV(x)                      (((unsigned)(x) & 0x1) << 28)
+#define SDMA_5_2_FENCE_CP(x)                       (((unsigned)(x) & 0x7) << 24)
+#define SDMA_5_2_POLL_REGMEM_CPV(x)                (((unsigned)(x) & 0x1) << 24)
+#define SDMA_5_2_POLL_REGMEM_CP(x)                 (((unsigned)(x) & 0x7) << 20)
+#define SDMA_5_2_CONSTANT_FILL_CPV(x)              (((unsigned)(x) & 0x1) << 28)
+#define SDMA_5_2_CONSTANT_FILL_CP(x)               (((unsigned)(x) & 0x7) << 24)
+#define SDMA_5_2_TIMESTAMP_CPV(x)                  (((unsigned)(x) & 0x1) << 28)
+#define SDMA_5_2_TIMESTAMP_CP(x)                   (((unsigned)(x) & 0x7) << 24)
+
+/* SDMA 7.0 MALL policy. */
+#define SDMA_7_0_MALL_POLICY_RT                              0x0
+#define SDMA_7_0_MALL_POLICY_NT                              0x1
+#define SDMA_7_0_MALL_POLICY_HT                              0x2
+#define SDMA_7_0_MALL_POLICY_LU                              0x3
+#define SDMA_7_0_COPY_LINEAR_DST_MALL_POLICY(x)              (((unsigned)(x) & 0x3) << 20)
+#define SDMA_7_0_COPY_LINEAR_SRC_MALL_POLICY(x)              (((unsigned)(x) & 0x3) << 28)
+#define SDMA_7_0_COPY_LINEAR_SUB_WINDOW_DST_MALL_POLICY(x)   (((unsigned)(x) & 0x3) << 20)
+#define SDMA_7_0_COPY_LINEAR_SUB_WINDOW_SRC_MALL_POLICY(x)   (((unsigned)(x) & 0x3) << 28)
+#define SDMA_7_0_COPY_TILED_SUB_WINDOW_LINEAR_MALL_POLICY(x) (((unsigned)(x) & 0x3) << 20)
+#define SDMA_7_0_COPY_TILED_SUB_WINDOW_TILED_MALL_POLICY(x)  (((unsigned)(x) & 0x3) << 28)
+#define SDMA_7_0_COPY_T2T_SUB_WINDOW_DST_MALL_POLICY(x)      (((unsigned)(x) & 0x3) << 20)
+#define SDMA_7_0_COPY_T2T_SUB_WINDOW_SRC_MALL_POLICY(x)      (((unsigned)(x) & 0x3) << 28)
+#define SDMA_7_0_WRITE_LINEAR_MALL_POLICY(x)                 (((unsigned)(x) & 0x3) << 28)
+#define SDMA_7_0_CONSTANT_FILL_MALL_POLICY(x)                (((unsigned)(x) & 0x3) << 26)
+#define SDMA_7_0_FENCE_MALL_POLICY(x)                        (((unsigned)(x) & 0x3) << 26)
+#define SDMA_7_0_TIMESTAMP_MALL_POLICY(x)                    (((unsigned)(x) & 0x3) << 26)
+#define SDMA_7_0_POLL_REGMEM_MALL_POLICY(x)                  (((unsigned)(x) & 0x3) << 22)
 
 /* There is apparently an undocumented HW limitation that
  * prevents the HW from copying the last 255 bytes of (1 << 22) - 1
  */
-#define SDMA_V2_0_COPY_MAX_BYTES 0x3fff00   /* almost 4 MB*/
-#define SDMA_V5_2_COPY_MAX_BYTES 0x3fffff00 /* almost 1 GB */
+#define SDMA_2_0_COPY_MAX_BYTES 0x3fff00   /* almost 4 MB*/
+#define SDMA_5_2_COPY_MAX_BYTES 0x3fffff00 /* almost 1 GB */
 
 #define SDMA_NOP_PAD SDMA_PACKET(SDMA_OPCODE_NOP, 0, 0) /* header-only version */
 
 /* SDMA DCC settings for GFX10+ */
-#define SDMA5_DCC_DATA_FORMAT(x)       ((x) & 0x7f)
-#define SDMA5_DCC_ALPHA_IS_ON_MSB(x)   (((x) & 0x1) << 8)
-#define SDMA5_DCC_NUM_TYPE(x)          (((x) & 0x7) << 9)
-#define SDMA5_DCC_SURF_TYPE(x)         (((x) & 0x3) << 12) /* 0: color, 1: Z, 2: stencil, 3: FMASK */
-#define SDMA5_DCC_LLC_NOALLOC(x)       (((x) & 0x1) << 14) /* don't cache in MALL */
-#define SDMA5_DCC_MAX_COM(x)           (((x) & 0x3) << 24) /* max compressed block size, 0: 64B, 1: 128B, 2: 256B */
-#define SDMA5_DCC_MAX_UCOM(x)          (((x) & 0x3) << 26) /* max uncompressed block size, 0: 64B, 1: 128B, 2: 256B */
-#define SDMA5_DCC_WRITE_COMPRESS(x)    (((x) & 0x1) << 28) /* DCC write compression enabled, dst must be tiled */
-#define SDMA5_DCC_TMZ(x)               (((x) & 0x1) << 29) /* metadata is TMZ */
-#define SDMA5_DCC_PIPE_ALIGNED(x)      (((unsigned)(x) & 0x1) << 31)
+#define SDMA_5_0_DCC_DATA_FORMAT(x)     ((x) & 0x7f)
+#define SDMA_5_0_DCC_ALPHA_IS_ON_MSB(x) (((x) & 0x1) << 8)
+#define SDMA_5_0_DCC_NUM_TYPE(x)        (((x) & 0x7) << 9)
+#define SDMA_5_0_DCC_SURF_TYPE(x)       (((x) & 0x3) << 12) /* 0: color, 1: Z, 2: stencil, 3: FMASK */
+#define SDMA_5_0_DCC_LLC_NOALLOC(x)     (((x) & 0x1) << 14) /* don't cache in MALL */
+#define SDMA_5_0_DCC_MAX_COM(x)         (((x) & 0x3) << 24) /* max compressed block size, 0: 64B, 1: 128B, 2: 256B */
+#define SDMA_5_0_DCC_MAX_UCOM(x)        (((x) & 0x3) << 26) /* max uncompressed block size, 0: 64B, 1: 128B, 2: 256B */
+#define SDMA_5_0_DCC_WRITE_COMPRESS(x)  (((x) & 0x1) << 28) /* DCC write compression enabled, dst must be tiled */
+#define SDMA_5_0_DCC_TMZ(x)             (((x) & 0x1) << 29) /* metadata is TMZ */
+#define SDMA_5_0_DCC_PIPE_ALIGNED(x)    (((unsigned)(x) & 0x1) << 31)
 
 /* SDMA DCC settings for GFX12+ */
-#define SDMA7_DCC_DATA_FORMAT(x)       ((x) & 0x3f)
-#define SDMA7_DCC_NUM_TYPE(x)          (((x) & 0x7) << 9)
-#define SDMA7_DCC_READ_CM(x)           (((x) & 0x3) << 16) /* 0: bypass DCC, 2: decompress reads if PTE.D */
-#define SDMA7_DCC_WRITE_CM(x)          (((x) & 0x3) << 18) /* 0: bypass DCC, 1: write compressed if PTE.D, 2: write uncompressed if PTE.D */
-#define SDMA7_DCC_MAX_COM(x)           (((x) & 0x3) << 24)
-#define SDMA7_DCC_MAX_UCOM(x)          (((x) & 0x1) << 26) /* 1: max uncompressed block size 256B */
+#define SDMA_7_0_DCC_DATA_FORMAT(x)     ((x) & 0x3f)
+#define SDMA_7_0_DCC_NUM_TYPE(x)        (((x) & 0x7) << 9)
+#define SDMA_7_0_DCC_READ_CM(x)         (((x) & 0x3) << 16) /* 0: bypass DCC, 2: decompress reads if PTE.D */
+#define SDMA_7_0_DCC_WRITE_CM(x)        (((x) & 0x3) << 18) /* 0: bypass DCC, 1: write compressed if PTE.D, 2: write uncompressed if PTE.D */
+#define SDMA_7_0_DCC_MAX_COM(x)         (((x) & 0x3) << 24)
+#define SDMA_7_0_DCC_MAX_UCOM(x)        (((x) & 0x1) << 26) /* 1: max uncompressed block size 256B */
 
 enum amd_cmp_class_flags
 {

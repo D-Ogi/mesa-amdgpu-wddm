@@ -1095,7 +1095,8 @@ private:
          }
       }
 
-      if (gen_inst_has_dst(inst->opcode) && !is_null(inst->dst)) {
+      if (devinfo->ver >= 12 ||
+          (gen_inst_has_dst(inst->opcode) && !is_null(inst->dst))) {
          ERROR_IF(inst->dst.region.hstride == 0,
                   "Destination horizontal stride must not be 0.");
       }
@@ -1943,7 +1944,7 @@ private:
       if (!gen_inst_is_send(inst) || inst->send.desc_is_reg)
          return;
 
-      if (inst->opcode == GEN_OP_SENDG) {
+      if (inst->opcode == GEN_OP_SENDG || inst->opcode == GEN_OP_SENDGC) {
          sendg_descriptor_restrictions();
          return;
       }
@@ -2098,7 +2099,7 @@ private:
                    (h == 2 && v < 2) ||
                    (h == 1 && v == 4 && (dst_subnr % 32 == 2 * (src_subnr / 4)) && (src_subnr % 2 == 0)) ||
                    (h == 2 && v == 4 && (dst_subnr % 32 == src_subnr / 2)) ||
-                   (h == 4 && v == 8 && (dst_subnr % 32 == src_subnr / 4)))
+                   (h == 4 && v == 8 && (dst_subnr % 16 == src_subnr / 4)))
                   allowed = true;
             }
          }

@@ -653,8 +653,10 @@ cmd_buffer_flush_mesh_inline_data(struct anv_cmd_buffer *cmd_buffer,
       uint64_t push_addr64 =
          get_mesh_task_push_addr64(cmd_buffer, gfx, MESA_SHADER_TASK);
 
-      anv_batch_emit(&cmd_buffer->batch, GENX(3DSTATE_TASK_SHADER_DATA), data)
+      anv_batch_emit(&cmd_buffer->batch, GENX(3DSTATE_TASK_SHADER_DATA), data) {
+         assert(bind_map->inline_dwords_count <= ARRAY_SIZE(data.InlineData));
          fill_inline_params(data.InlineData, bind_map, gfx, push_addr64);
+      }
    }
 
    if (dirty_stages & VK_SHADER_STAGE_MESH_BIT_EXT &&
@@ -664,8 +666,10 @@ cmd_buffer_flush_mesh_inline_data(struct anv_cmd_buffer *cmd_buffer,
       uint64_t push_addr64 =
          get_mesh_task_push_addr64(cmd_buffer, gfx, MESA_SHADER_MESH);
 
-      anv_batch_emit(&cmd_buffer->batch, GENX(3DSTATE_MESH_SHADER_DATA), data)
+      anv_batch_emit(&cmd_buffer->batch, GENX(3DSTATE_MESH_SHADER_DATA), data) {
+         assert(bind_map->inline_dwords_count <= ARRAY_SIZE(data.InlineData));
          fill_inline_params(data.InlineData, bind_map, gfx, push_addr64);
+      }
    }
 }
 #endif

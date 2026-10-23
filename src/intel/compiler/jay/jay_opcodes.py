@@ -213,9 +213,9 @@ op('extract_subspan_info', 2, 'u32', Props.CMOD, ['uint16_t mask'])
 # indicate that the r3 phi's value is r1 when coming from B1, and r2 when coming
 # from B2. This would traditionally be written r3 = 𝜙(r1, r2).
 #
-# Phis operate on whole 32-bit lane values. Phis are not allowed to mix files.
-op('phi_src', 1, 'u1 u32', Props.NO_DEST, ['uint32_t index'])
-op('phi_dst', 0, 'u1 u32')
+# Phis are not allowed to mix files.
+op('phi_src', 1, 'u1 u16 u32', Props.NO_DEST, ['uint32_t index'])
+op('phi_dst', 0, 'u1 u16 u32')
 
 # Output from a unit test to prevent dead code elimination.
 op('unit_test', 1, 'u32', Props.NO_DEST)

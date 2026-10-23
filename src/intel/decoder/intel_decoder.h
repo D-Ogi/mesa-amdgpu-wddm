@@ -262,6 +262,15 @@ struct intel_batch_decode_hash {
    uint64_t hash;
 };
 
+struct intel_compute_walker {
+   /* Compute walker data that is going to be used in intel_hang_replay.
+    */
+   bool emit_inline_parameter;
+   bool btd_mode;
+   uint32_t inline_data[8];
+   unsigned inline_data_count;
+};
+
 struct intel_batch_decode_ctx {
    /**
     * Return information about the buffer containing the given address.
@@ -279,6 +288,9 @@ struct intel_batch_decode_ctx {
                          uint64_t address,
                          const void *data,
                          unsigned data_length);
+
+   void (*compute_walker)(void *user_data,
+                          const struct intel_compute_walker *walker);
 
    void *user_data;
 

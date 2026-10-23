@@ -111,7 +111,7 @@ get_vis_stream_patchpoint_cs(struct tu_cmd_buffer *cmd,
    util_dynarray_foreach (&cmd->vis_stream_cs_bos,
                           struct tu_vis_stream_patchpoint_cs,
                           patchpoint_cs) {
-      uint32_t *fence = (uint32_t *)tu_suballoc_bo_map(&patchpoint_cs->fence_bo);
+      uint32_t *fence = static_cast<uint32_t *>(tu_suballoc_bo_map(&patchpoint_cs->fence_bo));
       if (*fence == 1) {
          *fence = 0;
          tu_cs_init_suballoc(cs, cmd->device, &patchpoint_cs->cs_bo);
@@ -288,6 +288,7 @@ resolve_vis_stream_patchpoints(struct tu_queue *queue,
 
          struct tu_cs_entry entry = tu_cs_end_sub_stream(&cs, &sub_cs);
          submit_add_entries(queue->device, submit, dump_cmds, &entry, 1);
+         tu_cs_finish(&cs);
       }
 
       render_pass_idx += cmd_buffers[i]->state.tile_render_pass_count;
@@ -438,7 +439,7 @@ queue_submit(struct vk_queue *_queue, struct vk_queue_submit *vk_submit)
    pthread_mutex_lock(&device->submit_mutex);
 
    struct tu_cmd_buffer **cmd_buffers =
-      (struct tu_cmd_buffer **) vk_submit->command_buffers;
+      reinterpret_cast<struct tu_cmd_buffer **>(vk_submit->command_buffers);
    uint32_t cmdbuf_count = vk_submit->command_buffer_count;
 
    VkResult result =
@@ -604,7 +605,7 @@ out:
    tu_submit_finish(device, submit);
 
 fail_create_submit:
-   if (cmd_buffers != (struct tu_cmd_buffer **) vk_submit->command_buffers)
+   if (cmd_buffers != reinterpret_cast<struct tu_cmd_buffer **>(vk_submit->command_buffers))
       vk_free(&queue->device->vk.alloc, cmd_buffers);
 
    return result;

@@ -349,13 +349,14 @@ CDX12EncHMFT::IsSupported( const GUID *Api )
       return hr;
    }
 
-   if( m_EncoderCapabilities.m_bHWSupportsAppControlledSlicePartitioning )
+   if( m_EncoderCapabilities.m_bHWSupportsAppControlledSlicePartitioning &&
+       ( m_EncoderCapabilities.m_bHWSupportSliceModeMB || m_EncoderCapabilities.m_bHWSupportSliceModeMBRow ) )
    {
       if( *Api == CODECAPI_AVEncSliceControlMode || *Api == CODECAPI_AVEncSliceControlSize )
       {
          hr = S_OK;
          return hr;
-      }   
+      }
    }
 
    if( m_EncoderCapabilities.m_HWSupportsIntraRefreshModes != PIPE_VIDEO_ENC_INTRA_REFRESH_NONE )

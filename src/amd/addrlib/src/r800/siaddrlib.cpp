@@ -1,7 +1,7 @@
 /*
 ************************************************************************************************************************
 *
-*  Copyright (C) 2007-2024 Advanced Micro Devices, Inc. All rights reserved.
+*  Copyright (C) 2007-2026 Advanced Micro Devices, Inc. All rights reserved.
 *  SPDX-License-Identifier: MIT
 *
 ***********************************************************************************************************************/
@@ -1369,7 +1369,7 @@ UINT_64 SiLib::HwlComputeXmaskAddrFromCoord(
         {
             sliceBits = PowTwoAlign(sliceBits, BITS_TO_BYTES(HtileCacheBits) * numPipes / elemBits);
         }
-        macroOffset = slice * (sliceBits / numPipes) * elemBits ;
+        macroOffset = static_cast<UINT_64>(slice) * (sliceBits / numPipes) * elemBits;
     }
     else
     {   //tiled addressing
@@ -1387,7 +1387,7 @@ UINT_64 SiLib::HwlComputeXmaskAddrFromCoord(
         microY = (y % macroHeight) / MicroTileHeight / 4 ;
         microNumber = static_cast<UINT_64>(microX + microY * (macroWidth / MicroTileWidth / 4)) << microShift;
 
-        macroOffset = macroNumber * tileNumPerPipe * elemBits;
+        macroOffset = static_cast<UINT_64>(macroNumber) * tileNumPerPipe * elemBits;
     }
 
     if(elemIdxBits == microShift)
@@ -1404,10 +1404,10 @@ UINT_64 SiLib::HwlComputeXmaskAddrFromCoord(
     microOffset = elemBits * microNumber;
     totalOffset = microOffset + macroOffset;
 
-    UINT_32 pipe = ComputePipeFromCoord(x, y, 0, ADDR_TM_2D_TILED_THIN1, 0, FALSE, pTileInfo);
+    UINT_64 pipe = static_cast<UINT_64>(ComputePipeFromCoord(x, y, 0, ADDR_TM_2D_TILED_THIN1, 0, FALSE, pTileInfo));
     UINT_64 addrInBits = totalOffset % (m_pipeInterleaveBytes * 8) +
-                   pipe * (m_pipeInterleaveBytes * 8) +
-                   totalOffset / (m_pipeInterleaveBytes * 8) * (m_pipeInterleaveBytes * 8) * numPipes;
+                         pipe * (m_pipeInterleaveBytes * 8) +
+                         totalOffset / (m_pipeInterleaveBytes * 8) * (m_pipeInterleaveBytes * 8) * numPipes;
     *pBitPosition = static_cast<UINT_32>(addrInBits) % 8;
     UINT_64 addr = addrInBits / 8;
 

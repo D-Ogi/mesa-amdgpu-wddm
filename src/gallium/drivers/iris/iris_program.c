@@ -73,7 +73,6 @@ get_new_program_id(struct iris_screen *screen)
 
 static const unsigned *
 iris_backend_compile(const struct iris_screen *screen,
-                     void *mem_ctx,
                      struct brw_compile_params *params)
 {
    assert(screen->brw);
@@ -84,12 +83,14 @@ iris_backend_compile(const struct iris_screen *screen,
    params->prog_data->source_hash = *(uint64_t *)nir->info.source_blake3;
 
    if (intel_use_jay(devinfo, nir)) {
-      struct jay_shader_bin *bin =
-         jay_compile(devinfo, mem_ctx, nir,
-                     (union brw_any_prog_data *)params->prog_data,
-                     (union brw_any_prog_key *)params->key,
-                     params->archiver,
-                     NULL);
+      const struct jay_compile_params jc_params = {
+         .mem_ctx = params->mem_ctx,
+         .nir = nir,
+         .key = (union brw_any_prog_key *)params->key,
+         .prog_data = (union brw_any_prog_data *)params->prog_data,
+         .archiver = params->archiver,
+      };
+      struct jay_shader_bin *bin = jay_compile(devinfo, &jc_params);
 
       return bin->kernel;
    } else {
@@ -1353,23 +1354,23 @@ rewrite_src_with_bti(nir_builder *b, struct iris_binding_table *bt,
 }
 
 /**
- * Load the 64-bit GPU address of this stage's 64-bit binding table, i.e.
+ * Load the lower 32-bit GPU address of this stage's 64-bit binding table, i.e.
  * the array of SURFACE_STATEs built by iris_populate_64bit_binding_table().
  */
 static nir_def *
 iris_load_eff_64bit_surfaces_base_address(nir_builder *b)
 {
    if (b->shader->info.stage == MESA_SHADER_COMPUTE) {
-      return nir_load_inline_data_intel(b, 1, 64, nir_imm_int(b, 0),
-                                        .base = 0, .range = 8);
+      return nir_load_inline_data_intel(b, 1, 32, nir_imm_int(b, 0),
+                                        .base = 0, .range = 4);
    }
 
-   return nir_load_push_data_intel(b, 1, 64, nir_imm_int(b, 0),
-                                   .base = 0, .range = 8);
+   return nir_load_push_data_intel(b, 1, 32, nir_imm_int(b, 0),
+                                   .base = 0, .range = 4);
 }
 
 /**
- * Load the 64-bit GPU address of this stage's sampler-state table, i.e.
+ * Load the lower 32-bit GPU address of this stage's sampler-state table, i.e.
  * the array of SAMPLER_STATE_EXTENDED records built by
  * iris_upload_sampler_states().
  */
@@ -1377,12 +1378,34 @@ static nir_def *
 iris_load_eff_64bit_sampler_base_address(nir_builder *b)
 {
    if (b->shader->info.stage == MESA_SHADER_COMPUTE) {
-      return nir_load_inline_data_intel(b, 1, 64, nir_imm_int(b, 0),
-                                        .base = 8, .range = 8);
+      return nir_load_inline_data_intel(b, 1, 32, nir_imm_int(b, 0),
+                                        .base = 4, .range = 4);
    }
 
-   return nir_load_push_data_intel(b, 1, 64, nir_imm_int(b, 0),
-                                   .base = 8, .range = 8);
+   return nir_load_push_data_intel(b, 1, 32, nir_imm_int(b, 0),
+                                   .base = 4, .range = 4);
+}
+
+static nir_def *
+iris_eff_64bit_surface_handle(nir_builder *b, nir_def *base_addr,
+                              nir_def *byte_offset)
+{
+   nir_def *reloc_high = nir_load_reloc_const_intel(b, BRW_SHADER_RELOC_DESCRIPTORS_INTERNAL_HIGH);
+   nir_def *addr = nir_vec2(b,
+                            nir_iadd(b, base_addr, byte_offset),
+                            reloc_high);
+
+   return nir_resource_intel(
+      b,
+      2, /* num_components */
+      32, /* bit size */
+      base_addr, /* set_offset */
+      addr, /* surface_index */
+      nir_imm_int(b, 0), /* array_index */
+      nir_imm_int(b, 0), /* bindless_base_offset*/
+      .desc_set = 0,
+      .binding = 0,
+      .resource_access_intel = nir_resource_intel_internal);
 }
 
 /**
@@ -1421,18 +1444,24 @@ rewrite_src_with_surface_address(nir_builder *b,
       byte_offset = nir_imul_imm(b, nir_u2u32(b, slot), ss_size);
    }
 
-   nir_def *addr64 = nir_iadd(b, base_addr, nir_u2u64(b, byte_offset));
-   nir_def *handle = nir_resource_intel(
-      b,
-      1, /* num_components */
-      64, /* bit size */
-      addr64, /* set_offset */
-      addr64, /* surface_index */
-      nir_imm_int(b, 0), /* array_index */
-      nir_imm_int(b, 0), /* bindless_base_offset */
-      .desc_set = 0,
-      .binding = 0,
-      .resource_access_intel = nir_resource_intel_internal);
+   nir_def *handle = iris_eff_64bit_surface_handle(b, base_addr, byte_offset);
+
+   /* brw_nir_pre_lower_texture() lowers image_size and get_ssbo_size to a
+    * resinfo tex instruction and only uses texture_handle (which accepts the
+    * vec2 handle) when the resource is flagged bindless, otherwise it uses
+    * texture_offset that only takes a single component.
+    */
+   if (instr->type == nir_instr_type_intrinsic) {
+      nir_intrinsic_op op = nir_instr_as_intrinsic(instr)->intrinsic;
+
+      if (op == nir_intrinsic_image_size ||
+          op == nir_intrinsic_get_ssbo_size) {
+         nir_intrinsic_instr *rsrc = nir_def_as_intrinsic(handle);
+         nir_intrinsic_set_resource_access_intel(
+            rsrc, nir_intrinsic_resource_access_intel(rsrc) |
+                  nir_resource_intel_bindless);
+      }
+   }
 
    nir_src_rewrite(src, handle);
 }
@@ -1470,19 +1499,7 @@ rewrite_tex_with_surface_address(nir_builder *b,
       byte_offset = nir_imm_int(b, slot * state_size);
    }
 
-   nir_def *addr64 = nir_iadd(b, base_addr, nir_u2u64(b, byte_offset));
-   nir_def *handle = nir_resource_intel(
-      b,
-      1, /* num_components */
-      64, /* bit size */
-      addr64, /* set_offset */
-      addr64, /* surface_index */
-      nir_imm_int(b, 0), /* array_index */
-      nir_imm_int(b, 0), /* bindless_base_offset */
-      .desc_set = 0,
-      .binding = 0,
-      .resource_access_intel = nir_resource_intel_internal);
-
+   nir_def *handle = iris_eff_64bit_surface_handle(b, base_addr, byte_offset);
    nir_tex_instr_add_src(tex, src_type, handle);
 }
 
@@ -1554,7 +1571,7 @@ iris_setup_binding_table(const struct iris_screen *screen,
 
    assert(ARRAY_SIZE(info->textures_used) >= 4);
    int max_tex = BITSET_LAST_BIT(info->textures_used);
-   assert(max_tex <= 128);
+   assert(max_tex <= IRIS_MAX_TEXTURES);
    bt->surf_count[IRIS_SURFACE_GROUP_TEXTURE_LOW64] = MIN2(64, max_tex);
    bt->surf_count[IRIS_SURFACE_GROUP_TEXTURE_HIGH64] = MAX2(0, max_tex - 64);
    bt->used_mask[IRIS_SURFACE_GROUP_TEXTURE_LOW64] =
@@ -1596,6 +1613,7 @@ iris_setup_binding_table(const struct iris_screen *screen,
 
          case nir_intrinsic_load_output:
             if (!brw_can_coherent_fb_fetch(devinfo)) {
+               assert(screen->brw == NULL);
                mark_used_with_src(bt, &intrin->src[0],
                                   IRIS_SURFACE_GROUP_RENDER_TARGET_READ);
             }
@@ -1667,7 +1685,13 @@ iris_setup_binding_table(const struct iris_screen *screen,
             enum iris_surface_group group;
             unsigned group_index;
 
-            if (tex->texture_index < 64) {
+            /* Framebuffer reads use indices beyond the sampler-view range
+             * until they are mapped to render-target-read surfaces here.
+             */
+            if (tex->texture_index >= IRIS_MAX_TEXTURES) {
+               group = IRIS_SURFACE_GROUP_RENDER_TARGET_READ;
+               group_index = tex->texture_index - IRIS_MAX_TEXTURES;
+            } else if (tex->texture_index < 64) {
                group = IRIS_SURFACE_GROUP_TEXTURE_LOW64;
                group_index = tex->texture_index;
             } else {
@@ -1746,6 +1770,11 @@ iris_setup_binding_table(const struct iris_screen *screen,
                rewrite_src_with_surface_address(&b, bt, instr, &intrin->src[0],
                                                 IRIS_SURFACE_GROUP_IMAGE,
                                                 screen->isl_dev.ss.size);
+               /* intrinsic_image_* intrinsics only takes a single component
+                * handle, so here we rewrite as bindless to use a vec2 handle.
+                */
+               nir_rewrite_image_intrinsic(intrin, intrin->src[0].ssa,
+                                           nir_image_intrinsic_type_bindless);
             } else {
                rewrite_src_with_bti(&b, bt, instr, &intrin->src[0],
                                     IRIS_SURFACE_GROUP_IMAGE);
@@ -1776,22 +1805,18 @@ iris_setup_binding_table(const struct iris_screen *screen,
 
          case nir_intrinsic_load_output:
             if (!brw_can_coherent_fb_fetch(devinfo)) {
+               /* load_output should have been lowered to texture ops by
+                * brw_nir_lower_fs_load_output()
+                */
+               assert(screen->brw == NULL);
                /* We're using a BTI as the load_output offset here which
                 * breaks newer NIR assumptions.
                 */
                nir_io_semantics io_sem = nir_intrinsic_io_semantics(intrin);
                io_sem.no_validate = true;
                nir_intrinsic_set_io_semantics(intrin, io_sem);
-
-               if (use_efficient_64bit) {
-                  rewrite_src_with_surface_address(&b, bt, instr,
-                                                   &intrin->src[0],
-                                                   IRIS_SURFACE_GROUP_RENDER_TARGET_READ,
-                                                   screen->isl_dev.ss.size);
-               } else {
-                  rewrite_src_with_bti(&b, bt, instr, &intrin->src[0],
-                                       IRIS_SURFACE_GROUP_RENDER_TARGET_READ);
-               }
+               rewrite_src_with_bti(&b, bt, instr, &intrin->src[0],
+                                    IRIS_SURFACE_GROUP_RENDER_TARGET_READ);
             }
             break;
 
@@ -1817,19 +1842,8 @@ iris_setup_binding_table(const struct iris_screen *screen,
             if (use_efficient_64bit) {
                uint32_t slot = iris_group_index_to_bti(bt, IRIS_SURFACE_GROUP_CS_WORK_GROUPS, 0);
                nir_def *base_addr = iris_load_eff_64bit_surfaces_base_address(&b);
-               nir_def *addr64 = nir_iadd_imm(&b, base_addr, slot * screen->isl_dev.ss.size);
-
-               ubo_index = nir_resource_intel(
-                  &b,
-                  1, /* num_components */
-                  64, /* bit size */
-                  addr64, /* set_offset */
-                  addr64, /* surface_index */
-                  nir_imm_int(&b, 0), /* array_index */
-                  nir_imm_int(&b, 0), /* bindless_base_offset */
-                  .desc_set = 0,
-                  .binding = 0,
-                  .resource_access_intel = nir_resource_intel_internal);
+               ubo_index = iris_eff_64bit_surface_handle(
+                  &b, base_addr, nir_imm_int(&b, slot * screen->isl_dev.ss.size));
             } else {
                uint32_t offset = bt->offsets[IRIS_SURFACE_GROUP_CS_WORK_GROUPS];
 
@@ -2203,19 +2217,17 @@ iris_compile_vs(struct iris_screen *screen,
 
       struct brw_vs_prog_key brw_key = iris_to_brw_vs_key(screen, key);
 
-      struct brw_compile_vs_params params = {
-         .base = {
-            .mem_ctx = mem_ctx,
-            .nir = nir,
-            .key = &brw_key.base,
-            .prog_data = (struct brw_stage_prog_data *)brw_prog_data,
-            .log_data = dbg,
-            .archiver = debug_archiver,
-         },
+      struct brw_compile_params params = {
+         .mem_ctx = mem_ctx,
+         .nir = nir,
+         .key = &brw_key.base,
+         .prog_data = (struct brw_stage_prog_data *)brw_prog_data,
+         .log_data = dbg,
+         .archiver = debug_archiver,
       };
 
-      program = iris_backend_compile(screen, mem_ctx, &params.base);
-      error = params.base.error_str;
+      program = iris_backend_compile(screen, &params);
+      error = params.error_str;
       if (program) {
          iris_debug_recompile(dbg, ish, key);
          iris_apply_brw_prog_data(shader, &brw_prog_data->base.base, ubo_ranges);
@@ -2462,19 +2474,17 @@ iris_compile_tcs(struct iris_screen *screen,
       struct iris_ubo_range ubo_ranges[4] = {};
       brw_apply_ubo_ranges(screen, nir, ubo_ranges, &brw_prog_data->base.base);
 
-      struct brw_compile_tcs_params params = {
-         .base = {
-            .mem_ctx = mem_ctx,
-            .nir = nir,
-            .key = &brw_key.base,
-            .prog_data = (struct brw_stage_prog_data *)brw_prog_data,
-            .log_data = dbg,
-            .archiver = debug_archiver,
-         },
+      struct brw_compile_params params = {
+         .mem_ctx = mem_ctx,
+         .nir = nir,
+         .key = &brw_key.base,
+         .prog_data = (struct brw_stage_prog_data *)brw_prog_data,
+         .log_data = dbg,
+         .archiver = debug_archiver,
       };
 
-      program = iris_backend_compile(screen, mem_ctx, &params.base);
-      error = params.base.error_str;
+      program = iris_backend_compile(screen, &params);
+      error = params.error_str;
 
       if (program) {
          iris_debug_recompile(dbg, ish, key);
@@ -2671,20 +2681,20 @@ iris_compile_tes(struct iris_screen *screen,
 
       struct brw_tes_prog_key brw_key = iris_to_brw_tes_key(screen, key);
 
-      struct brw_compile_tes_params params = {
-         .base = {
-            .mem_ctx = mem_ctx,
-            .nir = nir,
-            .key = &brw_key.base,
-            .prog_data = (struct brw_stage_prog_data *)brw_prog_data,
-            .log_data = dbg,
-            .archiver = debug_archiver,
+      struct brw_compile_params params = {
+         .mem_ctx = mem_ctx,
+         .nir = nir,
+         .key = &brw_key.base,
+         .prog_data = (struct brw_stage_prog_data *)brw_prog_data,
+         .log_data = dbg,
+         .tes = {
+            .input_vue_map = &input_vue_map,
          },
-         .input_vue_map = &input_vue_map,
+         .archiver = debug_archiver,
       };
 
-      program = iris_backend_compile(screen, mem_ctx, &params.base);
-      error = params.base.error_str;
+      program = iris_backend_compile(screen, &params);
+      error = params.error_str;
 
       if (program) {
          iris_debug_recompile(dbg, ish, key);
@@ -2860,19 +2870,17 @@ iris_compile_gs(struct iris_screen *screen,
 
       struct brw_gs_prog_key brw_key = iris_to_brw_gs_key(screen, key);
 
-      struct brw_compile_gs_params params = {
-         .base = {
-            .mem_ctx = mem_ctx,
-            .nir = nir,
-            .key = &brw_key.base,
-            .prog_data = (struct brw_stage_prog_data *)brw_prog_data,
-            .log_data = dbg,
-            .archiver = debug_archiver,
-         },
+      struct brw_compile_params params = {
+         .mem_ctx = mem_ctx,
+         .nir = nir,
+         .key = &brw_key.base,
+         .prog_data = (struct brw_stage_prog_data *)brw_prog_data,
+         .log_data = dbg,
+         .archiver = debug_archiver,
       };
 
-      program = iris_backend_compile(screen, mem_ctx, &params.base);
-      error = params.base.error_str;
+      program = iris_backend_compile(screen, &params);
+      error = params.error_str;
       if (program) {
          iris_debug_recompile(dbg, ish, key);
          iris_apply_brw_prog_data(shader, &brw_prog_data->base.base, ubo_ranges);
@@ -3002,27 +3010,23 @@ iris_force_dual_color_blend(nir_shader *nir)
       var->data.location = FRAG_RESULT_DATA0;
       var->data.index = 1;
    }
+
+   /* Update nir information. */
+   nir->info.fs.color_is_dual_source = true;
 }
 
 static nir_def *
 iris_rt_write_efficient_64bit(nir_builder *b, signed rt, void *data)
 {
    const struct isl_device *isl_dev = data;
-   nir_def *addr = iris_load_eff_64bit_surfaces_base_address(b);
+   uint64_t offset = rt > 0 ? (uint32_t)(rt * isl_dev->ss.size) : 0;
+   nir_def *addr_lo = nir_iadd_imm(
+      b,
+      iris_load_eff_64bit_surfaces_base_address(b),
+      offset);
+   nir_def *reloc_high = nir_load_reloc_const_intel(b, BRW_SHADER_RELOC_DESCRIPTORS_INTERNAL_HIGH);
 
-   if (rt > 0) {
-      nir_def *offset = nir_imm_int(b, (uint32_t)(rt * isl_dev->ss.size));
-      nir_def *addr_lo = nir_unpack_64_2x32_split_x(b, addr);
-      nir_def *addr_hi = nir_unpack_64_2x32_split_y(b, addr);
-
-      nir_def *new_lo = nir_iadd(b, addr_lo, offset);
-      nir_def *carry = nir_uadd_carry(b, addr_lo, offset);
-      nir_def *new_hi = nir_iadd(b, addr_hi, carry);
-
-      addr = nir_pack_64_2x32_split(b, new_lo, new_hi);
-   }
-
-   return addr;
+   return nir_pack_64_2x32_split(b, addr_lo, reloc_high);
 }
 
 /**
@@ -3062,8 +3066,24 @@ iris_compile_fs(struct iris_screen *screen,
     * intrinsics to IRIS_SURFACE_GROUP_RENDER_TARGET_READ on Gfx8 for
     * non-coherent framebuffer fetches.
     */
-   elk_nir_lower_fs_outputs(nir);
+   if (!screen->brw)
+      elk_nir_lower_fs_outputs(nir);
 #endif
+
+   /* Lower non-coherent framebuffer reads to texture operations before
+    * binding-table setup.
+    * Reserve indices past the sampler views so iris_setup_binding_table() maps
+    * them to render-target-read surfaces.
+    * Coherent reads and the Elk path keep their load_output intrinsics.
+    */
+   if (screen->brw && !brw_can_coherent_fb_fetch(devinfo) &&
+       nir->info.outputs_read) {
+      struct brw_fs_prog_key brw_key = iris_to_brw_fs_key(screen, key);
+
+      brw_nir_lower_fs_outputs(nir);
+      NIR_PASS(_, nir, brw_nir_lower_fs_load_output, &brw_key,
+               IRIS_MAX_TEXTURES);
+   }
 
    int null_rts = key->nr_color_regions == 0 &&
       brw_nir_fs_needs_null_rt(devinfo, nir,
@@ -3085,27 +3105,26 @@ iris_compile_fs(struct iris_screen *screen,
       brw_apply_ubo_ranges(screen, nir, ubo_ranges, &brw_prog_data->base);
 
       struct brw_fs_prog_key brw_key = iris_to_brw_fs_key(screen, key);
-      struct brw_compile_fs_params params = {
-         .base = {
-            .mem_ctx = mem_ctx,
-            .nir = nir,
-            .key = &brw_key.base,
-            .prog_data = (struct brw_stage_prog_data *)brw_prog_data,
-            .log_data = dbg,
-            .archiver = debug_archiver,
+      struct brw_compile_params params = {
+         .mem_ctx = mem_ctx,
+         .nir = nir,
+         .key = &brw_key.base,
+         .prog_data = (struct brw_stage_prog_data *)brw_prog_data,
+         .log_data = dbg,
+         .fs = {
+            .vue_map = vue_map,
+            .max_polygons = UCHAR_MAX,
          },
-
-         .max_polygons = UCHAR_MAX,
-         .vue_map = vue_map,
+         .archiver = debug_archiver,
       };
 
       if (key->base.use_efficient_64bit) {
-         params.rt_write_cb = iris_rt_write_efficient_64bit;
-         params.rt_write_data = (void *)&screen->isl_dev;
+         params.fs.rt_write_cb = iris_rt_write_efficient_64bit;
+         params.fs.rt_write_data = (void *)&screen->isl_dev;
       }
 
-      program = iris_backend_compile(screen, mem_ctx, &params.base);
-      error = params.base.error_str;
+      program = iris_backend_compile(screen, &params);
+      error = params.error_str;
       if (program) {
          iris_debug_recompile(dbg, ish, key);
          iris_apply_brw_prog_data(shader, &brw_prog_data->base, ubo_ranges);
@@ -3441,19 +3460,17 @@ iris_compile_cs(struct iris_screen *screen,
          brw_cs_fill_push_const_info(devinfo, brw_prog_data, -1);
       }
 
-      struct brw_compile_cs_params params = {
-         .base = {
-            .mem_ctx = mem_ctx,
-            .nir = nir,
-            .key = &brw_key.base,
-            .prog_data = (struct brw_stage_prog_data *)brw_prog_data,
-            .log_data = dbg,
-            .archiver = debug_archiver,
-         },
+      struct brw_compile_params params = {
+         .mem_ctx = mem_ctx,
+         .nir = nir,
+         .key = &brw_key.base,
+         .prog_data = (struct brw_stage_prog_data *)brw_prog_data,
+         .log_data = dbg,
+         .archiver = debug_archiver,
       };
 
-      program = iris_backend_compile(screen, mem_ctx, &params.base);
-      error = params.base.error_str;
+      program = iris_backend_compile(screen, &params);
+      error = params.error_str;
       if (program) {
          iris_debug_recompile(dbg, ish, key);
          iris_apply_brw_prog_data(shader, &brw_prog_data->base, NULL);
@@ -3490,6 +3507,7 @@ iris_compile_cs(struct iris_screen *screen,
 
    if (program == NULL) {
       dbg_printf("Failed to compile compute shader: %s\n", error);
+      ralloc_free(mem_ctx);
 
       shader->compilation_failed = true;
       util_queue_fence_signal(&shader->ready);
@@ -3589,7 +3607,7 @@ iris_scratch_buffer_create(struct iris_screen *screen,
 
    uint32_t size = per_thread_scratch * devinfo->max_scratch_ids[MESA_SHADER_COMPUTE];
    buf->bo = iris_bo_alloc(screen->bufmgr, "scratch", size, 1024,
-                           IRIS_MEMZONE_SHADER, BO_ALLOC_PLAIN);
+                           IRIS_MEMZONE_OTHER, BO_ALLOC_PLAIN);
    if (!buf->bo) {
       free(buf);
       return NULL;
@@ -3597,7 +3615,7 @@ iris_scratch_buffer_create(struct iris_screen *screen,
 
    buf->surf_bo = iris_bo_alloc(screen->bufmgr, "scratch surface state",
                                 screen->isl_dev.ss.size, 64,
-                                IRIS_MEMZONE_SCRATCH, BO_ALLOC_CPU_VISIBLE);
+                                IRIS_MEMZONE_SURFACE, BO_ALLOC_CPU_VISIBLE);
    if (!buf->surf_bo) {
       iris_bo_unreference(buf->bo);
       free(buf);
@@ -4379,8 +4397,7 @@ iris_set_max_shader_compiler_threads(struct pipe_screen *pscreen,
                                      unsigned max_threads)
 {
    struct iris_screen *screen = (struct iris_screen *) pscreen;
-   util_queue_adjust_num_threads(&screen->shader_compiler_queue, max_threads,
-                                 false);
+   util_queue_adjust_num_threads(&screen->shader_compiler_queue, max_threads);
 }
 
 static bool

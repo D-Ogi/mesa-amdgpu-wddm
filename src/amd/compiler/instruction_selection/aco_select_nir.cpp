@@ -813,7 +813,8 @@ visit_call(isel_context* ctx, nir_call_instr* instr)
    if (ctx->program->gfx_level >= GFX9) {
       call_instr->operands[0] = Operand(stack_ptr, info.stack_ptr.def.physReg());
    } else {
-      call_instr->operands[0] = Operand(load_scratch_resource(ctx->program, bld, ctx->program->private_segment_buffers.size() - 1, true));
+      call_instr->operands[0] = Operand(load_scratch_resource(
+         ctx->program, bld, ctx->program->private_segment_buffers.size() - 1, true));
       call_instr->operands[0].setPrecolored(info.stack_ptr.def.physReg());
    }
 

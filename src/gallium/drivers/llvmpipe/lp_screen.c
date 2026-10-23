@@ -513,11 +513,13 @@ static const struct nir_shader_compiler_options gallivm_nir_options = {
    .lower_extract_word = true,
    .lower_insert_byte = true,
    .lower_insert_word = true,
-   .lower_uadd_carry = true,
-   .lower_usub_borrow = true,
    .lower_mul_2x32_64 = true,
    .lower_ifind_msb = true,
-   .lower_int64_options = nir_lower_imul_2x32_64 | nir_lower_bitfield_extract64,
+   /* LLVM calls into libgcc for a 64-bit division on a 32-bit target, and
+    * RuntimeDyld can't resolve the R_PPC_REL24 of that call on 32-bit PowerPC.
+    */
+   .lower_int64_options = nir_lower_imul_2x32_64 | nir_lower_bitfield_extract64 |
+                          (DETECT_ARCH_PPC && !DETECT_ARCH_PPC_64 ? nir_lower_divmod64 : 0),
    .lower_doubles_options = nir_lower_dround_even,
    .max_unroll_iterations = 32,
    .lower_to_scalar = true,
@@ -673,6 +675,10 @@ llvmpipe_is_format_supported(struct pipe_screen *_screen,
    if (bind & (PIPE_BIND_RENDER_TARGET | PIPE_BIND_SHADER_IMAGE))
       if (!lp_storage_render_image_format_supported(format))
          return false;
+
+   /* The JIT doesn't byte-swap on image stores. */
+   if (format_desc->is_byte_swapped && (bind & PIPE_BIND_SHADER_IMAGE))
+      return false;
 
    if (bind & PIPE_BIND_SHADER_IMAGE) {
       if (!lp_storage_image_format_supported(format))
@@ -900,12 +906,17 @@ lp_disk_cache_create(struct llvmpipe_screen *screen)
    char cache_id[BLAKE3_HEX_LEN];
    _mesa_blake3_init(&ctx);
 
-   if (!disk_cache_get_function_identifier(lp_disk_cache_create, &ctx) ||
-       !disk_cache_get_function_identifier(LLVMLinkInMCJIT, &ctx))
+   if (!disk_cache_get_function_identifier(lp_disk_cache_create, &ctx))
       return;
+
+#if !GALLIVM_USE_ORCJIT
+   if (!disk_cache_get_function_identifier(LLVMLinkInMCJIT, &ctx))
+      return;
+#endif
 
    _mesa_blake3_update(&ctx, &gallivm_perf, sizeof(gallivm_perf));
    update_cache_blake3_cpu(&ctx);
+   _mesa_blake3_update(&ctx, &lp_native_vector_width, sizeof(lp_native_vector_width));
    _mesa_blake3_final(&ctx, blake3);
    mesa_bytes_to_hex(cache_id, blake3, BLAKE3_KEY_LEN);
 

@@ -1346,25 +1346,44 @@ genX(write_cs_descriptor)(struct anv_dgc_cs_descriptor *desc,
    desc->simd_size = dispatch.simd_size;
 
 #if GFX_VERx10 >= 125
-   GENX(COMPUTE_WALKER_pack)(NULL, desc->gfx125.compute_walker,
-                             &(struct GENX(COMPUTE_WALKER)) {
-                                GENX(COMPUTE_WALKER_header),
-                                .body = {
-                                   .PostSync.MOCS = anv_mocs(device, NULL, 0),
-                                },
-                             });
+   if (GFX_VERx10 >= 350 && device->physical->uses_efficient_64bit) {
+#if GFX_VERx10 >= 350
+      GENX(COMPUTE_WALKER_2_pack)(NULL, desc->gfx350.compute_walker_2,
+                                  &(struct GENX(COMPUTE_WALKER_2)) {
+                                     GENX(COMPUTE_WALKER_2_header),
+                                     .body = {
+                                        .Post_sync_opn0.MOCS = anv_mocs(device, NULL, 0),
+                                        .Post_sync_opn1.MOCS = anv_mocs(device, NULL, 0),
+                                        .Post_sync_opn2.MOCS = anv_mocs(device, NULL, 0),
+                                        .Post_sync_opn3.MOCS = anv_mocs(device, NULL, 0),
+                                     },
+                                  });
 
-   assert(sizeof(desc->gfx125.compute_walker) >
-          sizeof(shader->cs.gfx125.compute_walker_body));
-   for (uint32_t i = 0; i < ARRAY_SIZE(shader->cs.gfx125.compute_walker_body); i++)
-      desc->gfx125.compute_walker[1 + i] |= shader->cs.gfx125.compute_walker_body[i];
-   desc->gfx125.inline_dwords_count = bind_map->inline_dwords_count;
-   assert(sizeof(desc->gfx125.inline_dwords) ==
-          sizeof(bind_map->inline_dwords));
-   memcpy(desc->gfx125.inline_dwords,
-          bind_map->inline_dwords,
-          sizeof(bind_map->inline_dwords));
+      assert(sizeof(desc->gfx350.compute_walker_2) >
+             sizeof(shader->cs.gfx350.compute_walker_body_2));
+      for (uint32_t i = 0; i < ARRAY_SIZE(shader->cs.gfx350.compute_walker_body_2); i++)
+         desc->gfx350.compute_walker_2[1 + i] |= shader->cs.gfx350.compute_walker_body_2[i];
+      assert(sizeof(desc->gfx350.inline_dwords) >= bind_map->inline_dwords_count);
+      memcpy(desc->gfx350.inline_dwords, bind_map->inline_dwords,
+             bind_map->inline_dwords_count);
+#endif
+   } else {
+      GENX(COMPUTE_WALKER_pack)(NULL, desc->gfx125.compute_walker,
+                                &(struct GENX(COMPUTE_WALKER)) {
+                                   GENX(COMPUTE_WALKER_header),
+                                   .body = {
+                                      .PostSync.MOCS = anv_mocs(device, NULL, 0),
+                                   },
+                                });
 
+      assert(sizeof(desc->gfx125.compute_walker) >
+             sizeof(shader->cs.gfx125.compute_walker_body));
+      for (uint32_t i = 0; i < ARRAY_SIZE(shader->cs.gfx125.compute_walker_body); i++)
+         desc->gfx125.compute_walker[1 + i] |= shader->cs.gfx125.compute_walker_body[i];
+      assert(sizeof(desc->gfx125.inline_dwords) >= bind_map->inline_dwords_count);
+      memcpy(desc->gfx125.inline_dwords, bind_map->inline_dwords,
+             bind_map->inline_dwords_count);
+   }
 #else
    assert(sizeof(desc->gfx9.media_vfe_state) ==
           shader->cs.gfx9.vfe.len * 4);

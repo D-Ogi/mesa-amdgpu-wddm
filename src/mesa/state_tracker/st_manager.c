@@ -882,7 +882,8 @@ st_context_teximage(struct st_context *st, GLenum target,
    pipe_resource_reference(&texObj->pt, tex);
    st_texture_release_all_sampler_views(st, texObj);
    pipe_resource_reference(&texImage->pt, tex);
-   texObj->surface_format = pipe_format;
+   texObj->surface_format = tex ? st_get_surface_format(pipe_format, tex) :
+                                  pipe_format;
 
    /* Cache whether the extra YUV plane-view / lowering setup in
     * st_get_sampler_views() and st_get_external_sampler_key() must run for
@@ -1079,8 +1080,7 @@ st_api_create_context(struct pipe_frontend_screen *fscreen,
 
    st->can_scissor_clear = !!st->screen->caps.clear_scissored;
 
-   st->ctx->invalidate_on_gl_viewport =
-      fscreen->get_param(fscreen, ST_MANAGER_BROKEN_INVALIDATE);
+   st->ctx->invalidate_on_gl_viewport = fscreen->broken_invalidate;
 
    st->frontend_screen = fscreen;
 

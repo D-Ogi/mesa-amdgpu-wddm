@@ -1001,27 +1001,17 @@ pub fn gen_decoder(
         gen_decode(&isa, instr_name_enum.ident(), instr_var_enum.ident());
 
     Ok(quote! {
-        pub mod decode {
-            use super::*;
-            use crate::isa::*;
-
-            pub type SourceEncoding =
-                super::SourceEncoding::<SmallConstantT, FauSpecialIndexPage>;
-            pub type SourceEncoding64 =
-                super::SourceEncoding64::<SmallConstantT, FauSpecialIndexPage>;
-
-            fn sign_ext(v: u32, enc_width: u8) -> i32 {
-                let r = 32 - enc_width;
-                ((v << r) as i32) >> r
-            }
-
-            #instr_name_enum
-
-            #instr_var_enum
-
-            #decode_ts
-
-            #printer_ts
+        fn sign_ext(v: u32, enc_width: u8) -> i32 {
+            let r = 32 - enc_width;
+            ((v << r) as i32) >> r
         }
+
+        #instr_name_enum
+
+        #instr_var_enum
+
+        #decode_ts
+
+        #printer_ts
     })
 }

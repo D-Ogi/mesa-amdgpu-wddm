@@ -7,7 +7,6 @@
 #include "compiler/nir/nir.h"
 #include "compiler/nir/nir_builder.h"
 #include "pan_nir.h"
-#include "panfrost/model/pan_model.h"
 
 #define DEBUG_PRINT false
 
@@ -325,7 +324,7 @@ hw_varying_slot(unsigned arch, mesa_shader_stage stage, gl_varying_slot slot)
 
 void
 pan_varying_collect_formats(struct pan_varying_layout *layout, nir_shader *nir,
-                            uint64_t gpu_id)
+                            unsigned arch)
 {
    assert(nir->info.stage == MESA_SHADER_VERTEX ||
           nir->info.stage == MESA_SHADER_FRAGMENT);
@@ -338,7 +337,6 @@ pan_varying_collect_formats(struct pan_varying_layout *layout, nir_shader *nir,
 
    nir_shader_instructions_pass(nir, walk_varyings, nir_metadata_all, &wv_data);
 
-   const unsigned gpu_arch = pan_arch(gpu_id);
    unsigned count = 0;
    for (unsigned i = 0; i < ARRAY_SIZE(slots); i++) {
       if (!slots[i].type)
@@ -355,7 +353,7 @@ pan_varying_collect_formats(struct pan_varying_layout *layout, nir_shader *nir,
       assert(layout->slots[idx].alu_type == nir_type_invalid);
 
       if (BITFIELD64_BIT(i) & PAN_HARDWARE_VARYING_BITS) {
-         layout->slots[idx] = hw_varying_slot(gpu_arch, nir->info.stage, i);
+         layout->slots[idx] = hw_varying_slot(arch, nir->info.stage, i);
       } else {
          nir_alu_type type = nir_alu_type_get_base_type(slots[i].type);
          unsigned bit_size = nir_alu_type_get_type_size(slots[i].type);
@@ -380,11 +378,10 @@ pan_varying_collect_formats(struct pan_varying_layout *layout, nir_shader *nir,
 
 void
 pan_build_varying_layout_compact(struct pan_varying_layout *layout,
-                                 nir_shader *nir, uint64_t gpu_id)
+                                 nir_shader *nir, unsigned arch)
 {
    pan_varying_layout_require_format(layout);
 
-   const unsigned gpu_arch = pan_arch(gpu_id);
    unsigned generic_size_B = 0;
    for (unsigned i = 0; i < layout->count; i++) {
       struct pan_varying_slot *slot = &layout->slots[i];
@@ -393,7 +390,7 @@ pan_build_varying_layout_compact(struct pan_varying_layout *layout,
 
       if (slot->section != PAN_VARYING_SECTION_GENERIC) {
          ASSERTED const struct pan_varying_slot hw_slot =
-            hw_varying_slot(gpu_arch, nir->info.stage, slot->location);
+            hw_varying_slot(arch, nir->info.stage, slot->location);
 
          assert(memcmp(slot, &hw_slot, sizeof(*slot)) == 0);
       } else {

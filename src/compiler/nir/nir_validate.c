@@ -1068,6 +1068,8 @@ validate_tex_src_texture_deref(nir_tex_instr *instr, validate_state *state,
    case nir_texop_query_levels:
    case nir_texop_fragment_mask_fetch_amd:
    case nir_texop_txf_ms_mcs_intel:
+   case nir_texop_txs_lod0_intel:
+   case nir_texop_resinfo_intel:
       validate_assert(state, nir_alu_type_get_base_type(instr->dest_type) == nir_type_int ||
                                 nir_alu_type_get_base_type(instr->dest_type) == nir_type_uint);
       break;

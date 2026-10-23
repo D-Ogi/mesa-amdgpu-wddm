@@ -208,3 +208,14 @@ spec@ext_texture_array@copyteximage 1d_array samples=4,Fail
 spec@ext_texture_array@copyteximage 1d_array samples=6,Fail
 spec@ext_texture_array@copyteximage 1d_array samples=8,Fail
 
+# CL issues
+api@clgetdeviceinfo,Fail
+api@clgetextensionfunctionaddressforplatform,Fail
+api@cllinkprogram,Fail
+program@execute@builtin@builtin-float-nextafter-1.0.generated,Fail
+program@execute@builtin@builtin-float-nextafter-1.0.generated@nextafter float1,Fail
+program@execute@builtin@builtin-float-nextafter-1.0.generated@nextafter float16,Fail
+program@execute@builtin@builtin-float-nextafter-1.0.generated@nextafter float2,Fail
+program@execute@builtin@builtin-float-nextafter-1.0.generated@nextafter float4,Fail
+program@execute@builtin@builtin-float-nextafter-1.0.generated@nextafter float8,Fail
+program@execute@vector-conversion,Fail

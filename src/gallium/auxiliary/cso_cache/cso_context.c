@@ -36,6 +36,7 @@
   */
 
 #include "pipe/p_state.h"
+#include "util/bitset.h"
 #include "util/u_draw.h"
 #include "util/u_framebuffer.h"
 #include "util/u_helpers.h"
@@ -76,6 +77,8 @@ struct cso_context_priv {
    bool has_streamout;
 
    uint32_t max_fs_samplerviews : 16;
+
+   BITSET_DECLARE(vbuf_format_fallbacks, PIPE_FORMAT_COUNT);
 
    unsigned saved_state;  /**< bitmask of CSO_BIT_x flags */
    unsigned saved_compute_state;  /**< bitmask of CSO_BIT_COMPUTE_x flags */
@@ -254,17 +257,63 @@ cso_init_vbuf(struct cso_context_priv *cso, unsigned flags)
 
    u_vbuf_get_caps(cso->base.pipe->screen, &caps, needs64b);
 
+   for (unsigned i = 0; i < PIPE_FORMAT_COUNT; i++) {
+      if (caps.format_translation[i] != i)
+         BITSET_SET(cso->vbuf_format_fallbacks, i);
+   }
+
    /* Enable u_vbuf if needed. */
-   if (caps.fallback_always ||
+   if (caps.needs_fallback ||
        (uses_user_vertex_buffers &&
         caps.fallback_only_for_user_vbuffers)) {
+      const bool can_bypass_vbuf = caps.fallback_only_for_formats_and_prims &&
+                                   cso->base.pipe->draw_vbo == tc_draw_vbo;
+
       assert(!cso->base.pipe->vbuf);
       cso->vbuf = u_vbuf_create(cso->base.pipe, &caps);
       cso->base.pipe->vbuf = cso->vbuf;
-      cso->always_use_vbuf = caps.fallback_always;
+      cso->always_use_vbuf = caps.needs_fallback && !can_bypass_vbuf;
       cso->vbuf_current = cso->base.pipe->vbuf =
-         caps.fallback_always ? cso->vbuf : NULL;
+         cso->always_use_vbuf ? cso->vbuf : NULL;
+
+      if (can_bypass_vbuf) {
+         cso->base.supported_prim_modes = caps.supported_prim_modes;
+         cso->base.supported_restart_modes =
+            caps.supported_restart_modes & caps.supported_prim_modes;
+         cso->base.rewrite_restart_index = caps.rewrite_restart_index;
+         cso->base.check_draw_modes =
+            cso->base.supported_prim_modes != BITFIELD_MASK(MESA_PRIM_COUNT) ||
+            cso->base.supported_restart_modes != BITFIELD_MASK(MESA_PRIM_COUNT) ||
+            cso->base.rewrite_restart_index;
+         cso->base.vertex_format_fallbacks =
+            !BITSET_IS_EMPTY(cso->vbuf_format_fallbacks);
+      }
    }
+}
+
+bool
+cso_vertex_format_needs_vbuf(const struct cso_context *cso,
+                             enum pipe_format format)
+{
+   const struct cso_context_priv *ctx = (const struct cso_context_priv *)cso;
+
+   return BITSET_TEST(ctx->vbuf_format_fallbacks, format);
+}
+
+void
+cso_draw_vbo_unsupported_mode(struct cso_context *cso,
+                              const struct pipe_draw_info *info,
+                              unsigned drawid_offset,
+                              const struct pipe_draw_indirect_info *indirect,
+                              const struct pipe_draw_start_count_bias *draws,
+                              unsigned num_draws)
+{
+   struct cso_context_priv *ctx = (struct cso_context_priv *)cso;
+
+   if (ctx->vbuf_current)
+      u_vbuf_draw_vbo(cso->pipe, info, drawid_offset, indirect, draws, num_draws);
+   else
+      u_vbuf_draw_vbo_primconvert(ctx->vbuf, info, drawid_offset, indirect, draws, num_draws);
 }
 
 static void

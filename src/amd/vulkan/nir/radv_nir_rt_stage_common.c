@@ -307,7 +307,8 @@ radv_build_rt_prolog(const struct radv_compiler_info *compiler_info, struct radv
 
    nir_def *push_constants = ac_nir_load_arg(&b, &stage->args.ac, stage->args.ac.push_constants);
    nir_def *sbt_desc = nir_pack_64_2x32(&b, ac_nir_load_arg(&b, &stage->args.ac, stage->args.ac.rt.sbt_descriptors));
-   nir_def *launch_size_addr = nir_pack_64_2x32(&b, ac_nir_load_arg(&b, &stage->args.ac, stage->args.ac.rt.launch_size_addr));
+   nir_def *launch_size_addr =
+      nir_pack_64_2x32(&b, ac_nir_load_arg(&b, &stage->args.ac, stage->args.ac.rt.launch_size_addr));
    nir_def *traversal_addr =
       nir_pack_64_2x32_split(&b, ac_nir_load_arg(&b, &stage->args.ac, stage->args.ac.rt.traversal_shader_addr),
                              nir_imm_int(&b, compiler_info->hw.address32_hi));
@@ -409,7 +410,8 @@ radv_build_rt_prolog(const struct radv_compiler_info *compiler_info, struct radv
    nir_def *id_y = nir_bcsel(&b, partial_oob, unswizzled_id_y, swizzled_id_y);
 
    /* shaderGroupBaseAlignment is RADV_RT_HANDLE_SIZE */
-   nir_def *raygen_addr = nir_pack_64_2x32(&b, ac_nir_load_smem(&b, 2, raygen_sbt, nir_imm_int(&b, 0), RADV_RT_HANDLE_SIZE, 0));
+   nir_def *raygen_addr =
+      nir_pack_64_2x32(&b, ac_nir_load_smem(&b, 2, raygen_sbt, nir_imm_int(&b, 0), RADV_RT_HANDLE_SIZE, 0));
    nir_def *shader_record_ptr = nir_iadd_imm(&b, raygen_sbt, RADV_RT_HANDLE_SIZE);
 
    if (compiler_info->key.rt_cps) {

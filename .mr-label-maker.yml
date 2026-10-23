@@ -43,6 +43,7 @@ issues:
         'iris': 'iris'
         'isl': 'ISL'
         'kk': 'KosmicKrisp'
+        'kraid': 'Kraid'
         'lima': 'lima'
         'lima/ppir': 'lima'
         'llvmpipe': 'llvmpipe'
@@ -216,7 +217,6 @@ merge_requests:
         '^src/gallium/drivers/zink/': ['zink']
         '^src/gallium/frontends/d3d10umd/': ['d3d10umd']
         '^src/gallium/frontends/dri/': ['gallium']
-        '^src/gallium/frontends/glx/': ['GLX']
         '^src/gallium/frontends/hgl/': ['haiku']
         '^src/gallium/frontends/lavapipe/': ['lavapipe']
         '^src/gallium/frontends/rusticl/': ['Rusticl']
@@ -293,6 +293,7 @@ merge_requests:
         '^src/nouveau/vulkan/': ['NVK']
         '^src/nouveau/winsys/': ['NVK']
         '^src/panfrost/': ['panfrost']
+        '^src/panfrost/compiler/kraid/': ['Kraid']
         '^src/panfrost/vulkan/': ['panvk']
         '^src/poly/': ['poly']
         '^src/virtio/vulkan/': ['venus']

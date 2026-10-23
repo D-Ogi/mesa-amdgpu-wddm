@@ -192,6 +192,7 @@ uint32_t intel_debug_bkp_before_dispatch_count = 0;
 uint32_t intel_debug_bkp_after_dispatch_count = 0;
 
 uint32_t intel_threads_per_eu_min = -1;
+uint32_t intel_threads_per_eu_set = -1;
 uint64_t intel_threads_per_eu_srchash = -1;
 bool intel_force_probe_jay = false;
 
@@ -252,8 +253,17 @@ process_intel_debug_variable_once(void)
 
    intel_threads_per_eu_min =
       debug_get_unsigned_option("INTEL_THREADS_PER_EU_MIN", -1);
+   intel_threads_per_eu_set =
+      debug_get_unsigned_option("INTEL_THREADS_PER_EU_SET", -1);
    intel_threads_per_eu_srchash =
       debug_get_unsigned_option("INTEL_THREADS_PER_EU_SRCHASH", (uint64_t)-1);
+
+   if (intel_threads_per_eu_set != -1 &&
+       (intel_threads_per_eu_set < 4 || intel_threads_per_eu_set > 10)) {
+         fprintf(stderr, "INTEL_THREADS_PER_EU_SET = %u is outside valid "
+                 "range [4, 10]. Ignoring\n", intel_threads_per_eu_set);
+         intel_threads_per_eu_set = -1;
+   }
 
    if (intel_threads_per_eu_min != -1 &&
        (intel_threads_per_eu_min < 4 || intel_threads_per_eu_min > 10)) {
@@ -294,6 +304,7 @@ bool
 intel_use_jay_for_stage(const struct intel_device_info *devinfo,
                         mesa_shader_stage stage)
 {
+   assert(stage != MESA_SHADER_NONE);
    if (stage == MESA_SHADER_KERNEL)
       stage = MESA_SHADER_COMPUTE;
 

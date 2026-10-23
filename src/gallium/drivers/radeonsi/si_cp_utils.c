@@ -16,13 +16,13 @@ void si_cp_release_acquire_mem_pws(struct si_context *sctx, struct radeon_cmdbuf
                               sctx->is_gfx_queue ? AMD_IP_GFX : AMD_IP_COMPUTE,
                               event_type, gcr_cntl);
 
-   if (unlikely(sctx->sqtt_enabled))
+   if (unlikely(si_is_sqtt_active(sctx)))
       si_sqtt_describe_barrier_start(sctx, cs);
 
    ac_emit_cp_acquire_mem_pws(&cs->current, sctx->gfx_level,
                               sctx->is_gfx_queue ? AMD_IP_GFX : AMD_IP_COMPUTE,
                               event_type, stage_sel, 0, gcr_cntl);
 
-   if (unlikely(sctx->sqtt_enabled))
+   if (unlikely(si_is_sqtt_active(sctx)))
       si_sqtt_describe_barrier_end(sctx, cs, sqtt_flush_flags);
 }

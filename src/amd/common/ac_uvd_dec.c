@@ -598,15 +598,17 @@ uvd_build_decode_cmd(struct ac_video_dec *decoder, struct ac_video_dec_decode_cm
    msg->body.decode.extension_support = 1;
 
    uint32_t dt_pitch;
+   uint32_t dt_uv_pitch;
 
    if (dec->gfx_level >= GFX9) {
       dt_pitch = surf_y->u.gfx9.surf_pitch;
+      dt_uv_pitch = surf_uv ? surf_uv->u.gfx9.surf_pitch : 0;
       msg->body.decode.dt_wa_chroma_bottom_offset = surf_y->u.gfx9.swizzle_mode;
       msg->body.decode.dt_luma_top_offset = 0;
       msg->body.decode.dt_chroma_top_offset = cmd->decode_surface.planes[1].va - cmd->decode_surface.planes[0].va;
    } else {
-      dt_pitch =
-         surf_y->u.legacy.level[0].nblk_x * surf_y->blk_w;
+      dt_pitch = surf_y->u.legacy.level[0].nblk_x * surf_y->blk_w;
+      dt_uv_pitch = surf_uv ? surf_uv->u.legacy.level[0].nblk_x * surf_uv->blk_w : 0;
       msg->body.decode.dt_luma_top_offset = 0;
       if (dec->is_amdgpu)
          msg->body.decode.dt_chroma_top_offset = cmd->decode_surface.planes[1].va - cmd->decode_surface.planes[0].va;
@@ -619,7 +621,7 @@ uvd_build_decode_cmd(struct ac_video_dec *decoder, struct ac_video_dec_decode_cm
    msg->body.decode.dt_pitch = dt_pitch;
 
    if (dec->family >= CHIP_STONEY)
-      msg->body.decode.dt_wa_chroma_top_offset = dt_pitch / 2;
+      msg->body.decode.dt_wa_chroma_top_offset = dt_uv_pitch;
 
    uint32_t *feedback = (uint32_t *)(emb + dec->feedback_offset);
    memset(feedback, 0, dec->feedback_size);

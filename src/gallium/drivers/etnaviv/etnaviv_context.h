@@ -180,6 +180,7 @@ struct etna_context {
       ETNA_DIRTY_RASTERIZER      = (1 << 2),
       ETNA_DIRTY_ZSA             = (1 << 3),
       ETNA_DIRTY_VERTEX_ELEMENTS = (1 << 4),
+      ETNA_DIRTY_CONSTBUF_FS     = (1 << 5),
       ETNA_DIRTY_BLEND_COLOR     = (1 << 6),
       ETNA_DIRTY_STENCIL_REF     = (1 << 7),
       ETNA_DIRTY_SAMPLE_MASK     = (1 << 8),
@@ -187,7 +188,7 @@ struct etna_context {
       ETNA_DIRTY_FRAMEBUFFER     = (1 << 10),
       ETNA_DIRTY_SCISSOR         = (1 << 11),
       ETNA_DIRTY_SAMPLER_VIEWS   = (1 << 12),
-      ETNA_DIRTY_CONSTBUF        = (1 << 13),
+      ETNA_DIRTY_CONSTBUF_VS     = (1 << 13),
       ETNA_DIRTY_VERTEX_BUFFERS  = (1 << 14),
       ETNA_DIRTY_INDEX_BUFFER    = (1 << 15),
       ETNA_DIRTY_SHADER          = (1 << 16),
@@ -197,7 +198,8 @@ struct etna_context {
       ETNA_DIRTY_SCISSOR_CLIP    = (1 << 20),
       ETNA_DIRTY_SHADER_CACHES   = (1 << 21),
       ETNA_DIRTY_STREAMOUT       = (1 << 22),
-      ETNA_DIRTY_STREAMOUT_CMD   = (1 << 23)
+      ETNA_DIRTY_STREAMOUT_CMD   = (1 << 23),
+      ETNA_DIRTY_CONSTBUF        = ETNA_DIRTY_CONSTBUF_VS | ETNA_DIRTY_CONSTBUF_FS,
    } dirty;
 
    struct slab_child_pool transfer_pool;
@@ -294,6 +296,13 @@ static inline struct etna_context *
 etna_context(struct pipe_context *pctx)
 {
    return (struct etna_context *)pctx;
+}
+
+static inline unsigned
+etna_constbuf_dirty(mesa_shader_stage stage)
+{
+   return stage == MESA_SHADER_FRAGMENT ? ETNA_DIRTY_CONSTBUF_FS
+                                        : ETNA_DIRTY_CONSTBUF_VS;
 }
 
 static inline struct etna_transfer *

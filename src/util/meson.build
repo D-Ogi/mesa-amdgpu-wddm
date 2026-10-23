@@ -129,6 +129,8 @@ files_mesa_util = files(
   'texcompress_astc_luts_wrap.h',
   'texcompress_astc.cpp',
   'texcompress_astc.h',
+  'texcompress_etc.c',
+  'texcompress_etc.h',
   'timespec.h',
   'u_atomic.c',
   'u_atomic.h',

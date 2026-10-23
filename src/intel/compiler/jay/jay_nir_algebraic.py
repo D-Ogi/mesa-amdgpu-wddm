@@ -36,6 +36,9 @@ lower_fsign = [
     (('u2f32', ('extract_u16', a, 0)), ('u2f32', ('u2u16', a))),
     (('i2f32', ('extract_i8', a, 0)), ('i2f32', ('u2u8', a))),
     (('i2f32', ('extract_i16', a, 0)), ('i2f32', ('u2u16', a))),
+    (('i2f32', ('extract_u8', 'a@16', 0)), ('u2f32', ('u2u8', a))),
+    (('i2f32', ('extract_u8', 'a@32', 0)), ('u2f32', ('u2u8', a))),
+    (('i2f32', ('extract_u16', 'a@32', 0)), ('u2f32', ('u2u16', a))),
 ]
 
 for s in range(1, 31):
@@ -71,12 +74,17 @@ lower_fsign.extend([
      ('pack_32_2x16_split', ('f2f16', a), ('f2f16', b))),
 ])
 
-for i in range(2, 15):
+# Fuse iadd+ishl. Prefer imad over umad so we can fold more modifiers.
+for i in range(2, 14):
     lower_fsign.extend([
         (('iadd', ('ishl(is_only_used_by_iadd)', 'b@32', i), c),
-         ('umad_32x16_intel', b, 1 << i, c)),
+         ('imad_32x16_intel', b, 1 << i, c)),
     ])
 
+lower_fsign.extend([
+    (('iadd', ('ishl(is_only_used_by_iadd)', 'b@32', i), c),
+     ('umad_32x16_intel', b, 1 << 15, c)),
+])
 
 lower_bool = [
     # Try to use conditional modifiers more

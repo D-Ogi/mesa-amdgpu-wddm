@@ -71,6 +71,7 @@ gen_roundtrip_cases = files(
   'tests/basic.txt',
   'tests/basic_verbose.txt',
   'tests/basic_translated.txt',
+  'tests/compact_verbose.txt',
   'tests/send.txt',
 )
 

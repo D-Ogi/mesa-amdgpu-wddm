@@ -673,31 +673,30 @@ void si_init_perfcounters(struct si_screen *screen)
 }
 
 static bool
-si_spm_init_bo(struct si_context *sctx)
+si_spm_init_bo(struct si_context *sctx, struct ac_spm *spm)
 {
    uint64_t size = 32 * 1024 * 1024; /* Default to 32MB. */
 
-   sctx->spm.buffer_size = size;
+   spm->buffer_size = size;
 
-   sctx->spm.bo =
+   spm->bo =
       pipe_aligned_buffer_create(&sctx->screen->b, SI_RESOURCE_FLAG_DRIVER_INTERNAL,
                                  PIPE_USAGE_DEFAULT, size, 4096);
 
-   return sctx->spm.bo != NULL;
+   return spm->bo != NULL;
 }
 
 void
-si_emit_spm_setup(struct si_context *sctx, struct radeon_cmdbuf *cs)
+si_emit_spm_setup(struct si_context *sctx, struct ac_spm *spm, struct radeon_cmdbuf *cs)
 {
    const enum amd_ip_type ip_type = sctx->ws->cs_get_ip_type(cs);
-   struct ac_spm *spm = &sctx->spm;
    uint64_t va = si_resource(spm->bo)->gpu_address;
 
    ac_emit_spm_setup(&cs->current, sctx->gfx_level, ip_type, spm, va);
 }
 
 bool
-si_spm_init(struct si_context *sctx)
+si_spm_init(struct si_context *sctx, struct ac_spm *spm)
 {
    const struct radeon_info *info = &sctx->screen->info;
 
@@ -710,20 +709,20 @@ si_spm_init(struct si_context *sctx)
    if (!ac_init_perfcounters(info, false, false, pc))
       return false;
 
-   if (!ac_init_spm(info, pc, &sctx->spm))
+   if (!ac_init_spm(info, pc, spm))
       return false;
 
-   if (!si_spm_init_bo(sctx))
+   if (!si_spm_init_bo(sctx, spm))
       return false;
 
    return true;
 }
 
 void
-si_spm_finish(struct si_context *sctx)
+si_spm_finish(struct si_context *sctx, struct ac_spm *spm)
 {
-   struct pipe_resource *bo = sctx->spm.bo;
+   struct pipe_resource *bo = spm->bo;
    pipe_resource_reference(&bo, NULL);
 
-   ac_destroy_spm(&sctx->spm);
+   ac_destroy_spm(spm);
 }

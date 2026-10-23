@@ -36,6 +36,7 @@
 
 #include "nir/nir_xfb_info.h"
 #include "nir/tgsi_to_nir.h"
+#include "util/perf/cpu_trace.h"
 #include "util/u_atomic.h"
 #include "util/u_cpu_detect.h"
 #include "util/u_math.h"
@@ -408,6 +409,7 @@ etna_upload_constant_data(struct etna_context *ctx, struct etna_shader_variant *
 bool
 etna_shader_link(struct etna_context *ctx)
 {
+   MESA_TRACE_FUNC();
    if (!ctx->shader.vs || !ctx->shader.fs)
       return false;
 
@@ -552,6 +554,7 @@ etna_variant_equal(const void *a, const void *b)
 static struct util_shader_variant *
 etna_variant_compile(UNUSED void *user_data, void *cso, const void *spec_key)
 {
+   MESA_TRACE_FUNC();
    struct etna_shader *shader = cso;
    const struct etna_shader_key *key = spec_key;
 
@@ -563,7 +566,7 @@ etna_variant_compile(UNUSED void *user_data, void *cso, const void *spec_key)
    v->key = *key;
    v->id = ++shader->variant_count;
 
-   if (etna_disk_cache_retrieve(shader->compiler, v))
+   if (etna_disk_cache_retrieve(shader->screen, v))
       return &v->base;
 
    if (!etna_compile_shader(v)) {
@@ -572,7 +575,7 @@ etna_variant_compile(UNUSED void *user_data, void *cso, const void *spec_key)
       return NULL;
    }
 
-   etna_disk_cache_store(shader->compiler, v);
+   etna_disk_cache_store(shader->screen, v);
 
    if (DBG_ENABLED(ETNA_DBG_DUMP_SHADERS))
       etna_dump_shader(v);
@@ -647,6 +650,7 @@ initial_variants_synchronous(struct etna_context *ctx)
 static void
 create_initial_variants_async(void *job, void *gdata, int thread_index)
 {
+   MESA_TRACE_FUNC();
    struct etna_shader *shader = job;
    struct util_debug_callback debug = {};
    static struct etna_shader_key key;
@@ -701,7 +705,9 @@ etna_create_shader_state(struct pipe_context *pctx,
    if (ctx->mag_switchover_half)
       gather_tex_lod_samplers(shader->nir, &shader->tex_lod_samplers);
 
-   etna_disk_cache_init_shader_key(compiler, shader);
+   shader->textures_used = shader->nir->info.textures_used[0];
+
+   etna_disk_cache_init_shader_key(screen, shader);
 
    if (initial_variants_synchronous(ctx)) {
       struct etna_shader_key key = {};
@@ -755,8 +761,7 @@ etna_set_max_shader_compiler_threads(struct pipe_screen *pscreen,
 {
    struct etna_screen *screen = etna_screen(pscreen);
 
-   util_queue_adjust_num_threads(&screen->shader_compiler_queue, max_threads,
-                                 false);
+   util_queue_adjust_num_threads(&screen->shader_compiler_queue, max_threads);
 }
 
 static bool
@@ -789,7 +794,9 @@ etna_shader_screen_init(struct pipe_screen *pscreen)
    /* Create at least one thread - even on single core CPU systems. */
    num_threads = MAX2(1, num_threads);
 
-   screen->compiler = etna_compiler_create(pscreen->get_name(pscreen), screen->info);
+   etna_disk_cache_init(screen);
+
+   screen->compiler = etna_compiler_create(screen->info);
    if (!screen->compiler)
       return false;
 
@@ -820,5 +827,6 @@ etna_shader_screen_fini(struct pipe_screen *pscreen)
    struct etna_screen *screen = etna_screen(pscreen);
 
    util_queue_destroy(&screen->shader_compiler_queue);
+   disk_cache_destroy(screen->disk_cache);
    etna_compiler_destroy(screen->compiler);
 }
