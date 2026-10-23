@@ -7,6 +7,7 @@
  */
 
 #include "radv_wsi.h"
+#include "util/os_time.h"
 #include "radv_buffer.h"
 #include "radv_buffer_view.h"
 #include "radv_device.h"
@@ -20,6 +21,7 @@
 
 #include "tools/radv_debug.h"
 #include "wsi_common.h"
+#include "wsi_common_entrypoints.h"
 
 static VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL
 radv_wsi_proc_addr(VkPhysicalDevice physicalDevice, const char *pName)
@@ -133,4 +135,18 @@ radv_finish_wsi(struct radv_physical_device *pdev)
 
    pdev->vk.wsi_device = NULL;
    wsi_device_finish(&pdev->wsi_device, &instance->vk.alloc);
+}
+
+/* BC250_MESH_TIMER: count presents (frames) for the per-frame estimate, then the
+ * common WSI present. Off: a plain call through. */
+VKAPI_ATTR VkResult VKAPI_CALL
+radv_QueuePresentKHR(VkQueue _queue, const VkPresentInfoKHR *pPresentInfo)
+{
+   VK_FROM_HANDLE(radv_queue, queue, _queue);
+   struct radv_device *device = radv_queue_device(queue);
+   if (unlikely(device->bc250_timer.enabled))
+      radv_bc250_timer_present(device, queue);
+   /* RADV_BC250_SUBMIT_PROFILE is not ported: its counters live in the amdgpu winsys and in
+    * vk_queue/vk_sync, which this port leaves alone (radv_bc250.c). */
+   return wsi_QueuePresentKHR(_queue, pPresentInfo);
 }

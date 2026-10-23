@@ -11,6 +11,7 @@
 #include "util/u_compile_stack.h"
 #include "meta/radv_meta.h"
 #include "nir/nir.h"
+#include "nir/nir_builder.h"
 #include "nir/nir_serialize.h"
 #include "nir/nir_xfb_info.h"
 #include "nir/radv_nir.h"
@@ -19,6 +20,7 @@
 #include "util/os_time.h"
 #include "util/u_atomic.h"
 #include "radv_device.h"
+#include "radv_bc250.h"
 #include "radv_entrypoints.h"
 #include "radv_formats.h"
 #include "radv_physical_device.h"
@@ -1733,6 +1735,9 @@ radv_generate_graphics_state_key(const struct radv_compiler_info *compiler_info,
       }
    }
 
+   key.bc250_ps_dynamic_provoking =
+      compiler_info->hw.bc250_barycentrics && BITSET_TEST(state->dynamic, MESA_VK_DYNAMIC_RS_PROVOKING_VERTEX);
+
    if (state->rs) {
       if (compiler_info->ac->gfx_level >= GFX10)
          key.rs.provoking_vtx_last = state->rs->provoking_vertex == VK_PROVOKING_VERTEX_MODE_LAST_VERTEX_EXT;
@@ -1769,9 +1774,11 @@ radv_generate_graphics_state_key(const struct radv_compiler_info *compiler_info,
    const bool vrs_is_possible = !vrs_disabled_by_msaa_8x && !vrs_disabled_by_sample_shading;
 
    key.ps.force_vrs_enabled = vrs_is_possible && compiler_info->force_vrs_enabled && !radv_is_static_vrs_enabled(state);
+   /* RADV_BC250_VRS_NOOP: the rate is always 1x1, whatever the pipeline or dynamic state says. */
    key.vrs_may_be_enabled =
-      vrs_is_possible && (radv_is_static_vrs_enabled(state) || BITSET_TEST(state->dynamic, MESA_VK_DYNAMIC_FSR) ||
-                          key.ps.force_vrs_enabled);
+      !compiler_info->hw.bc250_vrs_noop && vrs_is_possible &&
+      (radv_is_static_vrs_enabled(state) || BITSET_TEST(state->dynamic, MESA_VK_DYNAMIC_FSR) ||
+       key.ps.force_vrs_enabled);
 
    if (key.vrs_may_be_enabled && compiler_info->ac->has_vrs_frag_pos_z_bug)
       key.adjust_frag_coord_z = true;
@@ -1804,13 +1811,21 @@ radv_generate_graphics_state_key(const struct radv_compiler_info *compiler_info,
          ngg_stage = VK_SHADER_STAGE_GEOMETRY_BIT;
       } else if (state->shader_stages & VK_SHADER_STAGE_TESSELLATION_EVALUATION_BIT) {
          ngg_stage = VK_SHADER_STAGE_TESSELLATION_EVALUATION_BIT;
+      } else if (state->shader_stages & VK_SHADER_STAGE_MESH_BIT_EXT) {
+         ngg_stage = VK_SHADER_STAGE_MESH_BIT_EXT;
       } else {
          ngg_stage = VK_SHADER_STAGE_VERTEX_BIT;
       }
 
+      /* Mesh: the BC250 Mesh paths that place per-primitive data on one provoking corner
+       * (the base driver's compact vertex map, RADV_BC250_MESH_MERGE stage 2,
+       * RADV_BC250_MESH_COMPACT owned corners) must know that the mode can change at draw
+       * time. Mesh pipelines always had the flag (their NGG stage used to fall through to
+       * the vertex case above); it is spelled out so that it cannot get lost. */
       key.dynamic_provoking_vtx_mode =
          BITSET_TEST(state->dynamic, MESA_VK_DYNAMIC_RS_PROVOKING_VERTEX) &&
-         (ngg_stage == VK_SHADER_STAGE_VERTEX_BIT || ngg_stage == VK_SHADER_STAGE_GEOMETRY_BIT);
+         (ngg_stage == VK_SHADER_STAGE_VERTEX_BIT || ngg_stage == VK_SHADER_STAGE_GEOMETRY_BIT ||
+          ngg_stage == VK_SHADER_STAGE_MESH_BIT_EXT);
    }
 
    key.smooth_lines_may_be_enabled =
@@ -2139,6 +2154,23 @@ radv_create_gs_copy_shader(const struct radv_compiler_info *compiler_info, struc
    return gs_copy_binary;
 }
 
+/* RADV_BC250_ASYNC_COMPILE: the Mesh and fragment stages are compiled by ACO without optimizations first;
+ * the job keeps a clone of their final NIR (ACO modifies its input) and the stage state, and compiles the
+ * optimized binaries in the background. The NIR, route, plan, LDS layout and shader info are identical; only
+ * the machine code differs. */
+struct radv_bc250_async_job {
+   struct util_queue_fence fence;
+   struct radv_device *device;
+   struct radv_graphics_pipeline *pipeline;
+   bool skip_shaders_cache;
+   uint32_t stage_mask;
+   nir_shader *nir[MESA_VULKAN_SHADER_STAGES];
+   struct radv_shader_stage stage[MESA_VULKAN_SHADER_STAGES];
+   struct radv_graphics_state_key gfx_state;
+};
+
+static RADV_BC250_THREAD struct radv_bc250_async_job *bc250_async_capture;
+
 static VkResult
 radv_graphics_shaders_nir_to_asm(const struct radv_compiler_info *compiler_info, struct vk_pipeline_cache *cache,
                                  struct radv_shader_stage *stages, const struct radv_graphics_state_key *gfx_state,
@@ -2187,7 +2219,19 @@ radv_graphics_shaders_nir_to_asm(const struct radv_compiler_info *compiler_info,
          }
       }
 
-      binaries[s] = radv_shader_nir_to_asm(compiler_info, &stages[s], nir_shaders, shader_count, gfx_state);
+      if (bc250_async_capture && shader_count == 1 && (s == MESA_SHADER_MESH || s == MESA_SHADER_FRAGMENT)) {
+         struct radv_bc250_async_job *job = bc250_async_capture;
+         job->nir[s] = nir_shader_clone(NULL, stages[s].nir);
+         job->stage[s] = stages[s];
+         job->stage[s].nir = NULL;
+         job->stage_mask |= 1u << s;
+         struct radv_shader_stage quick = stages[s];
+         quick.key.optimisations_disabled = 1;
+         binaries[s] = radv_shader_nir_to_asm(compiler_info, &quick, nir_shaders, shader_count, gfx_state);
+      } else {
+         binaries[s] = radv_shader_nir_to_asm(compiler_info, &stages[s], nir_shaders, shader_count, gfx_state);
+      }
+
       if (!binaries[s]) {
          /* The compiler could not produce the binary of this stage, which leaves the pipeline
           * without a shader for it. Report it to the caller; the pipeline state setup reads the
@@ -2290,6 +2334,7 @@ radv_pipeline_import_retained_shaders(const struct radv_device *device, struct r
 
       stages[s].stage = s;
       stages[s].nir = nir_deserialize(NULL, options, &blob_reader);
+      stages[s].bc250_imported_nir = true;
       stages[s].entrypoint = nir_shader_get_entrypoint(stages[s].nir)->function->name;
       memcpy(stages[s].shader_blake3, retained_shaders->stages[s].shader_blake3, sizeof(stages[s].shader_blake3));
       memcpy(&stages[s].key, &retained_shaders->stages[s].key, sizeof(stages[s].key));
@@ -2315,7 +2360,7 @@ radv_pipeline_load_retained_shaders(const struct radv_device *device, const VkGr
       return;
 
    /* Nothing to load if fast-linking is enabled and if there is no retained shaders. */
-   if (radv_should_import_lib_binaries(create_flags))
+   if (radv_should_import_lib_binaries(create_flags) && !device->bc250_env.gpl_source_link)
       return;
 
    for (uint32_t i = 0; i < libs_info->libraryCount; i++) {
@@ -2462,6 +2507,194 @@ radv_skip_graphics_pipeline_compile(const struct radv_device *device, const VkGr
    return binary_stages == active_stages;
 }
 
+/* BC250 (GFX1013) barycentrics: export the vertex-order reference from the last
+ * pre-rasterization stage and resolve the fragment shader's rotation
+ * (radv_nir_bc250_lower_bary_rotation). Only fragment shaders that read
+ * barycentric coordinates or strict per-vertex inputs are affected; every other
+ * pipeline compiles exactly as before. Runs on linked, lowered I/O, after
+ * nir_opt_varyings, so that no varying optimization merges or drops the two
+ * reference slots, and before the FS input locations are assigned.
+ */
+static VkResult
+radv_bc250_link_bary_rotation(const struct radv_compiler_info *compiler_info, struct radv_shader_stage *stages,
+                              const struct radv_graphics_state_key *gfx_state)
+{
+   nir_shader *fs = stages[MESA_SHADER_FRAGMENT].nir;
+
+   if (!fs || !compiler_info->hw.bc250_barycentrics || compiler_info->ac->gfx_level >= GFX10_3 ||
+       !radv_nir_bc250_fs_needs_bary_rotation(fs))
+      return VK_SUCCESS;
+
+   struct radv_shader_stage *producer = NULL;
+   for (unsigned s = 0; s < MESA_VULKAN_SHADER_STAGES; s++) {
+      if (s != MESA_SHADER_FRAGMENT && stages[s].nir && stages[s].info.next_stage == MESA_SHADER_FRAGMENT)
+         producer = &stages[s];
+   }
+
+   const unsigned num_raster_vertices_per_prim = radv_get_num_raster_vertices_per_prim(compiler_info->ac->gfx_level, stages, gfx_state);
+   const char *fallback = NULL;
+   int raw_slot = -1, flat_slot = -1;
+
+   if (!producer) {
+      /* Fragment shader library or unlinked shader object. */
+      fallback = "no producer";
+   } else if (compiler_info->hw.bc250_bary_no_ref) {
+      /* Diagnostic only: wrong for the triangles the hardware rotates. */
+      fallback = "RADV_BC250_DIAG_BARY_NO_REF";
+   } else if (num_raster_vertices_per_prim && num_raster_vertices_per_prim != 3) {
+      /* Points and lines are not rotated. */
+      fallback = "points or lines";
+   } else if (producer->stage == MESA_SHADER_MESH && producer->bc250_safe_owned && compiler_info->key.bc250_mesh_safe_corners &&
+              debug_get_bool_option("RADV_BC250_BARY_PRIVATE_ROT0", false)) {
+      /* Hardware experiment: private corners export every triangle as three fresh ascending
+       * vertices (3p, 3p+1, 3p+2); if the parameter cache then never rotates, no reference
+       * parameters are needed (also when all 32 PARAMs are used). Proven only by the GPU CTS. */
+      fallback = "private corners (RADV_BC250_BARY_PRIVATE_ROT0)";
+   } else {
+      nir_shader *nir = producer->nir;
+      /* Admission and linking use the same conservative PARAM-capacity proof. */
+      int cid_slot = -1;
+      /* RADV_BC250_BARY_CORNER_ID_FORCE=1 (validation only): use the corner id even when two
+       * reference slots are free, so the barycentric CTS exercises it on hardware. */
+      const bool cid_force = debug_get_bool_option("RADV_BC250_BARY_CORNER_ID_FORCE", false);
+      if ((cid_force || !radv_bc250_bary_ref_slots(nir, fs, &raw_slot, &flat_slot)) &&
+          producer->stage == MESA_SHADER_MESH && producer->bc250_safe_owned &&
+          compiler_info->key.bc250_mesh_safe_corners && debug_get_bool_option("RADV_BC250_BARY_CORNER_ID", false) &&
+          radv_bc250_bary_cid_slot(nir, fs, &cid_slot)) {
+         /* RADV_BC250_BARY_CORNER_ID: one slot carries each private corner's number (0, 1, 2);
+          * the fragment shader finds the raw slot holding corner 0. */
+         raw_slot = cid_slot;
+         flat_slot = -1;
+         NIR_PASS(_, nir, radv_nir_bc250_export_bary_ref, cid_slot, cid_slot);
+         nir_shader_gather_info(nir, nir_shader_get_entrypoint(nir));
+         producer->bc250_bary_ref_mask = BITFIELD64_BIT(cid_slot);
+      } else if (raw_slot < 0) {
+         if (compiler_info->key.bc250_mesh_safe_bary_last && producer->stage == MESA_SHADER_MESH) {
+            /* Split uses the same FS ABI and cannot repair missing rotation
+             * information. Fail closed in the opt-in conformance mode rather
+             * than silently executing the old, incorrect rotation-zero path. */
+            fprintf(stderr, "BC250 Mesh pipeline refused: bary_reference_capacity_unresolved; "
+                            "SAFE_BARY_LAST requires a proven rotation reference\n");
+            return VK_ERROR_FEATURE_NOT_PRESENT;
+         }
+         fallback = "no two free parameters";
+      } else {
+         NIR_PASS(_, nir, radv_nir_bc250_export_bary_ref, raw_slot, flat_slot);
+         nir_shader_gather_info(nir, nir_shader_get_entrypoint(nir));
+         producer->bc250_bary_ref_mask = BITFIELD64_BIT(raw_slot) | BITFIELD64_BIT(flat_slot);
+      }
+   }
+
+   if (getenv("BC250_TRACE_COMPILE"))
+      fprintf(stderr, "BC250 BARYCENTRICS: %s producer=%s raw=%d flat=%d raster_vertices=%u provoking=%s%s%s\n",
+              fallback ? "rotation 0" : flat_slot < 0 ? "rotation from corner id" : "rotation from reference", producer ? mesa_shader_stage_name(producer->stage) : "none",
+              raw_slot >= 0 ? raw_slot - VARYING_SLOT_VAR0 : -1, flat_slot >= 0 ? flat_slot - VARYING_SLOT_VAR0 : -1,
+              num_raster_vertices_per_prim,
+              gfx_state->bc250_ps_dynamic_provoking ? "dynamic" : gfx_state->rs.provoking_vtx_last ? "last" : "first",
+              fallback ? " reason=" : "", fallback ? fallback : "");
+
+   NIR_PASS(_, fs, radv_nir_bc250_lower_bary_rotation, raw_slot, flat_slot, num_raster_vertices_per_prim,
+            gfx_state->bc250_ps_dynamic_provoking, gfx_state->rs.provoking_vtx_last);
+   if (producer) {
+      producer->bc250_bary_raw_slot = raw_slot;
+      producer->bc250_bary_flat_slot = flat_slot;
+   }
+   nir_shader_gather_info(fs, nir_shader_get_entrypoint(fs));
+   return VK_SUCCESS;
+}
+
+/* Multiview Mesh pipelines normally keep to the routes proven for them. One that every such route refused is
+ * compiled once more (the refused-pipeline retry, radv_bc250_split_refused_retry) with this flag set, which lets the
+ * owned and AMD routes take it: their view-index SGPR and per-vertex layer export are the ones the multiview draw
+ * loop already provides. */
+static RADV_BC250_THREAD bool radv_bc250_multiview_fast_retry;
+
+static enum radv_bc250_mesh_route_reason
+radv_bc250_mesh_no_split_reason(const struct radv_compiler_info *compiler_info,
+                                 struct radv_shader_stage *stages,
+                                 const struct radv_graphics_state_key *gfx_state)
+{
+   struct radv_shader_stage *ms = &stages[MESA_SHADER_MESH];
+   nir_shader *mesh = ms->nir;
+   nir_shader *fs = stages[MESA_SHADER_FRAGMENT].nir;
+   if (ms->bc250_safe_direct)
+      return RADV_BC250_ROUTE_REASON_UNKNOWN;
+   if (!compiler_info->key.bc250_mesh_safe_fast && !compiler_info->key.bc250_mesh_safe_pieces &&
+       !compiler_info->key.bc250_mesh_safe_owned && !compiler_info->key.bc250_mesh_safe_direct)
+      return RADV_BC250_ROUTE_REASON_SWITCHES_OFF;
+   if (stages[MESA_SHADER_TASK].stage != MESA_SHADER_NONE || ms->key.has_task_shader || ms->bc250_task_replay)
+      return RADV_BC250_ROUTE_REASON_TASK_STAGE;
+   if (gfx_state->has_multiview_view_index)
+      return RADV_BC250_ROUTE_REASON_MULTIVIEW;
+   if (gfx_state->vrs_may_be_enabled)
+      return RADV_BC250_ROUTE_REASON_VRS;
+   if (!fs)
+      return RADV_BC250_ROUTE_REASON_NO_FRAGMENT;
+   if (compiler_info->key.bc250_mesh_safe_bary && radv_bc250_mesh_fs_refused(compiler_info, fs)) {
+      int raw_slot, flat_slot;
+      if (compiler_info->hw.bc250_bary_no_ref || !mesh ||
+          !radv_bc250_bary_ref_slots(mesh, fs, &raw_slot, &flat_slot))
+         return RADV_BC250_ROUTE_REASON_BARY_REFERENCE;
+      if (mesh->info.mesh.primitive_type == MESA_PRIM_TRIANGLES && mesh->info.mesh.max_primitives_out < 24)
+         return RADV_BC250_ROUTE_REASON_BARY_COST;
+      return RADV_BC250_ROUTE_REASON_BARY_PRIVATE;
+   }
+   if (radv_bc250_merge_fs_refusal(fs))
+      return RADV_BC250_ROUTE_REASON_FRAGMENT_ABI;
+   if (mesh && mesh->info.shared_size > 16 * 1024)
+      return RADV_BC250_ROUTE_REASON_SHARED_MEMORY;
+   if (ms->bc250_pp_locations || (mesh && radv_bc250_mesh_needs_expansion(mesh)))
+      return RADV_BC250_ROUTE_REASON_PER_PRIMITIVE_OUTPUT;
+   if (mesh && (mesh->info.outputs_written & RADV_BC250_CLIPCULL_OUTPUTS))
+      return RADV_BC250_ROUTE_REASON_CLIPCULL_EXPORT;
+   if (!mesh || mesh->info.mesh.primitive_type != MESA_PRIM_TRIANGLES)
+      return RADV_BC250_ROUTE_REASON_TOPOLOGY;
+   if (!mesh->info.mesh.max_vertices_out || mesh->info.mesh.max_vertices_out > 256 ||
+       !mesh->info.mesh.max_primitives_out || mesh->info.mesh.max_primitives_out > 256)
+      return RADV_BC250_ROUTE_REASON_API_BOUND;
+   if (mesh->info.workgroup_size_variable ||
+       mesh->info.workgroup_size[0] * mesh->info.workgroup_size[1] * mesh->info.workgroup_size[2] > 256)
+      return RADV_BC250_ROUTE_REASON_WORKGROUP_BOUND;
+   const unsigned v = mesh->info.mesh.max_vertices_out;
+   const unsigned p = mesh->info.mesh.max_primitives_out;
+   const unsigned bound = v <= 32 ? MIN2(v, 3 * p) : 3 * p;
+   if (bound > 256)
+      return RADV_BC250_ROUTE_REASON_LAUNCH_BOUND;
+   if (mesh->info.outputs_read || mesh->info.outputs_written_16bit)
+      return RADV_BC250_ROUTE_REASON_MESH_IO;
+   if (mesh->info.shared_size > 16 * 1024)
+      return RADV_BC250_ROUTE_REASON_SHARED_MEMORY;
+   const uint64_t special = VARYING_BIT_PRIMITIVE_INDICES | VARYING_BIT_PRIMITIVE_COUNT;
+   const uint64_t primitive_id_vertex =
+      (mesh->info.outputs_written & VARYING_BIT_PRIMITIVE_ID) &&
+      !(mesh->info.per_primitive_outputs & VARYING_BIT_PRIMITIVE_ID) ? VARYING_BIT_PRIMITIVE_ID : 0;
+   const uint64_t vertex = mesh->info.outputs_written & ~(special | primitive_id_vertex);
+   const uint64_t allowed = VARYING_BIT_POS | primitive_id_vertex | (UINT64_C(0xffffffff) << VARYING_SLOT_VAR0);
+   if (!(vertex & VARYING_BIT_POS) || (vertex & ~allowed))
+      return RADV_BC250_ROUTE_REASON_MESH_IO;
+   const unsigned max_slots = compiler_info->key.bc250_mesh_safe_fast ||
+                              compiler_info->key.bc250_mesh_safe_pieces ? 16 : 8;
+   if (util_bitcount64(vertex) > max_slots)
+      return RADV_BC250_ROUTE_REASON_VARYING_LAYOUT;
+   nir_foreach_variable_with_modes(var, mesh, nir_var_shader_out) {
+      if (var->data.location < VARYING_SLOT_VAR0)
+         continue;
+      const struct glsl_type *type = glsl_without_array(var->type);
+      if (!(glsl_type_is_scalar(type) || glsl_type_is_vector(type) || glsl_type_is_matrix(type)) ||
+          glsl_get_bit_size(type) != 32)
+         return RADV_BC250_ROUTE_REASON_VARYING_LAYOUT;
+   }
+   const bool parallel = p <= 85;
+   const unsigned lds_bound = align(mesh->info.shared_size, 16) + 128 +
+      16 * util_bitcount64(vertex) * v + 6 * p +
+      (parallel ? MAX2(4 * v, align(3 * p, 4) + 32) : 4 * v) + bound;
+   if (lds_bound >= 30 * 1024)
+      return RADV_BC250_ROUTE_REASON_SHARED_MEMORY;
+   if (!radv_bc250_mesh_safe_direct_candidate_slots(mesh, true, max_slots))
+      return RADV_BC250_ROUTE_REASON_VARYING_LAYOUT;
+   return RADV_BC250_ROUTE_REASON_CANDIDATE_UNPROVEN;
+}
+
 VkResult
 radv_graphics_shaders_compile(const struct radv_compiler_info *compiler_info, struct vk_pipeline_cache *cache,
                               struct radv_shader_stage *stages, const struct radv_graphics_state_key *gfx_state,
@@ -2469,8 +2702,6 @@ radv_graphics_shaders_compile(const struct radv_compiler_info *compiler_info, st
                               struct radv_shader_debug_info *debug, struct radv_shader_binary **binaries,
                               struct radv_shader_debug_info *gs_copy_debug, struct radv_shader_binary **gs_copy_binary)
 {
-   const bool nir_cache = compiler_info->enable_nir_cache;
-
    for (unsigned s = 0; s < MESA_VULKAN_SHADER_STAGES; s++) {
       if (stages[s].stage == MESA_SHADER_NONE)
          continue;
@@ -2483,17 +2714,8 @@ radv_graphics_shaders_compile(const struct radv_compiler_info *compiler_info, st
             .lower_view_index_to_zero = !gfx_state->has_multiview_view_index,
             .lower_view_index_to_device_index = stages[s].key.view_index_from_device_index,
          };
-         blake3_hash key;
-
-         if (nir_cache) {
-            radv_hash_graphics_spirv_to_nir(key, &stages[s], &options);
-            stages[s].nir = radv_pipeline_cache_lookup_nir(compiler_info, cache, s, key);
-         }
-         if (!stages[s].nir) {
-            stages[s].nir = radv_shader_spirv_to_nir(compiler_info, &stages[s], &options, is_internal);
-            if (nir_cache)
-               radv_pipeline_cache_insert_nir(compiler_info, cache, key, stages[s].nir);
-         }
+         stages[s].nir = radv_shader_spirv_to_nir_cached(compiler_info, cache, &stages[s],
+                                                        &options, is_internal);
       }
 
       stages[s].feedback.duration += os_time_get_nano() - stage_start;
@@ -2503,6 +2725,388 @@ radv_graphics_shaders_compile(const struct radv_compiler_info *compiler_info, st
           * allocation failed. Report it instead of building a pipeline without this stage (session 486). */
          return VK_ERROR_OUT_OF_HOST_MEMORY;
       }
+   }
+
+   /* RADV_BC250_MESH_CLIPCULL_CONST (radv_bc250_mesh_clip_cull_const): constant non-negative
+    * clip/cull distances are removed before any BC250 rewrite and route decision (merge, AMD
+    * route, split, expansion, autocull). radv_bc250_prepare_task already did this for the Mesh
+    * shaders it rewrites; a second run finds nothing to remove. */
+   /* RADV_BC250_MESH_REFERENCE with RADV_BC250_MESH_REFERENCE_CULLDIST=keep: a Mesh shader the raw
+    * route admits keeps its clip/cull distances (exported as POS1), as in the reference driver. */
+   const bool bc250_reference_keep_cd =
+      compiler_info->hw.bc250_mesh_reference_keep_cd && stages[MESA_SHADER_MESH].nir &&
+      !stages[MESA_SHADER_MESH].bc250_split_mesh &&
+      radv_bc250_mesh_amd_route(true, false, false, stages[MESA_SHADER_MESH].nir,
+                                stages[MESA_SHADER_TASK].stage != MESA_SHADER_NONE ||
+                                   stages[MESA_SHADER_MESH].key.has_task_shader ||
+                                   stages[MESA_SHADER_MESH].bc250_task_replay,
+                                gfx_state->has_multiview_view_index, true);
+   if (compiler_info->hw.bc250_mesh_cc_const && stages[MESA_SHADER_MESH].nir && !bc250_reference_keep_cd)
+      radv_bc250_mesh_clip_cull_const(stages[MESA_SHADER_MESH].nir, stages[MESA_SHADER_FRAGMENT].nir,
+                                      stages[MESA_SHADER_FRAGMENT].nir || noop_fs);
+
+   /* gl_CullPrimitiveEXT lowers to the NGG null-primitive bit in the prim-exp
+    * argument (ac_nir_lower_ngg_mesh -> ac_nir_pack_ngg_prim_exp_arg), not to
+    * the quarantined per-primitive attribute export path, and the GFX10
+    * fully-culled allocation workaround covers 100% culling. */
+
+   /* RADV_BC250_MESH_MERGE: K small triangle Mesh workgroups become one raw
+    * subgroup of K*P >= 65 triangles (radv_bc250_merge_mesh), before the route
+    * decision. Mesh-only pipelines whose NIR is compiled here and not retained:
+    * no Task stage or replay, no split, no multiview, no mesh queries, no
+    * graphics pipeline library NIR (a retained merged NIR would be merged
+    * again at link time). */
+   /* Clip/cull distances left after RADV_BC250_MESH_CLIPCULL_CONST keep the expanded route, which
+    * culls cull distances in the shader (the merged raw shape would export them as POS1). */
+   struct radv_shader_stage *owned_ms = &stages[MESA_SHADER_MESH];
+   /* A fixed private-index proof depends only on the Mesh output. It is also
+    * valid for a depth-only pipeline and after the existing Task transport has
+    * lowered its payload; neither needs a new transport or export planner. */
+   if (compiler_info->key.bc250_mesh_safe_bary_last && !retained_shaders &&
+       !owned_ms->bc250_imported_nir && !owned_ms->bc250_split_mesh &&
+       !owned_ms->bc250_ordered_export && !owned_ms->bc250_safe_fast && !owned_ms->bc250_safe_owned &&
+       stages[MESA_SHADER_TASK].stage == MESA_SHADER_NONE &&
+       (!gfx_state->has_multiview_view_index || radv_bc250_multiview_fast_retry) && !gfx_state->vrs_may_be_enabled &&
+       !compiler_info->key.bc250_mesh_amd_size && !compiler_info->key.bc250_mesh_min2waves)
+      radv_bc250_prepare_bary_affine(compiler_info, owned_ms, stages[MESA_SHADER_FRAGMENT].nir);
+   const bool private_bary = radv_bc250_mesh_private_bary(compiler_info, stages[MESA_SHADER_FRAGMENT].nir);
+   /* The private expansion already references every vertex with a small backjump. For tiny classes
+    * without shader culling the ordinary exporter needs no survivor map.
+    * AUTOCULL_ALL retains the existing route until separately costed. */
+   const bool tiny_bary = compiler_info->key.bc250_mesh_safe_bary &&
+      compiler_info->key.bc250_mesh_safe_bary_tiny && compiler_info->key.bc250_mesh_safe_corners &&
+      owned_ms->nir && !compiler_info->key.bc250_mesh_autocull_all &&
+      ((owned_ms->nir->info.mesh.max_primitives_out <
+         (compiler_info->key.bc250_mesh_safe_bary_last ? 86u : 24u)) ||
+       owned_ms->nir->info.mesh.max_primitives_out > 85) &&
+      (private_bary || (compiler_info->key.bc250_mesh_safe_bary_last &&
+       (radv_bc250_mesh_has_per_primitive_data(owned_ms->nir) ||
+        (owned_ms->nir->info.outputs_written & (RADV_BC250_CLIPCULL_OUTPUTS | VARYING_BIT_CULL_PRIMITIVE)))) ||
+       owned_ms->nir->info.mesh.primitive_type != MESA_PRIM_TRIANGLES ||
+       owned_ms->nir->info.mesh.max_primitives_out > 85 ||
+       /* RADV_BC250_MESH_SAFE_PIECES_EXT: every split piece (Task pieces included) takes the
+        * private-corner export, not only pieces with barycentrics or per-primitive data. */
+       (compiler_info->bc250x.safe_pieces_ext && compiler_info->key.bc250_mesh_safe_bary_last &&
+        owned_ms->bc250_split_mesh && debug_get_bool_option("RADV_BC250_MESH_SAFE_SPLIT_PIECES", false))) &&
+      owned_ms->nir->info.mesh.max_vertices_out <= 256;
+   /* RADV_BC250_MESH_SAFE_SPLIT_PIECES (default 0): every split piece (Task replay or the direct
+    * Mesh-only split) is its own workgroup exporting its own slice, like the one-piece case, so it
+    * takes the private-corner export too; a missing fragment shader (rasterizer discard) is allowed. */
+   const bool safe_split_pieces = debug_get_bool_option("RADV_BC250_MESH_SAFE_SPLIT_PIECES", false) &&
+      compiler_info->key.bc250_mesh_safe_bary_last && tiny_bary && owned_ms->bc250_split_mesh;
+   const bool no_fs_ok = safe_split_pieces && !stages[MESA_SHADER_FRAGMENT].nir;
+   /* RADV_BC250_MESH_SAFE_PIECES_EXT: an unsplit subgroup-free wave32 Mesh shader with 33..64 primitives
+    * (above the wave32 owned capacity) tries the owned route in wave64; if it is not admitted it keeps
+    * wave32 and its route. */
+   bool owned_wave64 = false;
+   if (compiler_info->bc250x.safe_pieces_ext && owned_ms->nir && !owned_ms->bc250_split_mesh &&
+       !owned_ms->bc250_safe_fast && !owned_ms->bc250_safe_owned &&
+       owned_ms->nir->info.mesh.max_primitives_out > 32 && owned_ms->nir->info.mesh.max_primitives_out <= 64 &&
+       radv_bc250_mesh_wave64_promotable(owned_ms)) {
+      radv_bc250_mesh_set_wave(owned_ms->nir, 64);
+      owned_wave64 = true;
+   }
+   if (compiler_info->key.bc250_mesh_safe_owned && !retained_shaders &&
+       (private_bary || no_fs_ok || !radv_bc250_mesh_fs_refused(compiler_info, stages[MESA_SHADER_FRAGMENT].nir)) &&
+       (!owned_ms->bc250_split_mesh || safe_split_pieces ||
+        (compiler_info->key.bc250_mesh_safe_bary_last && tiny_bary &&
+         owned_ms->bc250_task_replay && owned_ms->bc250_split_pieces == 1)) &&
+       !owned_ms->bc250_ordered_export &&
+       !owned_ms->bc250_imported_nir && !owned_ms->bc250_safe_fast && !owned_ms->bc250_safe_owned &&
+       (!gfx_state->has_multiview_view_index || radv_bc250_multiview_fast_retry) && !gfx_state->vrs_may_be_enabled &&
+       (private_bary || tiny_bary || (!gfx_state->dynamic_provoking_vtx_mode && !gfx_state->rs.provoking_vtx_last)) &&
+       !compiler_info->key.bc250_mesh_amd_size && !compiler_info->key.bc250_mesh_min2waves) {
+      for (unsigned attempt = 0; attempt < 2; attempt++) {
+         /* A failed constant-count specialization must not displace the
+          * existing safe owned route (HB2's counts can be dynamic). */
+         if (attempt && !(compiler_info->key.bc250_mesh_safe_bary_last && tiny_bary &&
+                          (private_bary || (!gfx_state->dynamic_provoking_vtx_mode &&
+                                            !gfx_state->rs.provoking_vtx_last))))
+            break;
+         const bool use_tiny = tiny_bary && !attempt;
+         radv_bc250_owned_lds_direct = compiler_info->bc250x.safe_pieces_ext && use_tiny &&
+            owned_ms->bc250_split_mesh &&
+            (compiler_info->key.bc250_mesh_direct_read & RADV_BC250_DIRECT_READ_ALL) == RADV_BC250_DIRECT_READ_ALL;
+         const bool owned_ok = radv_bc250_mesh_safe_owned(&owned_ms->nir, &stages[MESA_SHADER_FRAGMENT].nir,
+                                        compiler_info->key.bc250_mesh_safe_corners,
+                                        private_bary, use_tiny, compiler_info->key.bc250_mesh_safe_bary_last,
+                                        compiler_info->key.bc250_bary_io16, safe_split_pieces,
+                                        compiler_info->key.mesh_shader_queries,
+                                        compiler_info->key.bc250_mesh_direct_read & RADV_BC250_DIRECT_READ_ALL,
+                                        owned_ms->bc250_index_staging, &owned_ms->bc250_pp_locations);
+         radv_bc250_owned_lds_direct = false;
+         if (!owned_ok)
+            continue;
+         owned_ms->bc250_safe_owned = true;
+         owned_ms->bc250_safe_bary_tiny = use_tiny;
+         if (use_tiny) {
+            owned_ms->bc250_expanded = true;
+            owned_ms->bc250_private_tris = true;
+         }
+         /* RADV_BC250_MESH_PP_SHARE needs the real provoking corner (0x5: dynamic, not shared). */
+         owned_ms->bc250_compact_owned = !compiler_info->bc250x.pp_share ? 1 :
+            gfx_state->dynamic_provoking_vtx_mode ? 0x5 : gfx_state->rs.provoking_vtx_last ? 0x4 : 0x1;
+         if (getenv("BC250_TRACE_COMPILE"))
+            fprintf(stderr, "BC250 MESH SAFE OWNED: logical_V=%u P=%u bound=%u task_transport=%u\n",
+                    owned_ms->nir->info.mesh.max_vertices_out, owned_ms->nir->info.mesh.max_primitives_out,
+                    3 * owned_ms->nir->info.mesh.max_primitives_out, owned_ms->bc250_task_replay);
+         break;
+      }
+   }
+   if (owned_wave64) {
+      if (!owned_ms->bc250_safe_owned)
+         radv_bc250_mesh_set_wave(owned_ms->nir, 32);
+      else if (getenv("BC250_TRACE_COMPILE"))
+         fprintf(stderr, "BC250 MESH SAFE PIECES EXT: owned route in wave64\n");
+   }
+
+   const bool bc250_merge_clipcull = stages[MESA_SHADER_MESH].nir && !compiler_info->hw.bc250_mesh_allow_pos1 &&
+      (stages[MESA_SHADER_MESH].nir->info.outputs_written & RADV_BC250_CLIPCULL_OUTPUTS);
+   if (compiler_info->key.bc250_mesh_merge && bc250_merge_clipcull && getenv("BC250_TRACE_COMPILE"))
+      fprintf(stderr, "BC250 MESH MERGE: not merged reason=clip/cull distance output\n");
+   if (compiler_info->key.bc250_mesh_merge && !bc250_merge_clipcull && stages[MESA_SHADER_MESH].nir &&
+       !stages[MESA_SHADER_MESH].bc250_split_mesh && !stages[MESA_SHADER_MESH].bc250_task_replay &&
+       !stages[MESA_SHADER_MESH].bc250_imported_nir && !stages[MESA_SHADER_MESH].bc250_ordered_export &&
+       !stages[MESA_SHADER_MESH].bc250_safe_fast && !stages[MESA_SHADER_MESH].bc250_safe_owned &&
+       !retained_shaders &&
+       stages[MESA_SHADER_TASK].stage == MESA_SHADER_NONE && !stages[MESA_SHADER_MESH].key.has_task_shader &&
+       !gfx_state->has_multiview_view_index && !compiler_info->key.mesh_shader_queries) {
+      /* Stage 2 (per-primitive outputs): the data rides on each primitive's
+       * provoking vertex and the fragment shader reads it flat, so the
+       * provoking mode must be static, the fragment shader must be linked
+       * here and must not read explicit per-vertex inputs, and VRS stays
+       * excluded (as for the base driver's compact vertex map). Outputs the fragment
+       * shader never reads are dropped first, as the expansion does. */
+      nir_shader *merge_fs = stages[MESA_SHADER_FRAGMENT].nir;
+      const char *pp_refusal = NULL;
+      if (radv_bc250_mesh_has_per_primitive_data(stages[MESA_SHADER_MESH].nir)) {
+         if (merge_fs) {
+            NIR_PASS(_, merge_fs, nir_remove_dead_variables, nir_var_shader_in, NULL);
+            NIR_PASS(_, stages[MESA_SHADER_MESH].nir, nir_remove_unused_varyings, merge_fs);
+            nir_shader_gather_info(stages[MESA_SHADER_MESH].nir,
+                                   nir_shader_get_entrypoint(stages[MESA_SHADER_MESH].nir));
+         }
+         pp_refusal = radv_bc250_merge_fs_refusal(merge_fs);
+         if (!pp_refusal && gfx_state->dynamic_provoking_vtx_mode)
+            pp_refusal = "dynamic provoking vertex mode";
+         if (!pp_refusal && gfx_state->vrs_may_be_enabled)
+            pp_refusal = "VRS may be enabled";
+      }
+      struct radv_bc250_merge_plan plan;
+      const bool merge = radv_bc250_mesh_merge_plan(stages[MESA_SHADER_MESH].nir, pp_refusal,
+                                                    gfx_state->rs.provoking_vtx_last, &plan);
+      if (getenv("BC250_TRACE_COMPILE")) {
+         char stage2[96] = "";
+         if (plan.pp)
+            snprintf(stage2, sizeof(stage2), " stage2=1 wave=%u provoking=%s cull=%u physical_per_instance=%u",
+                     plan.wave, plan.provoking ? (plan.provoking_last ? "last" : "first") : "none", plan.cull, plan.c);
+         fprintf(stderr, "BC250 MESH MERGE: %s K=%u S=%u L=%u V=%u P=%u merged_V=%u merged_P=%u lanes=%u lds_bound=%u subgroup_ops=%u%s%s%s\n",
+                 merge ? "merged" : "not merged", plan.k, plan.s, plan.l, plan.v, plan.p, plan.vm, plan.k * plan.p,
+                 plan.lanes, plan.lds, plan.subgroup_ops, stage2, merge ? "" : " reason=", merge ? "" : plan.reason);
+      }
+      plan.dims = compiler_info->key.bc250_mesh_merge_prep;
+      plan.address32_hi = compiler_info->hw.address32_hi;
+      if (merge && radv_bc250_merge_mesh(stages[MESA_SHADER_MESH].nir, merge_fs, &plan)) {
+         stages[MESA_SHADER_MESH].bc250_merge_k = plan.k;
+         stages[MESA_SHADER_MESH].bc250_merge_s = plan.s;
+         stages[MESA_SHADER_MESH].bc250_merge_dims = plan.dims;
+      }
+   }
+
+   /* RADV_BC250_MESH_AMD: eligible Mesh shaders skip the split and the
+    * expansion and run as one NGG subgroup of T lanes (radv_bc250.c). A Mesh
+    * shader that radv_bc250_prepare_task already split or attached to a
+    * Task replay is rewritten (e.g. the split consumes CullPrimitive) and
+   * keeps the base driver's route. */
+   struct radv_shader_stage *safe_ms = &stages[MESA_SHADER_MESH];
+   safe_ms->bc250_safe_direct = safe_ms->bc250_safe_fast || safe_ms->bc250_safe_owned || (compiler_info->key.bc250_mesh_safe_direct &&
+      !safe_ms->bc250_ordered_export && !safe_ms->bc250_split_mesh && !safe_ms->bc250_task_replay && safe_ms->bc250_merge_k <= 1 &&
+      stages[MESA_SHADER_TASK].stage == MESA_SHADER_NONE && !safe_ms->key.has_task_shader &&
+      !gfx_state->has_multiview_view_index && !gfx_state->vrs_may_be_enabled &&
+      !compiler_info->key.bc250_mesh_amd_size && !compiler_info->key.bc250_mesh_min2waves &&
+      radv_bc250_mesh_safe_direct_candidate(safe_ms->nir, compiler_info->key.bc250_mesh_safe_parallel) &&
+      stages[MESA_SHADER_FRAGMENT].nir && !radv_bc250_mesh_fs_refused(compiler_info, stages[MESA_SHADER_FRAGMENT].nir));
+   if (compiler_info->key.bc250_mesh_safe_direct && safe_ms->nir && getenv("BC250_TRACE_COMPILE"))
+      fprintf(stderr, "BC250 MESH SAFE DIRECT: %s V=%u P=%u bound=%u\n",
+              safe_ms->bc250_safe_direct ? "admitted" : "fallback",
+              safe_ms->nir->info.mesh.max_vertices_out, safe_ms->nir->info.mesh.max_primitives_out,
+              safe_ms->nir->info.mesh.max_vertices_out <= 32 ?
+                 MIN2(safe_ms->nir->info.mesh.max_vertices_out, 3 * safe_ms->nir->info.mesh.max_primitives_out) :
+                 3 * safe_ms->nir->info.mesh.max_primitives_out);
+
+   stages[MESA_SHADER_MESH].bc250_amd_mesh = safe_ms->bc250_ordered_export || safe_ms->bc250_safe_direct || (
+      !stages[MESA_SHADER_MESH].bc250_split_mesh &&
+      radv_bc250_mesh_amd_route(compiler_info->key.bc250_mesh_amd, compiler_info->key.bc250_mesh_fast,
+                                stages[MESA_SHADER_MESH].bc250_merge_k > 1, stages[MESA_SHADER_MESH].nir,
+                                stages[MESA_SHADER_TASK].stage != MESA_SHADER_NONE ||
+                                   stages[MESA_SHADER_MESH].key.has_task_shader ||
+                                   stages[MESA_SHADER_MESH].bc250_task_replay,
+                                gfx_state->has_multiview_view_index && !radv_bc250_multiview_fast_retry,
+                                compiler_info->hw.bc250_mesh_allow_pos1 || compiler_info->hw.bc250_mesh_reference_keep_cd));
+
+   if (compiler_info->key.bc250_expand_primitives && stages[MESA_SHADER_MESH].nir &&
+       !stages[MESA_SHADER_MESH].bc250_amd_mesh) {
+      nir_shader *bc250_mesh = stages[MESA_SHADER_MESH].nir;
+
+      /* The split and the expansion below stage every declared Mesh output in
+       * at most 16 KiB of LDS, and they run before the ordinary varying
+       * linking. Drop the outputs the linked fragment shader never reads
+       * first: an unread output has no observable effect, and without this
+       * Hellblade 2's Nanite shader (256V/128P, a dead flat uvec3 output)
+       * needs 18.9 KiB of staging and every such pipeline is refused. Outputs
+       * the Mesh shader reads back itself and built-ins other than PrimitiveId
+       * are kept (nir_remove_unused_io_vars).
+       */
+      nir_shader *bc250_fs = stages[MESA_SHADER_FRAGMENT].nir;
+      if (bc250_fs) {
+         NIR_PASS(_, bc250_fs, nir_remove_dead_variables, nir_var_shader_in, NULL);
+         NIR_PASS(_, bc250_mesh, nir_remove_unused_varyings, bc250_fs);
+      }
+      if (compiler_info->key.bc250_split_mesh && !stages[MESA_SHADER_MESH].bc250_split_mesh &&
+          ((bc250_mesh->info.outputs_written & VARYING_BIT_CULL_PRIMITIVE) ||
+           (bc250_mesh->info.mesh.primitive_type == MESA_PRIM_TRIANGLES &&
+            (bc250_mesh->info.mesh.max_primitives_out > 85 || stages[MESA_SHADER_MESH].bc250_fit_min_pieces > 1 ||
+             radv_bc250_mesh_culldist_split(compiler_info, bc250_mesh))))) {
+         unsigned pieces = 0;
+         if (!radv_bc250_split_mesh(bc250_mesh, NULL, stages[MESA_SHADER_FRAGMENT].nir, false, false, compiler_info->key.bc250_balanced_slices, compiler_info->key.bc250_parallel_cull, compiler_info->key.bc250_output_regions,
+                                    compiler_info->key.bc250_mesh_compact_lds, compiler_info->key.bc250_piece_prims, stages[MESA_SHADER_MESH].bc250_fit_min_pieces, &pieces))
+            return VK_ERROR_FEATURE_NOT_PRESENT;
+         stages[MESA_SHADER_MESH].bc250_split_mesh = true;
+         stages[MESA_SHADER_MESH].bc250_split_pieces = pieces;
+      }
+      bool bc250_over_budget = false;
+      /* The per-primitive outputs the expansion turns into flat per-vertex outputs. */
+      stages[MESA_SHADER_MESH].bc250_pp_locations =
+         bc250_mesh->info.per_primitive_outputs & bc250_mesh->info.outputs_written &
+         ((UINT64_C(0xffffffff) << VARYING_SLOT_VAR0) | VARYING_BIT_PRIMITIVE_ID | VARYING_BIT_VIEWPORT |
+          VARYING_BIT_LAYER);
+      /* RADV_BC250_MESH_SPLIT_ANY: a Mesh shader without a fragment shader (rasterizer discard)
+       * expands against an empty fragment shader: no varying is read, only positions export. */
+      nir_shader *bc250_empty_fs = NULL;
+      if (!stages[MESA_SHADER_FRAGMENT].nir && debug_get_bool_option("RADV_BC250_MESH_SPLIT_ANY", false))
+         bc250_empty_fs = nir_builder_init_simple_shader(MESA_SHADER_FRAGMENT, bc250_mesh->options,
+                                                         "bc250_empty_fs").shader;
+      bool bc250_expanded = radv_bc250_expand_primitive_attributes(bc250_mesh, bc250_empty_fs ? bc250_empty_fs : stages[MESA_SHADER_FRAGMENT].nir, compiler_info->key.bc250_compact_vertices &&
+         stages[MESA_SHADER_TASK].stage == MESA_SHADER_NONE &&
+         !gfx_state->has_multiview_view_index && !gfx_state->vrs_may_be_enabled &&
+         !gfx_state->dynamic_provoking_vtx_mode && !gfx_state->rs.provoking_vtx_last,
+         stages[MESA_SHADER_MESH].bc250_fit_reclaim || compiler_info->key.bc250_mesh_compact_lds,
+         (compiler_info->key.bc250_mesh_direct_read & RADV_BC250_DIRECT_READ_ALL), &bc250_over_budget,
+         &stages[MESA_SHADER_MESH].bc250_dead_shared, stages[MESA_SHADER_MESH].bc250_index_staging,
+         &stages[MESA_SHADER_MESH].bc250_compact_map, compiler_info->key.bc250_mesh_compact);
+      ralloc_free(bc250_empty_fs);
+      stages[MESA_SHADER_MESH].bc250_expanded = bc250_expanded;
+      /* RADV_BC250_MESH_IMPLICIT_TRIS: without the compact vertex map every primitive has
+       * its own consecutive vertices (radv_bc250_expand_primitive_attributes). */
+      stages[MESA_SHADER_MESH].bc250_private_tris = bc250_expanded && !stages[MESA_SHADER_MESH].bc250_compact_map;
+      /* Per-primitive generic attributes are only representable through the
+       * expansion epilogue. If it was required but not applied (e.g. the mesh
+       * shared-memory + staging budget is exceeded), reject now instead of
+       * leaving raw per-primitive output intrinsics that later NIR passes
+       * assert on and crash in. */
+      if (!bc250_expanded && (stages[MESA_SHADER_MESH].bc250_split_mesh ||
+                              radv_bc250_mesh_needs_expansion(bc250_mesh))) {
+         if (stages[MESA_SHADER_MESH].bc250_split_mesh)
+            fprintf(stderr, "BC250 mesh split rejected: required vertex expansion unavailable\n");
+         /* Output staging over the LDS budget: smaller pieces stage less. */
+         stages[MESA_SHADER_MESH].bc250_lds_refused = bc250_over_budget;
+         return VK_ERROR_FEATURE_NOT_PRESENT;
+      }
+   }
+
+   /* RADV_BC250_MESH_FAIL_CLOSED: every protected route has been decided by now. A Mesh shader on
+    * none of them would draw the API connectivity unchecked (the route the hang rules forbid):
+    * refuse it. The refused-pipeline retry may still split it; otherwise pipeline creation fails. */
+   if (compiler_info->hw.bc250_mesh_fail_closed && stages[MESA_SHADER_MESH].nir &&
+       !radv_bc250_mesh_protected_route(stages[MESA_SHADER_MESH].bc250_safe_direct,
+                                       stages[MESA_SHADER_MESH].bc250_ordered_export,
+                                       stages[MESA_SHADER_MESH].bc250_split_mesh,
+                                       stages[MESA_SHADER_MESH].bc250_expanded,
+                                       stages[MESA_SHADER_MESH].bc250_merge_k,
+                                       stages[MESA_SHADER_MESH].bc250_empty_output)) {
+      if (getenv("BC250_TRACE_COMPILE"))
+         fprintf(stderr, "BC250 MESH FAIL CLOSED: no protected route (V=%u P=%u prim=%u), refused\n",
+                 stages[MESA_SHADER_MESH].nir->info.mesh.max_vertices_out,
+                 stages[MESA_SHADER_MESH].nir->info.mesh.max_primitives_out,
+                 stages[MESA_SHADER_MESH].nir->info.mesh.primitive_type);
+      return VK_ERROR_FEATURE_NOT_PRESENT;
+   }
+
+   /* RADV_BC250_MESH_AMD size and reuse parts: they apply to AMD-route Mesh
+    * shaders and, switched on alone, to the other native mesh-only shaders
+    * that the base driver did not split (expanded or not), with T taken from the final
+    * NIR. Task, replayed, split and multiview Mesh shaders are excluded.
+    * With the route part on (RADV_BC250_MESH_AMD=1), only AMD-route Mesh
+    * shaders get them, so every base-route pipeline stays unchanged. */
+   if (stages[MESA_SHADER_MESH].nir) {
+      const bool bc250_plain_mesh =
+         stages[MESA_SHADER_MESH].bc250_amd_mesh ||
+         (!compiler_info->key.bc250_mesh_amd && !stages[MESA_SHADER_MESH].bc250_split_mesh && !stages[MESA_SHADER_MESH].bc250_task_replay &&
+          stages[MESA_SHADER_TASK].stage == MESA_SHADER_NONE && !stages[MESA_SHADER_MESH].key.has_task_shader &&
+          !gfx_state->has_multiview_view_index && !stages[MESA_SHADER_MESH].nir->info.mesh.nv);
+      const bool bc250_merged = stages[MESA_SHADER_MESH].bc250_merge_k > 1;
+      /* Merged subgroups keep THDS_PER_SUBGRP = 0 and fast launch 0. */
+      stages[MESA_SHADER_MESH].bc250_amd_size =
+         bc250_plain_mesh && compiler_info->key.bc250_mesh_amd_size && !bc250_merged;
+      stages[MESA_SHADER_MESH].bc250_amd_reuse = bc250_plain_mesh && compiler_info->key.bc250_mesh_amd_reuse;
+      /* Fast launch 0 for every Mesh pipeline: plain, expanded, split pieces,
+       * hybrid-Task replay consumers and multiview. Their NIR reads the
+       * workgroup index (readfirstlane of lane 0's input), draw id, view index
+       * and grid SGPRs only, never per-lane launch VGPRs, and their draws use
+       * the same DRAW_INDEX_AUTO / DISPATCH_MESH_INDIRECT_MULTI packets. Only a
+       * native hardware Task stage (not used by the base driver's policy) and the
+       * experimental AMD size part keep fast launch 1 (see radv_device.c). */
+      stages[MESA_SHADER_MESH].bc250_fl0 =
+         (compiler_info->key.bc250_mesh_fl0 || stages[MESA_SHADER_MESH].bc250_amd_mesh || bc250_merged) &&
+         !stages[MESA_SHADER_MESH].bc250_amd_size &&
+         stages[MESA_SHADER_TASK].stage == MESA_SHADER_NONE && !stages[MESA_SHADER_MESH].key.has_task_shader &&
+         !stages[MESA_SHADER_MESH].nir->info.mesh.nv;
+
+      /* RADV_BC250_MESH_AUTOCULL (radv_bc250_mesh_autocull_candidate). RADV_BC250_MESH_CULLDIST_CULL:
+       * a Mesh shader that writes cull distances (constant non-negative ones are already gone) is
+       * a candidate also without RADV_BC250_MESH_AUTOCULL: the shader culls with them and does
+       * not export them, as VS NGG culling (ac_nir_lower_ngg_mesh bc250_autocull_culldist). */
+      const bool bc250_culldist = compiler_info->hw.bc250_mesh_culldist_cull &&
+                                  stages[MESA_SHADER_MESH].nir->info.cull_distance_array_size &&
+                                  (stages[MESA_SHADER_MESH].nir->info.outputs_written & RADV_BC250_CLIPCULL_OUTPUTS);
+      if (compiler_info->key.bc250_mesh_autocull || bc250_culldist) {
+         const char *reason;
+         stages[MESA_SHADER_MESH].bc250_autocull = radv_bc250_mesh_autocull_candidate(
+            stages[MESA_SHADER_MESH].nir, stages[MESA_SHADER_MESH].bc250_expanded, bc250_merged,
+            stages[MESA_SHADER_MESH].bc250_amd_mesh &&
+               !(compiler_info->key.bc250_mesh_safe_bary_last &&
+                 stages[MESA_SHADER_MESH].bc250_safe_bary_tiny), gfx_state, &reason);
+         stages[MESA_SHADER_MESH].bc250_autocull_culldist = stages[MESA_SHADER_MESH].bc250_autocull && bc250_culldist;
+         if (getenv("BC250_TRACE_COMPILE"))
+            fprintf(stderr, "BC250 MESH AUTOCULL candidate: %s V=%u P=%u split=%u replay=%u%s%s%s\n",
+                    stages[MESA_SHADER_MESH].bc250_autocull ? "yes" : "no",
+                    stages[MESA_SHADER_MESH].nir->info.mesh.max_vertices_out,
+                    stages[MESA_SHADER_MESH].nir->info.mesh.max_primitives_out,
+                    stages[MESA_SHADER_MESH].bc250_split_mesh, stages[MESA_SHADER_MESH].bc250_task_replay,
+                    bc250_culldist ? " culldist=1" : "", reason ? " reason=" : "", reason ? reason : "");
+      }
+   }
+
+   /* RADV_BC250_MESH_COMPACT (ac_nir_lower_ngg_mesh.c, ms_compact_vertices): the base driver's
+    * plain expansion (3 private vertices per triangle, not the compact vertex map), no
+    * multiview. The per-primitive payload the expansion copies to every corner stays on
+    * a vertex owned by its primitive: the provoking corner (0 first, 2 last), both for a
+    * dynamic provoking mode. The lowering applies its own checks (trace line
+    * BC250 MESH COMPACT). */
+   if (compiler_info->key.bc250_mesh_compact && stages[MESA_SHADER_MESH].nir) {
+      struct radv_shader_stage *ms = &stages[MESA_SHADER_MESH];
+      ms->bc250_compact = ms->bc250_expanded && !ms->bc250_compact_map && !ms->bc250_amd_mesh &&
+                          ms->bc250_merge_k <= 1 && !gfx_state->has_multiview_view_index &&
+                          ms->nir->info.mesh.primitive_type == MESA_PRIM_TRIANGLES;
+      ms->bc250_compact_owned = !ms->bc250_pp_locations ? 0 :
+                                gfx_state->dynamic_provoking_vtx_mode ? 0x5 :
+                                gfx_state->rs.provoking_vtx_last ? 0x4 : 0x1;
+      if (getenv("BC250_TRACE_COMPILE"))
+         fprintf(stderr, "BC250 MESH COMPACT candidate: %s V=%u P=%u expanded=%u compact_map=%u pp_locations=0x%" PRIx64
+                 " owned=0x%x provoking=%s\n", ms->bc250_compact ? "yes" : "no",
+                 ms->nir->info.mesh.max_vertices_out, ms->nir->info.mesh.max_primitives_out, ms->bc250_expanded,
+                 ms->bc250_compact_map, ms->bc250_pp_locations, ms->bc250_compact_owned,
+                 gfx_state->dynamic_provoking_vtx_mode ? "dynamic" : gfx_state->rs.provoking_vtx_last ? "last" : "first");
    }
 
    if (retained_shaders) {
@@ -2545,6 +3149,38 @@ radv_graphics_shaders_compile(const struct radv_compiler_info *compiler_info, st
 
       radv_nir_shader_info_init(i, next_stage, &stages[i].info);
    }
+   if (stages[MESA_SHADER_MESH].nir) {
+      stages[MESA_SHADER_MESH].info.ms.bc250_amd_mesh = stages[MESA_SHADER_MESH].bc250_amd_mesh;
+      stages[MESA_SHADER_MESH].info.ms.bc250_safe_fast = stages[MESA_SHADER_MESH].bc250_safe_fast;
+      stages[MESA_SHADER_MESH].info.ms.bc250_pp_direct = stages[MESA_SHADER_MESH].bc250_pp_direct;
+      stages[MESA_SHADER_MESH].bc250_safe_stats =
+         (compiler_info->key.bc250_mesh_direct_read & RADV_BC250_MESH_SAFE_STATS_KEY) &&
+         stages[MESA_SHADER_MESH].bc250_safe_fast;
+      stages[MESA_SHADER_MESH].info.ms.bc250_safe_stats = stages[MESA_SHADER_MESH].bc250_safe_stats;
+      stages[MESA_SHADER_MESH].info.ms.bc250_safe_direct = stages[MESA_SHADER_MESH].bc250_safe_direct;
+      stages[MESA_SHADER_MESH].info.ms.bc250_route_reason = radv_bc250_mesh_no_split_reason(compiler_info, stages, gfx_state);
+      stages[MESA_SHADER_MESH].info.ms.bc250_safe_autocull = stages[MESA_SHADER_MESH].bc250_safe_direct &&
+         (compiler_info->key.bc250_mesh_safe_parallel ||
+          (stages[MESA_SHADER_MESH].bc250_safe_fast &&
+           ((compiler_info->key.bc250_mesh_direct_read & RADV_BC250_MESH_SAFE_LOCAL_KEY) ||
+            compiler_info->key.bc250_mesh_safe_corners))) &&
+         compiler_info->key.bc250_mesh_safe_autocull &&
+         stages[MESA_SHADER_MESH].nir->info.mesh.max_primitives_out <= 85 &&
+         !gfx_state->rs.polygon_mode_unknown && gfx_state->rs.polygon_mode == VK_POLYGON_MODE_FILL;
+      stages[MESA_SHADER_MESH].info.ms.bc250_amd_size = stages[MESA_SHADER_MESH].bc250_amd_size;
+      stages[MESA_SHADER_MESH].info.ms.bc250_amd_reuse = stages[MESA_SHADER_MESH].bc250_amd_reuse;
+      stages[MESA_SHADER_MESH].info.ms.bc250_fl0 = stages[MESA_SHADER_MESH].bc250_fl0;
+      stages[MESA_SHADER_MESH].info.ms.bc250_autocull = stages[MESA_SHADER_MESH].bc250_autocull;
+      stages[MESA_SHADER_MESH].info.ms.bc250_autocull_culldist = stages[MESA_SHADER_MESH].bc250_autocull_culldist;
+      stages[MESA_SHADER_MESH].info.ms.bc250_compact = stages[MESA_SHADER_MESH].bc250_compact;
+      stages[MESA_SHADER_MESH].info.ms.bc250_expanded = stages[MESA_SHADER_MESH].bc250_expanded;
+      stages[MESA_SHADER_MESH].info.ms.bc250_merge_k = stages[MESA_SHADER_MESH].bc250_merge_k;
+      stages[MESA_SHADER_MESH].info.ms.bc250_merge_s = stages[MESA_SHADER_MESH].bc250_merge_s;
+      stages[MESA_SHADER_MESH].info.ms.bc250_merge_dims = stages[MESA_SHADER_MESH].bc250_merge_dims;
+      stages[MESA_SHADER_MESH].info.ms.bc250_alloc_barrier = compiler_info->key.bc250_mesh_alloc_barrier;
+      stages[MESA_SHADER_MESH].info.ms.bc250_min2waves =
+         compiler_info->key.bc250_mesh_min2waves && stages[MESA_SHADER_MESH].bc250_amd_mesh;
+   }
 
    /* Determine if shaders uses NGG before linking because it's needed for some NIR pass. */
    radv_fill_shader_info_ngg(compiler_info, stages, active_nir_stages);
@@ -2572,7 +3208,7 @@ radv_graphics_shaders_compile(const struct radv_compiler_info *compiler_info, st
 
    if (stages[MESA_SHADER_FRAGMENT].nir) {
       NIR_PASS(_, stages[MESA_SHADER_FRAGMENT].nir, radv_nir_lower_fs_barycentric, gfx_state,
-               num_raster_vertices_per_prim);
+               num_raster_vertices_per_prim, compiler_info->ac->gfx_level >= GFX10_3);
 
       /* frag_depth = gl_FragCoord.z broadcasts to all samples of the fragment shader invocation,
        * so only optimize it away if we know there is only one sample per invocation.
@@ -2600,7 +3236,15 @@ radv_graphics_shaders_compile(const struct radv_compiler_info *compiler_info, st
              */
             if (var->data.location == VARYING_SLOT_PRIMITIVE_ID || var->data.location == VARYING_SLOT_VIEWPORT ||
                 var->data.location == VARYING_SLOT_LAYER) {
-               var->data.per_primitive = true;
+               const nir_shader *mesh = stages[MESA_SHADER_MESH].nir;
+               const uint64_t bit = BITFIELD64_BIT(var->data.location);
+               /* BC250 expansion carries these builtins on duplicated vertices. */
+               bool expanded_builtin = compiler_info->key.bc250_expand_primitives &&
+                                       (mesh->info.outputs_written & bit) &&
+                                       !(mesh->info.per_primitive_outputs & bit);
+               var->data.per_primitive = !expanded_builtin;
+               if (expanded_builtin)
+                  var->data.interpolation = INTERP_MODE_FLAT;
             }
          }
       }
@@ -2722,6 +3366,12 @@ radv_graphics_shaders_compile(const struct radv_compiler_info *compiler_info, st
 
    /* Optimize varyings on lowered shader I/O (more efficient than optimizing I/O derefs). */
    radv_graphics_shaders_link_varyings(stages, compiler_info->ac->gfx_level);
+   if (stages[MESA_SHADER_MESH].nir && stages[MESA_SHADER_MESH].bc250_pp_direct && stages[MESA_SHADER_FRAGMENT].nir)
+      radv_bc250_pp_direct_fs_inputs(stages[MESA_SHADER_FRAGMENT].nir);
+
+   VkResult bary_result = radv_bc250_link_bary_rotation(compiler_info, stages, gfx_state);
+   if (bary_result != VK_SUCCESS)
+      return bary_result;
 
    /* Optimize constant clip/cull distance after linking to operate on scalar io in the last
     * pre raster stage.
@@ -2770,7 +3420,10 @@ radv_graphics_shaders_compile(const struct radv_compiler_info *compiler_info, st
 
       struct radv_shader_stage *fs_stage = &stages[MESA_SHADER_FRAGMENT];
 
-      if (fs_stage->nir && (fs_stage->info.ps.allow_flat_shading || fs_stage->info.ps.force_disable_vrs)) {
+      /* RADV_BC250_VRS_NOOP strips the output right after spirv_to_nir (radv_nir_bc250_vrs_noop);
+       * this is only a backstop for NIR that did not come from there. */
+      if (fs_stage->nir && (fs_stage->info.ps.allow_flat_shading || fs_stage->info.ps.force_disable_vrs ||
+                            compiler_info->hw.bc250_vrs_noop)) {
          stages[i].info.force_vrs_per_vertex = false;
 
          if (stages[i].info.outinfo.writes_primitive_shading_rate ||
@@ -2801,6 +3454,32 @@ radv_graphics_shaders_compile(const struct radv_compiler_info *compiler_info, st
       radv_postprocess_nir(compiler_info, gfx_state, &stages[i]);
 
       stages[i].feedback.duration += os_time_get_nano() - stage_start;
+   }
+
+   /* BC250: expanded Mesh shaders may stage up to 28 KiB of outputs in LDS
+    * (radv_bc250_expand_primitive_attributes). Fail closed if the NGG lowering
+    * then had to move output storage to the Mesh scratch ring, which has no
+    * hardware validation on GFX1013.
+    */
+   if (stages[MESA_SHADER_MESH].nir &&
+       (stages[MESA_SHADER_MESH].bc250_expanded || stages[MESA_SHADER_MESH].bc250_merge_k > 1) &&
+       stages[MESA_SHADER_MESH].info.ms.needs_ms_scratch_ring) {
+      if (getenv("BC250_TRACE_COMPILE"))
+         fprintf(stderr, "BC250 expanded Mesh rejected: output storage would spill to the Mesh scratch ring\n");
+      stages[MESA_SHADER_MESH].bc250_lds_refused = stages[MESA_SHADER_MESH].bc250_expanded;
+      return VK_ERROR_FEATURE_NOT_PRESENT;
+   }
+
+   /* BC250 Mesh position exports (radv_bc250_mesh_pos_export_refusal): the lowered shader must
+    * export exactly the position vectors SPI_SHADER_POS_FORMAT declares, and clip/cull distance
+    * vectors (POS1/POS2) are refused until the hardware gates pass (RADV_BC250_MESH_ALLOW_POS1). */
+   if (stages[MESA_SHADER_MESH].nir && compiler_info->key.bc250_native_mesh) {
+      const char *refusal = radv_bc250_mesh_pos_export_refusal(compiler_info, stages[MESA_SHADER_MESH].nir,
+                                                              &stages[MESA_SHADER_MESH].info);
+      if (refusal) {
+         fprintf(stderr, "BC250 Mesh pipeline refused: %s\n", refusal);
+         return VK_ERROR_FEATURE_NOT_PRESENT;
+      }
    }
 
    if (stages[MESA_SHADER_VERTEX].nir || stages[MESA_SHADER_TESS_EVAL].nir) {
@@ -2964,6 +3643,24 @@ fail:
    return result;
 }
 
+/* Normalize the library subsets: a complete library and its final link must
+ * describe the same compiler state even when the link contributes no subset. */
+static void
+radv_bc250_graphics_state_hash(const struct radv_device *device,
+                               const VkGraphicsPipelineCreateInfo *info,
+                               const struct radv_graphics_pipeline_state *gfx_state, uint8_t hash[32])
+{
+   struct radv_pipeline_layout layout = gfx_state->layout;
+   radv_pipeline_layout_hash(&layout);
+   const struct radv_graphics_pipeline_key key =
+      radv_generate_graphics_pipeline_key(device, info, &gfx_state->vk, ALL_GRAPHICS_LIB_FLAGS);
+   struct mesa_blake3 ctx;
+   _mesa_blake3_init(&ctx);
+   radv_pipeline_hash(device, &layout, &ctx);
+   _mesa_blake3_update(&ctx, &key.gfx_state, sizeof(key.gfx_state));
+   _mesa_blake3_final(&ctx, hash);
+}
+
 void
 radv_graphics_pipeline_hash(const struct radv_device *device, const struct radv_graphics_pipeline_state *gfx_state,
                             unsigned char *hash)
@@ -2990,6 +3687,97 @@ radv_graphics_pipeline_hash(const struct radv_device *device, const struct radv_
    _mesa_blake3_final(&ctx, hash);
 }
 
+static void
+radv_bc250_async_free_nir(struct radv_bc250_async_job *job)
+{
+   for (unsigned s = 0; s < MESA_VULKAN_SHADER_STAGES; ++s) {
+      ralloc_free(job->nir[s]);
+      job->nir[s] = NULL;
+   }
+}
+
+/* Background: the optimized binaries of the same NIR. Published only if every stage compiled without scratch
+ * and with shader info and LDS equal to the quick binaries; otherwise the quick binaries stay bound. */
+static void
+radv_bc250_async_execute(void *data, void *gdata, int thread_index)
+{
+   struct radv_bc250_async_job *job = data;
+   struct radv_device *device = job->device;
+   struct radv_graphics_pipeline *pipeline = job->pipeline;
+   struct radv_shader *opt[MESA_VULKAN_SHADER_STAGES] = {NULL};
+   bool ok = true;
+
+   /* RADV_BC250_ASYNC_NEVER_SWAP=1 (testing): keep the quick binaries bound for the pipeline's lifetime. */
+   if (debug_get_bool_option("RADV_BC250_ASYNC_NEVER_SWAP", false)) {
+      radv_bc250_async_free_nir(job);
+      return;
+   }
+
+   u_foreach_bit (s, job->stage_mask) {
+      nir_shader *nir = job->nir[s];
+      struct radv_shader_binary *binary = radv_shader_nir_to_asm(&device->compiler_info, &job->stage[s], &nir, 1,
+                                                                 &job->gfx_state);
+      struct radv_shader_debug_info debug = {0};
+      /* Cached like the synchronous path's shaders, so the pipeline entry below resolves on the next run. */
+      opt[s] = binary ? radv_shader_create(device, NULL, binary, job->skip_shaders_cache, &debug) : NULL;
+      free(binary);
+      const struct radv_shader *quick = pipeline->base.shaders[s];
+      if (!opt[s] || !quick || opt[s]->config.scratch_bytes_per_wave || opt[s]->config.lds_size != quick->config.lds_size ||
+          memcmp(&opt[s]->info, &quick->info, sizeof(quick->info))) {
+         ok = false;
+         break;
+      }
+   }
+   radv_bc250_async_free_nir(job);
+
+   if (!ok) {
+      for (unsigned s = 0; s < MESA_VULKAN_SHADER_STAGES; ++s) {
+         if (opt[s])
+            radv_shader_unref(device, opt[s]);
+      }
+      if (getenv("BC250_TRACE_COMPILE"))
+         fprintf(stderr, "BC250 ASYNC COMPILE: optimized binaries not published (quick binaries stay)\n");
+      return;
+   }
+
+   for (unsigned s = 0; s < MESA_VULKAN_SHADER_STAGES; ++s)
+      pipeline->bc250_opt_shaders[s] = opt[s] ? opt[s] : pipeline->base.shaders[s];
+   radv_bc250_release_store(&pipeline->bc250_opt_ready, 1);
+
+   /* The disk cache gets the entry the synchronous path would have written, so the next run loads the
+    * optimized binaries directly. */
+   if (!job->skip_shaders_cache) {
+      struct radv_graphics_pipeline *copy = malloc(sizeof(*copy));
+      if (copy) {
+         memcpy(copy, pipeline, sizeof(*copy));
+         memcpy(copy->base.shaders, pipeline->bc250_opt_shaders, sizeof(copy->base.shaders));
+         copy->base.cache_object = NULL;
+         radv_pipeline_cache_insert(device, NULL, &copy->base);
+         /* The entry reached the disk cache when it was added; this copy holds no reference. */
+         if (copy->base.cache_object)
+            vk_pipeline_cache_object_unref(&device->vk, copy->base.cache_object);
+         free(copy);
+      }
+   }
+   if (getenv("BC250_TRACE_COMPILE"))
+      fprintf(stderr, "BC250 ASYNC COMPILE: optimized binaries published (stages 0x%x)\n", job->stage_mask);
+}
+
+static bool
+radv_bc250_async_allowed(const struct radv_device *device, const struct radv_graphics_pipeline *pipeline,
+                         const struct radv_shader_stage *stages, bool fast_linking_enabled)
+{
+   const VkPipelineCreateFlags2 excluded = VK_PIPELINE_CREATE_2_LIBRARY_BIT_KHR |
+      VK_PIPELINE_CREATE_2_RETAIN_LINK_TIME_OPTIMIZATION_INFO_BIT_EXT |
+      VK_PIPELINE_CREATE_2_DISABLE_OPTIMIZATION_BIT | VK_PIPELINE_CREATE_2_CAPTURE_STATISTICS_BIT_KHR |
+      VK_PIPELINE_CREATE_2_CAPTURE_INTERNAL_REPRESENTATIONS_BIT_KHR | VK_PIPELINE_CREATE_2_INDIRECT_BINDABLE_BIT_EXT;
+   return device->bc250_async && !pipeline->base.is_internal && !fast_linking_enabled &&
+          !(pipeline->base.create_flags & excluded) &&
+          (pipeline->active_stages & VK_SHADER_STAGE_MESH_BIT_EXT) &&
+          !stages[MESA_SHADER_MESH].key.keep_executable_info &&
+          !stages[MESA_SHADER_FRAGMENT].key.keep_executable_info;
+}
+
 static VkResult
 radv_graphics_pipeline_compile(struct radv_graphics_pipeline *pipeline, const VkGraphicsPipelineCreateInfo *pCreateInfo,
                                const struct radv_graphics_pipeline_state *gfx_state, struct radv_device *device,
@@ -2999,6 +3787,9 @@ radv_graphics_pipeline_compile(struct radv_graphics_pipeline *pipeline, const Vk
    struct radv_shader_binary *binaries[MESA_VULKAN_SHADER_STAGES] = {NULL};
    struct radv_shader_binary *gs_copy_binary = NULL;
    bool skip_shaders_cache = radv_pipeline_skip_shaders_cache(device, &pipeline->base);
+   const bool bc250_prepare_before_cache = radv_device_physical(device)->bc250_native_mesh &&
+      ((pipeline->active_stages & VK_SHADER_STAGE_TASK_BIT_EXT) ||
+       (compiler_info->key.bc250_split_mesh && (pipeline->active_stages & VK_SHADER_STAGE_MESH_BIT_EXT)));
    struct radv_shader_stage *stages = gfx_state->stages;
    const VkPipelineCreationFeedbackCreateInfo *creation_feedback =
       vk_find_struct_const(pCreateInfo->pNext, PIPELINE_CREATION_FEEDBACK_CREATE_INFO);
@@ -3035,9 +3826,33 @@ radv_graphics_pipeline_compile(struct radv_graphics_pipeline *pipeline, const Vk
       }
    }
 
+   /* BC250 Mesh LDS fit retry (radv_bc250_fit_retry): without the cached plan,
+    * a cache hit would pair the retried shaders with the first attempt's split
+    * draw multiplier (radv_bc250_prepare_task runs before the lookup). */
+   if (stages[MESA_SHADER_MESH].bc250_fit_reclaim && !compiler_info->key.bc250_cache_plan)
+      skip_shaders_cache = true;
+
+   /* Cached native split shaders still require their draw multiplier and
+    * argument helper. Reconstruct those before lookup; task-backed pipelines
+    * retain their existing cache exclusion until their metadata is covered. */
    bool found_in_application_cache = true;
-   if (!skip_shaders_cache &&
-       radv_graphics_pipeline_cache_search(device, cache, pipeline, &found_in_application_cache)) {
+   const bool restored_bc250 = bc250_prepare_before_cache &&
+      (compiler_info->key.bc250_cache_plan || device->bc250_env.pipeline_plan) &&
+      pipeline->base.type == RADV_PIPELINE_GRAPHICS && !skip_shaders_cache &&
+      radv_graphics_pipeline_cache_search(device, cache, pipeline, &gfx_state->layout, &found_in_application_cache);
+   if (bc250_prepare_before_cache && !restored_bc250) {
+      if (pipeline->base.create_flags & VK_PIPELINE_CREATE_2_FAIL_ON_PIPELINE_COMPILE_REQUIRED_BIT)
+         return VK_PIPELINE_COMPILE_REQUIRED;
+      result = radv_bc250_prepare_task(device, pipeline, gfx_state);
+      if (result != VK_SUCCESS)
+         return result;
+      skip_shaders_cache |= pipeline->bc250_task_pipeline != VK_NULL_HANDLE && !device->bc250_env.pipeline_plan;
+   }
+
+   if (restored_bc250 || (!skip_shaders_cache &&
+       radv_graphics_pipeline_cache_search(device, cache, pipeline, &gfx_state->layout, &found_in_application_cache))) {
+      if (bc250_prepare_before_cache && getenv("BC250_TRACE_COMPILE"))
+         fprintf(stderr, "BC250 graphics cache hit: split_pieces=%u\n", pipeline->bc250_direct_split_pieces);
       if (found_in_application_cache)
          pipeline_feedback.flags |= VK_PIPELINE_CREATION_FEEDBACK_APPLICATION_PIPELINE_CACHE_HIT_BIT;
 
@@ -3073,21 +3888,59 @@ radv_graphics_pipeline_compile(struct radv_graphics_pipeline *pipeline, const Vk
       retained_shaders = &gfx_pipeline_lib->retained_shaders;
    }
 
+   if (radv_device_physical(device)->bc250_native_mesh && !bc250_prepare_before_cache) {
+      VkResult hybrid_result = radv_bc250_prepare_task(device, pipeline, gfx_state);
+      if (hybrid_result != VK_SUCCESS)
+         return hybrid_result;
+   }
+
    const bool noop_fs = radv_pipeline_needs_noop_fs(pipeline, &gfx_state->key.gfx_state);
 
    struct radv_shader_debug_info debug[MESA_VULKAN_SHADER_STAGES] = {0};
    struct radv_shader_debug_info gs_copy_debug = {0};
+   struct radv_bc250_async_job *async_job = NULL;
+   /* The pipeline plan is captured from the final binaries: no quick/optimized swap with it. */
+   if (!retained_shaders && !device->bc250_env.pipeline_plan &&
+       radv_bc250_async_allowed(device, pipeline, stages, fast_linking_enabled))
+      async_job = calloc(1, sizeof(*async_job));
+   bc250_async_capture = async_job;
    result =
       radv_graphics_shaders_compile(compiler_info, cache, stages, &gfx_state->key.gfx_state, pipeline->base.is_internal,
                                     retained_shaders, noop_fs, debug, binaries, &gs_copy_debug, &gs_copy_binary);
+   bc250_async_capture = NULL;
+   if (async_job && (result != VK_SUCCESS || !async_job->stage_mask)) {
+      radv_bc250_async_free_nir(async_job);
+      free(async_job);
+      async_job = NULL;
+   }
    if (result == VK_SUCCESS) {
-      result = radv_graphics_shaders_create(device, cache, skip_shaders_cache, pipeline->base.shaders, binaries, debug,
-                                            &pipeline->base.gs_copy_shader, gs_copy_binary, &gs_copy_debug);
+      /* RADV_BC250_ASYNC_COMPILE: the quick binaries are never cached. */
+      result = radv_graphics_shaders_create(device, cache, skip_shaders_cache || async_job, pipeline->base.shaders,
+                                            binaries, debug, &pipeline->base.gs_copy_shader, gs_copy_binary,
+                                            &gs_copy_debug);
    }
 
-   /* Only a pipeline that has all of its shaders goes into the shaders cache. An entry without them
-    * is a hit for every later creation of the same pipeline (session 486). */
-   if (result == VK_SUCCESS && !skip_shaders_cache) {
+   if (result == VK_SUCCESS && device->bc250_env.pipeline_plan && pipeline->base.shaders[MESA_SHADER_MESH]) {
+      radv_bc250_capture_pipeline_plan(device, pipeline, &stages[MESA_SHADER_MESH]);
+      radv_bc250_graphics_state_hash(device, pCreateInfo, gfx_state, pipeline->bc250_plan.state_hash);
+      if (!radv_bc250_pipeline_plan_admitted(&pipeline->bc250_plan, pipeline->base.shaders[MESA_SHADER_MESH]))
+         result = VK_ERROR_FEATURE_NOT_PRESENT;
+   }
+
+   if (result == VK_SUCCESS && async_job) {
+      async_job->device = device;
+      async_job->pipeline = pipeline;
+      async_job->skip_shaders_cache = skip_shaders_cache;
+      async_job->gfx_state = gfx_state->key.gfx_state;
+      util_queue_fence_init(&async_job->fence);
+      pipeline->bc250_async = async_job;
+      util_queue_add_job(&device->bc250_async_queue, async_job, &async_job->fence, radv_bc250_async_execute, NULL, 0);
+      if (getenv("BC250_TRACE_COMPILE"))
+         fprintf(stderr, "BC250 ASYNC COMPILE: quick binaries bound, optimized queued (stages 0x%x)\n",
+                 async_job->stage_mask);
+   } else if (result == VK_SUCCESS && !skip_shaders_cache) {
+      /* Only a pipeline that has all of its shaders goes into the shaders cache. An entry without them
+       * is a hit for every later creation of the same pipeline (session 486). */
       radv_pipeline_cache_insert(device, cache, &pipeline->base);
    }
 
@@ -3172,6 +4025,7 @@ radv_get_vgt_shader_key(const struct radv_device *device, struct radv_shader **s
    key.tess = !!shaders[MESA_SHADER_TESS_CTRL];
    key.gs = !!shaders[MESA_SHADER_GEOMETRY];
    key.mesh = !!shaders[MESA_SHADER_MESH];
+   key.bc250_fl0 = shaders[MESA_SHADER_MESH] && shaders[MESA_SHADER_MESH]->info.ms.bc250_fl0;
    if (last_vgt_shader->info.is_ngg) {
       key.ngg = 1;
       key.ngg_passthrough = last_vgt_shader->info.is_ngg_passthrough;
@@ -3250,23 +4104,44 @@ radv_needs_null_export_workaround(const struct radv_device *device, const struct
 
 static VkResult
 radv_graphics_pipeline_import_binaries(struct radv_device *device, struct radv_graphics_pipeline *pipeline,
+                                       const struct radv_pipeline_layout *layout,
                                        const VkPipelineBinaryInfoKHR *binary_info)
 {
    blake3_hash pipeline_hash;
    struct mesa_blake3 ctx;
 
    _mesa_blake3_init(&ctx);
+   const struct radv_pipeline_binary *plan_binary = NULL;
 
    for (uint32_t i = 0; i < binary_info->binaryCount; i++) {
       VK_FROM_HANDLE(radv_pipeline_binary, pipeline_binary, binary_info->pPipelineBinaries[i]);
       struct radv_shader *shader;
       struct blob_reader blob;
 
+      if (radv_bc250_pipeline_binary_is_plan(pipeline_binary)) {
+         const bool complete_lib = pipeline->base.type == RADV_PIPELINE_GRAPHICS_LIB &&
+            device->bc250_env.gpl_binary_link &&
+            radv_pipeline_to_graphics_lib(&pipeline->base)->lib_flags == ALL_GRAPHICS_LIB_FLAGS;
+         if (!device->bc250_env.pipeline_plan || plan_binary ||
+             (pipeline->base.type != RADV_PIPELINE_GRAPHICS && !complete_lib))
+            return VK_ERROR_FEATURE_NOT_PRESENT;
+         plan_binary = pipeline_binary;
+         _mesa_blake3_update(&ctx, pipeline_binary->key, sizeof(pipeline_binary->key));
+         continue;
+      }
+
       blob_reader_init(&blob, pipeline_binary->data, pipeline_binary->size);
 
       shader = radv_shader_deserialize(device, pipeline_binary->key, sizeof(pipeline_binary->key), &blob);
       if (!shader)
          return VK_ERROR_OUT_OF_DEVICE_MEMORY;
+      if (device->bc250_env.pipeline_plan &&
+          (blob.overrun || shader->info.stage >= MESA_VULKAN_SHADER_STAGES ||
+           shader->info.stage == MESA_SHADER_TASK || shader->info.stage == MESA_SHADER_COMPUTE ||
+           pipeline->base.shaders[shader->info.stage])) {
+         radv_shader_unref(device, shader);
+         return VK_ERROR_FEATURE_NOT_PRESENT;
+      }
 
       if (shader->info.stage == MESA_SHADER_VERTEX && i > 0) {
          /* The GS copy-shader is a VS placed after all other stages. */
@@ -3280,11 +4155,122 @@ radv_graphics_pipeline_import_binaries(struct radv_device *device, struct radv_g
 
    _mesa_blake3_final(&ctx, pipeline_hash);
 
+   if (device->bc250_env.pipeline_plan && pipeline->base.shaders[MESA_SHADER_MESH]) {
+      if (!plan_binary)
+         return VK_ERROR_FEATURE_NOT_PRESENT;
+      VkResult result = radv_bc250_pipeline_binary_restore(device, pipeline, layout, plan_binary);
+      if (result != VK_SUCCESS)
+         return result;
+   } else if (plan_binary) {
+      return VK_ERROR_FEATURE_NOT_PRESENT;
+   }
+
    pipeline->base.pipeline_hash = *(uint64_t *)pipeline_hash;
 
    pipeline->has_pipeline_binaries = true;
 
    return VK_SUCCESS;
+}
+
+/* BC250 Mesh LDS fit. An expanded Mesh shader (every triangle owns three
+ * private vertices) keeps its output staging and the expanded outputs in LDS.
+ * When they do not fit, the NGG lowering would move outputs to the Mesh
+ * scratch ring, which is not validated on GFX1013, and the pipeline is refused
+ * (bc250_lds_refused). Instead of failing pipeline creation, compile it again:
+ *   1. same pieces, dead shared-variable copies dropped (bc250_fit_reclaim);
+ *   2. then one more piece per retry (bc250_fit_min_pieces), each piece
+ *      handling fewer triangles: fewer expanded vertices, the same launch
+ *      class (expanded private vertices, fast launch 0, no scratch ring),
+ *      until it fits or the split refuses (at most 5 pieces).
+ * Only pipelines refused today take this path: every pipeline that fits is
+ * compiled exactly as before. Each retry is a deterministic function of the
+ * pipeline's inputs and the compiler key, so a cached result stays valid;
+ * the split draw multiplier is restored from the cached plan
+ * (BC250_CACHE_PLAN), and without it a retried pipeline is not cached (see
+ * radv_graphics_pipeline_compile). Returns true when gfx_state is ready for
+ * another compile. */
+static bool
+radv_bc250_fit_reset(struct radv_device *device, struct radv_graphics_pipeline *pipeline,
+                     const VkGraphicsPipelineCreateInfo *pCreateInfo, struct radv_graphics_pipeline_state *gfx_state,
+                     VkShaderStageFlags active_stages, bool reclaim, unsigned min_pieces);
+
+static bool
+radv_bc250_fit_retry(struct radv_device *device, struct radv_graphics_pipeline *pipeline,
+                     const VkGraphicsPipelineCreateInfo *pCreateInfo, struct radv_graphics_pipeline_state *gfx_state,
+                     VkShaderStageFlags active_stages, unsigned attempt)
+{
+   if (!radv_device_physical(device)->bc250_native_mesh || !gfx_state->stages ||
+       pipeline->base.type != RADV_PIPELINE_GRAPHICS ||
+       vk_find_struct_const(pCreateInfo->pNext, PIPELINE_LIBRARY_CREATE_INFO_KHR))
+      return false;
+   const struct radv_shader_stage *ms = &gfx_state->stages[MESA_SHADER_MESH];
+   if (!ms->bc250_lds_refused)
+      return false;
+   /* The previous attempt must have produced the pieces it asked for;
+    * otherwise the split cannot go further for this shader. */
+   const unsigned pieces = MAX2(ms->bc250_split_pieces, 1);
+   if (ms->bc250_fit_min_pieces > pieces)
+      return false;
+   /* Skip the same-pieces step when there is nothing to drop, or when the
+    * refused attempt already had the compact layout (RADV_BC250_MESH_COMPACT_LDS)
+    * or dropped the dead copies itself (RADV_BC250_MESH_DIRECT_READ dead part). */
+   const bool reclaimed = ms->bc250_fit_reclaim || device->compiler_info.key.bc250_mesh_compact_lds ||
+                          (device->compiler_info.key.bc250_mesh_direct_read & RADV_BC250_DIRECT_READ_DEAD) ||
+                          !ms->bc250_dead_shared;
+   const bool reclaim = true;
+   const unsigned min_pieces = reclaimed ? pieces + 1 : pieces;
+   if (min_pieces > 5 || attempt > 6)
+      return false;
+   if (getenv("BC250_TRACE_COMPILE"))
+      fprintf(stderr, "BC250 Mesh LDS fit: retry %u after refusal with pieces=%u reclaim=%u: min_pieces=%u reclaim=%u\n",
+              attempt, pieces, ms->bc250_fit_reclaim, min_pieces, reclaim);
+   return radv_bc250_fit_reset(device, pipeline, pCreateInfo, gfx_state, active_stages, reclaim, min_pieces);
+}
+
+/* Undo a refused attempt's pipeline state (radv_bc250_prepare_task) and regenerate gfx_state for
+ * another compile with the given fit parameters. Returns true when gfx_state is ready. */
+static bool
+radv_bc250_fit_reset(struct radv_device *device, struct radv_graphics_pipeline *pipeline,
+                     const VkGraphicsPipelineCreateInfo *pCreateInfo, struct radv_graphics_pipeline_state *gfx_state,
+                     VkShaderStageFlags active_stages, bool reclaim, unsigned min_pieces)
+{
+   /* Undo the refused attempt's pipeline state (radv_bc250_prepare_task). */
+   VkDevice _device = radv_device_to_handle(device);
+   if (pipeline->bc250_task_pipeline)
+      radv_DestroyPipeline(_device, pipeline->bc250_task_pipeline, NULL);
+   if (pipeline->bc250_setup_pipeline && !pipeline->bc250_shared_setup)
+      radv_DestroyPipeline(_device, pipeline->bc250_setup_pipeline, NULL);
+   if (pipeline->bc250_task_layout && !pipeline->bc250_shared_setup)
+      radv_DestroyPipelineLayout(_device, pipeline->bc250_task_layout, NULL);
+   pipeline->bc250_task_pipeline = VK_NULL_HANDLE;
+   pipeline->bc250_setup_pipeline = VK_NULL_HANDLE;
+   pipeline->bc250_task_layout = VK_NULL_HANDLE;
+   pipeline->bc250_shared_setup = false;
+   pipeline->bc250_payload_stride = 0;
+   pipeline->bc250_ordered = false;
+   pipeline->bc250_direct_split_pieces = 0;
+   pipeline->active_stages = active_stages;
+   for (unsigned i = 0; i < MESA_VULKAN_SHADER_STAGES; i++) {
+      if (pipeline->base.shaders[i]) {
+         radv_shader_unref(device, pipeline->base.shaders[i]);
+         pipeline->base.shaders[i] = NULL;
+      }
+   }
+   if (pipeline->base.gs_copy_shader) {
+      radv_shader_unref(device, pipeline->base.gs_copy_shader);
+      pipeline->base.gs_copy_shader = NULL;
+   }
+
+   radv_graphics_pipeline_state_finish(device, gfx_state);
+   if (radv_generate_graphics_pipeline_state(device, pCreateInfo, gfx_state) != VK_SUCCESS || !gfx_state->stages) {
+      /* The caller finishes gfx_state again: leave it empty. */
+      memset(gfx_state, 0, sizeof(*gfx_state));
+      radv_pipeline_layout_init(device, &gfx_state->layout, false);
+      return false;
+   }
+   gfx_state->stages[MESA_SHADER_MESH].bc250_fit_reclaim = reclaim;
+   gfx_state->stages[MESA_SHADER_MESH].bc250_fit_min_pieces = min_pieces;
+   return true;
 }
 
 /* session 486: the state setup of a complete graphics pipeline reads the pipeline's shaders without a
@@ -3351,6 +4337,12 @@ radv_graphics_pipeline_init(struct radv_graphics_pipeline *pipeline, struct radv
    struct radv_graphics_pipeline_state gfx_state;
    VkResult result = VK_SUCCESS;
 
+   /* A partial BC250 interface cannot prove barycentric slot ownership or
+    * the Task consumer route. Recompile the merged source at the final link,
+    * including when the application requests a link without LTO. */
+   if (device->bc250_env.gpl_source_link)
+      fast_linking_enabled = false;
+
    pipeline->last_vgt_api_stage = MESA_SHADER_NONE;
 
    const VkPipelineLibraryCreateInfoKHR *libs_info =
@@ -3377,12 +4369,94 @@ radv_graphics_pipeline_init(struct radv_graphics_pipeline *pipeline, struct radv
    if (result != VK_SUCCESS)
       return result;
 
+   /* A fast link owns its private handles, even after library destruction.
+    * Partial compiled interfaces are refused until their route compatibility
+    * has been proven independently. */
+   if (!import_pipeline_binaries && libs_info && device->bc250_env.gpl_binary_link) {
+      struct radv_graphics_lib_pipeline *compiled = NULL;
+      for (unsigned i = 0; i < libs_info->libraryCount; i++) {
+         VK_FROM_HANDLE(radv_pipeline, imported, libs_info->pLibraries[i]);
+         struct radv_graphics_lib_pipeline *lib = radv_pipeline_to_graphics_lib(imported);
+         if (lib->base.bc250_plan.version)
+            compiled = lib;
+      }
+      if (compiled) {
+         uint8_t hash[32];
+         radv_bc250_graphics_state_hash(device, pCreateInfo, &gfx_state, hash);
+         if (libs_info->libraryCount != 1 || pCreateInfo->stageCount ||
+             compiled->lib_flags != ALL_GRAPHICS_LIB_FLAGS || !radv_is_fast_linking_enabled(pCreateInfo) ||
+             memcmp(hash, compiled->base.bc250_plan.state_hash, sizeof(hash))) {
+            result = VK_ERROR_FEATURE_NOT_PRESENT;
+         } else {
+            VK_FROM_HANDLE(radv_pipeline, producer, compiled->base.bc250_task_pipeline);
+            VK_FROM_HANDLE(radv_pipeline, setup, compiled->base.bc250_setup_pipeline);
+            result = radv_bc250_restore_cached_plan(device, pipeline, &gfx_state.layout,
+               &compiled->base.bc250_plan, pipeline->base.shaders[MESA_SHADER_MESH],
+               pipeline->base.shaders[MESA_SHADER_FRAGMENT],
+               producer ? producer->shaders[MESA_SHADER_COMPUTE] : NULL,
+               producer && setup ? setup->shaders[MESA_SHADER_COMPUTE] : NULL);
+         }
+         if (result != VK_SUCCESS) {
+            radv_graphics_pipeline_state_finish(device, &gfx_state);
+            return result;
+         }
+      }
+   }
+
    if (import_pipeline_binaries) {
-      result = radv_graphics_pipeline_import_binaries(device, pipeline, binary_info);
+      result = radv_graphics_pipeline_import_binaries(device, pipeline, &gfx_state.layout, binary_info);
+      if (result == VK_SUCCESS && pipeline->bc250_plan.version) {
+         uint8_t hash[32];
+         radv_bc250_graphics_state_hash(device, pCreateInfo, &gfx_state, hash);
+         if (memcmp(hash, pipeline->bc250_plan.state_hash, sizeof(hash)))
+            result = VK_ERROR_FEATURE_NOT_PRESENT;
+      }
    } else {
       if (gfx_state.compilation_required) {
+         const VkShaderStageFlags active_stages = pipeline->active_stages;
          result =
             radv_graphics_pipeline_compile(pipeline, pCreateInfo, &gfx_state, device, cache, fast_linking_enabled);
+         /* BC250 Mesh LDS fit: see radv_bc250_fit_retry. */
+         unsigned retries = 0;
+         while (result == VK_ERROR_FEATURE_NOT_PRESENT &&
+                radv_bc250_fit_retry(device, pipeline, pCreateInfo, &gfx_state, active_stages, retries + 1)) {
+            retries++;
+            result =
+               radv_graphics_pipeline_compile(pipeline, pCreateInfo, &gfx_state, device, cache, fast_linking_enabled);
+         }
+         /* RADV_BC250_MESH_SPLIT_ANY: one last attempt for a Mesh pipeline every route refused,
+          * letting Mesh-only lines/points split. Pipelines that already compile never get here.
+          * A multiview pipeline that is still refused gets a second pass that also lets the owned and AMD
+          * routes take it (radv_bc250_multiview_fast_retry), so the routes proven for it stay first. */
+         const bool multiview_pipeline = gfx_state.vk.mv && gfx_state.vk.mv->view_mask;
+         for (unsigned pass = 0; pass < (multiview_pipeline ? 2u : 1u); pass++) {
+            if (!(result == VK_ERROR_FEATURE_NOT_PRESENT && (active_stages & VK_SHADER_STAGE_MESH_BIT_EXT) &&
+                  debug_get_bool_option("RADV_BC250_MESH_SPLIT_ANY", false) &&
+                  radv_device_physical(device)->bc250_native_mesh && pipeline->base.type == RADV_PIPELINE_GRAPHICS &&
+                  !vk_find_struct_const(pCreateInfo->pNext, PIPELINE_LIBRARY_CREATE_INFO_KHR) &&
+                  radv_bc250_fit_reset(device, pipeline, pCreateInfo, &gfx_state, active_stages, false, 0)))
+               break;
+            radv_bc250_split_refused_retry = true;
+            radv_bc250_multiview_fast_retry = pass == 1;
+            result =
+               radv_graphics_pipeline_compile(pipeline, pCreateInfo, &gfx_state, device, cache, fast_linking_enabled);
+            /* The same LDS fit steps (more, smaller pieces) for the retried form. */
+            unsigned split_retries = 0;
+            while (result == VK_ERROR_FEATURE_NOT_PRESENT &&
+                   radv_bc250_fit_retry(device, pipeline, pCreateInfo, &gfx_state, active_stages, ++split_retries))
+               result =
+                  radv_graphics_pipeline_compile(pipeline, pCreateInfo, &gfx_state, device, cache, fast_linking_enabled);
+            radv_bc250_split_refused_retry = false;
+            radv_bc250_multiview_fast_retry = false;
+            if (getenv("BC250_TRACE_COMPILE"))
+               fprintf(stderr, "BC250 Mesh refused retry (split any topology%s): %s\n",
+                       pass ? ", multiview owned/AMD routes" : "", result == VK_SUCCESS ? "admitted" : "refused");
+         }
+         if (retries && getenv("BC250_TRACE_COMPILE"))
+            fprintf(stderr, "BC250 Mesh LDS fit: %s after %u retries (pieces=%u reclaim=%u)\n",
+                    result == VK_SUCCESS ? "admitted" : "refused", retries,
+                    gfx_state.stages ? gfx_state.stages[MESA_SHADER_MESH].bc250_split_pieces : 0,
+                    gfx_state.stages ? gfx_state.stages[MESA_SHADER_MESH].bc250_fit_reclaim : 0);
       }
    }
 
@@ -3452,6 +4526,13 @@ radv_graphics_pipeline_create(VkDevice _device, VkPipelineCache _cache, const Vk
       return result;
    }
 
+   radv_bc250_report_mesh_route(device, pipeline->base.shaders[MESA_SHADER_MESH],
+      "pipeline", pipeline->bc250_direct_split_pieces, pipeline->bc250_task_pipeline != VK_NULL_HANDLE,
+      pipeline->bc250_ordered, pipeline->bc250_plan.flags & RADV_BC250_PLAN_EMPTY);
+   /* RADV_BC250_MESH_IDXPASS: a declined or failed index route keeps the Mesh route. */
+   if (device->compiler_info.bc250x.idxpass && pipeline->base.shaders[MESA_SHADER_MESH] && !pipeline->bc250_task_pipeline)
+      radv_bc250_idx_create(device, pipeline, pCreateInfo);
+
    radv_pipeline_report_pso_history(device, &pipeline->base);
 
    *pPipeline = radv_pipeline_to_handle(&pipeline->base);
@@ -3462,6 +4543,38 @@ radv_graphics_pipeline_create(VkDevice _device, VkPipelineCache _cache, const Vk
 void
 radv_destroy_graphics_pipeline(struct radv_device *device, struct radv_graphics_pipeline *pipeline)
 {
+   if (pipeline->bc250_async) {
+      /* Removes a queued job, or waits for a running one. */
+      util_queue_drop_job(&device->bc250_async_queue, &pipeline->bc250_async->fence);
+      util_queue_fence_destroy(&pipeline->bc250_async->fence);
+      radv_bc250_async_free_nir(pipeline->bc250_async);
+      free(pipeline->bc250_async);
+      pipeline->bc250_async = NULL;
+      if (radv_bc250_acquire_load(&pipeline->bc250_opt_ready)) {
+         for (unsigned i = 0; i < MESA_VULKAN_SHADER_STAGES; ++i) {
+            if (pipeline->bc250_opt_shaders[i] && pipeline->bc250_opt_shaders[i] != pipeline->base.shaders[i])
+               radv_shader_unref(device, pipeline->bc250_opt_shaders[i]);
+         }
+      }
+   }
+   if (pipeline->bc250_task_pipeline)
+      radv_DestroyPipeline(radv_device_to_handle(device), pipeline->bc250_task_pipeline, NULL);
+   if (pipeline->bc250_idx_cs)
+      radv_DestroyPipeline(radv_device_to_handle(device), pipeline->bc250_idx_cs, NULL);
+   if (pipeline->bc250_idx_gfx)
+      radv_DestroyPipeline(radv_device_to_handle(device), pipeline->bc250_idx_gfx, NULL);
+   if (pipeline->bc250_idx_layout)
+      radv_DestroyPipelineLayout(radv_device_to_handle(device), pipeline->bc250_idx_layout, NULL);
+   if (pipeline->bc250_idx_setup)
+      radv_DestroyPipeline(radv_device_to_handle(device), pipeline->bc250_idx_setup, NULL);
+   if (pipeline->bc250_idx_setup_layout)
+      radv_DestroyPipelineLayout(radv_device_to_handle(device), pipeline->bc250_idx_setup_layout, NULL);
+   if (pipeline->bc250_idx_cs_ind)
+      radv_DestroyPipeline(radv_device_to_handle(device), pipeline->bc250_idx_cs_ind, NULL);
+   if (pipeline->bc250_setup_pipeline && !pipeline->bc250_shared_setup)
+      radv_DestroyPipeline(radv_device_to_handle(device), pipeline->bc250_setup_pipeline, NULL);
+   if (pipeline->bc250_task_layout && !pipeline->bc250_shared_setup)
+      radv_DestroyPipelineLayout(radv_device_to_handle(device), pipeline->bc250_task_layout, NULL);
    for (unsigned i = 0; i < MESA_VULKAN_SHADER_STAGES; ++i) {
       if (pipeline->base.shaders[i])
          radv_shader_unref(device, pipeline->base.shaders[i]);
@@ -3521,7 +4634,18 @@ radv_graphics_lib_pipeline_init(struct radv_graphics_lib_pipeline *pipeline, str
       radv_graphics_pipeline_import_layout(&pipeline->layout, pipeline_layout);
 
    if (import_pipeline_binaries) {
-      result = radv_graphics_pipeline_import_binaries(device, &pipeline->base, binary_info);
+      result = radv_graphics_pipeline_import_binaries(device, &pipeline->base, &pipeline->layout, binary_info);
+      if (result == VK_SUCCESS && pipeline->base.bc250_plan.version) {
+         struct radv_graphics_pipeline_state gfx_state;
+         result = radv_generate_graphics_pipeline_state(device, pCreateInfo, &gfx_state);
+         if (result == VK_SUCCESS) {
+            uint8_t hash[32];
+            radv_bc250_graphics_state_hash(device, pCreateInfo, &gfx_state, hash);
+            if (memcmp(hash, pipeline->base.bc250_plan.state_hash, sizeof(hash)))
+               result = VK_ERROR_FEATURE_NOT_PRESENT;
+            radv_graphics_pipeline_state_finish(device, &gfx_state);
+         }
+      }
    } else {
       struct radv_graphics_pipeline_state gfx_state;
 
@@ -3529,9 +4653,63 @@ radv_graphics_lib_pipeline_init(struct radv_graphics_lib_pipeline *pipeline, str
       if (result != VK_SUCCESS)
          return result;
 
-      result =
-         radv_graphics_pipeline_compile(&pipeline->base, pCreateInfo, &gfx_state, device, cache, fast_linking_enabled);
+      if (device->bc250_env.gpl_binary_link && pipeline->lib_flags == ALL_GRAPHICS_LIB_FLAGS &&
+          (pipeline->base.active_stages & VK_SHADER_STAGE_MESH_BIT_EXT) && !libs_info) {
+         /* The entire interface is present. Use the monolithic admission and
+          * preparation path, then retain only the executables and their plan.
+          * Partial libraries keep the conservative source fallback below. */
+         VkPipelineCreateFlags2 flags = pipeline->base.base.create_flags;
+         pipeline->base.base.type = RADV_PIPELINE_GRAPHICS;
+         pipeline->base.base.create_flags &= ~(VK_PIPELINE_CREATE_2_LIBRARY_BIT_KHR |
+            VK_PIPELINE_CREATE_2_RETAIN_LINK_TIME_OPTIMIZATION_INFO_BIT_EXT);
+         result = radv_graphics_pipeline_compile(&pipeline->base, pCreateInfo, &gfx_state, device, cache, false);
+         pipeline->base.base.type = RADV_PIPELINE_GRAPHICS_LIB;
+         pipeline->base.base.create_flags = flags;
+      } else if (device->bc250_env.gpl_source_link) {
+         VkPipelineShaderStageCreateInfo source[MESA_VULKAN_SHADER_STAGES];
+         unsigned count = 0;
+         if (libs_info) {
+            for (unsigned i = 0; i < libs_info->libraryCount; i++) {
+               VK_FROM_HANDLE(radv_pipeline, imported, libs_info->pLibraries[i]);
+               struct radv_graphics_lib_pipeline *lib = radv_pipeline_to_graphics_lib(imported);
+               if (!lib->bc250_source_only || count + lib->stage_count > ARRAY_SIZE(source)) {
+                  result = VK_ERROR_FEATURE_NOT_PRESENT;
+                  goto source_done;
+               }
+               if (lib->stage_count)
+                  memcpy(source + count, lib->stages, lib->stage_count * sizeof(source[0]));
+               count += lib->stage_count;
+            }
+         }
+         if (count + pCreateInfo->stageCount > ARRAY_SIZE(source)) {
+            result = VK_ERROR_FEATURE_NOT_PRESENT;
+            goto source_done;
+         }
+         if (pCreateInfo->stageCount)
+            memcpy(source + count, pCreateInfo->pStages, pCreateInfo->stageCount * sizeof(source[0]));
+         count += pCreateInfo->stageCount;
+         for (unsigned i = 0; i < count; i++) {
+            mesa_shader_stage stage = vk_to_mesa_shader_stage(source[i].stage);
+            if (!gfx_state.stages[stage].spirv.size || gfx_state.stages[stage].layout.mapping) {
+               result = VK_ERROR_FEATURE_NOT_PRESENT;
+               goto source_done;
+            }
+            pipeline->stage_keys[stage] = gfx_state.stages[stage].key;
+         }
+         pipeline->stages = radv_copy_shader_stage_create_info(device, count, source, pipeline->mem_ctx);
+         if (!pipeline->stages) {
+            result = VK_ERROR_OUT_OF_HOST_MEMORY;
+            goto source_done;
+         }
+         pipeline->stage_count = count;
+         pipeline->bc250_source_only = true;
+         result = VK_SUCCESS;
+      } else {
+         result =
+            radv_graphics_pipeline_compile(&pipeline->base, pCreateInfo, &gfx_state, device, cache, fast_linking_enabled);
+      }
 
+source_done:
       radv_graphics_pipeline_state_finish(device, &gfx_state);
    }
 
@@ -3562,6 +4740,9 @@ radv_graphics_lib_pipeline_create(VkDevice _device, VkPipelineCache _cache,
       radv_pipeline_destroy(device, &pipeline->base.base, pAllocator);
       return result;
    }
+
+   radv_bc250_report_mesh_route(device, pipeline->base.base.shaders[MESA_SHADER_MESH],
+      "library", 0, false, false, pipeline->base.bc250_plan.flags & RADV_BC250_PLAN_EMPTY);
 
    radv_pipeline_report_pso_history(device, &pipeline->base.base);
 
@@ -3635,7 +4816,35 @@ radv_CreateGraphicsPipelines_on_stack(VkDevice _device, VkPipelineCache pipeline
    VkResult result = VK_SUCCESS;
    unsigned i = 0;
 
+   VK_FROM_HANDLE(radv_device, device, _device);
    for (; i < count; i++) {
+      /* The experimental producer is a separate compute pipeline and is not
+       * serialized by the graphics pipeline binary format.
+       */
+      const VkPipelineBinaryInfoKHR *bc250_binaries =
+         vk_find_struct_const(pCreateInfos[i].pNext, PIPELINE_BINARY_INFO_KHR);
+      if (radv_device_physical(device)->bc250_hybrid_task && !device->bc250_env.pipeline_plan &&
+          bc250_binaries && bc250_binaries->binaryCount) {
+         pPipelines[i] = VK_NULL_HANDLE;
+         result = VK_ERROR_FEATURE_NOT_PRESENT;
+         if (vk_graphics_pipeline_create_flags(&pCreateInfos[i]) & VK_PIPELINE_CREATE_2_EARLY_RETURN_ON_FAILURE_BIT)
+            goto done_pipelines;
+         goto next_pipeline;
+      }
+
+      if (radv_device_physical(device)->bc250_native_mesh &&
+          !radv_device_physical(device)->bc250_hybrid_task &&
+          !radv_device_physical(device)->bc250_native_task) {
+         for (uint32_t j = 0; j < pCreateInfos[i].stageCount; j++) {
+            if (pCreateInfos[i].pStages[j].stage == VK_SHADER_STAGE_TASK_BIT_EXT) {
+               pPipelines[i] = VK_NULL_HANDLE;
+               result = VK_ERROR_FEATURE_NOT_PRESENT;
+               if (vk_graphics_pipeline_create_flags(&pCreateInfos[i]) & VK_PIPELINE_CREATE_2_EARLY_RETURN_ON_FAILURE_BIT)
+                  goto done_pipelines;
+               goto next_pipeline;
+            }
+         }
+      }
       const VkPipelineCreateFlagBits2 create_flags = vk_graphics_pipeline_create_flags(&pCreateInfos[i]);
       VkResult r;
       if (create_flags & VK_PIPELINE_CREATE_2_LIBRARY_BIT_KHR) {
@@ -3650,8 +4859,11 @@ radv_CreateGraphicsPipelines_on_stack(VkDevice _device, VkPipelineCache pipeline
          if (create_flags & VK_PIPELINE_CREATE_2_EARLY_RETURN_ON_FAILURE_BIT)
             break;
       }
+
+   next_pipeline:;
    }
 
+done_pipelines:
    for (; i < count; ++i)
       pPipelines[i] = VK_NULL_HANDLE;
 

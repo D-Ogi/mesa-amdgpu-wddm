@@ -76,6 +76,29 @@ struct gfx10_ngg_info {
    bool max_vert_out_per_gs_instance;
 };
 
+enum radv_bc250_mesh_route_reason {
+   RADV_BC250_ROUTE_REASON_UNKNOWN = 0,
+   RADV_BC250_ROUTE_REASON_SWITCHES_OFF,
+   RADV_BC250_ROUTE_REASON_TASK_STAGE,
+   RADV_BC250_ROUTE_REASON_MULTIVIEW,
+   RADV_BC250_ROUTE_REASON_VRS,
+   RADV_BC250_ROUTE_REASON_NO_FRAGMENT,
+   RADV_BC250_ROUTE_REASON_PER_PRIMITIVE_OUTPUT,
+   RADV_BC250_ROUTE_REASON_TOPOLOGY,
+   RADV_BC250_ROUTE_REASON_API_BOUND,
+   RADV_BC250_ROUTE_REASON_WORKGROUP_BOUND,
+   RADV_BC250_ROUTE_REASON_MESH_IO,
+   RADV_BC250_ROUTE_REASON_VARYING_LAYOUT,
+   RADV_BC250_ROUTE_REASON_SHARED_MEMORY,
+   RADV_BC250_ROUTE_REASON_FRAGMENT_ABI,
+   RADV_BC250_ROUTE_REASON_LAUNCH_BOUND,
+   RADV_BC250_ROUTE_REASON_CANDIDATE_UNPROVEN,
+   RADV_BC250_ROUTE_REASON_CLIPCULL_EXPORT,
+   RADV_BC250_ROUTE_REASON_BARY_REFERENCE,
+   RADV_BC250_ROUTE_REASON_BARY_PRIVATE,
+   RADV_BC250_ROUTE_REASON_BARY_COST,
+};
+
 struct radv_shader_info {
    uint32_t workgroup_size;
    uint32_t nir_shared_size;
@@ -118,6 +141,7 @@ struct radv_shader_info {
    bool force_indirect_descriptors : 1;
    bool ngg_wave_id_en : 1;
    bool descriptor_heap : 1;
+   bool bc250_compat_constants : 1;
    bool uses_sampler : 1;
 
    struct {
@@ -218,6 +242,8 @@ struct radv_shader_info {
       bool selects_frag_coord_xy_dynamically : 1;
       bool selects_quad_pos_dynamically : 1;
       bool selects_sample_mask_in_dynamically : 1;
+      /* BC250 barycentric vertex order with a dynamic provoking vertex mode. */
+      bool load_provoking_last : 1;
       bool selects_front_face_dynamically : 1;
 
       bool has_epilog : 1;
@@ -252,6 +278,37 @@ struct radv_shader_info {
       bool needs_ms_scratch_ring;
       bool has_task; /* If mesh shader is used together with a task shader. */
       bool has_query;
+      bool bc250_safe_direct;
+      bool bc250_safe_fast;
+      uint8_t bc250_pp_direct; /* RADV_BC250_MESH_PP_DIRECT (radv_shader_stage::bc250_pp_direct). */
+      bool bc250_safe_autocull; /* Proven-capacity W31 closure path. */
+      bool bc250_safe_stats; /* RADV_BC250_MESH_SAFE_STATS: mapped per-draw SAFE_FAST diagnostics. */
+      uint8_t bc250_route_reason; /* NO_SPLIT observer: why a safe direct proof was not admitted. */
+      bool bc250_amd_mesh; /* RADV_BC250_MESH_AMD route part (see radv_bc250_mesh_amd_route). */
+      bool bc250_amd_size; /* RADV_BC250_MESH_AMD size part: AMP = THDS = T. */
+      bool bc250_amd_reuse; /* RADV_BC250_MESH_AMD reuse part: VGT_REUSE_OFF = 1. */
+      bool bc250_fl0; /* RADV_BC250_MESH_FL0: GS_FAST_LAUNCH=0 launch. */
+      bool bc250_alloc_barrier; /* RADV_BC250_MESH_ALLOC_BARRIER: s_barrier right before GS_ALLOC_REQ. */
+      bool bc250_min2waves; /* RADV_BC250_MESH_MIN2WAVES: pad a one-wave raw workgroup to two waves. */
+      uint8_t bc250_merge_k; /* RADV_BC250_MESH_MERGE: API workgroups per subgroup; direct draws launch ceil(N/K). */
+      uint8_t bc250_merge_s; /* RADV_BC250_MESH_MERGE: lane stride of one API workgroup. */
+      /* RADV_BC250_MESH_MERGE option A: the shader reads the application's
+       * grid from AC_UD_MS_BC250_DIMS_VA when it is nonzero (prepped indirect
+       * draws launch ceil(N/K) groups). */
+      bool bc250_merge_dims;
+      bool bc250_autocull; /* RADV_BC250_MESH_AUTOCULL: epilogue culling, NGG culling settings SGPRs. */
+      /* RADV_BC250_MESH_CULLDIST_CULL: autocull requested because of cull distances (one-wave size rule). */
+      bool bc250_autocull_culldist;
+      /* The lowering culls the cull distances in the shader and does not export them
+       * (radv_get_num_pos_exports leaves them out, as for VS NGG culling). */
+      bool bc250_culldist_culled;
+      bool bc250_compact; /* RADV_BC250_MESH_COMPACT applied by the lowering (diagnostic identity: BC250_MESH_TIMER). */
+      /* BC250_MESH_TIMER class key (diagnostic identity only, no codegen input):
+       * The base driver's expansion applied, and the API max_vertices/max_primitives of the
+       * compiled (possibly split) shader. */
+      bool bc250_expanded;
+      uint16_t bc250_api_vertices;
+      uint16_t bc250_api_primitives;
    } ms;
 
    struct radv_streamout_info so;

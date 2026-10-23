@@ -144,7 +144,11 @@ struct radv_graphics_state_key {
    uint32_t dynamic_provoking_vtx_mode : 1;
    uint32_t smooth_lines_may_be_enabled : 1;
    uint32_t dcc_decompress_gfx11 : 1;
-   uint32_t reserved : 13;
+   /* BC250 barycentrics: the provoking vertex mode is dynamic (any last
+    * pre-rasterization stage; dynamic_provoking_vtx_mode is only set for NGG VS, GS
+    * and Mesh, not TES). */
+   uint32_t bc250_ps_dynamic_provoking : 1;
+   uint32_t reserved : 12;
 
    struct {
       uint8_t topology;
@@ -249,6 +253,8 @@ struct radv_graphics_pipeline_key {
 #define PS_STATE_RAST_PRIM__SHIFT               22
 #define PS_STATE_RAST_PRIM__MASK                0x3
 #define PS_STATE_USE_FLOAT_FRAG_COORD_XY__SHIFT 24
+#define PS_STATE_PROVOKING_LAST__SHIFT          27
+#define PS_STATE_PROVOKING_LAST__MASK           0x1
 #define PS_STATE_USE_FLOAT_FRAG_COORD_XY__MASK  0x1
 #define PS_STATE_USE_QUAD_POS__SHIFT            25
 #define PS_STATE_USE_QUAD_POS__MASK             0x1
@@ -294,6 +300,60 @@ struct radv_shader_stage {
    unsigned char shader_blake3[BLAKE3_KEY_LEN];
 
    nir_shader *nir;
+   bool bc250_split_mesh; /* Requires successful private-vertex expansion. */
+   /* BC250 Mesh LDS fit (radv_graphics_pipeline_init retries a pipeline whose
+    * expanded Mesh shader does not fit in LDS). Inputs of a retry: */
+   bool bc250_fit_reclaim; /* Drop dead shared-variable copies before the expansion layout. */
+   uint8_t bc250_fit_min_pieces; /* Split into at least this many pieces (0/1: normal policy). */
+   /* Outputs of an attempt: */
+   uint8_t bc250_split_pieces; /* Pieces of the split (0: not split). */
+   bool bc250_lds_refused; /* Refused because the expanded outputs do not fit in LDS. */
+   bool bc250_dead_shared; /* The expansion found dead shared-variable copies to drop. */
+   bool bc250_expanded; /* Mesh outputs were staged by radv_bc250_expand_primitive_attributes. */
+   bool bc250_empty_output; /* Mesh shader proven to output nothing (both counts literally zero). */
+   /* The expansion gave every primitive its own consecutive vertices (no compact vertex map),
+    * RADV_BC250_MESH_IMPLICIT_TRIS. */
+   bool bc250_private_tris;
+   /* Primitive index staging of the expanded shader (LDS offset, array stride, component bytes,
+    * logical vertices), for BC250_MESH_NIR_DUMP. */
+   uint32_t bc250_index_staging[4];
+   /* The expansion used the base driver's compact vertex map (BC250_COMPACT_VERTICES). */
+   bool bc250_compact_map;
+   /* Output locations the expansion turned from per-primitive into flat per-vertex. */
+   uint64_t bc250_pp_locations;
+   /* RADV_BC250_MESH_COMPACT candidate: corners owning the per-primitive payload
+    * (bit 0 corner 0, bit 2 corner 2), and whether the lowering applied it. */
+   bool bc250_compact;
+   bool bc250_safe_direct;
+   bool bc250_safe_fast;
+   /* RADV_BC250_MESH_PP_DIRECT: per-primitive generic outputs on the fast route (bit 0) with the provoking
+    * corner (bits 1-2: 0 or 2) owning a fresh export slot that carries them as flat attributes. */
+   uint8_t bc250_pp_direct;
+   bool bc250_safe_stats;
+   bool bc250_safe_owned;
+   bool bc250_safe_bary_affine;
+   bool bc250_safe_bary_tiny; /* Proven private connectivity; no second remap. */
+   bool bc250_ordered_export;
+   uint8_t bc250_compact_owned;
+   bool bc250_compact_applied;
+   bool bc250_autocull; /* RADV_BC250_MESH_AUTOCULL candidate (radv_bc250_mesh_autocull_candidate). */
+   /* RADV_BC250_MESH_CULLDIST_CULL: autocull candidate that writes cull distances: they are culled
+    * in the shader and not exported (the size policy is then the one-wave rule). */
+   bool bc250_autocull_culldist;
+   bool bc250_amd_mesh; /* RADV_BC250_MESH_AMD route part: no split, no expansion, native draws. */
+   bool bc250_amd_size; /* RADV_BC250_MESH_AMD size part: AMP = THDS = T, workgroup align(T, wave). */
+   bool bc250_amd_reuse; /* RADV_BC250_MESH_AMD reuse part: VGT_REUSE_OFF = 1 while bound. */
+   bool bc250_fl0; /* RADV_BC250_MESH_FL0: GS_FAST_LAUNCH=0 launch, PRIM_AMP_FACTOR covers the workgroup. */
+   bool bc250_task_replay; /* Mesh replayed by the base driver's hybrid/synthetic Task producer. */
+   bool bc250_imported_nir; /* NIR came from a graphics pipeline library (never merged). */
+   uint8_t bc250_merge_k; /* RADV_BC250_MESH_MERGE: API workgroups per hardware subgroup (0 = not merged). */
+   uint8_t bc250_merge_s; /* RADV_BC250_MESH_MERGE: lane stride of one API workgroup. */
+   bool bc250_merge_dims; /* RADV_BC250_MESH_MERGE option A: dims user SGPR (see radv_shader_info). */
+   /* BC250 barycentrics: the two generic slots this last pre-rasterization stage
+    * exports its position to (radv_nir_bc250_export_bary_ref), 0 if none. */
+   uint64_t bc250_bary_ref_mask;
+   int8_t bc250_bary_raw_slot;
+   int8_t bc250_bary_flat_slot;
    nir_shader *gs_copy_shader;
    nir_shader *internal_nir; /* meta shaders */
 
@@ -417,6 +477,7 @@ union radv_shader_arena_block {
       struct radv_shader_arena *arena;
       uint32_t offset;
       uint32_t size;
+      uint64_t bc250_trace_allocation; /* CPU diagnostic identity, not cached. */
    };
 };
 
@@ -475,6 +536,9 @@ struct radv_shader {
    uint64_t va;
 
    uint64_t upload_seq;
+   uint64_t bc250_trace_upload;
+   bool bc250_trace_target;
+   char bc250_trace_code[BLAKE3_HEX_LEN];
 
    struct ac_shader_config config;
    uint32_t code_size;
@@ -550,7 +614,56 @@ struct radv_compiler_info {
       uint32_t instr_prefetch_distance : 8;
       uint32_t rbplus_allowed : 1;
       uint32_t address_prt_wa_control_bit : 8;
-      uint32_t padding : 15;
+      uint32_t bc250_output_regions : 1;
+      /* GFX1013 barycentrics (radv_physical_device::bc250_barycentrics). */
+      uint32_t bc250_barycentrics : 1;
+      /* RADV_BC250_DIAG_BARY_NO_REF: no vertex-order reference (rotation 0), for A/B tests. */
+      uint32_t bc250_bary_no_ref : 1;
+      /* GFX1013 no-op VRS (radv_physical_device::bc250_vrs_noop, RADV_BC250_VRS_NOOP): shading
+       * rate outputs stripped, shading rate reads are 0 (radv_nir_bc250_vrs_noop). */
+      uint32_t bc250_vrs_noop : 1;
+      /* BC250 Mesh clip/cull distances (radv_physical_device::bc250_native_mesh only):
+       * RADV_BC250_MESH_CLIPCULL_CONST (default 1): constant non-negative distances are removed
+       * before the BC250 rewrites (radv_bc250_mesh_clip_cull_const). */
+      uint32_t bc250_mesh_cc_const : 1;
+      /* RADV_BC250_MESH_CULLDIST_CULL (default 1): cull distances are culled in the shader
+       * (autocull) and not exported, as VS NGG culling does. */
+      uint32_t bc250_mesh_culldist_cull : 1;
+      /* RADV_BC250_MESH_ALLOW_POS1 (default 0): admit Mesh pipelines that still export clip/cull
+       * distance position vectors (POS1/POS2; not hardware-proven, for hardware gates only). */
+      uint32_t bc250_mesh_allow_pos1 : 1;
+      /* RADV_BC250_MESH_REFERENCE=1 (GFX1013, default off): Mesh pipelines that the raw route
+       * (radv_bc250_mesh_amd_route) admits are compiled and drawn exactly as the reference driver
+       * (mesa 26.1.4 + the bc250 Mesh patch) draws them: PRIM_AMP_FACTOR = declared primitives,
+       * workgroup max(V, P, API threads), output counts always broadcast through LDS, a one-position
+       * fully-culled dummy, GE_CNTL.VERT_GRP_SIZE clamped (radv_bc250_mesh_reference). */
+      uint32_t bc250_mesh_reference : 1;
+      /* RADV_BC250_MESH_REFERENCE_CULLDIST=keep (default with the reference mode): clip/cull
+       * distances of raw-route Mesh shaders are kept and exported as POS1, like the reference
+       * driver; strip = RADV_BC250_MESH_CLIPCULL_CONST first, as the normal path does. */
+      uint32_t bc250_mesh_reference_keep_cd : 1;
+      /* GFX1013, on by default (RADV_BC250_MESH_WAVE_SYNC=0 turns it off for A/B): Mesh waves that run no
+       * API invocations (hardware workgroup larger than the API workgroup, e.g. split/expanded pieces) stop
+       * following the API barriers at an exact barrier total published by the API waves. The upstream
+       * "waves in flight == 0" check can observe the API waves' decrement in the same barrier epoch and end
+       * one barrier early; the extra wave then runs one barrier ahead, reads the output counts before
+       * wave 0 wrote them and skips a barrier the API waves wait at (FF7 Rebirth hang, live dump). */
+      uint32_t bc250_mesh_wave_sync : 1;
+      /* RADV_BC250_MESH_SAFE_COMPACT (with RADV_BC250_MESH_SAFE_ADAPTIVE): a workgroup whose surviving
+       * triangles, after deleting the vertices they do not reference, keep backjump <= 31 exports only
+       * those vertices, renumbered in order, and its survivors in order (ac_nir_lower_ngg_mesh). */
+      uint32_t bc250_mesh_safe_compact : 1;
+      /* RADV_BC250_MESH_DEAD_PAYLOAD: a Mesh shader that declares a task payload but never accesses
+       * it drops the declaration, so it is not treated as a payload consumer (radv_shader.c). */
+      uint32_t bc250_mesh_dead_payload : 1;
+      /* RADV_BC250_MESH_PIECE_PRIMID: the safe direct pieces accept a fragment shader reading
+       * PrimitiveId when the Mesh shader writes it per primitive (each piece keeps the written value). */
+      uint32_t bc250_mesh_piece_primid : 1;
+      /* RADV_BC250_MESH_FAIL_CLOSED: a Mesh pipeline that ends up on no protected route (not safe direct,
+       * ordered, split or expanded) is refused instead of drawing the raw API connectivity; the
+       * refused-pipeline retry may still split it (radv_pipeline_graphics.c). */
+      uint32_t bc250_mesh_fail_closed : 1;
+      uint32_t padding : 1;
    } hw;
 
    /* Misc values included as part of the cache key */
@@ -562,6 +675,11 @@ struct radv_compiler_info {
       uint32_t nggc_max_ps_params : 4;
       uint32_t no_ngg_gs : 1;
       uint32_t load_grid_size_from_user_sgpr : 1;
+      uint32_t bc250_native_mesh : 1;
+      uint32_t bc250_native_task : 1;
+      uint32_t bc250_expand_primitives : 1;
+      uint32_t bc250_split_mesh : 1;
+      uint32_t bc250_direct_split : 1;
       uint32_t emulate_ngg_gs_query_pipeline_stat : 1;
       uint32_t primitives_generated_query : 1;
       uint32_t mesh_shader_queries : 1;
@@ -592,7 +710,30 @@ struct radv_compiler_info {
       uint32_t gfx10_descriptor_alias_robust : 1;
       uint32_t nir_debug_info : 1;
       uint32_t use_elf : 1;
-      uint32_t padding : 25;
+      uint32_t bc250_compute_cu_mode : 1;
+      uint32_t bc250_cull_compact : 1;
+      uint32_t bc250_pack_triangle_vertices : 1;
+      uint32_t bc250_balanced_slices : 1;
+      uint32_t bc250_single_piece : 1;
+      uint32_t bc250_cache_plan : 1;
+      uint32_t bc250_parallel_cull : 1;
+      uint32_t bc250_compact_vertices : 1;
+      uint32_t bc250_output_regions : 1;
+      uint32_t bc250_mesh_amd : 1; /* RADV_BC250_MESH_AMD route part: no split/expansion, native draws. */
+      uint32_t bc250_mesh_amd_size : 1; /* RADV_BC250_MESH_AMD size part: PRIM_AMP = THDS = T. */
+      uint32_t bc250_mesh_amd_reuse : 1; /* RADV_BC250_MESH_AMD reuse part: VGT_REUSE_OFF = 1. */
+      uint32_t bc250_mesh_fl0 : 1; /* RADV_BC250_MESH_FL0: launch mesh-only Mesh with GS_FAST_LAUNCH=0. */
+      uint32_t bc250_mesh_alloc_barrier : 1; /* RADV_BC250_MESH_ALLOC_BARRIER: s_barrier right before GS_ALLOC_REQ. */
+      uint32_t bc250_mesh_min2waves : 1; /* RADV_BC250_MESH_MIN2WAVES: raw Mesh workgroups span >= 2 waves. */
+      uint32_t bc250_mesh_fast : 1; /* RADV_BC250_MESH_FAST: fast launch 0 + raw for > 64 triangles. */
+      uint32_t bc250_mesh_merge : 1; /* RADV_BC250_MESH_MERGE: K small Mesh workgroups per subgroup. */
+      uint32_t bc250_mesh_merge_prep : 1; /* RADV_BC250_MESH_MERGE_INDIRECT=a: prepped indirect (option A). */
+      uint32_t bc250_mesh_autocull : 1; /* RADV_BC250_MESH_AUTOCULL: cull expanded Mesh triangles in the epilogue. */
+      uint32_t bc250_mesh_autocull_all : 1; /* RADV_BC250_MESH_AUTOCULL_ALL: autocull every candidate size. */
+      uint32_t bc250_mesh_compact_lds : 1; /* RADV_BC250_MESH_COMPACT_LDS: smaller LDS layout for expanded Mesh. */
+      uint32_t bc250_split_prep_free : 1; /* RADV_BC250_SPLIT_PREP_FREE: direct split shaders carry the piece select. */
+      uint32_t bc250_mesh_implicit_tris : 1; /* RADV_BC250_MESH_IMPLICIT_TRIS: derived expanded Mesh connectivity. */
+      uint32_t padding : 2;
 
       int32_t force_aniso;
 
@@ -603,7 +744,77 @@ struct radv_compiler_info {
       uint8_t ps_wave_size;
       uint8_t cs_wave_size;
       uint8_t rt_wave_size;
+
+      /* RADV_BC250_PERF_PIECE_PRIMS: per-piece primitive ceiling of the Mesh
+       * split (default 63; 0 without BC250 native Mesh). */
+      /* RADV_BC250_PERF_PIECE_PRIMS is clamped to 1..85: bit 7 of this byte is free. */
+      uint8_t bc250_piece_prims : 7;
+      /* RADV_BC250_MESH_SAFE_ADAPTIVE: per-workgroup shared vertices or private corners. */
+      uint8_t bc250_mesh_safe_adaptive : 1;
+      /* RADV_BC250_MESH_DIRECT_READ: RADV_BC250_DIRECT_READ_* parts (0 when off). */
+      uint8_t bc250_mesh_direct_read;
+      /* RADV_BC250_MESH_AUTOCULL_WIDE: 0 off, 1 wide size policy with the primitives in
+       * one wave, 2 also primitives spanning several waves (radv_shader_info.c). */
+      uint8_t bc250_mesh_autocull_wide : 2;
+      /* Uses an unused bit in the same byte; all switch-off key bytes stay unchanged. */
+      uint8_t bc250_mesh_safe_corners : 1;
+      uint8_t bc250_mesh_safe_bary : 1;
+      uint8_t bc250_mesh_safe_bary_tiny : 1;
+      uint8_t bc250_mesh_safe_bary_affine : 1;
+      uint8_t bc250_bary_io16 : 1;
+      uint8_t bc250_mesh_safe_bary_last : 1;
+      /* Shared byte for compact (bit 0) and safe direct (bit 1). Keeping its position
+       * and size preserves every switch-off key byte; the key stays 24 bytes. */
+      uint8_t bc250_mesh_compact : 1;
+      /* Shares the existing byte; the unset compiler key is unchanged. */
+      uint8_t bc250_mesh_safe_direct : 1;
+      uint8_t bc250_mesh_safe_parallel : 1;
+      uint8_t bc250_mesh_safe_autocull : 1;
+      uint8_t bc250_mesh_safe_ordered : 1;
+      uint8_t bc250_mesh_safe_fast : 1;
+      uint8_t bc250_mesh_safe_owned : 1;
+      uint8_t bc250_mesh_safe_pieces : 1;
    } key;
+
+   /* BC-250 Mesh route switches added after the key and hw words filled up. Included in the cache hash
+    * only when non-zero, so the hash with all of them off is unchanged (radv_device_init_cache_key). */
+   struct {
+      /* RADV_BC250_TASK_GRID_FOLD: a Task launch count without a compile-time bound folds the split
+       * pieces into their own grid dimension instead of refusing the pipeline. */
+      uint32_t task_grid_fold : 1;
+      /* RADV_BC250_MESH_SAFE_PIECES_EXT: more split shapes on the safe pieces: private corners for every
+       * split piece (Task pieces included), wave64 for subgroup-free wave32 Mesh shaders, and
+       * CullPrimitive (consumed by the split) no longer blocks the shared-vertex piece check. */
+      uint32_t safe_pieces_ext : 1;
+      /* RADV_BC250_MESH_PP_SHARE: the owned private-corner route shares vertices inside 10-triangle
+       * windows; each triangle's provoking corner keeps its own copy (it carries the per-primitive data). */
+      uint32_t pp_share : 1;
+      /* RADV_BC250_MESH_LEAN_CHECK: skip per-workgroup checks whose result is already known. */
+      uint32_t lean_check : 1;
+      /* RADV_BC250_MESH_SPLIT_STORES: a split Mesh shader may store to images; the stores run in the
+       * first piece only (exactly once per original workgroup). */
+      uint32_t split_stores : 1;
+      /* RADV_BC250_TASK_TAIL: hybrid Task chunk slots 1..1023 are recorded once per indirect
+       * call and called per record; the API DrawID is read from the per-draw slot. */
+      uint32_t task_tail : 1;
+      /* RADV_BC250_TASK_MULTIVIEW: hybrid Task with a view mask when the Task shader ignores the view. */
+      uint32_t task_multiview : 1;
+      /* RADV_BC250_MESH_MULTIVIEW_VTX: the inserted multiview layer is exported per vertex. */
+      uint32_t mesh_multiview_vtx : 1;
+      /* RADV_BC250_MESH_PP_DIRECT: per-primitive generic outputs on the fast local route without expansion. */
+      uint32_t pp_direct : 1;
+      /* RADV_BC250_MESH_PIECES_65: 65..85-primitive Mesh shaders take the safe pieces. */
+      uint32_t pieces65 : 1;
+      /* RADV_BC250_MESH_LDS_PLAN: the local slot planner finds first occurrences with an LDS table. */
+      uint32_t lds_plan : 1;
+      /* RADV_BC250_MESH_LDS_COVER: the local route's coverage words and hole ranks come from LDS. */
+      uint32_t lds_cover : 1;
+      /* RADV_BC250_MESH_MERGED_CHECK: one ranked check gives the adaptive shared and renumbered results. */
+      uint32_t merged_check : 1;
+      /* RADV_BC250_MESH_IDXPASS: eligible Mesh draws become an index pass plus an indexed draw. */
+      uint32_t idxpass : 1;
+      uint32_t padding : 18;
+   } bc250x;
 
    /* Debug/tracing */
    struct {

@@ -10,6 +10,7 @@
 
 #include "util/u_compile_stack.h"
 #include "radv_shader.h"
+#include "radv_bc250.h"
 #include "meta/radv_meta.h"
 #include "nir/nir.h"
 #include "nir/nir_builder.h"
@@ -843,6 +844,34 @@ radv_shader_spirv_to_nir(const struct radv_compiler_info *compiler_info, struct 
 
    NIR_PASS(_, nir, nir_lower_explicit_io, nir_var_mem_push_const, nir_address_format_32bit_offset);
 
+      /* RADV_BC250_MESH_DEAD_PAYLOAD: with no access at all, the payload declaration has no effect.
+       * Dropping only some unused variables would move the others, so it is all or nothing. */
+      bool declared = false;
+      nir_foreach_variable_with_modes (var, nir, nir_var_mem_task_payload)
+         declared = true;
+      if (compiler_info->hw.bc250_mesh_dead_payload && nir->info.stage == MESA_SHADER_MESH && declared) {
+         bool accessed = false;
+         nir_foreach_function_impl (impl, nir) {
+            nir_foreach_block (block, impl) {
+               nir_foreach_instr (instr, block) {
+                  if (instr->type == nir_instr_type_deref &&
+                      nir_deref_mode_may_be(nir_instr_as_deref(instr), nir_var_mem_task_payload))
+                     accessed = true;
+                  else if (instr->type == nir_instr_type_intrinsic &&
+                           (nir_instr_as_intrinsic(instr)->intrinsic == nir_intrinsic_load_task_payload ||
+                            nir_instr_as_intrinsic(instr)->intrinsic == nir_intrinsic_store_task_payload))
+                     accessed = true;
+               }
+            }
+         }
+         if (!accessed) {
+            nir_foreach_variable_with_modes_safe (var, nir, nir_var_mem_task_payload)
+               exec_node_remove(&var->node);
+            if (getenv("BC250_TRACE_COMPILE"))
+               fprintf(stderr, "BC250 MESH DEAD PAYLOAD: unused task payload declaration dropped\n");
+         }
+      }
+
    NIR_PASS(_, nir, nir_lower_explicit_io, nir_var_mem_ubo | nir_var_mem_ssbo,
             nir_address_format_vec2_index_32bit_offset);
 
@@ -889,6 +918,21 @@ radv_shader_spirv_to_nir(const struct radv_compiler_info *compiler_info, struct 
     * section next to the shader.
     */
    NIR_PASS(_, nir, nir_opt_large_constants, glsl_get_natural_size_align_bytes, 16);
+
+   /* RADV_BC250_VRS_NOOP: no VRS hardware on GFX1013, every fragment is shaded at 1x1. Before any
+    * other consumer (BC250 Mesh routes included) sees the shading rate output or input.
+    */
+   if (compiler_info->hw.bc250_vrs_noop &&
+       (nir->info.stage == MESA_SHADER_VERTEX || nir->info.stage == MESA_SHADER_TESS_EVAL ||
+        nir->info.stage == MESA_SHADER_GEOMETRY || nir->info.stage == MESA_SHADER_MESH ||
+        nir->info.stage == MESA_SHADER_FRAGMENT)) {
+      unsigned stripped = 0, zeroed = 0;
+      bool vrs_progress = false;
+      NIR_PASS(vrs_progress, nir, radv_nir_bc250_vrs_noop, &stripped, &zeroed);
+      if (vrs_progress && getenv("BC250_TRACE_COMPILE"))
+         fprintf(stderr, "BC250 VRS NOOP: stage=%s stripped_shading_rate_outputs=%u zeroed_shading_rate_reads=%u\n",
+                 _mesa_shader_stage_to_string(nir->info.stage), stripped, zeroed);
+   }
 
    /* Lower primitive shading rate to match HW requirements. */
    if ((nir->info.stage == MESA_SHADER_VERTEX || nir->info.stage == MESA_SHADER_GEOMETRY ||
@@ -1087,10 +1131,152 @@ radv_lower_ngg(const struct radv_compiler_info *compiler_info, struct radv_shade
       options.has_gen_prim_query = info->ms.has_query;
       options.has_ms_gs_invocations_query = info->ms.has_query;
       options.multiview = gfx_state->has_multiview_view_index;
+      options.multiview_layer_per_vertex = compiler_info->bc250x.mesh_multiview_vtx;
+      options.bc250_cull_compact = compiler_info->key.bc250_cull_compact;
+      options.bc250_pack_triangle_vertices = compiler_info->key.bc250_pack_triangle_vertices;
+      options.bc250_autocull = info->ms.bc250_autocull;
+      /* RADV_BC250_MESH_CULLDIST_CULL: cull the cull distances in the shader, do not export them. */
+      options.bc250_autocull_culldist = info->ms.bc250_autocull_culldist;
+      bool culldist_culled = false;
+      options.bc250_culldist_culled = &culldist_culled;
+      /* RADV_BC250_MESH_COMPACT_LDS: packed per-vertex LDS records for the expanded shaders. */
+      options.bc250_compact_lds = compiler_info->key.bc250_mesh_compact_lds && ngg_stage->bc250_expanded;
+      /* RADV_BC250_MESH_DIRECT_READ: export the expanded shaders' outputs from their staging. */
+      options.bc250_direct_read = (compiler_info->key.bc250_mesh_direct_read & RADV_BC250_DIRECT_READ_EXPORT) &&
+                                  (ngg_stage->bc250_expanded || ngg_stage->bc250_safe_direct);
+      /* RADV_BC250_MESH_IMPLICIT_TRIS: derive the expanded shaders' primitive connectivity. */
+      options.bc250_implicit_tris = compiler_info->key.bc250_mesh_implicit_tris && ngg_stage->bc250_expanded &&
+                                    ngg_stage->bc250_private_tris;
+      options.bc250_bary_ref_mask = ngg_stage->bc250_bary_ref_mask;
+      options.bc250_safe_bary = compiler_info->key.bc250_mesh_safe_bary;
+      /* RADV_BC250_MESH_COMPACT: shared-vertex renumbering of the expanded shaders. */
+      options.bc250_compact = ngg_stage->bc250_compact;
+      options.bc250_safe_autocull = info->ms.bc250_safe_autocull;
+      if (compiler_info->key.bc250_mesh_safe_bary && ngg_stage->bc250_bary_ref_mask)
+         options.bc250_safe_autocull &= radv_bc250_autocull_size_policy(compiler_info,
+            nir->info.mesh.max_primitives_out, options.wave_size, options.max_workgroup_size);
+      options.bc250_safe_fast = ngg_stage->bc250_safe_fast;
+      /* Private corners remove the check/planner, at the cost of more exports.
+       * Keep the small min(V,3P) bound and the wider shared-vertex classes unchanged. */
+      options.bc250_safe_corners = compiler_info->key.bc250_mesh_safe_corners &&
+         ((options.bc250_safe_fast && nir->info.mesh.max_vertices_out > 32 &&
+           nir->info.mesh.max_vertices_out <= 64) || ngg_stage->bc250_safe_owned) &&
+         nir->info.mesh.max_primitives_out <= options.wave_size &&
+         3 * nir->info.mesh.max_primitives_out <= options.max_workgroup_size;
+      /* The owned representation already keeps primitive values on distinct
+       * provoking vertices. Copying its three corners preserves that ownership;
+       * it needs neither coverage checks nor the general W31 planner. */
+      options.bc250_safe_adaptive = options.bc250_safe_corners && compiler_info->key.bc250_mesh_safe_adaptive &&
+         !ngg_stage->bc250_safe_owned;
+      options.bc250_safe_compact = options.bc250_safe_adaptive && compiler_info->hw.bc250_mesh_safe_compact;
+      options.bc250_lean_check = compiler_info->bc250x.lean_check;
+      options.bc250_lds_plan = compiler_info->bc250x.lds_plan;
+      options.bc250_lds_cover = compiler_info->bc250x.lds_cover;
+      options.bc250_merged_check = compiler_info->bc250x.merged_check;
+      options.bc250_pp_share = options.bc250_safe_corners && ngg_stage->bc250_safe_owned &&
+         compiler_info->bc250x.pp_share &&
+         (ngg_stage->bc250_compact_owned == 0x1 || ngg_stage->bc250_compact_owned == 0x4);
+      options.bc250_safe_fast |= options.bc250_safe_corners;
+      options.bc250_safe_local = options.bc250_safe_fast &&
+         ((compiler_info->key.bc250_mesh_direct_read & RADV_BC250_MESH_SAFE_LOCAL_KEY) || options.bc250_safe_corners);
+      options.bc250_safe_check = options.bc250_safe_local &&
+         ((compiler_info->key.bc250_mesh_direct_read & RADV_BC250_MESH_SAFE_CHECK_KEY) || options.bc250_safe_corners);
+      /* RADV_BC250_MESH_PP_DIRECT: the one-wave local planner only (it keeps each provoking corner fresh);
+       * the private-corner, adaptive, compact and owned-sharing representations do not apply. */
+      options.bc250_pp_direct = ngg_stage->bc250_pp_direct;
+      if (options.bc250_pp_direct) {
+         assert(options.bc250_safe_local && options.bc250_safe_check);
+         options.bc250_safe_corners = false;
+         options.bc250_safe_adaptive = false;
+         options.bc250_safe_compact = false;
+         options.bc250_pp_share = false;
+      }
+      if (options.bc250_safe_local)
+         options.bc250_compact_lds = true;
+      options.bc250_safe_stats = ngg_stage->bc250_safe_stats;
+      options.bc250_safe_parallel = options.bc250_safe_fast || ngg_stage->bc250_safe_owned || (compiler_info->key.bc250_mesh_safe_parallel &&
+                                   nir->info.mesh.max_primitives_out <= 85);
+      if (ngg_stage->bc250_ordered_export) {
+         options.has_gen_prim_query = false;
+         options.has_ms_gs_invocations_query = false;
+      }
+      options.bc250_safe_direct = ngg_stage->bc250_safe_direct;
+      const unsigned mesh_corners = mesa_vertices_per_prim(nir->info.mesh.primitive_type);
+      options.bc250_safe_direct_bound = nir->info.mesh.max_vertices_out <= 32 && !options.bc250_pp_direct ?
+         MIN2(nir->info.mesh.max_vertices_out, mesh_corners * nir->info.mesh.max_primitives_out) :
+         mesh_corners * nir->info.mesh.max_primitives_out;
+      options.bc250_safe_direct_index_staging = ngg_stage->bc250_safe_owned ? NULL : ngg_stage->bc250_index_staging;
+      options.bc250_compact_owned_corners = ngg_stage->bc250_compact_owned;
+      memcpy(options.bc250_compact_index_staging, ngg_stage->bc250_index_staging,
+             sizeof(options.bc250_compact_index_staging));
+      ngg_stage->bc250_compact_applied = false;
+      options.bc250_compact_applied = &ngg_stage->bc250_compact_applied;
+      /* RADV_BC250_MESH_REFERENCE: the reference driver's count broadcast and fully-culled dummy. */
+      options.bc250_reference = compiler_info->hw.bc250_mesh_reference && info->ms.bc250_amd_mesh;
+      if (ngg_stage->bc250_safe_bary_tiny || ngg_stage->bc250_safe_bary_affine) {
+         /* Expansion emits exactly N*pc slots and consecutive private corners.
+          * No CullPrimitive is admitted here. LAST also reuses the split
+          * culler for the larger private classes. Use the split exporter's
+          * direct reads and implicit connectivity, avoiding
+          * the redundant corner-map publication and reload. */
+         /* These small line/point shapes also bypass the triangle culler. */
+         options.bc250_safe_autocull = false;
+         assert(!options.bc250_autocull || compiler_info->key.bc250_mesh_safe_bary_last);
+         if (compiler_info->key.bc250_mesh_safe_bary_last && ngg_stage->bc250_safe_bary_tiny)
+            options.bc250_compact_lds = compiler_info->key.bc250_mesh_compact_lds && ngg_stage->bc250_expanded;
+         if (ngg_stage->bc250_safe_bary_affine)
+            options.bc250_compact_lds = false; /* Preserve the original raw layout. */
+         options.bc250_implicit_tris = !(compiler_info->key.bc250_mesh_safe_bary_last &&
+            ngg_stage->bc250_safe_bary_affine && nir->info.mesh.primitive_type == MESA_PRIM_TRIANGLES &&
+            nir->info.mesh.max_primitives_out >= 24);
+         options.bc250_safe_direct = false;
+         options.bc250_safe_fast = false;
+         options.bc250_safe_local = false;
+         options.bc250_safe_check = false;
+         options.bc250_safe_corners = false;
+         options.bc250_safe_adaptive = false;
+         options.bc250_safe_compact = false;
+         options.bc250_pp_share = false;
+         options.bc250_safe_parallel = false;
+         if (getenv("BC250_TRACE_COMPILE"))
+            fprintf(stderr, "BC250 MESH SAFE BARY TINY: proven private connectivity, no remap\n");
+      }
+      options.bc250_wave_sync = compiler_info->hw.bc250_mesh_wave_sync;
 
       bool scratch_ring = false;
       NIR_PASS(_, nir, ac_nir_lower_ngg_mesh, &options, &scratch_ring);
+      /* BC250_MESH_NIR_DUMP=<dir>: the lowered NGG Mesh NIR for the offline
+       * equivalence oracle (tests/bc250-mesh/direct-read). */
+      if (getenv("BC250_MESH_NIR_DUMP")) {
+         if (getenv("BC250_ORDERED_NIR_DUMP")) {
+            unsigned ai = 0;
+            u_foreach_bit64 (dw, ngg_stage->args.ac.inline_push_const_mask)
+               fprintf(stderr, "BC250 ORDERED ABI: arg=%u pc=%u\n",
+                       ngg_stage->args.ac.inline_push_consts[ai++].arg_index, (unsigned)dw * 4);
+         }
+         /* The parameter exports of the per-primitive (flat) payload, for the oracle. */
+         uint64_t pp_params = 0;
+         u_foreach_bit64 (loc, ngg_stage->bc250_pp_locations) {
+            const uint8_t param = info->outinfo.vs_output_param_offset[loc];
+            if (param <= AC_EXP_PARAM_OFFSET_31)
+               pp_params |= BITFIELD64_BIT(param);
+         }
+         const uint32_t compact_flags = (ngg_stage->bc250_compact_applied || ngg_stage->bc250_safe_direct) |
+                                        (uint32_t)ngg_stage->bc250_compact_owned << 8 |
+                                        (uint32_t)(ngg_stage->bc250_safe_direct ? 31 : AC_NIR_BC250_COMPACT_W) << 16;
+         /* Clip/cull distance exports: the exported clip and cull components and whether the
+          * cull distances are culled in the shader instead (RADV_BC250_MESH_CULLDIST_CULL). */
+         const uint32_t clipcull = util_bitcount(info->outinfo.clip_dist_mask) |
+                                   (culldist_culled ? 0 : util_bitcount(info->outinfo.cull_dist_mask)) << 4 |
+                                   (uint32_t)culldist_culled << 8;
+         radv_bc250_dump_mesh_nir(getenv("BC250_MESH_NIR_DUMP"), nir, info->wave_size, options.max_workgroup_size,
+                                  ngg_stage->shader_blake3, ngg_stage->bc250_index_staging, compact_flags, pp_params,
+                                  clipcull);
+      }
+      ngg_stage->info.ms.bc250_culldist_culled = culldist_culled;
       ngg_stage->info.ms.needs_ms_scratch_ring = scratch_ring;
+      /* RADV_BC250_MESH_COMPACT: what the lowering applied (BC250_MESH_TIMER route "+cmp"). */
+      ngg_stage->info.ms.bc250_compact = ngg_stage->bc250_compact_applied;
       ngg_stage->info.ngg_wave_id_en = scratch_ring;
    } else {
       UNREACHABLE("invalid SW stage passed to radv_lower_ngg");
@@ -1298,6 +1484,16 @@ insert_block(struct radv_device *device, union radv_shader_arena_block *hole, ui
  * this should allocate blocks for shaders fast and with no fragmentation, while still allowing
  * free'd memory to be re-used.
  */
+
+static void
+bc250_trace_allocation(struct radv_device *device, union radv_shader_arena_block *alloc, void *owner)
+{
+   alloc->bc250_trace_allocation = radv_bc250_chain_event(device, "SHADER_ALLOC",
+      "alloc=%p owner=%p arena=%p bo=%p va=%llx bytes=%u",
+      (void *)alloc, owner, (void *)alloc->arena, (void *)alloc->arena->bo,
+      (unsigned long long)(radv_buffer_get_va(alloc->arena->bo) + alloc->offset), alloc->size);
+}
+
 union radv_shader_arena_block *
 radv_alloc_shader_memory(struct radv_device *device, uint32_t size, bool replayable, void *ptr)
 {
@@ -1328,6 +1524,7 @@ radv_alloc_shader_memory(struct radv_device *device, uint32_t size, bool replaya
             remove_hole(free_list, hole);
             hole->freelist.next = ptr;
             mtx_unlock(&device->shader_arena_mutex);
+            bc250_trace_allocation(device, hole, ptr);
             return hole;
          } else {
             union radv_shader_arena_block *alloc = alloc_block_obj(device);
@@ -1348,6 +1545,7 @@ radv_alloc_shader_memory(struct radv_device *device, uint32_t size, bool replaya
             add_hole(free_list, hole);
 
             mtx_unlock(&device->shader_arena_mutex);
+            bc250_trace_allocation(device, alloc, ptr);
             return alloc;
          }
       }
@@ -1366,6 +1564,7 @@ radv_alloc_shader_memory(struct radv_device *device, uint32_t size, bool replaya
    ++device->shader_arena_shift;
    list_addtail(&arena->list, &device->shader_arenas);
 
+   bc250_trace_allocation(device, alloc, ptr);
    mtx_unlock(&device->shader_arena_mutex);
    return alloc;
 
@@ -1398,6 +1597,10 @@ radv_free_shader_memory(struct radv_device *device, union radv_shader_arena_bloc
 
    mtx_lock(&device->shader_arena_mutex);
 
+   radv_bc250_chain_event(device, "SHADER_FREE_CPU",
+      "allocation=%llu alloc=%p va=%llx bytes=%u gpu_completion=UNOBSERVED",
+      (unsigned long long)alloc->bc250_trace_allocation, (void *)alloc,
+      (unsigned long long)(radv_buffer_get_va(alloc->arena->bo) + alloc->offset), alloc->size);
    union radv_shader_arena_block *hole_prev = get_hole(alloc->arena, alloc->list.prev);
    union radv_shader_arena_block *hole_next = get_hole(alloc->arena, alloc->list.next);
 
@@ -1524,6 +1727,8 @@ radv_replay_shader_arena_block(struct radv_device *device, const struct radv_ser
 
 out:
    mtx_unlock(&device->shader_arena_mutex);
+   if (ret_block)
+      bc250_trace_allocation(device, ret_block, ptr);
    return ret_block;
 }
 
@@ -1701,8 +1906,10 @@ radv_get_num_pos_exports(const struct radv_shader_info *info, unsigned *clip_dis
 
    /* Clip and cull distances are packed by ac_nir_export_position. */
    unsigned num_clip_dist_comps = util_bitcount(info->outinfo.clip_dist_mask);
-   /* Cull distances are not exported if the shader culls against them. */
-   unsigned num_cull_dist_comps = info->has_ngg_culling ? 0 : util_bitcount(info->outinfo.cull_dist_mask);
+   /* Cull distances are not exported if the shader culls against them (VS NGG culling, and
+    * BC250 Mesh autocull with RADV_BC250_MESH_CULLDIST_CULL). */
+   unsigned num_cull_dist_comps = info->has_ngg_culling || info->ms.bc250_culldist_culled ?
+                                  0 : util_bitcount(info->outinfo.cull_dist_mask);
    unsigned clip_cull_mask = BITFIELD_MASK(num_clip_dist_comps + num_cull_dist_comps);
 
    if (clip_cull_mask & 0x0f)
@@ -1713,6 +1920,70 @@ radv_get_num_pos_exports(const struct radv_shader_info *info, unsigned *clip_dis
    *clip_dist_mask = BITFIELD_MASK(num_clip_dist_comps);
    *cull_dist_mask = BITFIELD_RANGE(num_clip_dist_comps, num_cull_dist_comps);
    return num;
+}
+
+/* BC250 Mesh position exports, after the NGG lowering (radv_graphics_shaders_compile). Returns
+ * why the pipeline is refused, or NULL:
+ *  - the lowered shader must export exactly the position vectors that SPI_SHADER_POS_FORMAT
+ *    declares (radv_get_num_pos_exports): no position target beyond them, and every export that
+ *    carries DONE (every vertex export and the GFX10 fully-culled workaround's dummy vertex)
+ *    ends on the last declared one;
+ *  - clip/cull distance vectors (POS1/POS2, PA_CL_VS_OUT_CNTL CCDIST0/1) are refused until the
+ *    hardware gates of that form pass (MESH_PERF/ff7hang): constant non-negative distances are
+ *    removed (RADV_BC250_MESH_CLIPCULL_CONST) and cull distances are culled in the shader
+ *    (RADV_BC250_MESH_CULLDIST_CULL); what is left is a clip distance (the hardware must clip
+ *    against it) or a cull distance on a shape autocull does not cover.
+ *    RADV_BC250_MESH_ALLOW_POS1=1 admits them (hardware gates). */
+const char *
+radv_bc250_mesh_pos_export_refusal(const struct radv_compiler_info *compiler_info, const nir_shader *nir,
+                                   const struct radv_shader_info *info)
+{
+   unsigned clip_dist_mask, cull_dist_mask;
+   const unsigned num = radv_get_num_pos_exports(info, &clip_dist_mask, &cull_dist_mask);
+   unsigned max_target = 0, done_exports = 0;
+   bool done_mismatch = false;
+   nir_foreach_function_impl (impl, nir) {
+      nir_foreach_block (block, impl) {
+         nir_foreach_instr (instr, block) {
+            if (instr->type != nir_instr_type_intrinsic)
+               continue;
+            nir_intrinsic_instr *in = nir_instr_as_intrinsic(instr);
+            if (in->intrinsic != nir_intrinsic_export_amd)
+               continue;
+            const unsigned target = nir_intrinsic_target(in);
+            if (target < V_008DFC_SQ_EXP_POS || target >= V_008DFC_SQ_EXP_POS + 4)
+               continue;
+            max_target = MAX2(max_target, target - V_008DFC_SQ_EXP_POS + 1);
+            if (nir_intrinsic_flags(in) & AC_EXP_FLAG_DONE) {
+               done_exports++;
+               done_mismatch |= target != V_008DFC_SQ_EXP_POS + num - 1;
+            }
+         }
+      }
+   }
+   /* Traced only for shaders with clip/cull distances or more than one position vector (the trace of
+    * every other shader stays as it was). */
+   if (getenv("BC250_TRACE_COMPILE") &&
+       (num > 1 || info->outinfo.clip_dist_mask || info->outinfo.cull_dist_mask || max_target > num ||
+        done_mismatch))
+      fprintf(stderr, "BC250 MESH POS EXPORTS: format=%u clip=%u cull=%u culldist_culled=%u exported=%u "
+              "done_exports=%u%s\n", num, util_bitcount(clip_dist_mask), util_bitcount(cull_dist_mask),
+              info->ms.bc250_culldist_culled, max_target, done_exports, done_mismatch ? " done_mismatch=1" : "");
+   /* RADV_BC250_MESH_REFERENCE: raw-route shaders take the reference driver's form, which has
+    * no such checks: clip/cull distances exported as POS1 and a fully-culled dummy that exports
+    * POS0 only (DONE on POS0 while POS_FORMAT declares two vectors). */
+   const bool reference = compiler_info->hw.bc250_mesh_reference && info->ms.bc250_amd_mesh;
+   if (max_target > num || (done_mismatch && !reference))
+      return "position exports do not match SPI_SHADER_POS_FORMAT";
+   if (reference)
+      return NULL;
+   if (clip_dist_mask && !compiler_info->hw.bc250_mesh_allow_pos1)
+      return "clip distances need a clip/cull distance position export (POS1), not hardware-proven on "
+             "BC250 Mesh (RADV_BC250_MESH_ALLOW_POS1=1 admits it)";
+   if (cull_dist_mask && !compiler_info->hw.bc250_mesh_allow_pos1)
+      return "cull distances not culled in the shader (autocull not applicable) need a clip/cull distance "
+             "position export (POS1), not hardware-proven on BC250 Mesh (RADV_BC250_MESH_ALLOW_POS1=1 admits it)";
+   return NULL;
 }
 
 static void
@@ -1955,6 +2226,10 @@ radv_precompute_registers_hw_ngg(struct radv_device *device, struct radv_shader 
 
    regs->ngg.ge_ngg_subgrp_cntl =
       S_028B4C_PRIM_AMP_FACTOR(info->ngg_info.prim_amp_factor) | S_028B4C_THDS_PER_SUBGRP(0); /* for fast launch */
+   /* RADV_BC250_MESH_AMD: THDS_PER_SUBGRP = PRIM_AMP_FACTOR = T, as LLPC programs Mesh. */
+   if (info->stage == MESA_SHADER_MESH && info->ms.bc250_amd_size)
+      regs->ngg.ge_ngg_subgrp_cntl = S_028B4C_PRIM_AMP_FACTOR(info->ngg_info.prim_amp_factor) |
+                                     S_028B4C_THDS_PER_SUBGRP(info->ngg_info.prim_amp_factor);
 
    regs->vgt_gs_instance_cnt = S_028B90_CNT(gs_num_invocations) | S_028B90_ENABLE(gs_num_invocations > 1) |
                                S_028B90_EN_MAX_VERT_OUT_PER_GS_INSTANCE(info->ngg_info.max_vert_out_per_gs_instance);
@@ -1989,6 +2264,17 @@ radv_precompute_registers_hw_ms(struct radv_device *device, struct radv_shader *
    radv_precompute_registers_hw_ngg(device, shader);
 
    regs->vgt_gs_max_vert_out = pdev->info.gfx_level >= GFX11 ? info->ngg_info.max_out_verts : info->workgroup_size;
+   /* RADV_BC250_MESH_AMD aligns the workgroup to the wave size; keep the base driver's
+    * VGT_GS_MAX_VERT_OUT = max(API threads, V, P) (= T), unaligned. */
+   if (info->ms.bc250_amd_size && pdev->info.gfx_level < GFX11)
+      regs->vgt_gs_max_vert_out = info->ngg_info.prim_amp_factor;
+
+   if ((info->ms.bc250_amd_mesh || info->ms.bc250_amd_size || info->ms.bc250_amd_reuse || info->ms.bc250_fl0) &&
+       (getenv("BC250_TRACE_COMPILE") || getenv("BC250_TRACE_REGS")))
+      fprintf(stderr, "BC250 MESH AMD: fl0=%u route=%u size=%u reuse=%u T=%u WG=%u WAVE=%u V=%u GE_NGG_SUBGRP_CNTL=%08x VGT_GS_MAX_VERT_OUT=%u merge_k=%u merge_s=%u scratch_ring=%u%s\n",
+              info->ms.bc250_fl0, info->ms.bc250_amd_mesh, info->ms.bc250_amd_size, info->ms.bc250_amd_reuse, info->ngg_info.prim_amp_factor, info->workgroup_size, info->wave_size, info->ngg_info.max_out_verts,
+              regs->ngg.ge_ngg_subgrp_cntl, regs->vgt_gs_max_vert_out, info->ms.bc250_merge_k, info->ms.bc250_merge_s, info->ms.needs_ms_scratch_ring,
+              info->ms.bc250_merge_dims ? " merge_dims=1" : "");
 
    regs->ngg.ms.spi_shader_gs_meshlet_dim = S_00B2B0_MESHLET_NUM_THREAD_X(info->cs.block_size[0] - 1) |
                                             S_00B2B0_MESHLET_NUM_THREAD_Y(info->cs.block_size[1] - 1) |
@@ -2007,14 +2293,20 @@ radv_precompute_registers_hw_ms(struct radv_device *device, struct radv_shader *
 }
 
 static uint32_t
-radv_ps_input_type_bits(const struct radv_shader_info *info, unsigned index, uint32_t default_bits)
+radv_ps_input_type_bits(enum amd_gfx_level gfx_level, const struct radv_shader_info *info, unsigned index,
+                        uint32_t default_bits)
 {
    if (info->ps.explicit_shaded_mask & BITFIELD_BIT(index)) {
       /* Force parameter cache to be read in passthrough mode. */
       return S_028644_OFFSET(1 << 5) | S_028644_FLAT_SHADE(1);
    } else if (info->ps.explicit_strict_shaded_mask & BITFIELD_BIT(index)) {
-      /* Rotate parameter cache contents to strict vertex order. */
-      return S_028644_ROTATE_PC_PTR(1) | S_028644_OFFSET(1 << 5) | S_028644_FLAT_SHADE(1);
+      /* Rotate parameter cache contents to strict vertex order. GFX10.3+
+       * only: on BC250 (GFX10.1) the bit is reserved, strict inputs are read
+       * in the raw order and reordered in the fragment shader
+       * (radv_nir_bc250_lower_bary_rotation).
+       */
+      return (gfx_level >= GFX10_3 ? S_028644_ROTATE_PC_PTR(1) : 0) | S_028644_OFFSET(1 << 5) |
+             S_028644_FLAT_SHADE(1);
    } else if (info->ps.float16_hi_shaded_mask & BITFIELD_BIT(index)) {
       /* These must be set even if only the high 16 bits are used. */
       return S_028644_ATTR1_VALID(1) | S_028644_FP16_INTERP_MODE(1) | S_028644_ATTR0_VALID(1);
@@ -2058,7 +2350,7 @@ radv_precompute_ps_inputs(const struct radv_physical_device *pdev, struct radv_s
       radv_ps_add_input(in, VARYING_SLOT_CLIP_DIST1, 0);
 
    u_foreach_bit (i, info->ps.input_mask)
-      radv_ps_add_input(in, VARYING_SLOT_VAR0 + i, radv_ps_input_type_bits(info, in->num, flat_bits));
+      radv_ps_add_input(in, VARYING_SLOT_VAR0 + i, radv_ps_input_type_bits(pdev->info.gfx_level, info, in->num, flat_bits));
 
    /* Potentially per-primitive PS inputs, decided at emit time. */
    if (info->ps.viewport_index_input) {
@@ -2074,7 +2366,7 @@ radv_precompute_ps_inputs(const struct radv_physical_device *pdev, struct radv_s
    /* Per-primitive PS inputs: the HW needs these to be last. */
    in->num_per_primitive = util_bitcount(info->ps.input_per_primitive_mask);
    u_foreach_bit (i, info->ps.input_per_primitive_mask)
-      radv_ps_add_input(in, VARYING_SLOT_VAR0 + i, radv_ps_input_type_bits(info, in->num, per_prim_bits));
+      radv_ps_add_input(in, VARYING_SLOT_VAR0 + i, radv_ps_input_type_bits(pdev->info.gfx_level, info, in->num, per_prim_bits));
 }
 
 static void
@@ -3114,6 +3406,67 @@ radv_shader_dma_submit(struct radv_device *device, struct radv_shader_dma_submis
    return true;
 }
 
+/* Diagnostics of the code just written to dest_ptr: the chain-trace identity of the shader and the opt-in
+ * CPU captures (BC250_CAPTURE_POLICY_SHADERS, BC250_CAPTURE_MESH_CODE). No GPU waits or reads. */
+static void
+radv_bc250_shader_code_audit(struct radv_device *device, struct radv_shader *shader, const void *dest_ptr)
+{
+   if (radv_bc250_chain_enabled(device)) {
+      blake3_hash hash;
+      _mesa_blake3_compute(dest_ptr, shader->code_size, hash);
+      _mesa_blake3_format(shader->bc250_trace_code, hash);
+      const char *target = getenv("BC250_CHAIN_MESH_BLAKE3");
+      shader->bc250_trace_target = shader->info.stage == MESA_SHADER_MESH && target &&
+                                  !strcmp(target, shader->bc250_trace_code);
+      shader->bc250_trace_upload = radv_bc250_chain_event(device, "SHADER_UPLOAD_CPU",
+         "shader=%p allocation=%llu va=%llx bytes=%u exec=%u stage=%u code=%s target=%u wgp=%u gpu_completion=UNOBSERVED",
+         (void *)shader, (unsigned long long)shader->alloc->bc250_trace_allocation,
+         (unsigned long long)radv_shader_get_va(shader), shader->code_size, shader->exec_size,
+         shader->info.stage, shader->bc250_trace_code, shader->bc250_trace_target, shader->config.wgp_mode);
+   }
+
+   /* Separate, default-off CPU upload audit for mode/cache experiments. */
+   if (debug_get_bool_option("BC250_CAPTURE_POLICY_SHADERS", false)) {
+      flockfile(stderr);
+      fprintf(stderr, "BC250POLICY stage=%u va=%llx bytes=%u exec=%u wave=%u wg=%u lds=%u scratch=%u sgprs=%u vgprs=%u wgp=%u rsrc1=%08x rsrc2=%08x\n",
+              shader->info.stage, (unsigned long long)radv_shader_get_va(shader),
+              shader->code_size, shader->exec_size, shader->info.wave_size,
+              shader->info.workgroup_size, shader->config.lds_size,
+              shader->config.scratch_bytes_per_wave, shader->config.num_sgprs,
+              shader->config.num_vgprs, shader->config.wgp_mode,
+              shader->config.rsrc1, shader->config.rsrc2);
+      fprintf(stderr, "BC250POLICYCODE ");
+      for (unsigned i = 0; i < shader->code_size; ++i)
+         fprintf(stderr, "%02x", ((const unsigned char *)dest_ptr)[i]);
+      fprintf(stderr, "\n");
+      funlockfile(stderr);
+   }
+
+   /* Opt-in CPU-side upload capture. No GPU waits or extra GPU reads. */
+   if (shader->info.stage == MESA_SHADER_MESH &&
+       debug_get_bool_option("BC250_CAPTURE_MESH_CODE", false)) {
+      static uint64_t captured_bytes;
+      const uint64_t limit = 256ull * 1024 * 1024;
+      const uint64_t cost = (uint64_t)shader->code_size * 2 + 512;
+      flockfile(stderr);
+      if (cost <= limit - captured_bytes) {
+         captured_bytes += cost;
+         fprintf(stderr, "BC250SHADER va=%llx bytes=%u exec=%u wave=%u wg=%u lds=%u scratch=%u rsrc1=%08x rsrc2=%08x\n",
+                 (unsigned long long)radv_shader_get_va(shader), shader->code_size,
+                 shader->exec_size, shader->info.wave_size, shader->info.workgroup_size,
+                 shader->config.lds_size, shader->config.scratch_bytes_per_wave,
+                 shader->config.rsrc1, shader->config.rsrc2);
+         fprintf(stderr, "BC250CODE ");
+         for (unsigned i = 0; i < shader->code_size; ++i)
+            fprintf(stderr, "%02x", ((const unsigned char *)dest_ptr)[i]);
+         fprintf(stderr, "\n");
+      } else {
+         fprintf(stderr, "BC250SHADER LIMIT bytes=%llu\n", (unsigned long long)captured_bytes);
+      }
+      funlockfile(stderr);
+   }
+}
+
 bool
 radv_shader_upload(struct radv_device *device, struct radv_shader *shader)
 {
@@ -3127,6 +3480,7 @@ radv_shader_upload(struct radv_device *device, struct radv_shader *shader)
          radv_shader_dma_push_submission(device, submission, 0);
          return false;
       }
+      radv_bc250_shader_code_audit(device, shader, submission->ptr);
 
       if (!radv_shader_dma_submit(device, submission, &shader->upload_seq))
          return false;
@@ -3135,7 +3489,13 @@ radv_shader_upload(struct radv_device *device, struct radv_shader *shader)
 
       if (!radv_shader_get_code(device, shader, dest_ptr))
          return false;
+      radv_bc250_shader_code_audit(device, shader, dest_ptr);
    }
+   radv_bc250_chain_event(device, "SHADER_UPLOAD_READY_FOR_SUBMISSION",
+      "shader=%p allocation=%llu upload=%llu dma=%u upload_seq=%llu gpu_completion=UNOBSERVED",
+      (void *)shader, (unsigned long long)shader->alloc->bc250_trace_allocation,
+      (unsigned long long)shader->bc250_trace_upload, device->shader_use_invisible_vram,
+      (unsigned long long)shader->upload_seq);
    return true;
 }
 
@@ -3644,6 +4004,9 @@ radv_aco_fill_compiler_options(struct aco_compiler_options *aco_info, const stru
    aco_info->wgp_mode = should_use_wgp;
    aco_info->compiler_info = compiler_info->ac;
    aco_info->is_opengl = false;
+   aco_info->allow_gfx10_mesh_shader = compiler_info->key.bc250_native_mesh;
+   aco_info->allow_gfx10_task_shader = compiler_info->key.bc250_native_task;
+   aco_info->bc250_bary_io16 = compiler_info->key.bc250_bary_io16;
    aco_info->optimisations_disabled = stage_key->optimisations_disabled;
    aco_info->gfx_level = compiler_info->ac->gfx_level;
    aco_info->family = compiler_info->debug.family;
@@ -3674,6 +4037,16 @@ radv_shader_nir_to_asm(const struct radv_compiler_info *compiler_info, struct ra
    const struct radv_shader_args *args = &pl_stage->args;
 
    bool wgp_mode = radv_should_use_wgp_mode(compiler_info->ac->gfx_level, stage, info);
+   /* Opt-in GFX1013 compute-pipeline experiment. Includes meta compute,
+    * split-argument helpers and hybrid TASK producers lowered to COMPUTE.
+    * Check the pipeline stage too: RT lowering can produce compute NIR.
+    * Native TASK, graphics stages and the separate trap handler are unchanged.
+    * The device compiler key includes this policy before pipeline lookup.
+    */
+   if (compiler_info->key.bc250_compute_cu_mode &&
+       pl_stage->stage == MESA_SHADER_COMPUTE && stage == MESA_SHADER_COMPUTE)
+      wgp_mode = false;
+
    bool dump_shader = false;
    for (unsigned i = 0; i < shader_count; ++i)
       dump_shader |= radv_can_dump_shader(compiler_info, shaders[i]);

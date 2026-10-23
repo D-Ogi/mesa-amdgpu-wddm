@@ -80,9 +80,14 @@ radv_copy_vrs_htile(struct radv_cmd_buffer *cmd_buffer, struct radv_image_view *
                     struct radv_image *dst_image, uint32_t base_array_layer, uint64_t htile_va, bool read_htile_value)
 {
    struct radv_device *device = radv_cmd_buffer_device(cmd_buffer);
+   const struct radv_physical_device *pdev = radv_device_physical(device);
    VkPipelineLayout layout;
    VkPipeline pipeline;
    VkResult result;
+
+   /* VRS rates live in HTILE on GFX10.3 only (GFX10.1 with RADV_BC250_VRS_NOOP ignores the attachment). */
+   if (pdev->info.gfx_level != GFX10_3)
+      return;
 
    result = get_pipeline(device, dst_image, &pipeline, &layout);
    if (result != VK_SUCCESS) {

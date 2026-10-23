@@ -86,3 +86,82 @@ radv_nir_lower_primitive_shading_rate(nir_shader *nir, enum amd_gfx_level gfx_le
 
    return nir_progress(progress, impl, nir_metadata_control_flow);
 }
+
+/* GFX1013 no-op VRS (on by default, RADV_BC250_VRS_NOOP=0 hides it): GFX10.1 has no VRS
+ * hardware, yet VK_KHR_fragment_shading_rate is exposed and every fragment is shaded at 1x1.
+ *
+ * Pre-rasterization stages: the PrimitiveShadingRateKHR output becomes a shader
+ * temporary. Its stores are dead and removed (a Mesh shader that reads its own
+ * output back still sees the value it wrote); the output never reaches the
+ * position or primitive export. Fragment shaders: ShadingRateKHR reads 0 (1x1).
+ *
+ * This runs on deref-level NIR right after spirv_to_nir (radv_shader_spirv_to_nir),
+ * so every consumer of the NIR sees a shader without the output: VS/TES/GS, every
+ * BC250 Mesh route (expanded, split pieces, direct read, autocull, compact LDS,
+ * implicit triangles, merge, AMD route, hybrid Task replay), graphics pipeline
+ * libraries and shader objects. A shader that neither writes nor reads the shading
+ * rate is not changed.
+ */
+bool
+radv_nir_bc250_vrs_noop(nir_shader *nir, unsigned *stripped_outputs, unsigned *zeroed_reads)
+{
+   nir_function_impl *impl = nir_shader_get_entrypoint(nir);
+   bool progress = false;
+
+   *stripped_outputs = 0;
+   *zeroed_reads = 0;
+
+   if (nir->info.stage == MESA_SHADER_FRAGMENT) {
+      nir_builder b = nir_builder_create(impl);
+
+      nir_foreach_block (block, impl) {
+         nir_foreach_instr_safe (instr, block) {
+            if (instr->type != nir_instr_type_intrinsic)
+               continue;
+
+            nir_intrinsic_instr *intr = nir_instr_as_intrinsic(instr);
+            if (intr->intrinsic != nir_intrinsic_load_frag_shading_rate)
+               continue;
+
+            b.cursor = nir_before_instr(instr);
+            nir_def_replace(&intr->def, nir_imm_zero(&b, 1, intr->def.bit_size));
+            (*zeroed_reads)++;
+            progress = true;
+         }
+      }
+
+      nir_foreach_variable_with_modes_safe (var, nir, nir_var_system_value) {
+         if (var->data.location == SYSTEM_VALUE_FRAG_SHADING_RATE) {
+            exec_node_remove(&var->node);
+            progress = true;
+         }
+      }
+      BITSET_CLEAR(nir->info.system_values_read, SYSTEM_VALUE_FRAG_SHADING_RATE);
+
+      return nir_progress(progress, impl, nir_metadata_control_flow);
+   }
+
+   nir_foreach_variable_with_modes (var, nir, nir_var_shader_out) {
+      if (var->data.location != VARYING_SLOT_PRIMITIVE_SHADING_RATE)
+         continue;
+
+      var->data.mode = nir_var_shader_temp;
+      var->data.per_primitive = false;
+      (*stripped_outputs)++;
+   }
+
+   if (*stripped_outputs) {
+      nir_fixup_deref_modes(nir);
+      /* Like the other temporaries at this point: a function temporary, SSA values once lowered. */
+      nir_lower_global_vars_to_local(nir);
+      nir_remove_dead_variables(nir, nir_var_function_temp | nir_var_shader_temp, NULL);
+      nir_opt_dce(nir);
+      progress = true;
+   }
+
+   nir->info.outputs_written &= ~VARYING_BIT_PRIMITIVE_SHADING_RATE;
+   nir->info.outputs_read &= ~VARYING_BIT_PRIMITIVE_SHADING_RATE;
+   nir->info.per_primitive_outputs &= ~VARYING_BIT_PRIMITIVE_SHADING_RATE;
+
+   return nir_progress(progress, impl, nir_metadata_none);
+}

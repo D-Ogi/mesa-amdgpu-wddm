@@ -69,6 +69,7 @@ radv_aco_convert_shader_info(struct aco_shader_info *aco_info, const struct radv
    aco_info->schedule_ngg_pos_exports =
       compiler_info->ac->gfx_level < GFX11 && radv->has_ngg_culling && radv->has_ngg_early_prim_export;
    aco_info->lds_size = radv_calculate_lds_size(radv, compiler_info->ac->gfx_level);
+   aco_info->gs_alloc_req_barrier = radv->stage == MESA_SHADER_MESH && radv->ms.bc250_alloc_barrier;
 }
 
 static inline void

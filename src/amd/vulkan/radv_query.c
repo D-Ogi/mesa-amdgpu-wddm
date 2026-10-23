@@ -401,7 +401,9 @@ radv_get_pipelinestat_query_size(struct radv_device *device)
     * invocations, it's easier to use the same size as GFX11.
     */
    const struct radv_physical_device *pdev = radv_device_physical(device);
-   unsigned num_results = pdev->info.gfx_level >= GFX10_3 ? 14 : 11;
+   /* BC250 needs the extended block too: its MESH/TASK invocation counters are
+    * snapshotted into high slots of the result block from GDS. */
+   unsigned num_results = (pdev->info.gfx_level >= GFX10_3 || pdev->bc250_native_mesh) ? 14 : 11;
    return num_results * 8;
 }
 
@@ -638,6 +640,14 @@ radv_begin_pipeline_stat_query(struct radv_cmd_buffer *cmd_buffer, struct radv_q
          gfx10_copy_shader_query_gfx(cmd_buffer, true, RADV_SHADER_QUERY_MS_INVOCATION_OFFSET, va + mesh_invoc_offset);
       }
 
+      if (pdev->bc250_native_mesh &&
+          pool->vk.pipeline_statistics & VK_QUERY_PIPELINE_STATISTIC_TASK_SHADER_INVOCATIONS_BIT_EXT) {
+         uint32_t task_invoc_offset =
+            radv_get_pipelinestat_query_offset(VK_QUERY_PIPELINE_STATISTIC_TASK_SHADER_INVOCATIONS_BIT_EXT);
+
+         gfx10_copy_shader_query_gfx(cmd_buffer, true, RADV_SHADER_QUERY_TS_INVOCATION_OFFSET, va + task_invoc_offset);
+      }
+
       /* Record that the command buffer needs GDS. */
       cmd_buffer->queue_state.gds_needed = true;
 
@@ -713,6 +723,14 @@ radv_end_pipeline_stat_query(struct radv_cmd_buffer *cmd_buffer, struct radv_que
             radv_get_pipelinestat_query_offset(VK_QUERY_PIPELINE_STATISTIC_MESH_SHADER_INVOCATIONS_BIT_EXT);
 
          gfx10_copy_shader_query_gfx(cmd_buffer, true, RADV_SHADER_QUERY_MS_INVOCATION_OFFSET, va + mesh_invoc_offset);
+      }
+
+      if (pdev->bc250_native_mesh &&
+          pool->vk.pipeline_statistics & VK_QUERY_PIPELINE_STATISTIC_TASK_SHADER_INVOCATIONS_BIT_EXT) {
+         uint32_t task_invoc_offset =
+            radv_get_pipelinestat_query_offset(VK_QUERY_PIPELINE_STATISTIC_TASK_SHADER_INVOCATIONS_BIT_EXT);
+
+         gfx10_copy_shader_query_gfx(cmd_buffer, true, RADV_SHADER_QUERY_TS_INVOCATION_OFFSET, va + task_invoc_offset);
       }
 
       cmd_buffer->state.active_emulated_pipeline_queries--;
@@ -1796,10 +1814,18 @@ radv_create_query_pool(struct radv_device *device, const VkQueryPoolCreateInfo *
       (pdev->use_ngg && pCreateInfo->queryType == VK_QUERY_TYPE_PRIMITIVES_GENERATED_EXT) ||
       (pdev->emulate_mesh_shader_queries &&
        (pCreateInfo->queryType == VK_QUERY_TYPE_MESH_PRIMITIVES_GENERATED_EXT ||
-        pool->vk.pipeline_statistics & VK_QUERY_PIPELINE_STATISTIC_MESH_SHADER_INVOCATIONS_BIT_EXT));
+        pool->vk.pipeline_statistics & VK_QUERY_PIPELINE_STATISTIC_MESH_SHADER_INVOCATIONS_BIT_EXT)) ||
+      /* BC250 has no ACE queue: its MESH/TASK invocation counters live in GDS
+       * and are snapshotted on the graphics queue like the emulated GS path. */
+      (pdev->bc250_native_mesh &&
+       (pool->vk.pipeline_statistics &
+        (VK_QUERY_PIPELINE_STATISTIC_MESH_SHADER_INVOCATIONS_BIT_EXT |
+         VK_QUERY_PIPELINE_STATISTIC_TASK_SHADER_INVOCATIONS_BIT_EXT)));
 
-   /* The number of task shader invocations needs to be queried on ACE. */
-   pool->uses_ace = (pool->vk.pipeline_statistics & VK_QUERY_PIPELINE_STATISTIC_TASK_SHADER_INVOCATIONS_BIT_EXT);
+   /* The number of task shader invocations needs to be queried on ACE; BC250
+    * emulates it through GDS snapshots instead. */
+   pool->uses_ace = (pool->vk.pipeline_statistics & VK_QUERY_PIPELINE_STATISTIC_TASK_SHADER_INVOCATIONS_BIT_EXT) &&
+                    !pdev->bc250_native_mesh;
 
    pool->uses_shader_query_buf =
       pdev->info.gfx_level >= GFX11 && (pool->vk.query_type == VK_QUERY_TYPE_PRIMITIVES_GENERATED_EXT ||
@@ -1848,7 +1874,13 @@ radv_create_query_pool(struct radv_device *device, const VkQueryPoolCreateInfo *
       break;
    }
    case VK_QUERY_TYPE_MESH_PRIMITIVES_GENERATED_EXT:
-      if (pdev->info.gfx_level >= GFX11) {
+      if (pdev->bc250_native_mesh) {
+         /* BC250 has no ACE queue and does not set emulate_mesh_shader_queries,
+          * but its native mesh shaders increment the same GDS prim-gen counter
+          * (word 44) whenever a query is active, so the GFX10 snapshot path in
+          * radv_begin/end_ms_prim_query applies unchanged. */
+         pool->stride = 16;
+      } else if (pdev->info.gfx_level >= GFX11) {
          /* GFX11 natively supports mesh generated primitives with pipeline statistics. */
          pool->stride = radv_get_pipelinestat_query_size(device) * 2;
       } else {

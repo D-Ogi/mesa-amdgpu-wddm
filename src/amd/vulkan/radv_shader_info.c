@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: MIT
  */
 #include "radv_shader_info.h"
+#include "radv_bc250.h"
 #include "nir/nir.h"
 #include "nir/nir_xfb_info.h"
 #include "nir/radv_nir.h"
@@ -15,6 +16,9 @@
 #include "radv_shader.h"
 
 #include "ac_nir.h"
+
+#include <stdio.h>
+#include <stdlib.h>
 
 static void
 mark_sampler_desc(const nir_variable *var, struct radv_shader_info *info)
@@ -270,6 +274,9 @@ gather_intrinsic_info(const nir_shader *nir, const nir_intrinsic_instr *instr, s
    case nir_intrinsic_load_rasterization_primitive_amd:
       info->ps.load_rasterization_prim = true;
       break;
+   case nir_intrinsic_load_provoking_last:
+      info->ps.load_provoking_last = true;
+      break;
    case nir_intrinsic_load_local_invocation_id:
    case nir_intrinsic_load_workgroup_id: {
       unsigned mask = nir_def_components_read(&instr->def);
@@ -424,7 +431,7 @@ assign_outinfo_params(struct radv_vs_output_info *outinfo, uint64_t mask, unsign
 
 static void
 radv_get_output_masks(const struct nir_shader *nir, const struct radv_graphics_state_key *gfx_state,
-                      uint64_t *per_vtx_mask, uint64_t *per_prim_mask)
+                      bool mesh_layer_per_vertex, bool mesh_pp_direct, uint64_t *per_vtx_mask, uint64_t *per_prim_mask)
 {
    /* These are not compiled into neither output param nor position exports. */
    const uint64_t special_mask =
@@ -433,15 +440,29 @@ radv_get_output_masks(const struct nir_shader *nir, const struct radv_graphics_s
    *per_prim_mask = nir->info.outputs_written & nir->info.per_primitive_outputs & ~special_mask;
    *per_vtx_mask = nir->info.outputs_written & ~nir->info.per_primitive_outputs & ~special_mask;
 
-   /* Mesh multiview is only lowered in ac_nir_lower_ngg, so we have to fake it here. */
-   if (nir->info.stage == MESA_SHADER_MESH && gfx_state->has_multiview_view_index)
-      *per_prim_mask |= VARYING_BIT_LAYER;
+   /* RADV_BC250_MESH_PP_DIRECT: per-primitive generic outputs are flat attributes of the provoking
+    * corner's slot, exported with the per-vertex parameters. */
+   if (nir->info.stage == MESA_SHADER_MESH && mesh_pp_direct) {
+      const uint64_t generic = *per_prim_mask & (UINT64_C(0xffffffff) << VARYING_SLOT_VAR0);
+      *per_prim_mask &= ~generic;
+      *per_vtx_mask |= generic;
+   }
+
+   /* Mesh multiview is only lowered in ac_nir_lower_ngg, so we have to fake it here.
+    * RADV_BC250_MESH_MULTIVIEW_VTX: GFX10.1 has no layer field in the primitive export; the inserted
+    * multiview layer (the view index, equal for every vertex of a draw) is a per-vertex output. */
+   if (nir->info.stage == MESA_SHADER_MESH && gfx_state->has_multiview_view_index) {
+      if (mesh_layer_per_vertex && !(nir->info.outputs_written & VARYING_BIT_LAYER))
+         *per_vtx_mask |= VARYING_BIT_LAYER;
+      else
+         *per_prim_mask |= VARYING_BIT_LAYER;
+   }
 }
 
 static void
 radv_set_vs_output_param(enum amd_gfx_level gfx_level, const struct nir_shader *nir,
                          const struct radv_graphics_state_key *gfx_state, struct radv_shader_info *info,
-                         bool export_prim_id, bool export_clip_cull_dists)
+                         bool export_prim_id, bool export_clip_cull_dists, bool mesh_layer_per_vertex)
 {
    struct radv_vs_output_info *outinfo = &info->outinfo;
    uint64_t per_vtx_mask, per_prim_mask;
@@ -451,7 +472,8 @@ radv_set_vs_output_param(enum amd_gfx_level gfx_level, const struct nir_shader *
    if (gfx_state->rs.rasterizer_discard)
       return;
 
-   radv_get_output_masks(nir, gfx_state, &per_vtx_mask, &per_prim_mask);
+   radv_get_output_masks(nir, gfx_state, mesh_layer_per_vertex, info->ms.bc250_pp_direct != 0, &per_vtx_mask,
+                         &per_prim_mask);
 
    /* Implicit primitive ID for VS and TES is added by ac_nir_lower_legacy_vs / ac_nir_lower_ngg,
     * it can be configured as either a per-vertex or per-primitive output depending on the GPU.
@@ -792,8 +814,20 @@ gather_shader_info_mesh(const struct radv_compiler_info *compiler_info, const ni
    ngg_info->prim_amp_factor = nir->info.mesh.max_primitives_out;
    ngg_info->vgt_esgs_ring_itemsize = 1;
 
+   if (info->ms.bc250_amd_size) {
+      /* RADV_BC250_MESH_AMD size part: like LLPC, one NGG subgroup per workgroup with
+       * PRIM_AMP_FACTOR = THDS_PER_SUBGRP = T = max(API threads, V, P) <= 256
+       * (lgc CollectResourceUsage / RegisterMetadataBuilder). */
+      const unsigned api_workgroup_size =
+         ac_compute_cs_workgroup_size(nir->info.workgroup_size, false, UINT32_MAX);
+      ngg_info->prim_amp_factor =
+         MIN2(MAX3(api_workgroup_size, nir->info.mesh.max_vertices_out, nir->info.mesh.max_primitives_out), 256);
+   }
+
    info->ms.has_query = compiler_info->key.mesh_shader_queries;
    info->ms.has_task = stage_key->has_task_shader;
+   info->ms.bc250_api_vertices = MIN2(nir->info.mesh.max_vertices_out, 65535);
+   info->ms.bc250_api_primitives = MIN2(nir->info.mesh.max_primitives_out, 65535);
 }
 
 static void
@@ -805,12 +839,126 @@ calc_mesh_workgroup_size(const struct radv_compiler_info *compiler_info, const n
    if (compiler_info->ac->gfx_level >= GFX11) {
       /* Use multi-row export. It is also necessary to use the API workgroup size for non-emulated queries. */
       info->workgroup_size = api_workgroup_size;
+   } else if (info->ms.bc250_safe_direct) {
+      const unsigned v = nir->info.mesh.max_vertices_out;
+      const unsigned p = nir->info.mesh.max_primitives_out;
+      const unsigned corners = mesa_vertices_per_prim(nir->info.mesh.primitive_type);
+      /* RADV_BC250_MESH_PP_DIRECT: every provoking corner owns a fresh slot, so up to 3P slots. */
+      const unsigned bound = v <= 32 && !info->ms.bc250_pp_direct ? MIN2(v, corners * p) : corners * p;
+      info->workgroup_size = align(MAX3(api_workgroup_size, bound, p), info->wave_size);
+      assert(bound <= 256 && info->workgroup_size <= 256);
+      /* Fast launch 0 must provision every export lane, including duplicates. */
+      info->ngg_info.prim_amp_factor = info->workgroup_size;
+      info->ngg_info.max_out_verts = info->workgroup_size;
+   } else if (info->ms.bc250_amd_size) {
+      /* RADV_BC250_MESH_AMD size part: the workgroup is T lanes rounded up to the wave
+       * size (LLPC MeshTaskShader.cpp). ac_nir_lower_ngg_mesh gets the same
+       * aligned size and makes the lanes beyond the API workgroup run the
+       * matching barriers (handle_smaller_ms_api_workgroup). */
+      info->workgroup_size = align(info->ngg_info.prim_amp_factor, info->wave_size);
    } else {
       struct gfx10_ngg_info *ngg_info = &info->ngg_info;
       unsigned min_ngg_workgroup_size = ac_compute_ngg_workgroup_size(
          ngg_info->hw_max_esverts, ngg_info->max_gsprims, ngg_info->max_out_verts, ngg_info->prim_amp_factor);
 
       info->workgroup_size = MAX2(min_ngg_workgroup_size, api_workgroup_size);
+
+      /* RADV_BC250_MESH_MIN2WAVES: launch a one-wave raw workgroup as two
+       * waves. The lanes beyond the API workgroup run the barriers only
+       * (handle_smaller_ms_api_workgroup); with fast launch 0 the rule below
+       * then provisions PRIM_AMP_FACTOR for both waves. */
+      if (info->ms.bc250_min2waves && info->workgroup_size <= info->wave_size)
+         info->workgroup_size = 2 * info->wave_size;
+
+      /* RADV_BC250_MESH_REFERENCE: raw-route shaders keep the reference driver's (upstream)
+       * sizing: PRIM_AMP_FACTOR = declared primitives, output bound = declared vertices. */
+      const bool reference = compiler_info->hw.bc250_mesh_reference && info->ms.bc250_amd_mesh &&
+                             info->ms.bc250_merge_k <= 1;
+      if (info->ms.bc250_fl0 && !reference) {
+         /* RADV_BC250_MESH_FL0 (port of Tree C's rule, f45f746): with
+          * GS_FAST_LAUNCH=0 the geometry engine launches max(ES vertices, GS
+          * primitives x PRIM_AMP_FACTOR) threads per subgroup, while the
+          * lowering assumes workgroup_size lanes. The base driver's expansion gives e.g.
+          * 64 primitives and 192 lanes, so AMP = P would launch 1 wave of 3
+          * (the HL1 hang). Provision AMP (and the output bound) for the whole
+          * workgroup; THDS_PER_SUBGRP stays 0 and VGT_GS_MAX_VERT_OUT stays
+          * the workgroup size, as on Tree C. */
+         const unsigned launched = ngg_info->max_gsprims * ngg_info->prim_amp_factor;
+         if (DIV_ROUND_UP(MAX2(launched, ngg_info->hw_max_esverts), info->wave_size) <
+             DIV_ROUND_UP(info->workgroup_size, info->wave_size)) {
+            ngg_info->prim_amp_factor = info->workgroup_size;
+            ngg_info->max_out_verts = MAX2(ngg_info->max_out_verts, info->workgroup_size);
+         }
+         /* RADV_BC250_MESH_MERGE: the wave rule above lets the last wave launch
+          * fewer lanes than the workgroup (e.g. 96 primitives x AMP 96 for 99
+          * lanes: the 3 sink-vertex lanes would never run). Provision every
+          * lane: PRIM_AMP_FACTOR >= workgroup size. */
+         if (info->ms.bc250_merge_k > 1) {
+            ngg_info->prim_amp_factor = MAX2(ngg_info->prim_amp_factor, info->workgroup_size);
+            ngg_info->max_out_verts = MAX2(ngg_info->max_out_verts, info->workgroup_size);
+         }
+      }
+   }
+
+   /* RADV_BC250_MESH_AUTOCULL: every packed vertex (3 per surviving primitive)
+    * needs a lane of the workgroup. */
+   if (info->ms.bc250_autocull &&
+       3 * nir->info.mesh.max_primitives_out > align(info->workgroup_size, info->wave_size))
+      info->ms.bc250_autocull = false;
+
+   /* RADV_BC250_MESH_CULLDIST_CULL: autocull because of cull distances (they are then culled in the
+    * shader and not exported). Instead of the size policy below, the class that ran on hardware:
+    * all primitives in one wave (the one-wave compaction of AC1/AC3b and Control; FF7's split
+    * pieces), unless RADV_BC250_MESH_AUTOCULL_ALL=1 or RADV_BC250_MESH_AUTOCULL_WIDE=2 already
+    * admit the multi-wave form. A refused shader keeps its cull distances as exports
+    * (radv_bc250_mesh_pos_export_refusal decides). */
+   if (info->ms.bc250_autocull && info->ms.bc250_autocull_culldist) {
+      const unsigned prims = nir->info.mesh.max_primitives_out;
+      const bool multiwave_ok = compiler_info->key.bc250_mesh_autocull_all || compiler_info->key.bc250_mesh_autocull_wide >= 2;
+      if (prims > info->wave_size && !multiwave_ok) {
+         info->ms.bc250_autocull = false;
+         info->ms.bc250_autocull_culldist = false;
+      }
+      if (getenv("BC250_TRACE_COMPILE"))
+         fprintf(stderr, "BC250 MESH AUTOCULL policy: culldist %s P=%u wave=%u lanes=%u\n",
+                 info->ms.bc250_autocull ? "applied" : "refused (primitives in several waves)", prims,
+                 info->wave_size, align(info->workgroup_size, info->wave_size));
+      return;
+   }
+   if (!info->ms.bc250_autocull)
+      info->ms.bc250_autocull_culldist = false;
+
+   /* RADV_BC250_MESH_AUTOCULL size policy (measured on BC-250, MESH_PERF/autocull
+    * GATES.md): Mesh time follows the launched lanes, not the exported vertices, so
+    * culling only pays where the lanes are few per wave and the culled share of the
+    * work is large. Measured win: 32 triangles in wave32 (96 lanes, k_half32 -16%);
+    * no gain or a loss for 16 triangles (48 lanes, -3%) and for 64 triangles in wave64
+    * (192 lanes, +4% culled, +10% with nothing culled). So by default only wave32
+    * shapes with 24..32 triangles (<= 96 lanes) get it; RADV_BC250_MESH_AUTOCULL_ALL=1
+    * keeps every candidate (experiments). A refused shader is compiled exactly as
+    * with the switch off.
+    *
+    * RADV_BC250_MESH_AUTOCULL_WIDE (key bc250_mesh_autocull_wide) adds the wider shapes
+    * with >= 24 triangles: level 1 those whose primitives fit in one wave (P <= wave size,
+    * e.g. Control's 64 triangles in wave64 with 192 lanes, split pieces of 32..64
+    * triangles), level 2 also primitives spanning several waves (up to 85 triangles /
+    * 255 lanes). The compiled shader is the same as with RADV_BC250_MESH_AUTOCULL_ALL=1;
+    * the launch shape never changes. */
+   if (info->ms.bc250_autocull && !compiler_info->key.bc250_mesh_autocull_all) {
+      const unsigned prims = nir->info.mesh.max_primitives_out;
+      const unsigned lanes = align(info->workgroup_size, info->wave_size);
+      const unsigned wide = compiler_info->key.bc250_mesh_autocull_wide;
+      const bool wide_class = wide && prims >= 24 && (prims <= info->wave_size || wide >= 2);
+      if (wide_class && (info->wave_size != 32 || prims > 32 || lanes > 96)) {
+         if (getenv("BC250_TRACE_COMPILE"))
+            fprintf(stderr, "BC250 MESH AUTOCULL policy: wide P=%u wave=%u lanes=%u prim_waves=%u\n", prims,
+                    info->wave_size, lanes, DIV_ROUND_UP(prims, info->wave_size));
+      } else if (!radv_bc250_autocull_size_policy(compiler_info, prims, info->wave_size, lanes)) {
+         info->ms.bc250_autocull = false;
+         if (getenv("BC250_TRACE_COMPILE"))
+            fprintf(stderr, "BC250 MESH AUTOCULL policy: refused P=%u wave=%u lanes=%u\n", prims, info->wave_size,
+                    lanes);
+      }
    }
 }
 
@@ -1065,6 +1213,8 @@ radv_nir_shader_info_pass(const struct radv_compiler_info *compiler_info, const 
 {
    struct nir_function *func = (struct nir_function *)exec_list_get_head_const(&nir->functions);
 
+   info->bc250_compat_constants = nir->info.bc250_compat_constants;
+
    if (layout->use_dynamic_descriptors) {
       info->loads_dynamic_offsets = true;
 
@@ -1088,7 +1238,8 @@ radv_nir_shader_info_pass(const struct radv_compiler_info *compiler_info, const 
       struct radv_vs_output_info *outinfo = &info->outinfo;
       uint64_t per_vtx_mask, per_prim_mask;
 
-      radv_get_output_masks(nir, gfx_state, &per_vtx_mask, &per_prim_mask);
+      radv_get_output_masks(nir, gfx_state, compiler_info->bc250x.mesh_multiview_vtx, info->ms.bc250_pp_direct != 0,
+                            &per_vtx_mask, &per_prim_mask);
 
       /* Mesh multiview is only lowered in ac_nir_lower_ngg, so we have to fake it here. */
       if (nir->info.stage == MESA_SHADER_MESH && gfx_state->has_multiview_view_index)
@@ -1448,7 +1599,7 @@ radv_link_shaders_info(const struct radv_compiler_info *compiler_info, struct ra
       const bool ps_clip_dists_in = !fs_stage || !!fs_stage->info.ps.input_clips_culls_mask;
 
       radv_set_vs_output_param(compiler_info->ac->gfx_level, prerast_stage->nir, gfx_state, &prerast_stage->info,
-                               ps_prim_id_in, ps_clip_dists_in);
+                               ps_prim_id_in, ps_clip_dists_in, compiler_info->bc250x.mesh_multiview_vtx);
    }
 
    if (prerast_stage && !ms_stage) {
@@ -1534,6 +1685,7 @@ radv_nir_shader_info_merge(const struct radv_shader_stage *src, struct radv_shad
           (src->stage == MESA_SHADER_VERTEX && dst->stage == MESA_SHADER_GEOMETRY) ||
           (src->stage == MESA_SHADER_TESS_EVAL && dst->stage == MESA_SHADER_GEOMETRY));
 
+   dst_info->bc250_compat_constants |= src_info->bc250_compat_constants;
    dst_info->loads_push_constants |= src_info->loads_push_constants;
    dst_info->loads_dynamic_offsets |= src_info->loads_dynamic_offsets;
    dst_info->loads_dynamic_descriptors_offset_addr |= src_info->loads_dynamic_descriptors_offset_addr;

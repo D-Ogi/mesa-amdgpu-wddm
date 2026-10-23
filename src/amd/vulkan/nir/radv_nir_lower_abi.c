@@ -138,6 +138,10 @@ lower_abi_instr(nir_builder *b, nir_intrinsic_instr *intrin, void *state)
    case nir_intrinsic_load_pipeline_stat_query_enabled_amd:
       replacement = shader_query_bool_setting(b, radv_shader_query_pipeline_stat, s);
       break;
+   case nir_intrinsic_load_ngg_safe_stats_buf_va_amd:
+      replacement = nir_pack_64_2x32_split(b, ac_nir_load_arg(b, &s->args->ac, s->args->ngg_query_buf_va),
+                                           nir_imm_int(b, s->address32_hi));
+      break;
    case nir_intrinsic_load_prim_gen_query_enabled_amd:
       replacement = shader_query_bool_setting(b, radv_shader_query_prim_gen, s);
       break;
@@ -145,6 +149,19 @@ lower_abi_instr(nir_builder *b, nir_intrinsic_instr *intrin, void *state)
       replacement = shader_query_bool_setting(b, radv_shader_query_prim_xfb, s);
       break;
    case nir_intrinsic_load_cull_any_enabled_amd: {
+      if (b->shader->info.stage == MESA_SHADER_MESH) {
+         /* RADV_BC250_MESH_AUTOCULL: the epilogue's runtime branch. Cull only when
+          * front or back face culling is enabled (rasterizer discard sets both):
+          * frustum and small-primitive culling alone do not pay for the culling
+          * epilogue, so without face culling the shader takes the switch-off
+          * epilogue. One scalar test of the settings SGPR. */
+         nir_def *settings = ac_nir_load_arg(b, &s->args->ac, s->args->nggc_settings);
+         /* b96cfa1b names these bits by the determinant sign (radv_nggc_settings); DirectMesh was
+          * written against radv_nggc_front_face | radv_nggc_back_face, the same two bits. */
+         replacement = nir_test_mask(b, settings, radv_nggc_cull_face_negative_determinant |
+                                                     radv_nggc_cull_face_positive_determinant);
+         break;
+      }
       nir_def *gs_tg_info = ac_nir_load_arg(b, &s->args->ac, s->args->ac.gs_tg_info);
 
       /* Cull only if the workgroup contains at least 16 triangles.
@@ -305,6 +322,15 @@ lower_abi_instr(nir_builder *b, nir_intrinsic_instr *intrin, void *state)
    case nir_intrinsic_load_layer_id:
       replacement = ac_nir_unpack_arg(b, &s->args->ac, s->args->ac.ancillary, 16, s->gfx_level >= GFX12 ? 14 : 13);
       break;
+   case nir_intrinsic_load_provoking_last:
+      /* BC250 barycentric vertex order (radv_nir_bc250_lower_bary_rotation). */
+      assert(stage == MESA_SHADER_FRAGMENT);
+      if (s->gfx_state->bc250_ps_dynamic_provoking) {
+         replacement = GET_SGPR_FIELD_NIR(s->args->ps_state, PS_STATE_PROVOKING_LAST);
+      } else {
+         replacement = nir_imm_int(b, s->gfx_state->rs.provoking_vtx_last);
+      }
+      break;
    case nir_intrinsic_load_provoking_vtx_in_prim_amd: {
       if (s->gfx_state->dynamic_provoking_vtx_mode) {
          replacement = GET_SGPR_FIELD_NIR(s->args->ngg_state, NGG_STATE_PROVOKING_VTX);
@@ -452,6 +478,13 @@ lower_abi_instr(nir_builder *b, nir_intrinsic_instr *intrin, void *state)
       /* Extract it manually because GET_SGPR_FIELD_NIR doesn't sign-extend. */
       replacement =
          nir_ishr_imm(b, ac_nir_load_arg(b, &s->args->ac, s->args->ps_state), PS_STATE_FRONT_FACE_SELECT__SHIFT);
+      break;
+   case nir_intrinsic_load_user_data_amd:
+      /* RADV_BC250_MESH_MERGE option A: component 0 is the dims user SGPR
+       * (AC_UD_MS_BC250_DIMS_VA); radv emits user_data_amd nowhere else. */
+      assert(stage == MESA_SHADER_MESH && s->args->bc250_merge_dims.used);
+      replacement = nir_pad_vector(b, ac_nir_load_arg(b, &s->args->ac, s->args->bc250_merge_dims),
+                                   intrin->def.num_components);
       break;
    default:
       progress = false;

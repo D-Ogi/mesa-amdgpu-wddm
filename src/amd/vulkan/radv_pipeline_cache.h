@@ -39,8 +39,11 @@ struct radv_shader *radv_shader_create(struct radv_device *device, struct vk_pip
                                        const struct radv_shader_binary *binary, bool skip_cache,
                                        struct radv_shader_debug_info *dbg);
 
+struct radv_pipeline_layout;
 bool radv_graphics_pipeline_cache_search(struct radv_device *device, struct vk_pipeline_cache *cache,
-                                         struct radv_graphics_pipeline *pipeline, bool *found_in_application_cache);
+                                         struct radv_graphics_pipeline *pipeline,
+                                         const struct radv_pipeline_layout *layout,
+                                         bool *found_in_application_cache);
 
 bool radv_compute_pipeline_cache_search(struct radv_device *device, struct vk_pipeline_cache *cache,
                                         struct radv_compute_pipeline *pipeline, bool *found_in_application_cache);
@@ -83,5 +86,12 @@ struct radv_shader *radv_shader_deserialize(struct radv_device *device, const vo
 VkResult radv_pipeline_cache_get_binaries(struct radv_device *device, const VkAllocationCallbacks *pAllocator,
                                           const unsigned char *blake3, struct util_dynarray *pipeline_binaries,
                                           uint32_t *num_binaries, bool *found_in_internal_cache);
+
+/* Returns independently owned original NIR; never stores BC250-lowered NIR. */
+nir_shader *radv_shader_spirv_to_nir_cached(const struct radv_compiler_info *compiler_info,
+                                           struct vk_pipeline_cache *cache,
+                                           struct radv_shader_stage *stage,
+                                           const struct radv_spirv_to_nir_options *options,
+                                           bool is_internal);
 
 #endif /* RADV_PIPELINE_CACHE_H */

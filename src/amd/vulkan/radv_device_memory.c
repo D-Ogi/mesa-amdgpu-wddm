@@ -278,12 +278,42 @@ fail:
    return result;
 }
 
+/* RADV_BC250_TRACE_MEM=1: log application memory allocations of 64 MiB or more and every failed
+ * allocation to stderr (diagnostics for games that report running out of video memory). */
+static bool
+radv_bc250_trace_mem(void)
+{
+   static int enabled = -1;
+   if (enabled < 0)
+      enabled = debug_get_bool_option("RADV_BC250_TRACE_MEM", false);
+   return enabled;
+}
+
 VKAPI_ATTR VkResult VKAPI_CALL
 radv_AllocateMemory(VkDevice _device, const VkMemoryAllocateInfo *pAllocateInfo,
                     const VkAllocationCallbacks *pAllocator, VkDeviceMemory *pMem)
 {
    VK_FROM_HANDLE(radv_device, device, _device);
-   return radv_alloc_memory(device, pAllocateInfo, pAllocator, pMem, false);
+   VkResult result = radv_alloc_memory(device, pAllocateInfo, pAllocator, pMem, false);
+
+   if (unlikely(radv_bc250_trace_mem()) &&
+       (result != VK_SUCCESS || pAllocateInfo->allocationSize >= (64ull << 20))) {
+      const struct radv_physical_device *pdev = radv_device_physical(device);
+      const uint32_t type = pAllocateInfo->memoryTypeIndex;
+      const bool valid_type = type < pdev->memory_properties.memoryTypeCount;
+      const VkMemoryDedicatedAllocateInfo *dedicated =
+         vk_find_struct_const(pAllocateInfo->pNext, MEMORY_DEDICATED_ALLOCATE_INFO);
+      fprintf(stderr,
+              "BC250 MEM alloc size=%.1fMiB type=%u heap=%d domain=0x%x flags=0x%x typeflags=0x%x dedicated=%s "
+              "overalloc_disallowed=%d result=%d\n",
+              pAllocateInfo->allocationSize / 1048576.0, type,
+              valid_type ? (int)pdev->memory_properties.memoryTypes[type].heapIndex : -1,
+              valid_type ? pdev->memory_domains[type] : 0, valid_type ? pdev->memory_flags[type] : 0,
+              valid_type ? pdev->memory_properties.memoryTypes[type].propertyFlags : 0,
+              dedicated ? (dedicated->image ? "image" : (dedicated->buffer ? "buffer" : "none")) : "none",
+              device->overallocation_disallowed, result);
+   }
+   return result;
 }
 
 VKAPI_ATTR void VKAPI_CALL

@@ -317,6 +317,9 @@ declare_ms_input_sgprs(struct radv_shader_args_state *state, const struct radv_s
    if (info->ms.has_task) {
       RADV_ADD_UD_ARG(state, 1, AC_ARG_VALUE, ac.task_ring_entry, AC_UD_TASK_RING_ENTRY);
    }
+   if (info->ms.bc250_merge_dims) {
+      RADV_ADD_UD_ARG(state, 1, AC_ARG_VALUE, bc250_merge_dims, AC_UD_MS_BC250_DIMS_VA);
+   }
 }
 
 static void
@@ -364,7 +367,8 @@ declare_ngg_sgprs(struct radv_shader_args_state *state, const struct radv_shader
    if (ngg_needs_state_sgpr)
       RADV_ADD_UD_ARG(state, 1, AC_ARG_VALUE, ngg_state, AC_UD_NGG_STATE);
 
-   if (info->has_ngg_culling) {
+   /* RADV_BC250_MESH_AUTOCULL Mesh shaders read the same culling settings as VS NGG culling. */
+   if (info->has_ngg_culling || (info->stage == MESA_SHADER_MESH && (info->ms.bc250_autocull || info->ms.bc250_safe_autocull))) {
       RADV_ADD_UD_ARG(state, 1, AC_ARG_VALUE, nggc_settings, AC_UD_NGGC_SETTINGS);
       RADV_ADD_UD_ARRAY_ARG(state, 1, AC_ARG_VALUE, nggc_viewport_scale, 0, AC_UD_NGGC_VIEWPORT);
       RADV_ADD_UD_ARRAY_ARG(state, 1, AC_ARG_VALUE, nggc_viewport_scale, 1, AC_UD_NGGC_VIEWPORT);
@@ -418,6 +422,10 @@ radv_ps_needs_state_sgpr(const struct radv_shader_info *info, const struct radv_
 
    /* For computing barycentrics when the primitive topology is unknown at compile time (GPL). */
    if (info->ps.load_rasterization_prim)
+      return true;
+
+   /* BC250 barycentric vertex order with a dynamic provoking vertex mode. */
+   if (info->ps.load_provoking_last && gfx_state->bc250_ps_dynamic_provoking)
       return true;
 
    if (info->ps.selects_frag_coord_xy_dynamically || info->ps.selects_quad_pos_dynamically ||
@@ -553,6 +561,8 @@ declare_unmerged_vs_tes_gs_args(struct radv_shader_args_state *state, const enum
       ac_add_preserved(&state->args->ac, &state->args->ngg_state);
       if (gfx_level >= GFX11)
          ac_add_preserved(&state->args->ac, &state->args->ngg_query_buf_va);
+      else if (info->stage == MESA_SHADER_MESH && info->ms.bc250_safe_stats)
+         ac_add_preserved(&state->args->ac, &state->args->ngg_query_buf_va);
    }
    ac_add_preserved(&state->args->ac, &state->args->vgt_esgs_ring_itemsize);
    ac_add_preserved(&state->args->ac, &state->args->ngg_lds_layout);
@@ -638,7 +648,8 @@ declare_shader_args(const struct radv_compiler_info *compiler_info, struct radv_
          RADV_ADD_UD_ARG(state, 1, AC_ARG_VALUE, cs_state, AC_UD_CS_STATE);
       } else {
          if (info->cs.uses_grid_size) {
-            if (compiler_info->key.load_grid_size_from_user_sgpr)
+            if (compiler_info->key.load_grid_size_from_user_sgpr ||
+                (stage == MESA_SHADER_TASK && compiler_info->key.bc250_native_task))
                RADV_ADD_UD_ARG(state, 3, AC_ARG_VALUE, ac.num_work_groups, AC_UD_CS_GRID_SIZE);
             else
                RADV_ADD_UD_ARG(state, 2, AC_ARG_CONST_ADDR, ac.num_work_groups, AC_UD_CS_GRID_SIZE);
@@ -849,6 +860,8 @@ declare_shader_args(const struct radv_compiler_info *compiler_info, struct radv_
                declare_ngg_sgprs(state, info, ngg_needs_state_sgpr);
 
                if (gfx_level >= GFX11 && has_shader_query)
+                  RADV_ADD_UD_ARG(state, 1, AC_ARG_VALUE, ngg_query_buf_va, AC_UD_NGG_QUERY_BUF_VA);
+               else if (gfx_level < GFX11 && info->stage == MESA_SHADER_MESH && info->ms.bc250_safe_stats)
                   RADV_ADD_UD_ARG(state, 1, AC_ARG_VALUE, ngg_query_buf_va, AC_UD_NGG_QUERY_BUF_VA);
             }
 

@@ -9,6 +9,7 @@
  */
 
 #include "radv_pipeline.h"
+#include "radv_bc250.h"
 #include "meta/radv_meta.h"
 #include "nir/nir.h"
 #include "nir/radv_nir.h"
@@ -376,6 +377,26 @@ radv_postprocess_nir(const struct radv_compiler_info *compiler_info, const struc
     * NGG culling.
     */
    NIR_PASS(_, stage->nir, radv_nir_lower_descriptors, compiler_info, stage);
+   if (getenv("BC250_ORDERED_NIR_DUMP") && stage->stage == MESA_SHADER_COMPUTE && stage->nir->info.name) {
+      unsigned index_base, index_stride;
+      if (sscanf(stage->nir->info.name, "bc250_ordered_producer:%u:%u", &index_base, &index_stride) == 2) {
+         nir_shader *test = nir_shader_clone(NULL, stage->nir);
+         test->info.stage = MESA_SHADER_MESH;
+         test->info.mesh.max_vertices_out = 128;
+         test->info.mesh.max_primitives_out = 64;
+         test->info.mesh.primitive_type = MESA_PRIM_TRIANGLES;
+         const uint32_t ix[4] = {index_base, index_stride, 4, 128};
+         const uint8_t hash[32] = {1};
+         unsigned ai = 0;
+         u_foreach_bit64 (dw, stage->args.ac.inline_push_const_mask)
+            fprintf(stderr, "BC250 ORDERED PRODUCER ABI: arg=%u pc=%u\n",
+                    stage->args.ac.inline_push_consts[ai++].arg_index, (unsigned)dw * 4);
+         radv_bc250_dump_mesh_nir(getenv("BC250_ORDERED_NIR_DUMP"), test, stage->info.wave_size,
+            stage->info.workgroup_size, hash, ix, 0, 0, 0);
+         ralloc_free(test);
+      }
+   }
+
 
    NIR_PASS(_, stage->nir, nir_lower_alu_width, ac_nir_opt_vectorize_cb, &gfx_level);
 
@@ -504,7 +525,13 @@ radv_postprocess_nir(const struct radv_compiler_info *compiler_info, const struc
          .wave_size = stage->info.wave_size,
          .workgroup_size = stage->info.workgroup_size,
          .use_llvm = use_llvm,
-         .load_grid_size_from_user_sgpr = compiler_info->key.load_grid_size_from_user_sgpr,
+         /* Mesh grid dimensions are always declared as three value SGPRs.
+          * Compute may instead use a pointer on pre-GFX10.3 ACE queues.
+          */
+         .load_grid_size_from_user_sgpr = stage->stage == MESA_SHADER_MESH ||
+                                          (stage->stage == MESA_SHADER_TASK &&
+                                           compiler_info->key.bc250_native_task) ||
+                                          compiler_info->key.load_grid_size_from_user_sgpr,
       });
    NIR_PASS(_, stage->nir, radv_nir_lower_abi, gfx_level, stage, gfx_state, compiler_info->hw.address32_hi);
 

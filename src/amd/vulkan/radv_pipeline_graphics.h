@@ -17,6 +17,7 @@
 #include "radv_pipeline.h"
 #include "radv_pipeline_layout.h"
 #include "radv_shader.h"
+#include "radv_bc250_pipeline_plan.h"
 
 #include "vk_graphics_state.h"
 
@@ -137,6 +138,32 @@ struct radv_graphics_pipeline {
    uint64_t needed_dynamic_state;
 
    VkShaderStageFlags active_stages;
+   /* RADV_BC250_ASYNC_COMPILE: the background job, and the shader set bound once bc250_opt_ready is set
+    * (acquire/release); base.shaders keeps the unoptimized binaries until the pipeline is destroyed. */
+   struct radv_bc250_async_job *bc250_async;
+   struct radv_shader *bc250_opt_shaders[MESA_VULKAN_SHADER_STAGES];
+   int bc250_opt_ready;
+   VkPipeline bc250_task_pipeline;
+   VkPipeline bc250_setup_pipeline;
+   bool bc250_shared_setup; /* Setup pipeline and layout owned by the device meta cache. */
+   VkPipelineLayout bc250_task_layout;
+   /* RADV_BC250_MESH_IDXPASS: index-pass compute pipeline (+ its layout) and the indexed-draw pipeline. */
+   VkPipeline bc250_idx_cs;
+   VkPipeline bc250_idx_gfx;
+   VkPipelineLayout bc250_idx_layout;
+   /* Indirect draws: the setup pass (+ its layout) and the indirect index pass. */
+   VkPipeline bc250_idx_setup;
+   VkPipelineLayout bc250_idx_setup_layout;
+   VkPipeline bc250_idx_cs_ind;
+   uint16_t bc250_idx_vertices, bc250_idx_primitives;
+   uint32_t bc250_idx_vertex_stride;
+   uint32_t bc250_payload_stride;
+   bool bc250_ordered;
+   uint32_t bc250_direct_split_pieces;
+   /* RADV_BC250_SPLIT_PREP_FREE: the fragment shader's effects do not depend
+    * on the order of its primitives (radv_bc250.c, bc250_fs_order_independent). */
+   bool bc250_split_order_free;
+   struct radv_bc250_pipeline_plan bc250_plan;
 
    struct radv_dynamic_state dynamic_state;
 
@@ -188,6 +215,7 @@ struct radv_graphics_lib_pipeline {
 
    VkGraphicsPipelineLibraryFlagsEXT lib_flags;
 
+   bool bc250_source_only;
    struct radv_retained_shaders retained_shaders;
 
    void *mem_ctx;
@@ -700,6 +728,7 @@ struct radv_vgt_shader_key {
    uint8_t hs_wave32 : 1;
    uint8_t gs_wave32 : 1;
    uint8_t vs_wave32 : 1;
+   uint8_t bc250_fl0 : 1; /* RADV_BC250_MESH_FL0: Mesh launched with GS_FAST_LAUNCH=0. */
 };
 
 struct radv_vgt_shader_key radv_get_vgt_shader_key(const struct radv_device *device, struct radv_shader **shaders,

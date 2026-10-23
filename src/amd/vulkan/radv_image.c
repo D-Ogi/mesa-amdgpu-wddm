@@ -689,8 +689,12 @@ radv_get_surface_flags(struct radv_device *device, struct radv_image *image, uns
                (pdev->info.gfx_level < GFX12 ? RADEON_SURF_DISABLE_DCC : 0);
    }
 
-   /* Disable DCC for VRS rate images because the hw can't handle compression. */
-   if (image->vk.usage & VK_IMAGE_USAGE_2_FRAGMENT_SHADING_RATE_ATTACHMENT_BIT_KHR)
+   /* Disable DCC for VRS rate images because the hw can't handle compression. With
+    * RADV_BC250_VRS_NOOP the hardware never reads a rate image (GFX10.1 has no VRS), so the image
+    * keeps the surface it has without the usage (vkd3d-proton adds the usage to every single-mip
+    * R8_UINT texture when attachment rates are exposed).
+    */
+   if ((image->vk.usage & VK_IMAGE_USAGE_2_FRAGMENT_SHADING_RATE_ATTACHMENT_BIT_KHR) && !pdev->bc250_vrs_noop)
       flags |= RADEON_SURF_VRS_RATE | (pdev->info.gfx_level < GFX12 ? RADEON_SURF_DISABLE_DCC : 0);
    if (!(image->vk.usage & (VK_IMAGE_USAGE_2_SAMPLED_BIT_KHR | VK_IMAGE_USAGE_2_STORAGE_BIT_KHR)))
       flags |= RADEON_SURF_NO_TEXTURE;

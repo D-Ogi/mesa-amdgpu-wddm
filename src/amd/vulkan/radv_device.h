@@ -15,6 +15,7 @@
 #include "ac_sqtt.h"
 
 #include "util/mesa-blake3.h"
+#include "util/u_queue.h"
 
 #include "tools/radv_debug.h"
 #include "tools/radv_debug_nir.h"
@@ -24,6 +25,7 @@
 #include "radv_queue.h"
 #include "radv_radeon_winsys.h"
 #include "radv_shader.h"
+#include "radv_bc250_timer.h"
 
 #include "vk_acceleration_structure.h"
 #include "vk_device.h"
@@ -137,8 +139,92 @@ struct radv_shader_abort_data {
    VkDeviceAddress buffer_addr;
 };
 
+/* BC250 switches the draw, dispatch and submit paths consult, read once by
+ * radv_bc250_device_env_init() right after vk_device_init() instead of by a
+ * getenv() per call (getenv scans the whole environment; a Proton game has
+ * ~150 variables). Same values as the per-call reads as long as the process
+ * environment does not change after device creation. */
+struct radv_bc250_device_env {
+   bool gpl_source_link; /* RADV_BC250_GPL_SOURCE_LINK: conservative final-source linking. */
+   bool gpl_binary_link; /* RADV_BC250_GPL_BINARY_LINK: complete executable libraries. */
+   bool shader_object_plan; /* RADV_BC250_SHADER_OBJECT_PLAN: linked executable ownership. */
+   bool pipeline_plan; /* RADV_BC250_PIPELINE_PLAN: opt-in portable cache plan. */
+   bool chain_trace;          /* BC250_CHAIN_TRACE on GFX1013 (radv_bc250_chain_enabled) */
+   bool chain_shader_only;    /* BC250_CHAIN_SHADER_ONLY */
+   bool chain_arguments_only; /* BC250_CHAIN_ARGUMENTS_ONLY */
+   bool chain_sample_output;  /* BC250_CHAIN_SAMPLE_OUTPUT */
+   bool transient_arena;      /* BC250_TRANSIENT_ARENA */
+   bool trace_compile;        /* BC250_TRACE_COMPILE is set (any value) */
+   bool trace_regs;           /* BC250_TRACE_REGS is set */
+   bool trace_usage;          /* BC250_TRACE_USAGE is set */
+   bool omit_launch;          /* BC250_DIAGNOSTIC_OMIT_LAUNCH is set */
+   bool post_mesh_vgt_flush;  /* BC250_EXPERIMENTAL_POST_MESH_VGT_FLUSH */
+   bool skip_inactive_chunks; /* BC250_EXPERIMENTAL_SKIP_INACTIVE_CHUNKS */
+   bool no_split_l2_inv;      /* RADV_BC250_PERF_NO_SPLIT_L2_INV */
+   bool split_batch_trace;    /* RADV_BC250_SPLIT_BATCH_TRACE */
+   bool merge_prep_l2_inv;    /* RADV_BC250_MESH_MERGE_PREP_L2_INV */
+   bool native_task_direct;   /* BC250_NATIVE_TASK_DIRECT || RADV_BC250_NATIVE_TASK */
+   bool native_task_indirect; /* BC250_NATIVE_TASK_INDIRECT || RADV_BC250_NATIVE_TASK */
+   /* RADV_BC250_SCRATCH_REUSE=1: split indirect outputs and batch lists come
+    * from the command buffer's upload buffer, other BC250 scratch from the
+    * transient arena also without ONE_TIME_SUBMIT (bc250_alloc_scratch). */
+   bool scratch_reuse;
+   /* RADV_BC250_SPLIT_LEAN_SETUP=1: the per-draw split argument setup binds,
+    * pushes and restores only what it touches (bc250_split_setup_dispatch). */
+   bool split_lean_setup;
+   /* RADV_BC250_SPLIT_PREP_FREE=1: order-independent split indirect draws are
+    * drawn as one indirect draw per piece, without the setup dispatch
+    * (bc250_draw_split_prep_free); the shaders carry the piece select. */
+   bool split_prep_free;
+   bool mesh_no_split; /* Coverage reporting only; never disables the fallback. */
+   /* RADV_BC250_LOCAL_BOS=1: the device's winsys is created with RADV_PERFTEST=localbos: driver-internal
+    * buffers (command buffer IBs, upload buffers, shader arenas, query pools, rings) become
+    * VM_ALWAYS_VALID kernel objects and leave the per-submission BO list (radv_create_winsys). */
+   bool local_bos;
+   /* RADV_BC250_SUBMIT_PROFILE=1: per-queue submission cost (runtime, driver, BO list, CS ioctl,
+    * timer, present) printed every 5 s (radv_bc250_submit_profile_*). */
+   bool submit_profile;
+};
+
+#define RADV_BC250_MESH_VERT_GRP_CLAMP 1
+#define RADV_BC250_MESH_VERT_GRP_OFF   2
+
 struct radv_device {
    struct vk_device vk;
+   /* Shared reservation budget for persistent index-route storage. */
+   uint32_t bc250_idx_storage_bytes;
+   /* Index-route storage returned by reset or destroyed command buffers, reused by the next recording (counted in
+    * the reservation budget while kept here). */
+   simple_mtx_t bc250_idx_spare_mtx;
+   struct {
+      struct radeon_winsys_bo *bo;
+      uint32_t size;
+      bool pool;
+   } bc250_idx_spare[32];
+   uint32_t bc250_idx_spare_count, bc250_idx_spare_bytes;
+   struct radv_bc250_device_env bc250_env;
+   /* RADV_BC250_ASYNC_COMPILE: background queue for the optimized Mesh/FS binaries of pipelines that were
+    * created with an unoptimized ACO build first (radv_pipeline_graphics.c). */
+   bool bc250_async;
+   struct util_queue bc250_async_queue;
+   uint64_t bc250_trace_device_id; /* Process-local diagnostic generation. */
+   struct radv_bc250_mesh_timer bc250_timer; /* BC250_MESH_TIMER (radv_bc250_timer.h) */
+   /* RADV_BC250_COMPUTE_QUEUE_PRIORITY (radv_queue.c): the kernel context priority of compute-family
+    * queues created without a global priority; RADEON_CTX_PRIORITY_INVALID = off. */
+   enum radeon_ctx_priority bc250_compute_priority;
+   /* RADV_BC250_SPLIT_BATCH_PREP=1: one split-argument setup dispatch per
+    * render pass instance instead of one per split indirect draw. */
+   bool bc250_split_batch_prep;
+   /* RADV_BC250_MESH_DEALLOC_DIST=N (GFX1013, 1..127): VGT_OUT_DEALLOC_CNTL.DEALLOC_DIST
+    * while a Mesh shader is bound, 32 (the CLEAR_STATE value) again for other graphics
+    * shaders and at the end of the command buffer. 0 = unset: the register is never written. */
+   uint32_t bc250_mesh_dealloc_dist;
+   /* RADV_BC250_MESH_VERT_GRP (GFX1013): GE_CNTL.VERT_GRP_SIZE of Mesh draws. Unset (0) keeps
+    * ES_VERTS_PER_SUBGRP (1 for every BC250 Mesh route), which AMD's PAL lists as illegal on
+    * GFX10.1 without fast launch. "clamp" applies the ordinary GFX10 rule used for the other NGG
+    * stages (ES_VERTS_PER_SUBGRP - 5, 0 when that is not positive), "off" disables vertex
+    * grouping (256, PAL's default on GFX10). */
+   uint32_t bc250_mesh_vert_grp;
 
    struct radeon_winsys *ws;
 

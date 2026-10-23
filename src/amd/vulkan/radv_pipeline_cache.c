@@ -5,6 +5,7 @@
  */
 
 #include "radv_pipeline_cache.h"
+#include "radv_bc250.h"
 #include "util/macros.h"
 #include "util/mesa-blake3.h"
 #include "util/u_atomic.h"
@@ -41,6 +42,16 @@ radv_hash_graphics_spirv_to_nir(blake3_hash hash, const struct radv_shader_stage
          continue;
       _mesa_blake3_update(&ctx, stage->layout.set[i].layout->hash, sizeof(stage->layout.set[i].layout->hash));
    }
+   /* Immutable sampler conversion affects original SPIR-V translation.
+    * Include set positions and absent sets, never pointer values. */
+   _mesa_blake3_update(&ctx, &stage->layout.num_sets, sizeof(stage->layout.num_sets));
+   for (unsigned i = 0; i < stage->layout.num_sets; i++) {
+      const struct radv_descriptor_set_layout *layout = stage->layout.set[i].layout;
+      const uint8_t present = layout != NULL;
+      _mesa_blake3_update(&ctx, &present, sizeof(present));
+      if (layout)
+         _mesa_blake3_update(&ctx, layout->hash, sizeof(layout->hash));
+   }
    _mesa_blake3_final(&ctx, hash);
 }
 
@@ -52,6 +63,45 @@ radv_free_binary_debug_info(struct radv_shader_binary_debug_info *dbg)
       free(dbg->disasm_string);
    free(dbg->statistics);
    free(dbg->debug_info);
+}
+
+nir_shader *
+radv_shader_spirv_to_nir_cached(const struct radv_compiler_info *compiler_info,
+                               struct vk_pipeline_cache *cache,
+                               struct radv_shader_stage *stage,
+                               const struct radv_spirv_to_nir_options *options,
+                               bool is_internal)
+{
+   /* Cache only original application SPIR-V. Mapping objects and generated
+    * internal NIR require their own identities and are deliberately excluded. */
+   const bool enabled = compiler_info->enable_nir_cache && !is_internal &&
+                        !stage->internal_nir && !stage->layout.mapping;
+   blake3_hash key;
+   nir_shader *nir = NULL;
+   if (enabled) {
+      radv_hash_graphics_spirv_to_nir(key, stage, options);
+      /* The GFX1013 no-op VRS changes the NIR of the same SPIR-V (radv_nir_bc250_vrs_noop); the key
+       * is unchanged when it is off (RADV_BC250_VRS_NOOP=0). */
+      if (compiler_info->hw.bc250_vrs_noop) {
+         static const char tag[] = "bc250-vrs-noop";
+         struct mesa_blake3 ctx;
+         _mesa_blake3_init(&ctx);
+         _mesa_blake3_update(&ctx, key, sizeof(blake3_hash));
+         _mesa_blake3_update(&ctx, tag, sizeof(tag));
+         _mesa_blake3_final(&ctx, key);
+      }
+      /* Lookup deserializes into independently owned mutable NIR. */
+      nir = radv_pipeline_cache_lookup_nir(compiler_info, cache, stage->stage, key);
+   }
+   if (getenv("BC250_TRACE_COMPILE"))
+      fprintf(stderr, "BC250 original NIR: stage=%u cache=%s\n", stage->stage,
+              !enabled ? "disabled" : nir ? "hit" : "miss");
+   if (!nir) {
+      nir = radv_shader_spirv_to_nir(compiler_info, stage, options, is_internal);
+      if (enabled && nir)
+         radv_pipeline_cache_insert_nir(compiler_info, cache, key, nir);
+   }
+   return nir;
 }
 
 static void
@@ -399,9 +449,18 @@ radv_pipeline_cache_object_search(struct radv_device *device, struct vk_pipeline
    return container_of(object, struct radv_pipeline_cache_object, base);
 }
 
+/* Legacy switch-off plan. The opt-in version additionally retains producer
+ * executables and the full private draw state. */
+struct radv_bc250_cached_plan {
+   uint32_t version;
+   uint32_t direct_pieces;
+};
+#define RADV_BC250_PLAN_VERSION 1u
+
 bool
 radv_graphics_pipeline_cache_search(struct radv_device *device, struct vk_pipeline_cache *cache,
-                                    struct radv_graphics_pipeline *pipeline, bool *found_in_application_cache)
+                                    struct radv_graphics_pipeline *pipeline, const struct radv_pipeline_layout *layout,
+                                    bool *found_in_application_cache)
 {
    struct radv_pipeline_cache_object *pipeline_obj;
 
@@ -446,7 +505,56 @@ radv_graphics_pipeline_cache_search(struct radv_device *device, struct vk_pipeli
       return false;
    }
 
-   for (unsigned i = 0; i < pipeline_obj->num_shaders; i++) {
+   unsigned graphics_shaders = pipeline_obj->num_shaders;
+   if (device->bc250_env.pipeline_plan && pipeline->base.type == RADV_PIPELINE_GRAPHICS &&
+       (pipeline->active_stages & VK_SHADER_STAGE_MESH_BIT_EXT)) {
+      const struct radv_bc250_pipeline_plan *plan = pipeline_obj->data;
+      if (pipeline_obj->data_size != sizeof(*plan) || !radv_bc250_pipeline_plan_valid(plan))
+         goto invalid_plan;
+      const unsigned private_shaders = (plan->flags & RADV_BC250_PLAN_TASK) ? 2 : 0;
+      if (graphics_shaders <= private_shaders)
+         goto invalid_plan;
+      graphics_shaders -= private_shaders;
+      /* Validate before reconstructing helpers or publishing shader references. */
+      const struct radv_shader *mesh = NULL, *fragment = NULL;
+      uint32_t stages = 0;
+      for (unsigned i = 0; i < graphics_shaders; i++) {
+         const struct radv_shader *shader = pipeline_obj->shaders[i];
+         if (!shader || shader->info.stage >= MESA_VULKAN_SHADER_STAGES ||
+             shader->info.stage == MESA_SHADER_COMPUTE || shader->info.stage == MESA_SHADER_TASK)
+            goto invalid_plan;
+         const uint32_t stage = 1u << shader->info.stage;
+         if (stages & stage)
+            goto invalid_plan;
+         stages |= stage;
+         if (shader->info.stage == MESA_SHADER_MESH)
+            mesh = shader;
+         if (shader->info.stage == MESA_SHADER_FRAGMENT)
+            fragment = shader;
+      }
+      if (!mesh)
+         goto invalid_plan;
+      struct radv_shader *producer = private_shaders ? pipeline_obj->shaders[graphics_shaders] : NULL;
+      struct radv_shader *setup = private_shaders ? pipeline_obj->shaders[graphics_shaders + 1] : NULL;
+      if (radv_bc250_restore_cached_plan(device, pipeline, layout, plan, mesh, fragment, producer, setup) != VK_SUCCESS)
+         goto invalid_plan;
+   } else if (device->compiler_info.key.bc250_cache_plan &&
+       pipeline->base.type == RADV_PIPELINE_GRAPHICS &&
+       (pipeline->active_stages & VK_SHADER_STAGE_MESH_BIT_EXT)) {
+      const struct radv_bc250_cached_plan *plan = pipeline_obj->data;
+      if (pipeline_obj->data_size != sizeof(*plan) ||
+          plan->version != RADV_BC250_PLAN_VERSION || plan->direct_pieces > 5) {
+         vk_pipeline_cache_object_unref(&device->vk, &pipeline_obj->base);
+         return false;
+      }
+      if (plan->direct_pieces && radv_bc250_prepare_direct_split(device, pipeline) != VK_SUCCESS) {
+         vk_pipeline_cache_object_unref(&device->vk, &pipeline_obj->base);
+         return false;
+      }
+      pipeline->bc250_direct_split_pieces = plan->direct_pieces;
+   }
+
+   for (unsigned i = 0; i < graphics_shaders; i++) {
       mesa_shader_stage s = pipeline_obj->shaders[i]->info.stage;
       if (s == MESA_SHADER_VERTEX && i > 0) {
          pipeline->base.gs_copy_shader = radv_shader_ref(pipeline_obj->shaders[i]);
@@ -457,6 +565,10 @@ radv_graphics_pipeline_cache_search(struct radv_device *device, struct vk_pipeli
 
    pipeline->base.cache_object = &pipeline_obj->base;
    return true;
+
+invalid_plan:
+   vk_pipeline_cache_object_unref(&device->vk, &pipeline_obj->base);
+   return false;
 }
 
 bool
@@ -505,11 +617,34 @@ radv_pipeline_cache_insert(struct radv_device *device, struct vk_pipeline_cache 
    if (!num_shaders)
       return;
 
+   const struct radv_graphics_pipeline *graphics = pipeline->type == RADV_PIPELINE_GRAPHICS ?
+      container_of(pipeline, struct radv_graphics_pipeline, base) : NULL;
+   const bool portable_plan = device->bc250_env.pipeline_plan && graphics &&
+                              (graphics->active_stages & VK_SHADER_STAGE_MESH_BIT_EXT);
+   if (portable_plan && !radv_bc250_pipeline_plan_valid(&graphics->bc250_plan))
+      return;
+   const bool private_shaders = portable_plan && (graphics->bc250_plan.flags & RADV_BC250_PLAN_TASK);
+   if (private_shaders && (!graphics->bc250_task_pipeline || !graphics->bc250_setup_pipeline))
+      return;
+   num_shaders += private_shaders ? 2 : 0;
+
    struct radv_pipeline_cache_object *pipeline_obj;
-   pipeline_obj = radv_pipeline_cache_object_create(&device->vk, num_shaders, pipeline->blake3, 0);
+   const bool store_plan = device->compiler_info.key.bc250_cache_plan &&
+                           pipeline->type == RADV_PIPELINE_GRAPHICS &&
+                           (container_of(pipeline, struct radv_graphics_pipeline, base)->active_stages & VK_SHADER_STAGE_MESH_BIT_EXT);
+   pipeline_obj = radv_pipeline_cache_object_create(&device->vk, num_shaders, pipeline->blake3,
+                                                    portable_plan ? sizeof(struct radv_bc250_pipeline_plan) :
+                                                    store_plan ? sizeof(struct radv_bc250_cached_plan) : 0);
 
    if (!pipeline_obj)
       return;
+   if (portable_plan) {
+      memcpy(pipeline_obj->data, &graphics->bc250_plan, sizeof(graphics->bc250_plan));
+   } else if (store_plan) {
+      struct radv_bc250_cached_plan *plan = pipeline_obj->data;
+      plan->version = RADV_BC250_PLAN_VERSION;
+      plan->direct_pieces = container_of(pipeline, struct radv_graphics_pipeline, base)->bc250_direct_split_pieces;
+   }
 
    unsigned idx = 0;
    for (unsigned i = 0; i < MESA_VULKAN_SHADER_STAGES; ++i) {
@@ -519,6 +654,19 @@ radv_pipeline_cache_insert(struct radv_device *device, struct vk_pipeline_cache 
    /* Place the GS copy-shader after all other stages */
    if (pipeline->gs_copy_shader)
       pipeline_obj->shaders[idx++] = radv_shader_ref(pipeline->gs_copy_shader);
+
+   if (private_shaders) {
+      VK_FROM_HANDLE(radv_pipeline, producer, graphics->bc250_task_pipeline);
+      VK_FROM_HANDLE(radv_pipeline, setup, graphics->bc250_setup_pipeline);
+      /* A pipeline reference alone does not serialize a shader into an
+       * application cache: these shaders were created in the meta cache. */
+      struct radv_shader *shaders[2] = {producer->shaders[MESA_SHADER_COMPUTE], setup->shaders[MESA_SHADER_COMPUTE]};
+      for (unsigned i = 0; i < 2; i++) {
+         struct vk_pipeline_cache_object *object =
+            vk_pipeline_cache_add_object(cache, &radv_shader_ref(shaders[i])->base);
+         pipeline_obj->shaders[idx++] = container_of(object, struct radv_shader, base);
+      }
+   }
 
    assert(idx == num_shaders);
 
@@ -838,8 +986,16 @@ radv_pipeline_cache_get_binaries(struct radv_device *device, const VkAllocationC
       }
    } else {
       struct radv_shader *gs_copy_shader = NULL;
+      const struct radv_bc250_pipeline_plan *plan = device->bc250_env.pipeline_plan &&
+         pipeline_obj->data_size == sizeof(struct radv_bc250_pipeline_plan) ? pipeline_obj->data : NULL;
+      const unsigned private_shaders = plan && (plan->flags & RADV_BC250_PLAN_TASK) ? 2 : 0;
+      if (plan && (!radv_bc250_pipeline_plan_valid(plan) || pipeline_obj->num_shaders <= private_shaders)) {
+         result = VK_ERROR_FEATURE_NOT_PRESENT;
+         goto fail;
+      }
+      const unsigned graphics_shaders = pipeline_obj->num_shaders - private_shaders;
 
-      for (unsigned i = 0; i < pipeline_obj->num_shaders; i++) {
+      for (unsigned i = 0; i < graphics_shaders; i++) {
          struct radv_shader *shader = pipeline_obj->shaders[i];
          mesa_shader_stage s = shader->info.stage;
 
@@ -857,6 +1013,14 @@ radv_pipeline_cache_get_binaries(struct radv_device *device, const VkAllocationC
       if (gs_copy_shader) {
          result = radv_create_pipeline_binary_from_shader(device, pAllocator, gs_copy_shader, pipeline_binaries,
                                                           num_binaries);
+         if (result != VK_SUCCESS)
+            goto fail;
+      }
+      if (plan) {
+         result = radv_create_pipeline_binary_from_bc250_plan(device, pAllocator, plan,
+            private_shaders ? pipeline_obj->shaders[graphics_shaders] : NULL,
+            private_shaders ? pipeline_obj->shaders[graphics_shaders + 1] : NULL,
+            pipeline_binaries, num_binaries);
          if (result != VK_SUCCESS)
             goto fail;
       }

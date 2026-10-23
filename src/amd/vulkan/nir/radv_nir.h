@@ -47,13 +47,23 @@ bool radv_nir_optimize_vs_inputs_to_const(nir_shader *shader, const struct radv_
 
 bool radv_nir_lower_primitive_shading_rate(nir_shader *nir, enum amd_gfx_level gfx_level);
 
+bool radv_nir_bc250_vrs_noop(nir_shader *nir, unsigned *stripped_outputs, unsigned *zeroed_reads);
+
 bool radv_nir_lower_fs_intrinsics(nir_shader *nir, const struct radv_shader_stage *fs_stage,
                                   const struct radv_graphics_state_key *gfx_state);
 
 bool radv_nir_lower_fs_input_attachment(nir_shader *nir);
 
 bool radv_nir_lower_fs_barycentric(nir_shader *shader, const struct radv_graphics_state_key *gfx_state,
-                                   unsigned num_raster_vertices_per_prim);
+                                   unsigned num_raster_vertices_per_prim, bool has_provoking_vtx);
+
+bool radv_nir_bc250_export_bary_ref(nir_shader *producer, unsigned raw_slot, unsigned flat_slot);
+
+bool radv_nir_bc250_fs_needs_bary_rotation(const nir_shader *fs);
+
+bool radv_nir_bc250_lower_bary_rotation(nir_shader *fs, int raw_slot, int flat_slot,
+                                        unsigned num_raster_vertices_per_prim, bool dynamic_provoking,
+                                        bool provoking_last);
 
 bool radv_nir_lower_intrinsics_early(nir_shader *nir, bool lower_view_index_to_zero);
 

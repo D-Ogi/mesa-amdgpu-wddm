@@ -81,6 +81,8 @@ struct radv_queue_state {
    uint32_t shadow_regs_ib_size_dw;
 };
 
+#define RADV_BC250_PROF_FIELDS 18
+
 struct radv_queue {
    struct vk_queue vk;
    struct radeon_winsys_ctx *hw_ctx;
@@ -130,6 +132,11 @@ int32_t radv_bc250_bind_queue(void *vk_queue, void *cookie);
 int32_t radv_bc250_unbind_queue(void *vk_queue);
 
 enum radeon_ctx_priority radv_get_queue_global_priority(const VkDeviceQueueGlobalPriorityCreateInfo *pObj);
+
+enum radeon_ctx_priority radv_bc250_compute_priority_option(const struct radv_physical_device *pdev);
+
+enum radeon_ctx_priority radv_bc250_queue_priority(const struct radv_device *device, uint32_t queue_family_index,
+                                                   const VkDeviceQueueGlobalPriorityCreateInfo *global_priority);
 
 void radv_emit_graphics(struct radv_device *device, struct radv_cmd_stream *cs);
 

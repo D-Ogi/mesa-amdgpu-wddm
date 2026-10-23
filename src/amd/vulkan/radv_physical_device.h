@@ -118,6 +118,25 @@ struct radv_physical_device {
    /* Whether to enable NGG. */
    bool use_ngg;
 
+   /* Private, unsupported direct-mesh experiment for BC-250 (GFX1013). */
+   bool bc250_native_mesh;
+   bool bc250_native_task; /* Experimental native TASK capability; submission separately gated. */
+   bool bc250_hybrid_task;
+   bool bc250_expose_dgc;
+   /* VK_KHR_fragment_shader_barycentric on GFX1013 (vertex order recovered in
+    * the fragment shader, radv_nir_bc250_lower_bary_rotation); off with
+    * RADV_BC250_NO_BARYCENTRICS=1. */
+   bool bc250_barycentrics;
+   /* GFX1013, on by default (RADV_BC250_VRS_NOOP=0 hides it): VK_KHR_fragment_shading_rate is
+    * exposed (pipeline, primitive and attachment rates) but every fragment is shaded at 1x1.
+    * GFX10.1 has no VRS hardware: no VRS register or HTILE VRS field is ever written, shading
+    * rate outputs are stripped and shading rate reads return 0 (radv_nir_bc250_vrs_noop). */
+   bool bc250_vrs_noop;
+   /* RADV_BC250_EXPOSE_FAST_BINDING (opt-in): VK_EXT_descriptor_buffer stays exposed
+    * with hybrid Task, and the BC250 Mesh/Task pipeline paths accept descriptor
+    * buffer pipelines (radv_bc250_prepare_task). */
+   bool bc250_fast_binding;
+
    /* Whether to enable NGG culling. */
    bool use_ngg_culling;
 

@@ -9,6 +9,9 @@
  */
 
 #include "radv_queue.h"
+#include "radv_bc250.h"
+#include "util/os_time.h"
+#include "util/u_atomic.h"
 #include "tools/radv_debug_hang.h"
 #include "tools/radv_debug_nir.h"
 #include "tools/radv_rmv.h"
@@ -33,6 +36,40 @@ radv_get_queue_global_priority(const VkDeviceQueueGlobalPriorityCreateInfo *pObj
       return RADEON_CTX_PRIORITY_MEDIUM;
 
    return vk_to_radeon_priority(pObj->globalPriority);
+}
+
+/* RADV_BC250_COMPUTE_QUEUE_PRIORITY=low|medium|high|realtime (GFX1013 only, default off): the kernel
+ * context priority of the compute-family queues whose creator did not chain a global priority (vkd3d-proton
+ * never does). HIGH / REALTIME select the kernel's high-priority compute ring (HQD pipe/queue priority) and
+ * need CAP_SYS_NICE or DRM master: when the kernel refuses, device creation falls back to MEDIUM (printed).
+ * LOW only changes the drm scheduler's software priority. Graphics and the other families are unchanged. */
+enum radeon_ctx_priority
+radv_bc250_compute_priority_option(const struct radv_physical_device *pdev)
+{
+   const char *v = os_get_option("RADV_BC250_COMPUTE_QUEUE_PRIORITY");
+   if (!v || !v[0] || pdev->info.family != CHIP_GFX1013 || !radv_compute_queue_enabled(pdev))
+      return RADEON_CTX_PRIORITY_INVALID;
+   if (!strcmp(v, "low"))
+      return RADEON_CTX_PRIORITY_LOW;
+   if (!strcmp(v, "medium"))
+      return RADEON_CTX_PRIORITY_MEDIUM;
+   if (!strcmp(v, "high"))
+      return RADEON_CTX_PRIORITY_HIGH;
+   if (!strcmp(v, "realtime"))
+      return RADEON_CTX_PRIORITY_REALTIME;
+   fprintf(stderr, "radv/bc250: RADV_BC250_COMPUTE_QUEUE_PRIORITY=%s ignored (low|medium|high|realtime)\n", v);
+   return RADEON_CTX_PRIORITY_INVALID;
+}
+
+enum radeon_ctx_priority
+radv_bc250_queue_priority(const struct radv_device *device, uint32_t queue_family_index,
+                          const VkDeviceQueueGlobalPriorityCreateInfo *global_priority)
+{
+   const struct radv_physical_device *pdev = radv_device_physical(device);
+   if (!global_priority && device->bc250_compute_priority != RADEON_CTX_PRIORITY_INVALID &&
+       vk_queue_to_radv(pdev, queue_family_index) == RADV_QUEUE_COMPUTE)
+      return device->bc250_compute_priority;
+   return radv_get_queue_global_priority(global_priority);
 }
 
 static VkResult
@@ -246,6 +283,16 @@ radv_queue_submit_empty(struct radv_queue *queue, struct vk_queue_submit *submis
                                 submission->signals);
 }
 
+static uint32_t
+radv_mesh_scratch_ring_size(const struct radv_physical_device *pdev)
+{
+   /* The lowering extracts a 12-bit ordered wave ID. The 2048-entry
+    * bound is documented for GFX10.3; cover the full index on BC250. */
+   const unsigned entries = pdev->info.gfx_level == GFX10 && pdev->bc250_native_mesh
+                               ? 4096 : AC_MESH_SCRATCH_NUM_ENTRIES;
+   return entries * AC_MESH_SCRATCH_ENTRY_BYTES;
+}
+
 static void
 radv_set_ring_buffer(const struct radv_physical_device *pdev, struct radeon_winsys_bo *bo, uint32_t offset,
                      uint32_t ring_size, bool add_tid, bool swizzle_enable, bool oob_select_raw, uint32_t element_size,
@@ -348,7 +395,7 @@ radv_fill_shader_rings(struct radv_device *device, uint32_t *desc, struct radeon
    desc += 8;
 
    if (mesh_scratch_ring_bo) {
-      radv_set_ring_buffer(pdev, mesh_scratch_ring_bo, 0, AC_MESH_SCRATCH_NUM_ENTRIES * AC_MESH_SCRATCH_ENTRY_BYTES,
+      radv_set_ring_buffer(pdev, mesh_scratch_ring_bo, 0, radv_mesh_scratch_ring_size(pdev),
                            false, false, false, 0, 0, &desc[0]);
    }
 
@@ -958,7 +1005,7 @@ radv_update_preamble_cs(struct radv_queue_state *queue, struct radv_device *devi
    }
 
    if (!queue->ring_info.task_rings && needs->task_rings) {
-      assert(pdev->info.gfx_level >= GFX10_3);
+      assert(pdev->info.gfx_level >= GFX10_3 || pdev->bc250_native_task);
 
       /* We write the control buffer from the CPU, so need to grant CPU access to the BO.
        * The draw ring needs to be zero-initialized otherwise the ready bits will be incorrect.
@@ -977,15 +1024,18 @@ radv_update_preamble_cs(struct radv_queue_state *queue, struct radv_device *devi
    }
 
    if (!queue->ring_info.mesh_scratch_ring && needs->mesh_scratch_ring) {
-      assert(pdev->info.gfx_level >= GFX10_3);
+      /* Mesh output scratch uses ordinary buffer accesses, including on the
+       * opt-in BC250 GFX10 mesh path. This does not enable native task rings. */
+      assert(pdev->info.gfx_level >= GFX10_3 ||
+             (pdev->info.gfx_level == GFX10 && pdev->bc250_native_mesh));
       result =
-         radv_bo_create(device, NULL, AC_MESH_SCRATCH_NUM_ENTRIES * AC_MESH_SCRATCH_ENTRY_BYTES, 256,
+         radv_bo_create(device, NULL, radv_mesh_scratch_ring_size(pdev), 256,
                         RADEON_DOMAIN_VRAM, ring_bo_flags, RADV_BO_PRIORITY_SCRATCH, 0, true, &mesh_scratch_ring_bo);
 
       if (result != VK_SUCCESS)
          goto fail;
       radv_rmv_log_command_buffer_bo_create(device, mesh_scratch_ring_bo, 0, 0,
-                                            AC_MESH_SCRATCH_NUM_ENTRIES * AC_MESH_SCRATCH_ENTRY_BYTES);
+                                            radv_mesh_scratch_ring_size(pdev));
    }
 
    if (!queue->ring_info.ge_rings && needs->ge_rings) {
@@ -1996,6 +2046,38 @@ static VkResult
 radv_queue_submit(struct vk_queue *vqueue, struct vk_queue_submit *submission)
 {
    struct radv_queue *queue = (struct radv_queue *)vqueue;
+   struct radv_device *device = radv_queue_device(queue);
+   const uint64_t timer_call_ns = unlikely(device->bc250_timer.enabled) ? os_time_get_nano() : 0;
+
+   bool trace_target_submit = false;
+   if (radv_bc250_chain_enabled(device)) {
+      for (uint32_t i = 0; i < submission->command_buffer_count; ++i) {
+         struct radv_cmd_buffer *cb = (struct radv_cmd_buffer *)submission->command_buffers[i];
+         trace_target_submit |= cb->bc250_trace_has_target;
+      }
+   }
+   uint64_t trace_submit = trace_target_submit ? radv_bc250_chain_event(device, "TARGET_QUEUE_INTENT",
+      "queue=%p submission=%p commands=%u waits=%u signals=%u",
+      (void *)queue, (void *)submission, submission->command_buffer_count, submission->wait_count,
+      submission->signal_count) : 0;
+   if (trace_submit) {
+      for (uint32_t i = 0; i < submission->command_buffer_count; ++i) {
+         struct radv_cmd_buffer *cb = (struct radv_cmd_buffer *)submission->command_buffers[i];
+         radv_bc250_chain_event(device, "TARGET_QUEUE_CMD", "submit=%llu index=%u cmd=%p epoch=%llu cs=%p bridge=%s",
+            (unsigned long long)trace_submit, i, (void *)cb, (unsigned long long)cb->bc250_trace_epoch,
+            cb->cs ? (void *)cb->cs->b : NULL,
+            cb->vk.base.object_name && !strncmp(cb->vk.base.object_name, "BC250.", 6) ? cb->vk.base.object_name
+                                                                                      : "UNAVAILABLE");
+      }
+      for (uint32_t i = 0; i < submission->wait_count; ++i)
+         radv_bc250_chain_event(device, "TARGET_QUEUE_WAIT_INTENT", "submit=%llu sync=%p value=%llu",
+            (unsigned long long)trace_submit, (void *)submission->waits[i].sync,
+            (unsigned long long)submission->waits[i].wait_value);
+      for (uint32_t i = 0; i < submission->signal_count; ++i)
+         radv_bc250_chain_event(device, "TARGET_QUEUE_SIGNAL_INTENT", "submit=%llu sync=%p value=%llu",
+            (unsigned long long)trace_submit, (void *)submission->signals[i].sync,
+            (unsigned long long)submission->signals[i].signal_value);
+   }
 
    /* BD-201 (DESIGN.md 6.7): see radv_queue_sparse_submit. */
    assert(queue->vk.submit.mode == VK_QUEUE_SUBMIT_MODE_IMMEDIATE);
@@ -2024,6 +2106,36 @@ radv_queue_submit(struct vk_queue *vqueue, struct vk_queue_submit *submission)
       result = radv_queue_submit_empty(queue, submission);
    } else {
       result = radv_queue_submit_normal(queue, submission);
+   }
+
+   if (trace_submit)
+      radv_bc250_chain_event(device, "TARGET_QUEUE_RESULT", "submit=%llu result=%d gpu_completion=UNOBSERVED",
+         (unsigned long long)trace_submit, result);
+   if (result == VK_SUCCESS && unlikely(device->bc250_timer.enabled))
+      radv_bc250_timer_submit(device, queue, submission, timer_call_ns); /* BC250_MESH_TIMER: queue + lazy readback */
+   if (result == VK_SUCCESS && device->bc250_env.trace_usage) {
+      static uint64_t submits, mesh_total, task_total, idx_direct_total, idx_indirect_total, idx_records_total;
+      uint64_t mesh = 0, task = 0, idx_direct = 0, idx_indirect = 0, idx_records = 0;
+      for (uint32_t j = 0; j < submission->command_buffer_count; j++) {
+         struct radv_cmd_buffer *cb = (struct radv_cmd_buffer *)submission->command_buffers[j];
+         mesh += cb->bc250_diag_mesh;
+         task += cb->bc250_diag_task;
+         idx_direct += cb->bc250_diag_idx_direct;
+         idx_indirect += cb->bc250_diag_idx_indirect;
+         idx_records += cb->bc250_diag_idx_records;
+      }
+      p_atomic_fetch_add(&idx_direct_total, idx_direct);
+      p_atomic_fetch_add(&idx_indirect_total, idx_indirect);
+      p_atomic_fetch_add(&idx_records_total, idx_records);
+      uint64_t m = p_atomic_fetch_add(&mesh_total, mesh);
+      uint64_t t = p_atomic_fetch_add(&task_total, task);
+      uint64_t n = p_atomic_add_return(&submits, 1);
+      if (n == 1 || n % 300 == 0 || (mesh && !m) || (task && !t))
+         fprintf(stderr, "BC250_USAGE v5-diag submits=%llu mesh_only_commands=%llu task_mesh_commands=%llu idx_direct=%llu "
+                 "idx_indirect_calls=%llu idx_indirect_max_records=%llu (accepted submissions; not GPU completion)\n",
+                 (unsigned long long)n, (unsigned long long)(m + mesh), (unsigned long long)(t + task),
+                 (unsigned long long)idx_direct_total, (unsigned long long)idx_indirect_total,
+                 (unsigned long long)idx_records_total);
    }
 
 fail:
@@ -2069,7 +2181,7 @@ radv_queue_init(struct radv_device *device, struct radv_queue *queue, int idx,
 {
    const struct radv_physical_device *pdev = radv_device_physical(device);
 
-   queue->priority = radv_get_queue_global_priority(global_priority);
+   queue->priority = radv_bc250_queue_priority(device, create_info->queueFamilyIndex, global_priority);
    queue->state.qf = vk_queue_to_radv(pdev, create_info->queueFamilyIndex);
 
    if (queue->state.qf == RADV_QUEUE_VIDEO_ENC && device->hw_vcn_enc_ctx)

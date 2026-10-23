@@ -418,6 +418,7 @@ struct radv_cmd_state {
    bool ignore_ds_state;
 
    uint64_t shader_query_buf_va; /* GFX12+ */
+   uint64_t bc250_safe_stats_buf_va; /* opt-in SAFE_FAST diagnostics for GFX10 Mesh */
 
    enum radv_depth_clamp_mode depth_clamp_mode;
    bool depth_clip_enable;
@@ -463,6 +464,7 @@ struct radv_enc_state {
 };
 
 struct radv_linear_suballoc_buffer {
+   uint64_t bc250_sample_chain; /* Selected diagnostic output; zero for ordinary uploads. */
    uint8_t *cpu_map;
    unsigned offset;
    uint64_t size;
@@ -548,6 +550,20 @@ struct radv_draw_stats_pass {
 
 struct radv_cmd_buffer {
    struct vk_command_buffer vk;
+   uint64_t bc250_diag_mesh, bc250_diag_task;
+   /* RADV_BC250_MESH_IDXPASS usage: direct index-route draws, indirect calls and their maximum records. */
+   uint64_t bc250_diag_idx_direct, bc250_diag_idx_indirect, bc250_diag_idx_records;
+   uint64_t bc250_trace_epoch, bc250_trace_chain, bc250_trace_producer;
+   bool bc250_trace_has_target;
+   const uint32_t *bc250_trace_start_buf;
+   uint32_t bc250_trace_start_dw;
+   bool bc250_inside_mesh_draw;
+   struct radv_bc250_timer_cmd bc250_timer; /* BC250_MESH_TIMER (radv_bc250_timer.h) */
+   /* RADV_BC250_MESH_MERGE option A: low 32 bits of the prepped driver
+    * records of the indirect draw being emitted (0 otherwise). */
+   uint32_t bc250_merge_dims_va;
+   bool bc250_mesh_amd_reuse_off; /* VGT_REUSE_OFF = 1 was written for a RADV_BC250_MESH_AMD Mesh. */
+   bool bc250_mesh_dealloc_dist_set; /* RADV_BC250_MESH_DEALLOC_DIST was written, 32 not restored yet. */
 
    struct {
       struct u_trace *trace;
@@ -570,7 +586,65 @@ struct radv_cmd_buffer {
    uint64_t descriptor_buffers[MAX_SETS];
    uint64_t descriptor_heaps[RADV_MAX_HEAPS];
 
+   /* DGC capture writes uploads into its preprocess-owned arena. */
+   uint64_t bc250_dgc_upload_va;
+   uint64_t bc250_dgc_application_va;
+   /* RADV_BC250_TASK_TAIL in a DGC capture: the program VA where the capture places the chunk
+    * slots 1..1023 (reached by one conditional CHAIN), and the side stream holding them. */
+   uint64_t bc250_dgc_tail_va;
+   struct radv_cmd_stream *bc250_dgc_tail;
+   bool bc250_dgc_merged_constants;
+   bool bc250_dgc_inherit_graphics_state;
+   uint64_t bc250_dgc_nonuniform_pc;
+   VkShaderStageFlags bc250_dgc_pc_stages[MAX_PUSH_CONSTANTS_SIZE / 4];
+   /* Capture-only typed Task constant uploads for a reusable count IB. */
+   struct {
+      uint32_t offsets[2050];
+      unsigned count;
+      bool overflow;
+   } *bc250_dgc_task_uploads;
    struct radv_linear_suballoc_buffer linear_suballocators[RADV_NUM_LINEAR_SUBALLOCATORS];
+   struct radv_linear_suballoc_buffer *bc250_small_arena;
+   /* RADV_BC250_MESH_IDXPASS: device-local index pages, bump allocated by this recording. Reset and destroy
+    * return them (and the pool) to the device spare list, so recordings reuse them instead of creating buffers
+    * (a new buffer cost a clear each frame). */
+   struct radeon_winsys_bo *bc250_idx_pages[16];
+   uint64_t bc250_idx_page_size[16];
+   uint32_t bc250_idx_npages, bc250_idx_page, bc250_idx_added;
+   uint64_t bc250_idx_offset;
+   struct radeon_winsys_bo *bc250_idx_pool_bo;
+   bool bc250_idx_pool_used;
+   /* RADV_BC250_MESH_IDXPASS batch: the index passes of consecutive draws are recorded into this side stream; one
+    * call reserved before the first of those draws runs them (copied into body at close) followed by one wait. */
+   struct radv_cmd_stream *bc250_idx_batch;
+   /* The side stream, kept across batches and resets (reset when a batch opens). */
+   struct radv_cmd_stream *bc250_idx_side;
+   uint32_t *bc250_idx_batch_body;
+   uint32_t *bc250_idx_batch_buf;
+   uint32_t bc250_idx_batch_capacity;
+   uint32_t bc250_idx_batch_upload_bytes;
+   /* RADV_BC250_IDX_DEBUG: CPU-visible tables of the first indirect calls, printed when the buffer is reset. */
+   uint32_t *bc250_idx_dbg_map[8];
+   uint32_t bc250_idx_dbg_max[8];
+   uint32_t bc250_idx_dbg_n;
+   uint32_t *bc250_idx_dbg_pool;
+   /* RADV_BC250_MESH_IDXPASS: the index-route pipeline is bound in place of this application pipeline (rebound
+    * before anything else uses graphics state); bc250_idx_drawing marks the route's own indexed draw. */
+   struct radv_graphics_pipeline *bc250_idx_restore;
+   /* Indirect index pool: indices from pool + 256, the GPU-side count of used indices at pool. */
+   uint64_t bc250_idx_pool;
+   uint32_t bc250_idx_pool_capacity;
+   bool bc250_idx_drawing;
+   uint64_t bc250_ordered_arena;
+   unsigned bc250_ordered_arena_size;
+   /* RADV_BC250_SPLIT_BATCH_PREP: CPU mapping of the open split-argument
+    * batch list of the current render pass instance (NULL when none is open),
+    * its GPU address and the number of entries appended so far. */
+   uint32_t *bc250_split_batch;
+   /* RADV_BC250_TASK_TAIL: side streams holding the shared chunk slots 1..1023 (struct radv_cmd_stream *). */
+   struct util_dynarray bc250_task_tails;
+   uint64_t bc250_split_batch_va;
+   uint32_t bc250_split_batch_used;
 
    struct radv_cmd_buffer_queue_state queue_state;
 
@@ -1132,5 +1206,8 @@ radv_cmd_buffer_is_transfer_gang(const struct radv_cmd_buffer *cmd_buffer)
 {
    return cmd_buffer->qf == RADV_QUEUE_TRANSFER && cmd_buffer->gang.cs && cmd_buffer->gang.cs->hw_ip == AMD_IP_COMPUTE;
 }
+
+/* The Mesh shader the next draw will use (radv_cmd_buffer.c). */
+const struct radv_shader *radv_bc250_api_mesh_shader(const struct radv_cmd_buffer *cmd_buffer);
 
 #endif /* RADV_CMD_BUFFER_H */

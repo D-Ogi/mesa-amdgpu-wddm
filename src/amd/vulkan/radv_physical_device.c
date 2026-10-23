@@ -30,6 +30,7 @@
 #include "radv_entrypoints.h"
 #include "radv_instance.h"
 #include "radv_physical_device.h"
+#include "radv_bc250.h"
 #include "radv_pipeline_rt.h"
 #include "radv_video.h"
 #include "radv_wsi.h"
@@ -74,6 +75,40 @@ radv_taskmesh_enabled(const struct radv_physical_device *pdev)
 
    return pdev->use_ngg && !pdev->use_llvm && pdev->info.gfx_level >= GFX10_3 && radv_compute_queue_enabled(pdev) &&
           !pdev->info.has_taskmesh_indirect0_bug;
+}
+
+static bool
+radv_mesh_enabled(const struct radv_physical_device *pdev)
+{
+   return radv_taskmesh_enabled(pdev) || pdev->bc250_native_mesh;
+}
+
+/* DirectMesh hides VK_EXT_descriptor_buffer, VK_EXT_descriptor_heap, VK_EXT_graphics_pipeline_library,
+ * VK_EXT_shader_object, VK_KHR_pipeline_binary and VK_EXT_device_generated_commands whenever hybrid or
+ * native Task is on, and clamps maxDrawIndirectCount to 4096. This port does not: DXVK and our
+ * vkd3d-proton engine use those extensions, and hiding them on this board would change behaviour for
+ * every D3D9-12 title, not only for Task shaders. RADV_BC250_TASK_STRICT_EXT=1 restores the reference
+ * behaviour for an A/B: each extension entry and its mandatory feature are gated together, so the
+ * strict arm never advertises an extension whose feature reads VK_FALSE. The maxDrawIndirectCount
+ * clamp is not part of the switch: the mesh routes enforce 4096 themselves, so it always applies.
+ * The combination "Task exposed and these extensions exposed" has not been measured on hardware;
+ * see PORT-NOTES.md.
+ */
+static bool
+radv_bc250_task_strict_ext(const struct radv_physical_device *pdev)
+{
+   return (pdev->bc250_hybrid_task || pdev->bc250_native_task) &&
+          debug_get_bool_option("RADV_BC250_TASK_STRICT_EXT", false);
+}
+
+static bool
+radv_bc250_descriptor_buffer_exposed(const struct radv_physical_device *pdev)
+{
+   if (!radv_bc250_task_strict_ext(pdev))
+      return true;
+   if (pdev->bc250_native_task)
+      return false;
+   return !pdev->bc250_hybrid_task || pdev->bc250_fast_binding;
 }
 
 bool
@@ -166,6 +201,19 @@ radv_video_encode_queue_enabled(const struct radv_physical_device *pdev)
 
    return pdev->video_encode_enabled && pdev->info.ip[AMD_IP_VCN_ENC].num_queues > 0 &&
           !(instance->queue_disable_flags & RADV_QUEUE_DISABLE_VIDEO_ENC);
+}
+
+/* RADV_BC250_COMPUTE_QUEUE_COUNT=<n> (GFX1013 only, default off): expose at most n queues in the compute
+ * family (vkd3d-proton creates min(queueCount, 4) and spreads its D3D12 compute / copy queues over them;
+ * each Vulkan compute queue is its own kernel scheduler entity, placed on one of the kernel compute rings). */
+static uint32_t
+radv_bc250_compute_queue_count(const struct radv_physical_device *pdev)
+{
+   const uint32_t n = pdev->info.ip[AMD_IP_COMPUTE].num_queues;
+   if (pdev->info.family != CHIP_GFX1013)
+      return n;
+   const uint32_t v = debug_get_num_option("RADV_BC250_COMPUTE_QUEUE_COUNT", 0);
+   return v ? MIN2(n, v) : n;
 }
 
 bool
@@ -752,8 +800,8 @@ radv_physical_device_get_supported_extensions(const struct radv_physical_device 
       .KHR_external_semaphore_fd = pdev->info.is_amdgpu,
 #endif
       .KHR_format_feature_flags2 = true,
-      .KHR_fragment_shader_barycentric = pdev->info.gfx_level >= GFX10_3,
-      .KHR_fragment_shading_rate = pdev->info.gfx_level >= GFX10_3,
+      .KHR_fragment_shader_barycentric = pdev->info.gfx_level >= GFX10_3 || pdev->bc250_barycentrics,
+      .KHR_fragment_shading_rate = pdev->info.gfx_level >= GFX10_3 || pdev->bc250_vrs_noop,
       .KHR_get_memory_requirements2 = true,
       .KHR_global_priority = true,
       .KHR_image_format_list = true,
@@ -779,7 +827,7 @@ radv_physical_device_get_supported_extensions(const struct radv_physical_device 
       .KHR_map_memory2 = true,
       .KHR_multiview = true,
       .KHR_performance_query = radv_perf_query_supported(pdev),
-      .KHR_pipeline_binary = true,
+      .KHR_pipeline_binary = !radv_bc250_task_strict_ext(pdev),
       .KHR_pipeline_executable_properties = true,
       .KHR_pipeline_library = true,
 #ifdef RADV_USE_WSI_PLATFORM
@@ -880,12 +928,12 @@ radv_physical_device_get_supported_extensions(const struct radv_physical_device 
       .EXT_depth_clip_control = true,
       .EXT_depth_clip_enable = true,
       .EXT_depth_range_unrestricted = true,
-      .EXT_descriptor_buffer = true,
-      .EXT_descriptor_heap = !(RADV_DEBUG(instance, NO_HEAP)),
+      .EXT_descriptor_buffer = radv_bc250_descriptor_buffer_exposed(pdev),
+      .EXT_descriptor_heap = !radv_bc250_task_strict_ext(pdev) && !(RADV_DEBUG(instance, NO_HEAP)),
       .EXT_descriptor_indexing = true,
       .EXT_device_address_binding_report = true,
       .EXT_device_fault = true,
-      .EXT_device_generated_commands = pdev->info.gfx_level >= GFX8,
+      .EXT_device_generated_commands = !radv_bc250_task_strict_ext(pdev) && pdev->info.gfx_level >= GFX8,
       .EXT_device_memory_report = true,
       .EXT_discard_rectangles = true,
 #ifdef VK_USE_PLATFORM_DISPLAY_KHR
@@ -901,7 +949,8 @@ radv_physical_device_get_supported_extensions(const struct radv_physical_device 
       .EXT_fragment_shader_interlock = radv_has_pops(pdev),
       .EXT_global_priority = true,
       .EXT_global_priority_query = true,
-      .EXT_graphics_pipeline_library = !pdev->use_llvm && !(RADV_DEBUG(instance, NO_GPL)),
+      .EXT_graphics_pipeline_library =
+         !radv_bc250_task_strict_ext(pdev) && !pdev->use_llvm && !(RADV_DEBUG(instance, NO_GPL)),
       .EXT_hdr_metadata = true,
       .EXT_host_image_copy = radv_host_image_copy_enabled(pdev),
       .EXT_host_query_reset = true,
@@ -922,7 +971,7 @@ radv_physical_device_get_supported_extensions(const struct radv_physical_device 
       .EXT_map_memory_placed = true,
       .EXT_memory_budget = true,
       .EXT_memory_priority = true,
-      .EXT_mesh_shader = radv_taskmesh_enabled(pdev),
+      .EXT_mesh_shader = radv_mesh_enabled(pdev),
       .EXT_multi_draw = true,
       .EXT_multisampled_render_to_single_sampled = radv_msrtss_enabled(pdev),
       .EXT_mutable_descriptor_type = true, /* Trivial promotion from VALVE. */
@@ -959,7 +1008,7 @@ radv_physical_device_get_supported_extensions(const struct radv_physical_device 
       .EXT_shader_float8 = pdev->info.gfx_level >= GFX11_7 && !pdev->use_llvm,
       .EXT_shader_image_atomic_int64 = true,
       .EXT_shader_module_identifier = true,
-      .EXT_shader_object = !pdev->use_llvm && !(RADV_DEBUG(instance, NO_ESO)),
+      .EXT_shader_object = !radv_bc250_task_strict_ext(pdev) && !pdev->use_llvm && !(RADV_DEBUG(instance, NO_ESO)),
       .EXT_shader_replicated_composites = true,
       .EXT_shader_split_barrier = radv_split_barrier_enabled(pdev),
       .EXT_shader_stencil_export = true,
@@ -1283,7 +1332,7 @@ radv_physical_device_get_features(const struct radv_physical_device *pdev, struc
       /* VK_KHR_fragment_shading_rate */
       .pipelineFragmentShadingRate = true,
       .primitiveFragmentShadingRate = true,
-      .attachmentFragmentShadingRate = radv_vrs_attachment_enabled(pdev),
+      .attachmentFragmentShadingRate = radv_vrs_attachment_enabled(pdev) || pdev->bc250_vrs_noop,
 
       /* VK_KHR_workgroup_memory_explicit_layout */
       .workgroupMemoryExplicitLayout = true,
@@ -1380,10 +1429,18 @@ radv_physical_device_get_features(const struct radv_physical_device *pdev, struc
       .minLod = true,
 
       /* VK_EXT_mesh_shader */
-      .meshShader = taskmesh_en,
-      .taskShader = taskmesh_en,
-      .multiviewMeshShader = taskmesh_en,
+      .meshShader = radv_mesh_enabled(pdev),
+      .taskShader = taskmesh_en || pdev->bc250_hybrid_task || pdev->bc250_native_task,
+      /* RADV_BC250_EXPOSE_MULTIVIEW_MESH: the Mesh lowering writes the layer per view and multiview
+       * Mesh shaders take the expanded route. vkd3d-proton turns D3D12 view instancing off when Mesh
+       * is exposed without multiview Mesh. */
+      .multiviewMeshShader = taskmesh_en ||
+         (pdev->bc250_native_mesh && debug_get_bool_option("RADV_BC250_EXPOSE_MULTIVIEW_MESH", false)),
       .primitiveFragmentShadingRateMeshShader = taskmesh_en,
+      /* BC250 counts MESH/TASK invocations through GDS snapshots (v8). */
+      /* Replay splitting does not yet preserve mesh-invocation queries. */
+      /* DirectMesh counts MESH/TASK invocations through GDS snapshots. This port keeps the feature
+       * off: our KMD is the single owner of GDS state and no witness measures it. */
       .meshShaderQueries = false,
 
       /* VK_EXT_depth_clip_control */
@@ -1419,7 +1476,7 @@ radv_physical_device_get_features(const struct radv_physical_device *pdev, struc
       .attachmentFeedbackLoopLayout = true,
 
       /* VK_EXT_graphics_pipeline_library */
-      .graphicsPipelineLibrary = true,
+      .graphicsPipelineLibrary = !radv_bc250_task_strict_ext(pdev),
 
       /* VK_EXT_extended_dynamic_state3 */
       .extendedDynamicState3TessellationDomainOrigin = true,
@@ -1455,10 +1512,10 @@ radv_physical_device_get_features(const struct radv_physical_device *pdev, struc
       .extendedDynamicState3ShadingRateImageEnable = false,
 
       /* VK_EXT_descriptor_buffer */
-      .descriptorBuffer = true,
-      .descriptorBufferCaptureReplay = true,
-      .descriptorBufferImageLayoutIgnored = true,
-      .descriptorBufferPushDescriptors = true,
+      .descriptorBuffer = radv_bc250_descriptor_buffer_exposed(pdev),
+      .descriptorBufferCaptureReplay = radv_bc250_descriptor_buffer_exposed(pdev),
+      .descriptorBufferImageLayoutIgnored = radv_bc250_descriptor_buffer_exposed(pdev),
+      .descriptorBufferPushDescriptors = radv_bc250_descriptor_buffer_exposed(pdev),
 
       /* VK_AMD_shader_early_and_late_fragment_tests */
       .shaderEarlyAndLateFragmentTests = true,
@@ -1531,7 +1588,7 @@ radv_physical_device_get_features(const struct radv_physical_device *pdev, struc
       .shaderSubgroupRotateClustered = true,
 
       /* VK_EXT_shader_object */
-      .shaderObject = true,
+      .shaderObject = !radv_bc250_task_strict_ext(pdev),
 
       /* VK_KHR_shader_expect_assume */
       .shaderExpectAssume = true,
@@ -1572,7 +1629,7 @@ radv_physical_device_get_features(const struct radv_physical_device *pdev, struc
       .videoMaintenance2 = true,
 
       /* VK_KHR_pipeline_binary */
-      .pipelineBinaries = true,
+      .pipelineBinaries = !radv_bc250_task_strict_ext(pdev),
 
       /* VK_KHR_shader_relaxed_extended_instruction */
       .shaderRelaxedExtendedInstruction = true,
@@ -1584,7 +1641,7 @@ radv_physical_device_get_features(const struct radv_physical_device *pdev, struc
       .depthClampControl = true,
 
       /* VK_EXT_device_generated_commands */
-      .deviceGeneratedCommands = true,
+      .deviceGeneratedCommands = !radv_bc250_task_strict_ext(pdev),
       .dynamicGeneratedPipelineLayout = true,
 
       /* VK_KHR_maintenance8 */
@@ -1692,8 +1749,8 @@ radv_physical_device_get_features(const struct radv_physical_device *pdev, struc
       .primitiveRestartIndex = true,
 
       /* VK_EXT_descriptor_heap */
-      .descriptorHeap = true,
-      .descriptorHeapCaptureReplay = true,
+      .descriptorHeap = !radv_bc250_task_strict_ext(pdev),
+      .descriptorHeapCaptureReplay = !radv_bc250_task_strict_ext(pdev),
 
       /* VK_KHR_shader_constant_data */
       .shaderConstantData = true,
@@ -1825,13 +1882,22 @@ radv_get_physical_device_properties(struct radv_physical_device *pdev)
    const bool enable_sparse = radv_sparse_enabled(pdev);
 
    VkShaderStageFlags taskmesh_stages =
-      radv_taskmesh_enabled(pdev) ? VK_SHADER_STAGE_MESH_BIT_EXT | VK_SHADER_STAGE_TASK_BIT_EXT : 0;
+      (radv_mesh_enabled(pdev) ? VK_SHADER_STAGE_MESH_BIT_EXT : 0) |
+      (radv_taskmesh_enabled(pdev) ? VK_SHADER_STAGE_TASK_BIT_EXT : 0);
+   /* VK_EXT_device_generated_commands: on a BC-250 a mesh draw token is only executable through
+    * radv_bc250_dgc, because the generic DGC prepare shader emits no mesh draw. With the route off
+    * (RADV_BC250_EXPOSE_DGC=0) the layout must be refused at the capability level, so neither stage is
+    * a supported DGC shader stage there. Every other device keeps taskmesh_stages as upstream. */
+   VkShaderStageFlags dgc_taskmesh_stages = taskmesh_stages;
+   if (pdev->bc250_native_mesh && !pdev->bc250_expose_dgc)
+      dgc_taskmesh_stages &= ~(VK_SHADER_STAGE_MESH_BIT_EXT | VK_SHADER_STAGE_TASK_BIT_EXT);
    VkShaderStageFlags rt_stages = radv_enable_rt(pdev) ? RADV_RT_STAGE_BITS : 0;
 
    bool accel_dot = pdev->info.compiler_info.has_accelerated_dot_product;
    bool gfx11plus = pdev->info.gfx_level >= GFX11;
 
-   VkExtent2D vrs_texel_extent = radv_vrs_attachment_enabled(pdev) ? (VkExtent2D){8, 8} : (VkExtent2D){0, 0};
+   VkExtent2D vrs_texel_extent =
+      radv_vrs_attachment_enabled(pdev) || pdev->bc250_vrs_noop ? (VkExtent2D){8, 8} : (VkExtent2D){0, 0};
    const int32_t max_viewport_size = pdev->info.gfx_level >= GFX12 ? 32768 : 16384;
 
    uint64_t os_page_size = 4096;
@@ -1915,7 +1981,12 @@ radv_get_physical_device_properties(struct radv_physical_device *pdev)
       .subTexelPrecisionBits = 8,
       .mipmapPrecisionBits = 8,
       .maxDrawIndexedIndexValue = UINT32_MAX,
-      .maxDrawIndirectCount = UINT32_MAX,
+      /* DirectMesh clamps this to 4096 under hybrid Task (its chunked Task producer). The clamp must
+       * not depend on the RADV_BC250_TASK_STRICT_EXT A/B switch: radv_bc250_draw_task_indirect() and
+       * radv_bc250_draw_split_indirect() refuse more than 4096 records on every mesh route, so an
+       * unclamped limit would promise a draw the driver then fails. The split route needs it without
+       * hybrid Task, hence bc250_native_mesh. These flags are only ever set on a GFX1013 board. */
+      .maxDrawIndirectCount = (pdev->bc250_native_mesh || pdev->bc250_hybrid_task) ? 4096 : UINT32_MAX,
       .maxSamplerLodBias = 16,
       .maxSamplerAnisotropy = 16,
       .maxViewports = MAX_VIEWPORTS,
@@ -2266,7 +2337,7 @@ radv_get_physical_device_properties(struct radv_physical_device *pdev)
       .graphicsPipelineLibraryIndependentInterpolationDecoration = true,
 
       /* VK_EXT_mesh_shader */
-      .maxTaskWorkGroupTotalCount = 4194304, /* 2^22 min required */
+      .maxTaskWorkGroupTotalCount = 4194304, /* Chunked BC250 TASK support. */
       .maxTaskWorkGroupCount = {65535, 65535, 65535},
       .maxTaskWorkGroupInvocations = 1024,
       .maxTaskWorkGroupSize = {1024, 1024, 1024},
@@ -2392,7 +2463,8 @@ radv_get_physical_device_properties(struct radv_physical_device *pdev)
       .supportedIndirectCommandsInputModes = VK_INDIRECT_COMMANDS_INPUT_MODE_VULKAN_INDEX_BUFFER_EXT |
                                              VK_INDIRECT_COMMANDS_INPUT_MODE_DXGI_INDEX_BUFFER_EXT,
       .supportedIndirectCommandsShaderStages =
-         VK_SHADER_STAGE_ALL_GRAPHICS | VK_SHADER_STAGE_COMPUTE_BIT | taskmesh_stages | rt_stages,
+         VK_SHADER_STAGE_ALL_GRAPHICS | VK_SHADER_STAGE_COMPUTE_BIT | dgc_taskmesh_stages | rt_stages |
+         (pdev->bc250_expose_dgc && pdev->bc250_hybrid_task ? VK_SHADER_STAGE_TASK_BIT_EXT : 0),
       .supportedIndirectCommandsShaderStagesPipelineBinding = VK_SHADER_STAGE_COMPUTE_BIT,
       .supportedIndirectCommandsShaderStagesShaderBinding = VK_SHADER_STAGE_COMPUTE_BIT,
       .deviceGeneratedCommandsTransformFeedback = true,
@@ -2537,6 +2609,10 @@ radv_get_physical_device_properties(struct radv_physical_device *pdev)
 
    /* VK_EXT_shader_object */
    radv_device_get_cache_uuid(pdev, p->shaderBinaryUUID);
+   /* RADV_BC250_VRS_NOOP compiles shading rate shaders differently: binaries are not interchangeable with
+    * the switch off (pipeline and shader caches already key on it through compiler_info.hw). */
+   if (pdev->bc250_vrs_noop)
+      p->shaderBinaryUUID[VK_UUID_SIZE - 1] ^= 0x01;
    p->shaderBinaryVersion = 1;
 }
 
@@ -2880,6 +2956,45 @@ radv_physical_device_try_create(struct radv_instance *instance, drmDevicePtr drm
       (pdev->info.gfx_level >= GFX10 && pdev->info.family != CHIP_NAVI14 && !(RADV_DEBUG(instance, NO_NGG))) ||
       pdev->info.gfx_level >= GFX11;
 
+   pdev->bc250_native_mesh = pdev->info.family == CHIP_GFX1013 && pdev->use_ngg &&
+                             !pdev->use_llvm && !RADV_DEBUG(instance, NO_MESH_SHADER);
+   pdev->bc250_native_task = pdev->bc250_native_mesh &&
+      radv_compute_queue_enabled(pdev) &&
+      (debug_get_bool_option("BC250_NATIVE_TASK_COMPILE", false) ||
+       debug_get_bool_option("RADV_BC250_NATIVE_TASK", false));
+   /* RADV_DIRECTMESH=1: DXVK (D3D9-11, no Mesh shaders) keeps GPL, shader objects and pipeline binaries
+    * instead of the preset's hybrid Task. An explicit RADV_BC250_HYBRID_TASK still applies. */
+   const bool bc250_dxvk = instance->vk.app_info.engine_name && !strcmp(instance->vk.app_info.engine_name, "DXVK");
+   pdev->bc250_hybrid_task = pdev->bc250_native_mesh &&
+      debug_get_bool_option("RADV_BC250_HYBRID_TASK", false) && !(bc250_dxvk && radv_bc250_directmesh_hybrid);
+   if (pdev->bc250_native_mesh && bc250_dxvk && radv_bc250_directmesh_hybrid && getenv("BC250_TRACE_COMPILE"))
+      fprintf(stderr, "radv/bc250: DXVK: hybrid Task off, GPL/shader objects/pipeline binaries kept\n");
+   /* On by default with native mesh: VK_EXT_device_generated_commands stays exposed as upstream, and
+    * a layout with a mesh draw must take radv_bc250_dgc, because the generic DGC shader emits no mesh
+    * draw. RADV_BC250_EXPOSE_DGC=0 turns the route off (a mesh DGC layout then fails closed). */
+   pdev->bc250_expose_dgc = pdev->bc250_native_mesh && !pdev->bc250_native_task &&
+      debug_get_bool_option("RADV_BC250_EXPOSE_DGC", true);
+   pdev->bc250_fast_binding = pdev->bc250_native_mesh &&
+      debug_get_bool_option("RADV_BC250_EXPOSE_FAST_BINDING", false);
+   /* GFX1013 has no ROTATE_PC_PTR or LOAD_PROVOKING_VTX; the fragment shader
+    * recovers the API vertex order from a position reference exported by the
+    * last pre-rasterization stage (radv_nir_bc250_lower_bary_rotation). On by
+    * default: without it vkd3d-proton hides mesh shaders (UE5 workaround). */
+   pdev->bc250_barycentrics = pdev->info.family == CHIP_GFX1013 &&
+      !debug_get_bool_option("RADV_BC250_NO_BARYCENTRICS", false);
+   /* NOT a capability this driver claims: GFX10.1 has no VRS hardware, so exposing
+    * VK_KHR_fragment_shading_rate with shading always 1x1 only makes vkd3d-proton report DX12
+    * Ultimate. DirectMesh has this on by default; here it is off and only an explicit
+    * RADV_BC250_VRS_NOOP=1 turns it on, for measurement. */
+   pdev->bc250_vrs_noop = pdev->info.family == CHIP_GFX1013 &&
+      debug_get_bool_option("RADV_BC250_VRS_NOOP", false);
+   if (pdev->bc250_native_mesh) {
+      assert(pdev->info.family == CHIP_GFX1013);
+      assert(pdev->info.gfx_level == GFX10);
+      assert(pdev->info.gfx_level < GFX11);
+      assert(!pdev->use_llvm);
+   }
+
    /* TODO: Investigate if NGG culling helps on GFX11. */
    pdev->use_ngg_culling = pdev->use_ngg &&
                            (pdev->info.gfx_level == GFX10 ||
@@ -2892,6 +3007,10 @@ radv_physical_device_try_create(struct radv_instance *instance, drmDevicePtr drm
    pdev->emulate_mesh_shader_queries = pdev->info.gfx_level == GFX10_3;
 
    /* PKT3_LOAD_SH_REG_INDEX is supported on GFX8+, but it hangs with compute queues until GFX10.3. */
+   /* Native mesh support does not make this packet safe on GFX10 ACE.
+    * Keep compute grid dimensions in memory, including hybrid task producers.
+    * A future native task ABI must be selected separately per shader stage.
+    */
    pdev->load_grid_size_from_user_sgpr = pdev->info.gfx_level >= GFX10_3;
 
    /* Determine the number of threads per wave for all stages. */
@@ -3127,7 +3246,7 @@ radv_get_physical_device_queue_family_properties(struct radv_physical_device *pd
       if (*pCount > idx) {
          *pQueueFamilyProperties[idx] = (VkQueueFamilyProperties){
             .queueFlags = compute_flags | radv_queue_family_protected_flag(pdev, RADV_QUEUE_COMPUTE),
-            .queueCount = pdev->info.ip[AMD_IP_COMPUTE].num_queues,
+            .queueCount = radv_bc250_compute_queue_count(pdev),
             .timestampValidBits = 64,
             .minImageTransferGranularity = (VkExtent3D){1, 1, 1},
          };
@@ -3459,6 +3578,25 @@ radv_get_memory_budget_properties(VkPhysicalDevice physicalDevice,
          memoryBudget->heapUsage[vram_vis_heap_idx] = vram_vis_internal_usage;
          memoryBudget->heapBudget[gtt_heap_idx] = gtt_free_space + gtt_internal_usage;
          memoryBudget->heapUsage[gtt_heap_idx] = gtt_internal_usage;
+
+         /* RADV_BC250_TRACE_MEM=1: budget snapshot at most every 2 s (see radv_device_memory.c). */
+         static int trace_budget = -1;
+         static uint64_t trace_last_ns;
+         if (trace_budget < 0)
+            trace_budget = debug_get_bool_option("RADV_BC250_TRACE_MEM", false);
+         if (unlikely(trace_budget) && os_time_get_nano() - trace_last_ns > 2000000000ull) {
+            trace_last_ns = os_time_get_nano();
+            fprintf(stderr,
+                    "BC250 MEM budget heap%u(VRAM-vis) size=%.0fMiB budget=%.0fMiB usage=%.0fMiB | heap%u(GTT) size=%.0fMiB "
+                    "budget=%.0fMiB usage=%.0fMiB | system vram_vis=%.0fMiB gtt=%.0fMiB | internal vram_vis=%.0fMiB "
+                    "vram=%.0fMiB gtt=%.0fMiB\n",
+                    vram_vis_heap_idx, vram_vis_heap_size / 1048576.0,
+                    memoryBudget->heapBudget[vram_vis_heap_idx] / 1048576.0, vram_vis_internal_usage / 1048576.0,
+                    gtt_heap_idx, gtt_heap_size / 1048576.0, memoryBudget->heapBudget[gtt_heap_idx] / 1048576.0,
+                    gtt_internal_usage / 1048576.0, heap_info.vram_vis_usage / 1048576.0,
+                    heap_info.gtt_usage / 1048576.0, heap_info.allocated_vram_vis / 1048576.0,
+                    heap_info.allocated_vram / 1048576.0, heap_info.allocated_gtt / 1048576.0);
+         }
       }
    } else {
       if (pdev->info.all_vram_visible && pdev->drirc.debug.hide_rebar_on_dgpu) {

@@ -21,6 +21,7 @@
 #include "radv_entrypoints.h"
 #include "radv_instance.h"
 #include "radv_queue.h"
+#include "radv_bc250.h"
 #include "radv_wsi.h"
 
 #include "util/bitset.h"
@@ -342,6 +343,10 @@ radv_CreateInstance(const VkInstanceCreateInfo *pCreateInfo, const VkAllocationC
 
    if (!pAllocator)
       pAllocator = vk_default_allocator();
+
+   /* DirectMesh (on with a BC-250 unless RADV_DIRECTMESH=0, or RADV_DIRECTMESH=1): BC-250 direct Mesh settings,
+    * before any option is read. */
+   radv_bc250_directmesh_env();
 
    instance = vk_zalloc(pAllocator, sizeof(*instance), 8, VK_SYSTEM_ALLOCATION_SCOPE_INSTANCE);
    if (!instance)

@@ -34,7 +34,10 @@ enum radv_ud_index {
    AC_UD_EPILOG_PC = 17,
    AC_UD_DYNAMIC_DESCRIPTORS = 18,
    AC_UD_DYNAMIC_DESCRIPTORS_OFFSET_ADDR = 19,
-   AC_UD_SHADER_START = 20,
+   /* RADV_BC250_MESH_MERGE option A: low 32 bits of the driver's prepped
+    * indirect records (0 = the grid SGPRs hold the application's grid). */
+   AC_UD_MS_BC250_DIMS_VA = 20,
+   AC_UD_SHADER_START = 21,
    AC_UD_VS_VERTEX_BUFFERS = AC_UD_SHADER_START,
    AC_UD_VS_BASE_VERTEX_START_INSTANCE,
    AC_UD_VS_PROLOG_INPUTS,
@@ -87,6 +90,9 @@ struct radv_shader_args {
    struct ac_arg task_state;
    /* User data 2/3 (0/1 on GFX11+). same as ring_offsets but for task shaders. */
    struct ac_arg task_ring_offsets;
+
+   /* RADV_BC250_MESH_MERGE option A (AC_UD_MS_BC250_DIMS_VA). */
+   struct ac_arg bc250_merge_dims;
 
    /* Compute shaders */
    struct ac_arg cs_state;
