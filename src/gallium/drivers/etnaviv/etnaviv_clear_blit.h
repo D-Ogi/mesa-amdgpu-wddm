@@ -42,7 +42,8 @@ etna_copy_resource(struct pipe_context *pctx, struct pipe_resource *dst,
 void
 etna_copy_resource_box(struct pipe_context *pctx, struct pipe_resource *dst,
                        struct pipe_resource *src, int dst_level, int src_level,
-                       struct pipe_box *box, bool rb_swap);
+                       unsigned dstx, unsigned dsty, unsigned dstz,
+                       const struct pipe_box *src_box, bool rb_swap);
 
 void
 etna_blit_save_state(struct etna_context *ctx, bool render_cond);

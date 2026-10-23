@@ -193,7 +193,10 @@ init_buffer(struct d3d12_screen *screen,
 
    buf_desc.alignment = D3D12_TEXTURE_DATA_PLACEMENT_ALIGNMENT;
    res->dxgi_format = DXGI_FORMAT_UNKNOWN;
-   buf = bufmgr->create_buffer(bufmgr, templ->width0, &buf_desc);
+   do {
+      buf = bufmgr->create_buffer(bufmgr, templ->width0, &buf_desc);
+   } while (!buf && d3d12_screen_reclaim_one(screen));
+
    if (!buf)
       return false;
    res->bo = d3d12_bo_wrap_buffer(screen, buf);

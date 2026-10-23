@@ -1564,6 +1564,8 @@ radv_wddm2_cs_init_functions(struct radv_wddm2_winsys *ws)
    ws->base.cs_unchain = radv_winsys_cs_unchain;
    ws->base.cs_destroy = radv_wddm2_cs_destroy;
    ws->base.cs_grow = radv_winsys_cs_grow;
+   ws->base.cs_set_last_cp_dma_header = radv_winsys_cs_set_last_cp_dma_header;
+   ws->base.cs_get_last_cp_dma_header = radv_winsys_cs_get_last_cp_dma_header;
    ws->base.cs_reset = radv_wddm2_cs_reset;
    ws->base.cs_add_buffer = radv_wddm2_cs_add_buffer;
    ws->base.cs_submit = radv_wddm2_cs_submit;

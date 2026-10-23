@@ -23,10 +23,11 @@ lower_ia(nir_builder *b, nir_intrinsic_instr *intrin,
 
    /* Framebuffer fetches are moved to output loads if they are not
     * depth/stencil nor multisample. */
-   if (nir_intrinsic_image_dim(intrin) == GLSL_SAMPLER_DIM_SUBPASS) {
+   if (nir_intrinsic_image_dim(intrin) == GLSL_SAMPLER_DIM_SUBPASS &&
+       nir_src_is_const(intrin->src[3])) {
       b->cursor = nir_before_instr(&intrin->instr);
-      nir_deref_instr *deref = nir_src_as_deref(intrin->src[0]);
-      uint32_t ia_index = deref->var->data.index;
+      uint32_t ia_index =
+         nir_intrinsic_base(intrin) + nir_src_as_uint(intrin->src[3]);
 
       /* Metal does not allow depth/stencil loads from the framebuffer */
       if (ial->depth_att != ia_index && ial->stencil_att != ia_index) {
@@ -70,7 +71,7 @@ static bool
 lower_input_attachment(struct nir_builder *b, nir_intrinsic_instr *intrin,
                        void *data)
 {
-   if (intrin->intrinsic != nir_intrinsic_image_deref_load)
+   if (intrin->intrinsic != nir_intrinsic_image_deref_input_attachment_load)
       return false;
 
    return lower_ia(b, intrin, (const struct lower_ia_state *)data);

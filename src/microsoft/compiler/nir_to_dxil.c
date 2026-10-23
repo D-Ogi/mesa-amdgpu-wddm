@@ -113,8 +113,6 @@ nir_options = {
    .lower_uadd_sat = true,
    .lower_usub_sat = true,
    .lower_iadd_sat = true,
-   .lower_uadd_carry = true,
-   .lower_usub_borrow = true,
    .lower_mul_high = true,
    .lower_pack_half_2x16 = true,
    .lower_pack_unorm_4x8 = true,
@@ -5565,12 +5563,14 @@ emit_tex(struct ntd_context *ctx, nir_tex_instr *instr)
          break;
 
       case nir_tex_src_texture_offset:
-         params.tex = emit_createhandle_call_dynamic(ctx, DXIL_RESOURCE_CLASS_SRV,
-            0, instr->texture_index,
-            dxil_emit_binop(&ctx->mod, DXIL_BINOP_ADD,
-               get_src(ctx, &instr->src[i].src, 0, nir_type_uint),
-               dxil_module_get_int32_const(&ctx->mod, instr->texture_index), 0),
-            instr->texture_non_uniform);
+         if (!instr->input_attachment_index) {
+            params.tex = emit_createhandle_call_dynamic(ctx, DXIL_RESOURCE_CLASS_SRV,
+               0, instr->texture_index,
+               dxil_emit_binop(&ctx->mod, DXIL_BINOP_ADD,
+                  get_src(ctx, &instr->src[i].src, 0, nir_type_uint),
+                  dxil_module_get_int32_const(&ctx->mod, instr->texture_index), 0),
+               instr->texture_non_uniform);
+         }
          break;
 
       case nir_tex_src_sampler_offset:

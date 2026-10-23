@@ -602,7 +602,6 @@ static void r600_init_screen_caps(struct r600_screen *rscreen)
 	caps->max_varyings = 32;
 
 	caps->texture_border_color_quirk = PIPE_QUIRK_TEXTURE_BORDER_COLOR_SWIZZLE_R600;
-	caps->endianness = PIPE_ENDIAN_LITTLE;
 
 	caps->device_type = rscreen->b.info.has_dedicated_vram
 	   ? PIPE_DEVICE_TYPE_DISCRETE_GPU

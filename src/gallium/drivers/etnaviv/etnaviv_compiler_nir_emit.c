@@ -179,7 +179,7 @@ etna_emit_alu(struct etna_compile *c, nir_alu_instr *alu, struct etna_inst_dst d
    case nir_op_flog2:
    case nir_op_fsin:
    case nir_op_fcos:
-      if (c->specs->has_new_transcendentals)
+      if (etna_core_has_feature(c->info, ETNA_FEATURE_HAS_FAST_TRANSCENDENTALS))
          inst.rounding = ISA_ROUNDING_RTZ;
       FALLTHROUGH;
    case nir_op_frsq:

@@ -38,6 +38,8 @@
 #include "util/simple_mtx.h"
 #include "util/u_queue.h"
 #include "util/u_upload_mgr.h"
+#include "vk_texcompress_astc.h"
+#include "vk_texcompress_etc2.h"
 
 #include "compiler/shader_enums.h"
 #include "pipe/p_screen.h"
@@ -164,9 +166,9 @@ struct lvp_physical_device {
 
    struct pipe_loader_device *pld;
    struct pipe_screen *pscreen;
+   struct pipe_screen *drv_pscreen;
    const nir_shader_compiler_options *drv_options[LVP_SHADER_STAGES];
    uint32_t max_images;
-   bool snorm_blend;
 
    struct vk_sync_timeline_type sync_timeline_type;
    const struct vk_sync_type *sync_types[3];
@@ -219,6 +221,7 @@ struct lvp_device {
    struct lvp_queue queue[LVP_NUM_QUEUES];
    uint32_t queue_count;
    struct pipe_screen *pscreen;
+   struct pipe_screen *drv_pscreen;
    void *noop_fs;
    simple_mtx_t bda_lock;
    struct hash_table bda;
@@ -302,7 +305,27 @@ struct lvp_image {
    bool disjoint;
    uint8_t plane_count;
    struct lvp_image_plane planes[3];
+   VkFormat emu_plane_format;
+   struct lvp_image_plane emu_plane;
 };
+
+static inline bool
+lvp_is_compressed_format_emulated(VkFormat format) {
+   const struct util_format_description *desc =
+      vk_format_description(format);
+
+   switch (desc->layout) {
+   case UTIL_FORMAT_LAYOUT_ASTC:
+      return vk_texcompress_astc_emulation_format(format) != VK_FORMAT_UNDEFINED;
+   case UTIL_FORMAT_LAYOUT_ETC:
+   case UTIL_FORMAT_LAYOUT_S3TC:
+   case UTIL_FORMAT_LAYOUT_RGTC:
+   case UTIL_FORMAT_LAYOUT_BPTC:
+      return true;
+   default:
+      return false;
+   }
+}
 
 struct lvp_image_view {
    struct vk_image_view vk;
@@ -777,6 +800,48 @@ lvp_vk_format_to_pipe_format(VkFormat format)
    }
 }
 
+static inline VkFormat
+lvp_texcompress_bc_emulation_format(VkFormat format)
+{
+   const struct util_format_description *desc = vk_format_description(format);
+
+   /* BC6H needs float16 for HDR data. The other BC formats decompress to raw
+    * texel values, so sRGB formats use an SRGB emulation format and the sRGB
+    * decode happens at sampling.
+    */
+
+   if (format == VK_FORMAT_BC6H_UFLOAT_BLOCK ||
+       format == VK_FORMAT_BC6H_SFLOAT_BLOCK)
+      return VK_FORMAT_R16G16B16A16_SFLOAT;
+
+   if (desc->is_snorm)
+      return VK_FORMAT_R8G8B8A8_SNORM;
+
+   return vk_format_is_srgb(format) ? VK_FORMAT_R8G8B8A8_SRGB :
+                                      VK_FORMAT_R8G8B8A8_UNORM;
+}
+
+static inline VkFormat
+lvp_texcompress_vk_format_to_emu_plane_format(VkFormat format)
+{
+   const struct util_format_description *desc =
+      vk_format_description(format);
+
+   switch (desc->layout) {
+   case UTIL_FORMAT_LAYOUT_ASTC:
+      return vk_texcompress_astc_emulation_format(format);
+   case UTIL_FORMAT_LAYOUT_ETC:
+      return vk_texcompress_etc2_emulation_format(format);
+   case UTIL_FORMAT_LAYOUT_S3TC:
+   case UTIL_FORMAT_LAYOUT_RGTC:
+   case UTIL_FORMAT_LAYOUT_BPTC:
+      return lvp_texcompress_bc_emulation_format(format);
+   default:
+      UNREACHABLE("Unsupported compressed texture format");
+      return VK_FORMAT_UNDEFINED;
+   }
+}
+
 void
 lvp_nir_lower_blend(nir_shader *nir, const nir_lower_blend_options *opts);
 
@@ -901,6 +966,14 @@ lvp_image_copy_depth_box(uint8_t *dst,
                enum pipe_format src_format,
                int src_stride, uint64_t src_slice_stride,
                unsigned src_x, unsigned src_y, unsigned src_z);
+
+void
+lvp_unpack_texcompress(uint8_t *dst_row,
+                       unsigned dst_stride,
+                       const uint8_t *src_row,
+                       unsigned src_stride,
+                       const VkExtent3D *extent,
+                       enum pipe_format format);
 
 #ifdef __cplusplus
 }

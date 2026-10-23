@@ -396,7 +396,7 @@ impl fmt::Display for ResHandle {
 /// half of a register, it is swizzled accordingly.  For 16-bit destinations,
 /// the instruction itself continues to operate 32 bits wide and the register
 /// write is simply masked.
-#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum RegRange {
     Byte0,
     Byte1,

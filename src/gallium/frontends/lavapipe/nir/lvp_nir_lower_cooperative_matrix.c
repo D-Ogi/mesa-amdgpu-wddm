@@ -475,8 +475,8 @@ static bool
 lower_cmat_reduce_finish_call(nir_builder *b, nir_cmat_call_instr *call)
 {
    nir_deref_instr *dst_deref = nir_src_as_deref(call->params[0]);
-   nir_deref_instr *src0_deref = nir_src_as_deref(call->params[1]);
-   struct glsl_cmat_description src_desc = *glsl_get_cmat_description(src0_deref->type);
+   ASSERTED nir_deref_instr *src0_deref = nir_src_as_deref(call->params[1]);
+   ASSERTED struct glsl_cmat_description src_desc = *glsl_get_cmat_description(src0_deref->type);
    nir_function *fnptr = call->callee;
    nir_cmat_reduce reduce = nir_cmat_call_reduce_flags(call);
    nir_def *src0 = load_cmat_src(b, call->params[1]);
@@ -524,8 +524,8 @@ static bool
 lower_cmat_reduce_call(nir_builder *b, nir_cmat_call_instr *call)
 {
    nir_deref_instr *dst_deref = nir_src_as_deref(call->params[0]);
-   nir_deref_instr *src_deref = nir_src_as_deref(call->params[1]);
-   struct glsl_cmat_description src_desc = *glsl_get_cmat_description(src_deref->type);
+   ASSERTED nir_deref_instr *src_deref = nir_src_as_deref(call->params[1]);
+   ASSERTED struct glsl_cmat_description src_desc = *glsl_get_cmat_description(src_deref->type);
    nir_cmat_reduce reduce = nir_cmat_call_reduce_flags(call);
    nir_def *src = load_cmat_src(b, call->params[1]);
    nir_function *fnptr = call->callee;
@@ -583,8 +583,8 @@ static bool
 lower_cmat_reduce_2x2_call(nir_builder *b, nir_cmat_call_instr *call)
 {
    nir_deref_instr *dst_deref = nir_src_as_deref(call->params[0]);
-   nir_deref_instr *src_deref = nir_src_as_deref(call->params[1]);
-   struct glsl_cmat_description src_desc = *glsl_get_cmat_description(src_deref->type);
+   ASSERTED nir_deref_instr *src_deref = nir_src_as_deref(call->params[1]);
+   ASSERTED struct glsl_cmat_description src_desc = *glsl_get_cmat_description(src_deref->type);
    nir_function *fnptr = call->callee;
    nir_def *lane_id = nir_load_subgroup_invocation(b);
    assert(src_desc.use == GLSL_CMAT_USE_ACCUMULATOR);

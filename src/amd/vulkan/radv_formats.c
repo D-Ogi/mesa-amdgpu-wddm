@@ -669,10 +669,8 @@ radv_get_modifier_flags(struct radv_physical_device *pdev, VkFormat format, uint
    features &= ~VK_FORMAT_FEATURE_2_COPY_IMAGE_INDIRECT_DST_BIT_KHR;
 
    if (!ac_modifier_supports_video(&pdev->info, modifier))
-      features &= ~(VK_FORMAT_FEATURE_2_VIDEO_DECODE_OUTPUT_BIT_KHR |
-                    VK_FORMAT_FEATURE_2_VIDEO_DECODE_DPB_BIT_KHR |
-                    VK_FORMAT_FEATURE_2_VIDEO_ENCODE_INPUT_BIT_KHR |
-                    VK_FORMAT_FEATURE_2_VIDEO_ENCODE_DPB_BIT_KHR |
+      features &= ~(VK_FORMAT_FEATURE_2_VIDEO_DECODE_OUTPUT_BIT_KHR | VK_FORMAT_FEATURE_2_VIDEO_DECODE_DPB_BIT_KHR |
+                    VK_FORMAT_FEATURE_2_VIDEO_ENCODE_INPUT_BIT_KHR | VK_FORMAT_FEATURE_2_VIDEO_ENCODE_DPB_BIT_KHR |
                     VK_FORMAT_FEATURE_2_VIDEO_ENCODE_QUANTIZATION_DELTA_MAP_BIT_KHR);
 
    if (ac_modifier_has_dcc(modifier)) {
@@ -867,22 +865,15 @@ radv_check_modifier_support(struct radv_physical_device *pdev, const VkPhysicalD
          return VK_ERROR_FORMAT_NOT_SUPPORTED;
 
       bool need_dcc_sign_reinterpret = false;
-      bool ret = radv_are_formats_dcc_compatible(pdev, info->pNext, format,
-                                                 info->flags, &need_dcc_sign_reinterpret);
+      bool ret = radv_are_formats_dcc_compatible(pdev, info->pNext, format, info->flags, &need_dcc_sign_reinterpret);
       if (!ret && !need_dcc_sign_reinterpret)
          return VK_ERROR_FORMAT_NOT_SUPPORTED;
    }
 
    const bool video =
       image_usage & (VK_IMAGE_USAGE_2_VIDEO_DECODE_DST_BIT_KHR | VK_IMAGE_USAGE_2_VIDEO_ENCODE_SRC_BIT_KHR);
-   if (video) {
-      if (!ac_modifier_supports_video(&pdev->info, modifier))
-         return VK_ERROR_FORMAT_NOT_SUPPORTED;
-
-      /* Decode DPB and output coincide (tier3) requires tiling. */
-      if (image_usage & VK_IMAGE_USAGE_2_VIDEO_DECODE_DPB_BIT_KHR && modifier == DRM_FORMAT_MOD_LINEAR)
-         return VK_ERROR_FORMAT_NOT_SUPPORTED;
-   }
+   if (video && !ac_modifier_supports_video(&pdev->info, modifier))
+      return VK_ERROR_FORMAT_NOT_SUPPORTED;
 
    /* QP map needs linear. */
    if (image_usage & VK_IMAGE_USAGE_2_VIDEO_ENCODE_QUANTIZATION_DELTA_MAP_BIT_KHR && modifier != DRM_FORMAT_MOD_LINEAR)
@@ -1014,7 +1005,8 @@ radv_get_image_format_properties(struct radv_physical_device *pdev, const VkPhys
    if (tiling == VK_IMAGE_TILING_OPTIMAL && info->type == VK_IMAGE_TYPE_2D &&
        (format_feature_flags &
         (VK_FORMAT_FEATURE_2_COLOR_ATTACHMENT_BIT | VK_FORMAT_FEATURE_2_DEPTH_STENCIL_ATTACHMENT_BIT)) &&
-       !(image_flags & VK_IMAGE_CREATE_2_CUBE_COMPATIBLE_BIT_KHR) &&
+       (!(image_flags & VK_IMAGE_CREATE_2_CUBE_COMPATIBLE_BIT_KHR) ||
+        (image_flags & VK_IMAGE_CREATE_2_MULTISAMPLED_RENDER_TO_SINGLE_SAMPLED_BIT_EXT)) &&
        !(image_usage & VK_IMAGE_USAGE_2_FRAGMENT_SHADING_RATE_ATTACHMENT_BIT_KHR)) {
       sampleCounts |= VK_SAMPLE_COUNT_2_BIT | VK_SAMPLE_COUNT_4_BIT | VK_SAMPLE_COUNT_8_BIT;
    }

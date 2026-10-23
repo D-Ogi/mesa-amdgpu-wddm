@@ -350,6 +350,12 @@ radv_dynamic_state_mask(VkDynamicState state)
     RADV_DYNAMIC_COLOR_WRITE_MASK | RADV_DYNAMIC_COLOR_BLEND_ENABLE | RADV_DYNAMIC_COLOR_BLEND_EQUATION |              \
     RADV_DYNAMIC_BLEND_CONSTANTS)
 
+#define RADV_DYNAMIC_DS_STATES                                                                                         \
+   (RADV_DYNAMIC_DEPTH_BOUNDS | RADV_DYNAMIC_STENCIL_COMPARE_MASK | RADV_DYNAMIC_STENCIL_WRITE_MASK |                  \
+    RADV_DYNAMIC_STENCIL_REFERENCE | RADV_DYNAMIC_DEPTH_TEST_ENABLE | RADV_DYNAMIC_DEPTH_WRITE_ENABLE |                \
+    RADV_DYNAMIC_DEPTH_COMPARE_OP | RADV_DYNAMIC_DEPTH_BOUNDS_TEST_ENABLE | RADV_DYNAMIC_STENCIL_TEST_ENABLE |         \
+    RADV_DYNAMIC_STENCIL_OP)
+
 static bool
 radv_pipeline_is_blend_enabled(const struct radv_graphics_pipeline *pipeline, const struct vk_color_blend_state *cb)
 {
@@ -437,6 +443,9 @@ radv_pipeline_needed_dynamic_state(const struct radv_device *device, const struc
 
    if (!radv_pipeline_has_color_attachments(state->rp))
       states &= ~RADV_DYNAMIC_CB_STATES;
+
+   if (!radv_pipeline_has_ds_attachments(state->rp))
+      states &= ~RADV_DYNAMIC_DS_STATES;
 
    return states;
 }
@@ -974,70 +983,56 @@ radv_pipeline_init_dynamic_state(const struct radv_device *device, struct radv_g
    }
 
    /* Depth stencil. */
-   /* If there is no depthstencil attachment, then don't read
-    * pDepthStencilState. The Vulkan spec states that pDepthStencilState may
-    * be NULL in this case. Even if pDepthStencilState is non-NULL, there is
-    * no need to override the depthstencil defaults in
-    * radv_pipeline::dynamic_state when there is no depthstencil attachment.
-    *
-    * Section 9.2 of the Vulkan 1.0.15 spec says:
-    *
-    *    pDepthStencilState is [...] NULL if the pipeline has rasterization
-    *    disabled or if the subpass of the render pass the pipeline is created
-    *    against does not use a depth/stencil attachment.
-    */
-   if (needed_states && radv_pipeline_has_ds_attachments(state->rp)) {
-      if (states & RADV_DYNAMIC_DEPTH_BOUNDS) {
-         dynamic->vk.ds.depth.bounds_test.min = state->ds->depth.bounds_test.min;
-         dynamic->vk.ds.depth.bounds_test.max = state->ds->depth.bounds_test.max;
-      }
+   if (states & RADV_DYNAMIC_DEPTH_BOUNDS) {
+      dynamic->vk.ds.depth.bounds_test.min = state->ds->depth.bounds_test.min;
+      dynamic->vk.ds.depth.bounds_test.max = state->ds->depth.bounds_test.max;
+   }
 
-      if (states & RADV_DYNAMIC_STENCIL_COMPARE_MASK) {
-         dynamic->vk.ds.stencil.front.compare_mask = state->ds->stencil.front.compare_mask;
-         dynamic->vk.ds.stencil.back.compare_mask = state->ds->stencil.back.compare_mask;
-      }
+   if (states & RADV_DYNAMIC_STENCIL_COMPARE_MASK) {
+      dynamic->vk.ds.stencil.front.compare_mask = state->ds->stencil.front.compare_mask;
+      dynamic->vk.ds.stencil.back.compare_mask = state->ds->stencil.back.compare_mask;
+   }
 
-      if (states & RADV_DYNAMIC_STENCIL_WRITE_MASK) {
-         dynamic->vk.ds.stencil.front.write_mask = state->ds->stencil.front.write_mask;
-         dynamic->vk.ds.stencil.back.write_mask = state->ds->stencil.back.write_mask;
-      }
+   if (states & RADV_DYNAMIC_STENCIL_WRITE_MASK) {
+      dynamic->vk.ds.stencil.front.write_mask = state->ds->stencil.front.write_mask;
+      dynamic->vk.ds.stencil.back.write_mask = state->ds->stencil.back.write_mask;
+   }
 
-      if (states & RADV_DYNAMIC_STENCIL_REFERENCE) {
-         dynamic->vk.ds.stencil.front.reference = state->ds->stencil.front.reference;
-         dynamic->vk.ds.stencil.back.reference = state->ds->stencil.back.reference;
-      }
+   if (states & RADV_DYNAMIC_STENCIL_REFERENCE) {
+      dynamic->vk.ds.stencil.front.reference = state->ds->stencil.front.reference;
+      dynamic->vk.ds.stencil.back.reference = state->ds->stencil.back.reference;
+   }
 
-      if (states & RADV_DYNAMIC_DEPTH_TEST_ENABLE) {
-         dynamic->vk.ds.depth.test_enable = state->ds->depth.test_enable;
-      }
+   if (states & RADV_DYNAMIC_DEPTH_TEST_ENABLE) {
+      dynamic->vk.ds.depth.test_enable = state->ds->depth.test_enable;
+   }
 
-      if (states & RADV_DYNAMIC_DEPTH_WRITE_ENABLE) {
-         dynamic->vk.ds.depth.write_enable = state->ds->depth.write_enable;
-      }
+   if (states & RADV_DYNAMIC_DEPTH_WRITE_ENABLE) {
+      dynamic->vk.ds.depth.write_enable = state->ds->depth.write_enable;
+   }
 
-      if (states & RADV_DYNAMIC_DEPTH_COMPARE_OP) {
-         dynamic->vk.ds.depth.compare_op = state->ds->depth.compare_op;
-      }
+   if (states & RADV_DYNAMIC_DEPTH_COMPARE_OP) {
+      dynamic->vk.ds.depth.compare_op = state->ds->depth.compare_op;
+   }
 
-      if (states & RADV_DYNAMIC_DEPTH_BOUNDS_TEST_ENABLE) {
-         dynamic->vk.ds.depth.bounds_test.enable = state->ds->depth.bounds_test.enable;
-      }
+   if (states & RADV_DYNAMIC_DEPTH_BOUNDS_TEST_ENABLE) {
+      dynamic->vk.ds.depth.bounds_test.enable = state->ds->depth.bounds_test.enable;
+   }
 
-      if (states & RADV_DYNAMIC_STENCIL_TEST_ENABLE) {
-         dynamic->vk.ds.stencil.test_enable = state->ds->stencil.test_enable;
-      }
+   if (states & RADV_DYNAMIC_STENCIL_TEST_ENABLE) {
+      dynamic->vk.ds.stencil.test_enable = state->ds->stencil.test_enable;
+   }
 
-      if (states & RADV_DYNAMIC_STENCIL_OP) {
-         dynamic->vk.ds.stencil.front.op.compare = state->ds->stencil.front.op.compare;
-         dynamic->vk.ds.stencil.front.op.fail = radv_translate_stencil_op(state->ds->stencil.front.op.fail);
-         dynamic->vk.ds.stencil.front.op.pass = radv_translate_stencil_op(state->ds->stencil.front.op.pass);
-         dynamic->vk.ds.stencil.front.op.depth_fail = radv_translate_stencil_op(state->ds->stencil.front.op.depth_fail);
+   if (states & RADV_DYNAMIC_STENCIL_OP) {
+      dynamic->vk.ds.stencil.front.op.compare = state->ds->stencil.front.op.compare;
+      dynamic->vk.ds.stencil.front.op.fail = radv_translate_stencil_op(state->ds->stencil.front.op.fail);
+      dynamic->vk.ds.stencil.front.op.pass = radv_translate_stencil_op(state->ds->stencil.front.op.pass);
+      dynamic->vk.ds.stencil.front.op.depth_fail = radv_translate_stencil_op(state->ds->stencil.front.op.depth_fail);
 
-         dynamic->vk.ds.stencil.back.op.compare = state->ds->stencil.back.op.compare;
-         dynamic->vk.ds.stencil.back.op.fail = radv_translate_stencil_op(state->ds->stencil.back.op.fail);
-         dynamic->vk.ds.stencil.back.op.pass = radv_translate_stencil_op(state->ds->stencil.back.op.pass);
-         dynamic->vk.ds.stencil.back.op.depth_fail = radv_translate_stencil_op(state->ds->stencil.back.op.depth_fail);
-      }
+      dynamic->vk.ds.stencil.back.op.compare = state->ds->stencil.back.op.compare;
+      dynamic->vk.ds.stencil.back.op.fail = radv_translate_stencil_op(state->ds->stencil.back.op.fail);
+      dynamic->vk.ds.stencil.back.op.pass = radv_translate_stencil_op(state->ds->stencil.back.op.pass);
+      dynamic->vk.ds.stencil.back.op.depth_fail = radv_translate_stencil_op(state->ds->stencil.back.op.depth_fail);
    }
 
    /* Color blend. */
@@ -2114,7 +2109,8 @@ radv_create_gs_copy_shader(const struct radv_compiler_info *compiler_info, struc
                                                        .wave_size = 64,
                                                        .workgroup_size = 64,
                                                        .use_llvm = compiler_info->key.use_llvm});
-   NIR_PASS(_, nir, radv_nir_lower_abi, compiler_info->ac->gfx_level, &gs_copy_stage, gfx_state, compiler_info->hw.address32_hi);
+   NIR_PASS(_, nir, radv_nir_lower_abi, compiler_info->ac->gfx_level, &gs_copy_stage, gfx_state,
+            compiler_info->hw.address32_hi);
 
    NIR_PASS(_, nir, ac_nir_lower_global_access, compiler_info->ac->gfx_level);
    NIR_PASS(_, nir, nir_lower_int64);
@@ -2635,7 +2631,9 @@ radv_graphics_shaders_compile(const struct radv_compiler_info *compiler_info, st
       NIR_PASS(_, stages[MESA_SHADER_FRAGMENT].nir, nir_opt_dce);
 
       const bool vrs_may_be_enabled =
-         gfx_state->vrs_may_be_enabled && !stages[MESA_SHADER_FRAGMENT].nir->info.fs.sample_mask_in_declared;
+         gfx_state->vrs_may_be_enabled && !(stages[MESA_SHADER_FRAGMENT].nir->info.fs.sample_mask_in_declared ||
+                                            stages[MESA_SHADER_FRAGMENT].nir->info.fs.sample_mask_out_declared);
+
       NIR_PASS(_, stages[MESA_SHADER_FRAGMENT].nir, radv_nir_lower_opt_fs_frag_pos, vrs_may_be_enabled,
                gfx_state->ms.sample_shading_enable || stages[MESA_SHADER_FRAGMENT].nir->info.fs.uses_sample_shading);
 
@@ -2887,10 +2885,9 @@ radv_generate_graphics_pipeline_state(struct radv_device *device, const VkGraphi
       }
    }
 
-   result = vk_graphics_pipeline_state_fill(&device->vk, &gfx_state->vk, pCreateInfo,
-                                            NULL /* driver_mv */, NULL /* driver_rp */,
-                                            0, NULL, NULL,
-                                            VK_SYSTEM_ALLOCATION_SCOPE_OBJECT, &gfx_state->vk_data);
+   result = vk_graphics_pipeline_state_fill(&device->vk, &gfx_state->vk, pCreateInfo, NULL /* driver_mv */,
+                                            NULL /* driver_rp */, 0, NULL, NULL, VK_SYSTEM_ALLOCATION_SCOPE_OBJECT,
+                                            &gfx_state->vk_data);
    if (result != VK_SUCCESS)
       goto fail;
 
@@ -3309,6 +3306,7 @@ radv_graphics_pipeline_init(struct radv_graphics_pipeline *pipeline, struct radv
 
    pipeline->uses_out_of_order_rast = gfx_state.vk.rs->rasterization_order_amd == VK_RASTERIZATION_ORDER_RELAXED_AMD;
    pipeline->uses_vrs_attachment = radv_pipeline_uses_vrs_attachment(pipeline, &gfx_state.vk);
+   pipeline->ignore_ds_state = gfx_state.vk.rp && !radv_pipeline_has_ds_attachments(gfx_state.vk.rp);
 
    uint32_t push_constant_size = 0;
    for (uint32_t i = 0; i < MESA_VULKAN_SHADER_STAGES; i++) {
@@ -3414,9 +3412,8 @@ radv_graphics_lib_pipeline_init(struct radv_graphics_lib_pipeline *pipeline, str
       }
    }
 
-   result = vk_graphics_pipeline_state_fill(&device->vk, state, pCreateInfo,
-                                            NULL /* driver_mv */, NULL /* driver_rp */, 0, NULL, NULL,
-                                            VK_SYSTEM_ALLOCATION_SCOPE_OBJECT, &pipeline->state_data);
+   result = vk_graphics_pipeline_state_fill(&device->vk, state, pCreateInfo, NULL /* driver_mv */, NULL /* driver_rp */,
+                                            0, NULL, NULL, VK_SYSTEM_ALLOCATION_SCOPE_OBJECT, &pipeline->state_data);
    if (result != VK_SUCCESS)
       return result;
 

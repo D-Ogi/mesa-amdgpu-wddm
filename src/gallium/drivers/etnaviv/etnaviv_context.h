@@ -37,7 +37,6 @@
 #include "pipe/p_context.h"
 #include "pipe/p_defines.h"
 #include "util/format/u_formats.h"
-#include "pipe/p_shader_tokens.h"
 #include "pipe/p_state.h"
 #include "util/macros.h"
 #include "util/slab.h"
@@ -181,6 +180,7 @@ struct etna_context {
       ETNA_DIRTY_RASTERIZER      = (1 << 2),
       ETNA_DIRTY_ZSA             = (1 << 3),
       ETNA_DIRTY_VERTEX_ELEMENTS = (1 << 4),
+      ETNA_DIRTY_CONSTBUF_FS     = (1 << 5),
       ETNA_DIRTY_BLEND_COLOR     = (1 << 6),
       ETNA_DIRTY_STENCIL_REF     = (1 << 7),
       ETNA_DIRTY_SAMPLE_MASK     = (1 << 8),
@@ -188,7 +188,7 @@ struct etna_context {
       ETNA_DIRTY_FRAMEBUFFER     = (1 << 10),
       ETNA_DIRTY_SCISSOR         = (1 << 11),
       ETNA_DIRTY_SAMPLER_VIEWS   = (1 << 12),
-      ETNA_DIRTY_CONSTBUF        = (1 << 13),
+      ETNA_DIRTY_CONSTBUF_VS     = (1 << 13),
       ETNA_DIRTY_VERTEX_BUFFERS  = (1 << 14),
       ETNA_DIRTY_INDEX_BUFFER    = (1 << 15),
       ETNA_DIRTY_SHADER          = (1 << 16),
@@ -198,7 +198,8 @@ struct etna_context {
       ETNA_DIRTY_SCISSOR_CLIP    = (1 << 20),
       ETNA_DIRTY_SHADER_CACHES   = (1 << 21),
       ETNA_DIRTY_STREAMOUT       = (1 << 22),
-      ETNA_DIRTY_STREAMOUT_CMD   = (1 << 23)
+      ETNA_DIRTY_STREAMOUT_CMD   = (1 << 23),
+      ETNA_DIRTY_CONSTBUF        = ETNA_DIRTY_CONSTBUF_VS | ETNA_DIRTY_CONSTBUF_FS,
    } dirty;
 
    struct slab_child_pool transfer_pool;
@@ -230,6 +231,7 @@ struct etna_context {
    unsigned num_fragment_sampler_views;
    uint32_t active_sampler_views;
    uint32_t dirty_sampler_views;
+   uint32_t border_shadow_views;
    uint32_t dirty_samplers;
    struct pipe_sampler_view *sampler_view[PIPE_MAX_SAMPLERS];
    struct etna_constbuf_state constant_buffer[MESA_SHADER_STAGES];
@@ -296,6 +298,13 @@ etna_context(struct pipe_context *pctx)
    return (struct etna_context *)pctx;
 }
 
+static inline unsigned
+etna_constbuf_dirty(mesa_shader_stage stage)
+{
+   return stage == MESA_SHADER_FRAGMENT ? ETNA_DIRTY_CONSTBUF_FS
+                                        : ETNA_DIRTY_CONSTBUF_VS;
+}
+
 static inline struct etna_transfer *
 etna_transfer(struct pipe_transfer *p)
 {
@@ -306,6 +315,12 @@ static inline bool
 etna_framebuffer_rt_use_ts(const struct etna_context *ctx, unsigned i)
 {
    return ctx->framebuffer_s.rt_ts_mask & BITFIELD_BIT(i);
+}
+
+static inline bool
+etna_sampler_view_uses_border_shadow(const struct etna_context *ctx, unsigned num)
+{
+   return ctx->border_shadow_views & (1u << num);
 }
 
 struct pipe_context *

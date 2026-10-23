@@ -44,7 +44,7 @@ static bool do_winsys_init(struct amdgpu_winsys *aws,
                            const struct amdgpu_winsys_options *options,
                            int fd)
 {
-   if (ac_query_gpu_info(fd, aws->dev, &aws->info, false, false) != AC_QUERY_GPU_INFO_SUCCESS) {
+   if (!ac_query_gpu_info(fd, aws->dev, &aws->info, false, false)) {
       mesa_loge("amdgpu: ac_query_gpu_info failed.\n");
       goto fail;
    }
@@ -504,9 +504,13 @@ amdgpu_winsys_create(int fd, const struct pipe_screen_config *config,
          goto fail_alloc;
 
       /* Create managers. */
+      uint64_t cache_mem_kb = aws->info.has_dedicated_vram ?
+         aws->info.vram_size_kb :
+         ((uint64_t)aws->info.vram_size_kb + aws->info.gart_size_kb);
+
       pb_cache_init(&aws->bo_cache, RADEON_NUM_HEAPS,
-                    500000, aws->check_vm ? 1.0f : 1.5f, 0,
-                    ((uint64_t)aws->info.vram_size_kb + aws->info.gart_size_kb) * 1024 / 8,
+                    500000, aws->check_vm ? 1.0f : 1.25f, 0,
+                    cache_mem_kb * 1024 / 8,
                     offsetof(struct amdgpu_bo_real_reusable, cache_entry), aws,
                     /* Cast to void* because one of the function parameters
                      * is a struct pointer instead of void*. */

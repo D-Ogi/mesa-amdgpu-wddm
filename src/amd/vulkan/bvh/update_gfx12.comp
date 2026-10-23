@@ -71,27 +71,56 @@ main()
    bounds.min = vec3(INFINITY);
    bounds.max = vec3(-INFINITY);
    if (is_leaf) {
-      VOID_REF src_leaf_node = OFFSET(src_bvh, child_offset);
+      radv_gfx12_primitive_node src_leaf_node = DEREF(REF(radv_gfx12_primitive_node)(OFFSET(src_bvh, child_offset)));
 
       uint32_t geometry_index = 0;
+      if (!RADV_TEST_BUILD_FLAG_UPDATE_SINGLE_GEOMETRY) {
+         geometry_index =
+            src_leaf_node.dwords[RADV_GFX12_UPDATABLE_PRIMITIVE_NODE_INDICES_MIDPOINT_OFFSET / 4 - 1] >> 4;
+      }
+
+      vk_bvh_geometry_data geom_data = args.geom_data0;
       if (!RADV_TEST_BUILD_FLAG_UPDATE_SINGLE_GEOMETRY)
-         geometry_index = DEREF(REF(uint32_t)(src_leaf_node + RADV_GFX12_UPDATABLE_PRIMITIVE_NODE_INDICES_OFFSET)) >> 4;
-
-      uint32_t primitive_index =
-         DEREF(REF(uint32_t)(src_leaf_node + RADV_GFX12_UPDATABLE_PRIMITIVE_NODE_INDICES_OFFSET + 4)) & 0xfffffff;
-
-      vk_bvh_geometry_data geom_data;
-      if (RADV_TEST_BUILD_FLAG_UPDATE_SINGLE_GEOMETRY)
-         geom_data = args.geom_data0;
-      else
          geom_data = DEREF(INDEX(vk_bvh_geometry_data, args.geom_data, geometry_index));
 
-      VOID_REF dst_leaf_node = OFFSET(dst_bvh, child_offset);
+      uint32_t primitive_index =
+         src_leaf_node.dwords[RADV_GFX12_UPDATABLE_PRIMITIVE_NODE_INDICES_MIDPOINT_OFFSET / 4] & 0xfffffff;
+
+      bool is_pair = false;
       if (geom_data.geometry_type == VK_GEOMETRY_TYPE_TRIANGLES_KHR) {
-         radv_build_triangle(bounds, dst_leaf_node, geom_data, primitive_index, true);
+         uint32_t pair_desc = src_leaf_node.dwords[31] >> (32 - RADV_GFX12_PRIMITIVE_NODE_PAIR_DESC_SIZE);
+         is_pair = (pair_desc & (0xfff << 3)) != 0;
+      }
+
+      VOID_REF dst_leaf_node = OFFSET(dst_bvh, child_offset);
+
+      if (is_pair) {
+         uint32_t second_geometry_index = 0;
+         if (!RADV_TEST_BUILD_FLAG_UPDATE_SINGLE_GEOMETRY) {
+            second_geometry_index =
+               (src_leaf_node.dwords[RADV_GFX12_UPDATABLE_PRIMITIVE_NODE_INDICES_MIDPOINT_OFFSET / 4 - 1] & 0xf) << 24;
+            second_geometry_index |=
+               src_leaf_node.dwords[RADV_GFX12_UPDATABLE_PRIMITIVE_NODE_INDICES_MIDPOINT_OFFSET / 4 - 2] >> 8;
+         }
+
+         vk_bvh_geometry_data second_geom_data = args.geom_data0;
+         if (!RADV_TEST_BUILD_FLAG_UPDATE_SINGLE_GEOMETRY)
+            second_geom_data = DEREF(INDEX(vk_bvh_geometry_data, args.geom_data, second_geometry_index));
+
+         uint32_t second_primitive_index =
+            src_leaf_node.dwords[RADV_GFX12_UPDATABLE_PRIMITIVE_NODE_INDICES_MIDPOINT_OFFSET / 4] >> 28;
+         second_primitive_index |=
+            (src_leaf_node.dwords[RADV_GFX12_UPDATABLE_PRIMITIVE_NODE_INDICES_MIDPOINT_OFFSET / 4 + 1] & 0xffffff) << 4;
+
+         radv_build_triangle(bounds, dst_leaf_node, geom_data, primitive_index, second_geom_data,
+                             second_primitive_index);
       } else {
-         VOID_REF src_ptr = OFFSET(geom_data.data, primitive_index * geom_data.stride);
-         radv_build_aabb(bounds, src_ptr, dst_leaf_node, geometry_index, primitive_index, true);
+         if (geom_data.geometry_type == VK_GEOMETRY_TYPE_TRIANGLES_KHR) {
+            radv_build_triangle(bounds, dst_leaf_node, geom_data, primitive_index, true);
+         } else {
+            VOID_REF src_ptr = OFFSET(geom_data.data, primitive_index * geom_data.stride);
+            radv_build_aabb(bounds, src_ptr, dst_leaf_node, geometry_index, primitive_index, true);
+         }
       }
    }
 
@@ -100,8 +129,8 @@ main()
    bool is_ready = is_leaf_or_invalid;
    while (true) {
       if (!is_ready) {
-         is_ready = atomicLoad(DEREF(INDEX(uint32_t, args.internal_ready_count, child_index)),
-                               gl_ScopeDevice, gl_StorageSemanticsBuffer, gl_SemanticsAcquire | gl_SemanticsMakeVisible) != 0;
+         is_ready = atomicLoad(DEREF(INDEX(uint32_t, args.internal_ready_count, child_index)), gl_ScopeDevice,
+                               gl_StorageSemanticsBuffer, gl_SemanticsAcquire | gl_SemanticsMakeVisible) != 0;
       }
 
       if (radv_ballot(cluster, is_ready) != 0xff)

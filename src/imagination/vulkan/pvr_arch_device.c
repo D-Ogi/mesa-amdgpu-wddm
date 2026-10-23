@@ -30,6 +30,7 @@
 #include "pvr_query.h"
 #include "pvr_queue.h"
 #include "pvr_robustness.h"
+#include "pvr_rt_dataset.h"
 #include "pvr_tex_state.h"
 #include "pvr_utrace.h"
 #include "util/os_misc.h"
@@ -733,6 +734,41 @@ static void pvr_finish_null_pages(struct pvr_device *device)
    pvr_bo_free(device, device->null_state.zero_bo);
 }
 
+static VkResult pvr_device_dummy_rt_init(struct pvr_device *device)
+{
+   VkResult result;
+
+   result = pvr_arch_render_target_dataset_create(device,
+                                                  1, /* width */
+                                                  1, /* height */
+                                                  1, /* samples */
+                                                  1, /* layers */
+                                                  &device->dummy_rt.rt_dataset);
+   if (result != VK_SUCCESS)
+      return result;
+
+   result = pvr_arch_ppp_state_create(device,
+                                      1, /* width */
+                                      1, /* height */
+                                      &device->dummy_rt.ppp_state_bo,
+                                      &device->dummy_rt.ppp_state_size);
+   if (result != VK_SUCCESS)
+      goto err_render_target_dataset_destroy;
+
+   return VK_SUCCESS;
+
+err_render_target_dataset_destroy:
+   pvr_render_target_dataset_destroy(device->dummy_rt.rt_dataset);
+
+   return result;
+}
+
+static void pvr_device_dummy_rt_finish(struct pvr_device *device)
+{
+   pvr_bo_suballoc_free(device->dummy_rt.ppp_state_bo);
+   pvr_render_target_dataset_destroy(device->dummy_rt.rt_dataset);
+}
+
 VkResult PVR_PER_ARCH(create_device)(struct pvr_physical_device *pdevice,
                                      const VkDeviceCreateInfo *pCreateInfo,
                                      const VkAllocationCallbacks *pAllocator,
@@ -895,6 +931,11 @@ VkResult PVR_PER_ARCH(create_device)(struct pvr_physical_device *pdevice,
    if (result != VK_SUCCESS)
       goto err_pvr_robustness_buffer_finish;
 
+   /* Render target state for geometry-only kicks outside a render pass. */
+   result = pvr_device_dummy_rt_init(device);
+   if (result != VK_SUCCESS)
+      goto err_pvr_border_color_table_finish;
+
    /* Initialize GPU tracing infrastructure */
    pvr_device_utrace_init(device);
 
@@ -915,6 +956,9 @@ VkResult PVR_PER_ARCH(create_device)(struct pvr_physical_device *pdevice,
    *pDevice = pvr_device_to_handle(device);
 
    return VK_SUCCESS;
+
+err_pvr_border_color_table_finish:
+   pvr_arch_border_color_table_finish(device);
 
 err_pvr_robustness_buffer_finish:
    pvr_robustness_buffer_finish(device);
@@ -1003,6 +1047,7 @@ void PVR_PER_ARCH(destroy_device)(struct pvr_device *device,
    simple_mtx_unlock(&device->rs_mtx);
    simple_mtx_destroy(&device->rs_mtx);
 
+   pvr_device_dummy_rt_finish(device);
    pvr_arch_border_color_table_finish(device);
    pvr_robustness_buffer_finish(device);
    pvr_spm_finish_scratch_buffer_store(device);

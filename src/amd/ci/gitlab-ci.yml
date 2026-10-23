@@ -59,6 +59,7 @@ radv-raven-vkcts:
   variables:
     DEQP_SUITE: radv
     DEQP_FRACTION: 6
+    RADV_EXPERIMENTAL: hic
 
 amd-raven-skqp:
   extends:
@@ -171,6 +172,7 @@ radv-cezanne-vkcts-asan:
     DEQP_SUITE: radv
     DEQP_FRACTION: 5
     FDO_CI_CONCURRENT: 3  # We get OOMkills if we go wider
+    RADV_EXPERIMENTAL: hic
 
 ############### VKCTS tests ###############
 
@@ -202,6 +204,7 @@ radv-hawaii-vkcts-full:
   timeout: 47m
   variables:
     CI_TRON_TIMEOUT__OVERALL__MINUTES: 45
+    RADV_EXPERIMENTAL: transfer_queue
 
 radv-polaris10-vkcts-full:
   extends:
@@ -224,7 +227,7 @@ radv-vega10-vkcts-full:
   timeout: 47m
   variables:
     CI_TRON_TIMEOUT__OVERALL__MINUTES: 45
-    RADV_EXPERIMENTAL: transfer_queue,video_decode,video_encode,msrtss
+    RADV_EXPERIMENTAL: transfer_queue,video_decode,video_encode,msrtss,hic
 
 radv-renoir-vkcts-full:
   extends:
@@ -234,7 +237,7 @@ radv-renoir-vkcts-full:
   timeout: 1h 20m
   variables:
     CI_TRON_TIMEOUT__OVERALL__MINUTES: 78
-    RADV_EXPERIMENTAL: transfer_queue,msrtss
+    RADV_EXPERIMENTAL: transfer_queue,msrtss,hic
 
 radv-navi10-vkcts-full:
   timeout: 30m
@@ -245,7 +248,7 @@ radv-navi10-vkcts-full:
     - .radv-valve-manual-rules
   variables:
     CI_TRON_TIMEOUT__OVERALL__MINUTES: 28
-    RADV_EXPERIMENTAL: transfer_queue,hic,msrtss
+    RADV_EXPERIMENTAL: transfer_queue,msrtss
 
 radv-navi21-vkcts:
   timeout: 18m
@@ -523,9 +526,9 @@ radv-vangogh-vkd3d-asan:
     - .test-vkd3d-proton
     - .vangogh-test-valve
     - .radv-valve-manual-rules
-  timeout: 12m
+  timeout: 15m
   variables:
-    CI_TRON_TIMEOUT__OVERALL__MINUTES: 10
+    CI_TRON_TIMEOUT__OVERALL__MINUTES: 13
     # Random tests fail/crash when trying to run them in parallel
     FDO_CI_CONCURRENT: 1
 

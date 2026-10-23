@@ -1706,7 +1706,7 @@ blorp_emit_depth_stencil_config(struct blorp_batch *batch,
  * clearing operations without such information.
  * */
 static void
-blorp_emit_gfx8_hiz_op(struct blorp_batch *batch,
+blorp_emit_hiz_op(struct blorp_batch *batch,
                        const struct blorp_params *params)
 {
    /* We should be performing an operation on a depth or stencil buffer.
@@ -1833,7 +1833,7 @@ blorp_exec_3d(struct blorp_batch *batch, const struct blorp_params *params)
 {
 #if GFX_VER >= 8
    if (params->hiz_op != ISL_AUX_OP_NONE) {
-      blorp_emit_gfx8_hiz_op(batch, params);
+      blorp_emit_hiz_op(batch, params);
       return;
    }
 #endif

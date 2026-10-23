@@ -279,8 +279,8 @@ static struct radeon_winsys_ctx *amdgpu_ctx_create(struct radeon_winsys *rws, un
    struct amdgpu_ctx *ctx = CALLOC_STRUCT(amdgpu_ctx);
    int r;
    struct amdgpu_bo_alloc_request alloc_buffer = {};
-   assert(!(flags & PIPE_CONTEXT_REALTIME_PRIORITY)); /* not supported */
-   uint32_t amdgpu_priority = flags & PIPE_CONTEXT_HIGH_PRIORITY ? AMDGPU_CTX_PRIORITY_HIGH :
+   uint32_t amdgpu_priority = flags & PIPE_CONTEXT_REALTIME_PRIORITY ? AMDGPU_CTX_PRIORITY_VERY_HIGH:
+                              flags & PIPE_CONTEXT_HIGH_PRIORITY ? AMDGPU_CTX_PRIORITY_HIGH :
                               flags & PIPE_CONTEXT_LOW_PRIORITY ? AMDGPU_CTX_PRIORITY_LOW :
                                                                   AMDGPU_CTX_PRIORITY_NORMAL;
    ac_drm_device *dev;
@@ -297,8 +297,9 @@ static struct radeon_winsys_ctx *amdgpu_ctx_create(struct radeon_winsys *rws, un
 
    while (1) {
       r = ac_drm_cs_ctx_create2(dev, amdgpu_priority, &ctx->ctx_handle);
-      if (r == -EACCES && amdgpu_priority == AMDGPU_CTX_PRIORITY_HIGH) {
-         /* Try again with a lower priority. */
+      if (r == -EACCES && amdgpu_priority >= AMDGPU_CTX_PRIORITY_HIGH) {
+         /* Try again with a lower priority. Chances are we're not
+          * privileged enough to get VERY_HIGH or HIGH. */
          amdgpu_priority = AMDGPU_CTX_PRIORITY_NORMAL;
          continue;
       }
@@ -975,7 +976,7 @@ amdgpu_cs_create(struct radeon_cmdbuf *rcs,
    } else {
       switch (ip_type) {
       case AMD_IP_GFX:
-         if (ctx->flags & PIPE_CONTEXT_HIGH_PRIORITY)
+         if (ctx->flags & (PIPE_CONTEXT_HIGH_PRIORITY | PIPE_CONTEXT_REALTIME_PRIORITY))
             acs->queue_index = AMDGPU_QUEUE_GFX_HIGH_PRIO;
          else
             acs->queue_index = AMDGPU_QUEUE_GFX;

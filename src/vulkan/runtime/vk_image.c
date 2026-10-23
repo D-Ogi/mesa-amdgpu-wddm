@@ -151,6 +151,11 @@ vk_image_init(struct vk_device *device,
       vk_find_struct_const(pCreateInfo->pNext, IMAGE_COMPRESSION_CONTROL_EXT);
    if (compr_info)
       image->compr_flags = compr_info->flags;
+
+   const VkImageAlignmentControlCreateInfoMESA *align_info =
+      vk_find_struct_const(pCreateInfo->pNext, IMAGE_ALIGNMENT_CONTROL_CREATE_INFO_MESA);
+   if (align_info)
+      image->maximum_requested_alignment = align_info->maximumRequestedAlignment;
 }
 
 void *

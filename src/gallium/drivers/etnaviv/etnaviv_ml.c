@@ -923,7 +923,8 @@ etna_ml_subgraph_invoke(struct pipe_context *pctx, struct pipe_ml_subgraph *psub
          }
          pipe_buffer_unmap(pctx, dst_transfer);
       } else {
-         pipe_buffer_write(pctx, tensor->resource, tensor->offset, tensor->size, inputs[i]);
+         pctx->buffer_subdata(pctx, tensor->resource, PIPE_MAP_DIRECTLY,
+                              tensor->offset, tensor->size, inputs[i]);
       }
    }
 

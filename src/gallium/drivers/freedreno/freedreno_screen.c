@@ -561,7 +561,7 @@ fd_init_screen_caps(struct fd_screen *screen)
    caps->fbfetch =
       fd_device_version(screen->dev) >= FD_VERSION_GMEM_BASE && is_a6xx(screen) ?
       screen->max_rts : 0;
-   caps->sample_shading = is_a6xx(screen);
+   caps->sample_shading = is_a5xx(screen) || is_a6xx(screen);
 
    caps->context_priority_mask = screen->priority_mask;
 

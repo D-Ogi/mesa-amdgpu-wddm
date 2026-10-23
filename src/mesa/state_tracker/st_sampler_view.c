@@ -435,27 +435,13 @@ st_get_sampler_view_format(const struct st_context *st,
    case PIPE_FORMAT_Y16_U16_V16_420_UNORM:
    case PIPE_FORMAT_Y16_U16_V16_422_UNORM:
    case PIPE_FORMAT_Y16_U16_V16_444_UNORM:
-      format = PIPE_FORMAT_R16_UNORM;
-      break;
    case PIPE_FORMAT_Y210:
-      if (texObj->pt->format == PIPE_FORMAT_X6R10X6G10_X6R10X6B10_422_UNORM)
-         format = texObj->pt->format;
-      else
-         format = PIPE_FORMAT_R16G16_UNORM;
-      break;
    case PIPE_FORMAT_Y212:
    case PIPE_FORMAT_Y216:
-      if (texObj->pt->format == PIPE_FORMAT_R16G16_R16B16_422_UNORM)
-         format = texObj->pt->format;
-      else
-         format = PIPE_FORMAT_R16G16_UNORM;
-      break;
    case PIPE_FORMAT_Y410:
-      format = PIPE_FORMAT_R10G10B10A2_UNORM;
-      break;
    case PIPE_FORMAT_Y412:
    case PIPE_FORMAT_Y416:
-      format = PIPE_FORMAT_R16G16B16A16_UNORM;
+      format = texObj->pt->format;
       break;
    case PIPE_FORMAT_YUYV:
    case PIPE_FORMAT_YVYU:

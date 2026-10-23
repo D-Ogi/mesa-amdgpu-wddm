@@ -263,6 +263,7 @@ struct gl_extensions
    GLboolean KHR_texture_compression_astc_ldr;
    GLboolean KHR_texture_compression_astc_sliced_3d;
    GLboolean MESA_framebuffer_flip_y;
+   GLboolean MESA_map_buffer_client_pointer;
    GLboolean MESA_texture_const_bandwidth;
    GLboolean MESA_pack_invert;
    GLboolean MESA_tile_raster_order;
@@ -911,6 +912,12 @@ struct gl_constants
    bool PackedDriverUniformStorage;
 
    bool HasFBFetch;
+
+   /** Bitmask of enum pipe_advanced_blend_mode blended natively by the
+    * driver. Modes that aren't set in the mask are lowered into the
+    * fragment shader using framebuffer fetch.
+    */
+   GLbitfield NativeAdvancedBlendModes;
 
    bool PointSizeFixed;
 

@@ -231,7 +231,6 @@ spec@arb_transform_feedback2@change objects while paused,Fail
 spec@arb_transform_feedback2@change objects while paused (gles3),Fail
 spec@arb_transform_feedback3@gl_nextbuffer-gl_nextbuffer,Fail
 spec@arb_transform_feedback_instanced@draw-auto instanced,Fail
-spec@egl_mesa_configless_context@basic,Fail
 spec@ext_framebuffer_object@fbo-stencil-gl_stencil_index1-blit,Fail
 spec@ext_framebuffer_object@fbo-stencil-gl_stencil_index1-copypixels,Fail
 spec@ext_framebuffer_object@fbo-stencil-gl_stencil_index16-blit,Fail

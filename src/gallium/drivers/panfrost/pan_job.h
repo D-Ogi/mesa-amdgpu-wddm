@@ -29,10 +29,23 @@
 
 typedef uint8_t pan_bo_access;
 
-/* A panfrost_batch corresponds to a bound FBO we're rendering to,
- * collecting over multiple draws. */
+/* Type of batches. */
+enum panfrost_batch_type {
+   /* A render batch is for tiling and vertex shading. It's tightly linked to
+    * a framebuffer state. Fragment jobs are implicitly queued at submit. It
+    * accepts state storage jobs too. */
+   PANFROST_BATCH_RENDER = 0,
+
+   /* A compute batch is for compute kernel jobs. It accepts state storage
+    * jobs too. */
+   PANFROST_BATCH_COMPUTE,
+
+   PANFROST_BATCH_TYPE_COUNT,
+};
 
 struct panfrost_batch {
+   enum panfrost_batch_type type;
+
    struct panfrost_context *ctx;
    struct pipe_framebuffer_state key;
 
@@ -171,9 +184,9 @@ struct panfrost_batch {
    /** This one is always on the batch */
    enum u_tristate line_smoothing;
 
-   /* Number of effective draws in the batch. Draws with rasterization disabled
-    * don't count as effective draws. It's basically the number of IDVS or
-    * <vertex,tiler> jobs present in the batch.
+   /* Number of effective draws in the batch. Draws with rasterization
+    * disabled don't count as effective draws. It's basically the number of
+    * tiling jobs present in the batch.
     */
    uint32_t draw_count;
 
@@ -198,11 +211,12 @@ struct panfrost_batch {
 
 /* Functions for managing the above */
 
-struct panfrost_batch *panfrost_get_batch_for_fbo(struct panfrost_context *ctx);
+struct panfrost_batch *panfrost_get_render_batch(struct panfrost_context *ctx);
 
-struct panfrost_batch *
-panfrost_get_fresh_batch_for_fbo(struct panfrost_context *ctx,
-                                 const char *reason);
+struct panfrost_batch *panfrost_get_fresh_render_batch(struct panfrost_context *ctx,
+                                                       const char *reason);
+
+struct panfrost_batch *panfrost_get_compute_batch(struct panfrost_context *ctx);
 
 void panfrost_batch_add_bo(struct panfrost_batch *batch, struct panfrost_bo *bo);
 
@@ -225,6 +239,8 @@ struct panfrost_bo *panfrost_batch_create_bo(struct panfrost_batch *batch,
                                              size_t size, uint32_t create_flags,
                                              mesa_shader_stage stage,
                                              const char *label);
+
+void panfrost_flush_batch(struct panfrost_batch *batch, const char *reason);
 
 void panfrost_flush_all_batches(struct panfrost_context *ctx,
                                 const char *reason);

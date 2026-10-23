@@ -170,6 +170,7 @@ struct gen_parser {
    const intel_device_info *devinfo;
    std::string_view text = {};
    std::vector<gen_inst> insts;
+   std::vector<bool> compacted;
    std::map<std::string_view, int> labels;
    std::vector<label_use> label_uses;
    std::vector<gen_error> errors;
@@ -178,6 +179,7 @@ struct gen_parser {
    std::string_view line;
    unsigned line_no = 0;
    gen_inst inst = {};
+   bool inst_compacted = false;
    gen_format format = GEN_FORMAT_ILLEGAL;
    unsigned num_sources = 0;
    bool has_dst = false;
@@ -214,6 +216,7 @@ struct gen_parser {
       assert(devinfo);
       assert(params->mem_ctx);
       assert(params->insts == NULL);
+      assert(params->compacted == NULL);
       assert(params->errors == NULL);
       assert(params->text || params->text_size == 0);
       assert(params->text_size >= 0);
@@ -253,6 +256,11 @@ struct gen_parser {
       if (!insts.empty()) {
          params->insts = ralloc_array(params->mem_ctx, gen_inst, insts.size());
          memcpy(params->insts, insts.data(), insts.size() * sizeof(gen_inst));
+         if (params->collect_compacted) {
+            params->compacted = ralloc_array(params->mem_ctx, bool, insts.size());
+            for (int i = 0; i < params->num_insts; i++)
+               params->compacted[i] = compacted[i];
+         }
       }
       return true;
    }
@@ -276,6 +284,7 @@ struct gen_parser {
    parse_instruction()
    {
       inst = {};
+      inst_compacted = false;
       format = GEN_FORMAT_ILLEGAL;
       num_sources = 0;
       has_dst = false;
@@ -355,6 +364,8 @@ struct gen_parser {
                         inst_label_uses.end());
 
       insts.push_back(inst);
+      if (params->collect_compacted)
+         compacted.push_back(inst_compacted);
       return true;
    }
 
@@ -744,6 +755,8 @@ struct gen_parser {
       if (has_dst) {
          if (!parse_dst())
             return false;
+      } else {
+         inst.dst.region.hstride = 1;
       }
 
       if (inst.opcode == GEN_OP_WAIT) {
@@ -2081,6 +2094,8 @@ struct gen_parser {
          inst.debug_control = true;
       } else if (name == "Align16") {
          inst.align16 = true;
+      } else if (name == "Compacted") {
+         inst_compacted = true;
       } else if (name == "EOT") {
          inst.send.eot = true;
       } else if (name == "NoDDChk") {

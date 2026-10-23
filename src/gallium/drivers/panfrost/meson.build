@@ -91,7 +91,6 @@ foreach ver : panfrost_versions
     'pan_cmdstream.c',
     'pan_blend_cso.c',
     'pan_fb_preload.c',
-    'pan_precomp.c',
     pan_packers,
   ]
   if ver in ['4', '5', '6', '7', '9']
@@ -99,13 +98,23 @@ foreach ver : panfrost_versions
   elif ver in ['10', '11', '12', '13', '14']
     files_panfrost_vx += ['pan_csf.c']
   endif
+
+  if ver not in ['4', '5']
+    files_panfrost_vx += files('pan_precomp.c')
+  endif
+
+  idep_libpan_vx = []
+  if ver in idep_libpan_per_arch
+    idep_libpan_vx = idep_libpan_per_arch[ver]
+  endif
+
   libpanfrost_versions += static_library(
     'panfrost-v' + ver, files_panfrost_vx,
     include_directories : panfrost_includes,
     c_args : ['-DPAN_ARCH=' + ver],
     gnu_symbol_visibility : 'hidden',
     dependencies : [idep_pan_packers, idep_nir, dep_libdrm, idep_mesautil,
-                    idep_libpan_per_arch[ver], idep_u_tracepoints,
+                    idep_libpan_vx, idep_u_tracepoints,
                     idep_panfrost_tracepoints],
 )
 endforeach

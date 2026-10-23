@@ -58,6 +58,7 @@ static inline void regfree(regex_t* r) {}
 #include <fcntl.h>
 #include <math.h>
 #include "strndup.h"
+#include "log.h"
 #include "u_process.h"
 #include "os_file.h"
 #include "os_misc.h"
@@ -330,22 +331,22 @@ findOption(const driOptionCache *cache, const char *name)
 UNUSED static bool
 checkValue(const driOptionValue *v, const driOptionInfo *info)
 {
+   if (!info->has_range)
+      return true;
+
    switch (info->type) {
    case DRI_ENUM: /* enum is just a special integer */
    case DRI_INT:
-      return (info->range.start._int == info->range.end._int ||
-              (v->_int >= info->range.start._int &&
-               v->_int <= info->range.end._int));
+      return v->_int >= info->range.start._int &&
+             v->_int <= info->range.end._int;
 
    case DRI_UINT64:
-      return (info->range.start._uint64 == info->range.end._uint64 ||
-              (v->_uint64 >= info->range.start._uint64 &&
-               v->_uint64 <= info->range.end._uint64));
+      return v->_uint64 >= info->range.start._uint64 &&
+             v->_uint64 <= info->range.end._uint64;
 
    case DRI_FLOAT:
-      return (info->range.start._float == info->range.end._float ||
-              (v->_float >= info->range.start._float &&
-               v->_float <= info->range.end._float));
+      return v->_float >= info->range.start._float &&
+             v->_float <= info->range.end._float;
 
    default:
       return true;
@@ -395,6 +396,7 @@ driParseOptionInfo(driOptionCache *info,
       }
 
       optinfo->type = opt->info.type;
+      optinfo->has_range = opt->info.has_range;
       optinfo->range = opt->info.range;
 
       switch (opt->info.type) {
@@ -536,7 +538,11 @@ driGetOptionsXml(const driOptionDescription *configOptions, unsigned numOptions)
       switch (opt->info.type) {
       case DRI_INT:
       case DRI_ENUM:
-         if (opt->info.range.start._int < opt->info.range.end._int) {
+         if (opt->info.has_range &&
+             opt->info.range.start._int == opt->info.range.end._int) {
+            ralloc_asprintf_append(&str, " valid=\"%d\"",
+                                   opt->info.range.start._int);
+         } else if (opt->info.has_range) {
             ralloc_asprintf_append(&str, " valid=\"%d:%d\"",
                                    opt->info.range.start._int,
                                    opt->info.range.end._int);
@@ -544,7 +550,11 @@ driGetOptionsXml(const driOptionDescription *configOptions, unsigned numOptions)
          break;
 
       case DRI_UINT64:
-         if (opt->info.range.start._uint64 < opt->info.range.end._uint64) {
+         if (opt->info.has_range &&
+             opt->info.range.start._uint64 == opt->info.range.end._uint64) {
+            ralloc_asprintf_append(&str, " valid=\"%" PRIu64 "\"",
+                                   opt->info.range.start._uint64);
+         } else if (opt->info.has_range) {
             ralloc_asprintf_append(&str, " valid=\"%" PRIu64 ":%" PRIu64 "\"",
                                    opt->info.range.start._uint64,
                                    opt->info.range.end._uint64);
@@ -552,7 +562,11 @@ driGetOptionsXml(const driOptionDescription *configOptions, unsigned numOptions)
          break;
 
       case DRI_FLOAT:
-         if (opt->info.range.start._float < opt->info.range.end._float) {
+         if (opt->info.has_range &&
+             opt->info.range.start._float == opt->info.range.end._float) {
+            ralloc_asprintf_append(&str, " valid=\"%f\"",
+                                   opt->info.range.start._float);
+         } else if (opt->info.has_range) {
             ralloc_asprintf_append(&str, " valid=\"%f:%f\"",
                                    opt->info.range.start._float,
                                    opt->info.range.end._float);
@@ -686,13 +700,17 @@ parseRange(driOptionInfo *info, const char *string)
 {
    char *cp;
 
+   info->has_range = false;
    XSTRDUP(cp, string);
 
    char *sep;
    sep = strchr(cp, ':');
    if (!sep) {
+      bool valid = parseValue(&info->range.start, info->type, cp);
+      info->range.end = info->range.start;
+      info->has_range = valid;
       free(cp);
-      return false;
+      return valid;
    }
 
    *sep = '\0';
@@ -718,6 +736,7 @@ parseRange(driOptionInfo *info, const char *string)
    }
 
    free(cp);
+   info->has_range = true;
    return true;
 }
 
@@ -925,7 +944,9 @@ static void
 parseEngineAttr(struct OptConfData *data, const char **attr)
 {
    uint32_t i;
-   const char *engine_name_match = NULL, *engine_versions = NULL;
+   const char *engine_name_match = NULL;
+   const char *engine_versions = NULL;
+   const char *application_versions = NULL;
    driOptionInfo version_range = {
       .type = DRI_INT,
    };
@@ -933,6 +954,8 @@ parseEngineAttr(struct OptConfData *data, const char **attr)
       if (!strcmp(attr[i], "name")) /* not needed here */;
       else if (!strcmp(attr[i], "engine_name_match")) engine_name_match = attr[i+1];
       else if (!strcmp(attr[i], "engine_versions")) engine_versions = attr[i+1];
+      else if (!strcmp(attr[i], "application_versions"))
+         application_versions = attr[i+1];
       else XML_WARNING("unknown application attribute: %s.", attr[i]);
    }
    if (engine_name_match) {
@@ -953,6 +976,16 @@ parseEngineAttr(struct OptConfData *data, const char **attr)
       } else {
          XML_WARNING("Failed to parse engine_versions range=\"%s\".",
                      engine_versions);
+      }
+   }
+   if (application_versions) {
+      driOptionValue v = { ._int = data->applicationVersion };
+      if (parseRange(&version_range, application_versions)) {
+         if (!checkValue(&v, &version_range))
+            data->ignoringApp = data->inApp;
+      } else {
+         XML_WARNING("Failed to parse application_versions range=\"%s\".",
+                     application_versions);
       }
    }
 }
@@ -1367,6 +1400,7 @@ parseStaticConfig(struct OptConfData *data)
          const char *engattr[] = {
             "engine_name_match", e->engine_name_match,
             "engine_versions", e->engine_versions,
+            "application_versions", e->application_versions,
             NULL
          };
 
@@ -1423,6 +1457,51 @@ void
 driInjectExecName(const char *exec)
 {
    execname = exec;
+}
+
+static void
+driLogNonDefaultOptions(const driOptionCache *cache,
+                        const driOptionCache *defaults,
+                        const char *tag)
+{
+   assert(cache->tableSize == defaults->tableSize);
+   assert(cache->info == defaults->info);
+
+   for (unsigned i = 0; i < (1u << cache->tableSize); i++) {
+      const driOptionInfo *info = &cache->info[i];
+      if (!info->name)
+         continue;
+
+      const driOptionValue *value = &cache->values[i];
+      const driOptionValue *default_value = &defaults->values[i];
+
+      switch (info->type) {
+      case DRI_BOOL:
+         if (value->_bool != default_value->_bool)
+            mesa_log(MESA_LOG_INFO, tag, "drirc: %s=%s", info->name,
+                     value->_bool ? "true" : "false");
+         break;
+      case DRI_ENUM:
+      case DRI_INT:
+         if (value->_int != default_value->_int)
+            mesa_log(MESA_LOG_INFO, tag, "drirc: %s=%d", info->name, value->_int);
+         break;
+      case DRI_UINT64:
+         if (value->_uint64 != default_value->_uint64)
+            mesa_log(MESA_LOG_INFO, tag, "drirc: %s=%" PRIu64, info->name, value->_uint64);
+         break;
+      case DRI_FLOAT:
+         if (value->_float != default_value->_float)
+            mesa_log(MESA_LOG_INFO, tag, "drirc: %s=%g", info->name, value->_float);
+         break;
+      case DRI_STRING:
+         if (strcmp(value->_string, default_value->_string))
+            mesa_log(MESA_LOG_INFO, tag, "drirc: %s=%s", info->name, value->_string);
+         break;
+      case DRI_SECTION:
+         break;
+      }
+   }
 }
 
 void
@@ -1491,6 +1570,9 @@ driParseConfigFiles(driOptionCache *cache, const driOptionCache *info,
 #else
    parseStaticConfig(&userData);
 #endif /* WITH_XMLCONFIG */
+
+   if (params->logNonDefaultOptions)
+      driLogNonDefaultOptions(cache, info, params->driverName);
 }
 
 void

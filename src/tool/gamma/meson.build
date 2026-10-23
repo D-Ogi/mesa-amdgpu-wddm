@@ -16,8 +16,6 @@ subdir('shaders')
 
 dep_sdl3 = dependency('sdl3')
 
-dep_vulkan = dependency('vulkan')
-
 executable(
   'gamma',
   [gamma_files, spv_shaders],

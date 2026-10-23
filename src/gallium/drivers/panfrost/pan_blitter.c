@@ -76,7 +76,7 @@ panfrost_blitter_draw_rectangle(struct blitter_context *blitter,
     * handling (see panfrost_batch_update_access).
     */
    if (pctx->has_blit_loop)
-      panfrost_get_fresh_batch_for_fbo(pctx, "Blit feedback loop flush");
+      panfrost_get_fresh_render_batch(pctx, "Blit feedback loop flush");
 
    if (scr->dev.arch <= 8 || depth != 0.0f || num_instances > 1)
       goto fallback;
@@ -241,7 +241,7 @@ panfrost_blitter_try_batch_clear(struct panfrost_context *ctx,
                                  const union pipe_color_union *color,
                                  double depth, unsigned stencil)
 {
-   struct panfrost_batch *batch = panfrost_get_batch_for_fbo(ctx);
+   struct panfrost_batch *batch = panfrost_get_render_batch(ctx);
 
    if (batch && !batch->draw_count) {
       panfrost_batch_clear(batch, buffers, color, depth, stencil);

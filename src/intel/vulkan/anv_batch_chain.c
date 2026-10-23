@@ -1637,6 +1637,9 @@ anv_queue_submit(struct vk_queue *vk_queue,
       return VK_SUCCESS;
    }
 
+   /* Assigns queue->ds.submission_id, used by the utrace flush below. */
+   uint64_t start_ts = intel_ds_begin_submit(&queue->ds);
+
    /* Flush the trace points first before taking the lock as the flushing
     * might try to take that same lock.
     */
@@ -1656,17 +1659,15 @@ anv_queue_submit(struct vk_queue *vk_queue,
       }
    }
 
-   uint64_t start_ts = intel_ds_begin_submit(&queue->ds);
-
    if (submit->buffer_bind_count ||
        submit->image_opaque_bind_count ||
        submit->image_bind_count) {
       result = anv_queue_submit_sparse_bind(queue, submit);
    } else {
-      pthread_mutex_lock(&device->mutex);
+      simple_mtx_lock(&device->mutex);
       result = anv_queue_submit_cmd_buffers_locked(queue, submit,
                                                    utrace_submit);
-      pthread_mutex_unlock(&device->mutex);
+      simple_mtx_unlock(&device->mutex);
    }
 
    intel_ds_end_submit(&queue->ds, start_ts);

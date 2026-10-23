@@ -12,6 +12,7 @@ use crate::foldable::{FoldData, Foldable};
 use crate::ir::*;
 use crate::model::{Model, model_for_gpu_id};
 use crate::ops::*;
+use crate::parallel_copy::ParallelCopy;
 use crate::ssa_value::{AllocSSA, SSAValueAllocator};
 use crate::swizzle::{AsmSwizzleWiden, SwizzleByte, SwizzleWord};
 use acorn::Acorn;
@@ -96,7 +97,7 @@ static F32_CURATED: &[f32] = &[
 static F16_CURATED: &[F16] = &[
     // Trivial values
     F16::ZERO,
-    F16::from_bits(0x3C00), // 1.0
+    F16::ONE,
     F16::from_bits(0x3800), // 0.5
     F16::from_bits(0x4000), // 2.0
     F16::from_bits(0x4800), // 8.0
@@ -307,7 +308,7 @@ pub struct TestShaderBuilder<'a> {
     ssa_alloc: SSAValueAllocator,
     start_block: BasicBlock,
     data_addr: SrcRef,
-    max_data_offset: u16,
+    max_data_addr: u16,
 }
 
 const WARP_SIZE: u32 = 16;
@@ -367,14 +368,15 @@ impl<'a> TestShaderBuilder<'a> {
             ssa_alloc,
             start_block,
             data_addr: data_addr.into(),
-            max_data_offset: 0,
+            max_data_addr: 0,
         }
     }
 
     pub fn ld_test_data(&mut self, offset: u16, bits: u8) -> SSARef {
         let dst = self.alloc_ref(bits.into());
 
-        self.max_data_offset = self.max_data_offset.max(offset);
+        self.max_data_addr =
+            self.max_data_addr.max(offset + u16::from(bits / 8));
 
         self.push_op(OpLoad {
             dst: dst.clone().into(),
@@ -389,7 +391,8 @@ impl<'a> TestShaderBuilder<'a> {
     }
 
     pub fn st_test_data(&mut self, offset: u16, data: SSARef) {
-        self.max_data_offset = self.max_data_offset.max(offset);
+        self.max_data_addr =
+            self.max_data_addr.max(offset + u16::from(data.bytes()));
 
         self.push_op(OpStore {
             src_type: DataType::get(1, NumericType::Integer, data.bytes() * 8),
@@ -409,7 +412,7 @@ impl<'a> TestShaderBuilder<'a> {
             info,
             ssa_alloc,
             mut start_block,
-            max_data_offset,
+            max_data_addr,
             ..
         } = self;
 
@@ -447,7 +450,7 @@ impl<'a> TestShaderBuilder<'a> {
 
         CompiledTestCase {
             code: bin,
-            max_data_offset,
+            max_data_addr,
             // ABI: we always load the CB0 args at offset 0 for now
             fau_args_offset: 0,
             info: s.info,
@@ -488,7 +491,7 @@ pub struct RawTestShaderBuilder<'a> {
     info: ShaderInfo,
     start_block: BasicBlock,
     data_addr: RegRef,
-    max_data_offset: u16,
+    max_data_addr: u16,
 }
 
 impl<'a> RawTestShaderBuilder<'a> {
@@ -540,13 +543,14 @@ impl<'a> RawTestShaderBuilder<'a> {
             info,
             start_block,
             data_addr,
-            max_data_offset: 0,
+            max_data_addr: 0,
         }
     }
 
     #[allow(dead_code)]
     pub fn ld_test_data_to(&mut self, dst: Dst, offset: u16, bits: u8) {
-        self.max_data_offset = self.max_data_offset.max(offset);
+        self.max_data_addr =
+            self.max_data_addr.max(offset + u16::from(bits / 8));
 
         let instr = self.push_op(OpLoad {
             dst,
@@ -561,7 +565,8 @@ impl<'a> RawTestShaderBuilder<'a> {
     }
 
     pub fn st_test_data(&mut self, offset: u16, data: RegRef) {
-        self.max_data_offset = self.max_data_offset.max(offset);
+        self.max_data_addr =
+            self.max_data_addr.max(offset + u16::from(data.bytes()));
 
         let instr = self.push_op(OpStore {
             src_type: DataType::get(1, NumericType::Integer, data.bytes() * 8),
@@ -585,7 +590,7 @@ impl<'a> RawTestShaderBuilder<'a> {
             mut b,
             info,
             mut start_block,
-            max_data_offset,
+            max_data_addr,
             ..
         } = self;
 
@@ -616,7 +621,7 @@ impl<'a> RawTestShaderBuilder<'a> {
 
         CompiledTestCase {
             code: bin,
-            max_data_offset,
+            max_data_addr,
             // ABI: we always load the CB0 args at offset 0 for now
             fau_args_offset: 0,
             info: s.info,
@@ -662,7 +667,7 @@ struct CompiledTestCase {
     code: Vec<u32>,
     info: ShaderInfo,
     #[allow(dead_code)]
-    max_data_offset: u16,
+    max_data_addr: u16,
     fau_args_offset: usize,
 }
 
@@ -673,6 +678,10 @@ impl CompiledTestCase {
         data_stride: u32,
         invocations: u32,
     ) -> InvocationArgs<'a> {
+        let last_invoc = invocations.saturating_sub(1);
+        let last_offset = usize::try_from(last_invoc * data_stride).unwrap();
+        let last_addr = last_offset + usize::from(self.max_data_addr);
+        assert!(last_addr <= data.len(), "OOB data access");
         InvocationArgs(InvocationInfo {
             code: transmute_slice_to_u8(&self.code),
             fau: FAU_ONLY_ARGS,
@@ -690,6 +699,10 @@ impl CompiledTestCase {
         let invocations = data.len().try_into().expect("Too many invocations");
         let data_stride = size_of::<T>().try_into().unwrap();
         let data_raw = transmute_mut_slice_to_u8(data);
+        assert!(
+            u32::from(self.max_data_addr) <= data_stride,
+            "OOB data access"
+        );
         self.with_data_raw(data_raw, data_stride, invocations)
     }
 }
@@ -925,16 +938,99 @@ fn test_lower_copy() {
                 b.compile_with(|s| s.lower_copy())
             };
 
-            let mut data = [SOURCE, INIT_DST, 0xDEFDEFDE];
+            let mut data = [[SOURCE, INIT_DST, 0xDEFDEFDE]; 1];
             let case = bin.with_data(&mut data);
             run.execute(case);
 
             let expected = (INIT_DST & !mask) | (SOURCE & mask);
-            let got = data[2];
+            let got = data[0][2];
 
             assert_eq!(
                 expected, got,
                 "lane {lanes} expected {expected:08x} got {got:08x}"
+            );
+        }
+    }
+}
+
+#[test]
+fn test_parallel_copy() {
+    let run = RunSingleton::get();
+
+    const INIT_A: u32 = 0x89ABCDEF;
+    const INIT_B: u32 = 0x41424344;
+    const RANGES: &[RegRange] = &[
+        RegRange::Byte0,
+        RegRange::Byte1,
+        RegRange::Byte2,
+        RegRange::Byte3,
+        RegRange::Half0,
+        RegRange::Half1,
+        RegRange::Regs(1),
+    ];
+
+    for &range_a in RANGES {
+        for &range_b in RANGES {
+            // We want different ranges of the same size
+            if range_a.bytes() != range_b.bytes() {
+                continue;
+            }
+
+            let bin = {
+                let mut b = RawTestShaderBuilder::new(&*run.model);
+
+                let r2 = RegRef::new(2, RegRange::Regs(1));
+                b.ld_test_data_to(r2.into(), 0, 32);
+
+                let r3 = RegRef::new(3, RegRange::Regs(1));
+                b.ld_test_data_to(r3.into(), 4, 32);
+
+                let mut pcopy = ParallelCopy::new(&*run.model, false);
+
+                let r2_sub = RegRef::new(2, range_a);
+                let r3_sub = RegRef::new(3, range_b);
+
+                pcopy.add_copy(r2_sub.into(), r3_sub.into());
+                pcopy.add_copy(r3_sub.into(), r2_sub.into());
+
+                for instr in pcopy.into_instrs::<SSAValueAllocator>(None) {
+                    b.push_instr(instr);
+                }
+
+                b.st_test_data(8, r2);
+                b.st_test_data(12, r3);
+
+                b.compile()
+            };
+
+            let mut data = [[INIT_A, INIT_B, 0xDEFDEFDE, 0xDEFDEFDE]; 1];
+            let case = bin.with_data(&mut data);
+            run.execute(case);
+
+            let lanes_a = DstLanes::from(range_a);
+            let lanes_b = DstLanes::from(range_b);
+            let shift_a = lanes_a.as_byte_range().unwrap().start * 8;
+            let shift_b = lanes_b.as_byte_range().unwrap().start * 8;
+            let mask_a = lanes_a.u32_mask().unwrap();
+            let mask_b = lanes_b.u32_mask().unwrap();
+
+            let swap_data_a = (INIT_A & mask_a) >> shift_a;
+            let swap_data_b = (INIT_B & mask_b) >> shift_b;
+
+            let expected_a = (INIT_A & !mask_a) | (swap_data_b << shift_a);
+            let expected_b = (INIT_B & !mask_b) | (swap_data_a << shift_b);
+
+            let got_a = data[0][2];
+            let got_b = data[0][3];
+
+            assert_eq!(
+                expected_a, got_a,
+                "lane {lanes_a}, r2: expected {expected_a:08x} got {got_a:08x}"
+            );
+
+            assert_eq!(
+                expected_b, got_b,
+                "lane {lanes_b}, r3: expected {expected_b:08x} got {got_b:08x}"
             );
         }
     }
@@ -1207,6 +1303,79 @@ fn test_op_clz() {
 }
 
 #[test]
+fn test_op_cmp() {
+    const DATA_TYPES: &[DataType] = &[
+        DataType::V4S8,
+        DataType::V4U8,
+        DataType::V2F16,
+        DataType::V2S16,
+        DataType::V2U16,
+        DataType::F32,
+        DataType::S32,
+        DataType::U32,
+    ];
+
+    const CMP_OPS: &[CmpOp] = &[
+        CmpOp::Eq,
+        CmpOp::Gt,
+        CmpOp::Ge,
+        CmpOp::Ne,
+        CmpOp::Lt,
+        CmpOp::Le,
+        CmpOp::GtLt,
+        CmpOp::Total,
+    ];
+
+    const ACCUM_OPS: &[CmpAccumOp] =
+        &[CmpAccumOp::None, CmpAccumOp::And, CmpAccumOp::Or];
+
+    const RES_TYPES: &[CmpResultType] =
+        &[CmpResultType::I1, CmpResultType::F1, CmpResultType::M1];
+
+    let mut a = Acorn::new();
+    let run = RunSingleton::get();
+    for &src_type in DATA_TYPES {
+        // 8-bits are only supported in arch <= v10
+        if src_type.bits() == 8 && run.model.arch() > 10 {
+            continue;
+        }
+        for &cmp_op in CMP_OPS {
+            // GtLt and Total only exist for floats
+            if matches!(cmp_op, CmpOp::GtLt | CmpOp::Total)
+                && !src_type.is_float_type()
+            {
+                continue;
+            }
+            for &accum_op in ACCUM_OPS {
+                for &res_type in RES_TYPES {
+                    // No 8-bit floats
+                    if src_type.bits() == 8 && res_type == CmpResultType::F1 {
+                        continue;
+                    }
+
+                    let op = OpCmp {
+                        dst: DstRef::None.into(),
+                        src_type,
+                        res_type,
+                        cmp_op,
+                        srcs: [0_u32.into(), 0_u32.into()],
+                        accum: 0_u32.into(),
+                        accum_op,
+                    };
+                    // Accum is always treated as a bool so let's use 0-1
+                    // (otherwise it would always be true)
+                    let rng = |i, dt| match i {
+                        2 => a.get_u32() % 2,
+                        _ => sample_datatype(&mut a, dt),
+                    };
+                    test_foldable_op_with(op, Precision::Exact, rng);
+                }
+            }
+        }
+    }
+}
+
+#[test]
 fn test_op_csel() {
     const DATA_TYPES: &[DataType] = &[
         DataType::S32,
@@ -1275,41 +1444,6 @@ fn test_op_f16_to_f32() {
         src: 0_u32.into(),
     };
     test_foldable_op(op, Precision::Ulp(0));
-}
-
-#[test]
-fn test_op_f32_to_f16() {
-    let run = RunSingleton::get();
-
-    // F32_TO_F16 only available from v11
-    if run.model.arch() < 11 {
-        return;
-    }
-
-    const ROUND_MODES: &[FRound] = &[
-        FRound::NearestEven,
-        FRound::Up,
-        FRound::Down,
-        FRound::TowardsZero,
-    ];
-
-    const CLAMP_MODES: &[FClamp] = &[
-        FClamp::None,
-        FClamp::ZeroToInf,
-        FClamp::NegOneToOne,
-        FClamp::ZeroToOne,
-    ];
-    for &round in ROUND_MODES {
-        for &clamp in CLAMP_MODES {
-            let op = OpF32ToF16 {
-                dst: DstRef::None.into(),
-                src: 0_u32.into(),
-                round,
-                clamp,
-            };
-            test_foldable_op(op, Precision::Ulp(0));
-        }
-    }
 }
 
 #[test]
@@ -1399,54 +1533,6 @@ fn test_op_fadd_lscale() {
             // FRound is not emulated correctly
             let ulps = if round == FRound::NearestEven { 0 } else { 1 };
             test_foldable_op(op, Precision::Ulp(ulps));
-        }
-    }
-}
-
-#[test]
-fn test_op_fcmp() {
-    const DATA_TYPES: &[DataType] = &[DataType::F32, DataType::V2F16];
-
-    const CMP_OPS: &[CmpOp] = &[
-        CmpOp::Eq,
-        CmpOp::Gt,
-        CmpOp::Ge,
-        CmpOp::Ne,
-        CmpOp::Lt,
-        CmpOp::Le,
-        CmpOp::GtLt,
-        CmpOp::Total,
-    ];
-
-    const ACCUM_OPS: &[CmpAccumOp] =
-        &[CmpAccumOp::None, CmpAccumOp::And, CmpAccumOp::Or];
-
-    const RES_TYPES: &[CmpResultType] =
-        &[CmpResultType::I1, CmpResultType::F1, CmpResultType::M1];
-
-    let mut a = Acorn::new();
-    for &src_type in DATA_TYPES {
-        for &cmp_op in CMP_OPS {
-            for &accum_op in ACCUM_OPS {
-                for &res_type in RES_TYPES {
-                    let op = OpFCmp {
-                        dst: DstRef::None.into(),
-                        src_type,
-                        res_type,
-                        cmp_op,
-                        srcs: [0_u32.into(), 0_u32.into()],
-                        accum: 0_u32.into(),
-                        accum_op,
-                    };
-                    // Accum is always treated as a bool so let's use 0-1
-                    // (otherwise it would always be true)
-                    let rng = |i, dt| match i {
-                        2 => a.get_u32() % 2,
-                        _ => sample_datatype(&mut a, dt),
-                    };
-                    test_foldable_op_with(op, Precision::Exact, rng);
-                }
-            }
         }
     }
 }
@@ -1770,69 +1856,6 @@ fn test_op_iadd() {
 }
 
 #[test]
-fn test_op_icmp() {
-    const DATA_TYPES: &[DataType] = &[
-        DataType::V4S8,
-        DataType::V4U8,
-        DataType::V2S16,
-        DataType::V2U16,
-        DataType::S32,
-        DataType::U32,
-    ];
-
-    const CMP_OPS: &[CmpOp] = &[
-        CmpOp::Eq,
-        CmpOp::Gt,
-        CmpOp::Ge,
-        CmpOp::Ne,
-        CmpOp::Lt,
-        CmpOp::Le,
-    ];
-
-    const ACCUM_OPS: &[CmpAccumOp] =
-        &[CmpAccumOp::None, CmpAccumOp::And, CmpAccumOp::Or];
-
-    const RES_TYPES: &[CmpResultType] =
-        &[CmpResultType::I1, CmpResultType::F1, CmpResultType::M1];
-
-    let mut a = Acorn::new();
-    let run = RunSingleton::get();
-    for &src_type in DATA_TYPES {
-        // 8-bits are only supported in arch <= v10
-        if src_type.bits() == 8 && run.model.arch() > 10 {
-            continue;
-        }
-        for &cmp_op in CMP_OPS {
-            for &accum_op in ACCUM_OPS {
-                for &res_type in RES_TYPES {
-                    // No 8-bit floats
-                    if src_type.bits() == 8 && res_type == CmpResultType::F1 {
-                        continue;
-                    }
-
-                    let op = OpICmp {
-                        dst: DstRef::None.into(),
-                        src_type,
-                        res_type,
-                        cmp_op,
-                        srcs: [0_u32.into(), 0_u32.into()],
-                        accum: 0_u32.into(),
-                        accum_op,
-                    };
-                    // Accum is always treated as a bool so let's use 0-1
-                    // (otherwise it would always be true)
-                    let rng = |i, dt| match i {
-                        2 => a.get_u32() % 2,
-                        _ => sample_datatype(&mut a, dt),
-                    };
-                    test_foldable_op_with(op, Precision::Exact, rng);
-                }
-            }
-        }
-    }
-}
-
-#[test]
 fn test_op_icmp_multi() {
     const DATA_TYPES: &[DataType] = &[DataType::S32, DataType::U32];
 
@@ -1966,6 +1989,26 @@ fn test_op_imul() {
                 };
                 test_foldable_op(op, Precision::Exact);
             }
+        }
+    }
+}
+
+#[test]
+fn test_op_imul_src1_widen() {
+    const DATA_TYPES: &[DataType] = &[DataType::S32, DataType::U32];
+
+    for &dst_type in DATA_TYPES {
+        for half in [0, 1] {
+            let op = OpIMul {
+                dst: DstRef::None.into(),
+                dst_type,
+                saturate: false,
+                srcs: [
+                    0_u32.into(),
+                    Src::from(0_u32).swizzle(Swizzle::widen_hx(dst_type, half)),
+                ],
+            };
+            test_foldable_op(op, Precision::Exact);
         }
     }
 }

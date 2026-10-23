@@ -2885,6 +2885,9 @@ nir_rewrite_image_intrinsic(nir_intrinsic_instr *intrin, nir_def *src,
       }                                                         \
       break;
       CASE(load)
+      CASE(input_attachment_load)
+      CASE(depth_input_attachment_load)
+      CASE(stencil_input_attachment_load)
       CASE(sparse_load)
       CASE(store)
       CASE(atomic)
@@ -3478,6 +3481,7 @@ nir_tex_instr_need_sampler(const nir_tex_instr *instr)
    case nir_texop_image_min_lod_agx:
    case nir_texop_fragment_mask_fetch_amd:
    case nir_texop_fragment_fetch_amd:
+   case nir_texop_txs_lod0_intel:
    case nir_texop_resinfo_intel:
    case nir_texop_sparse_residency_txf_intel:
       return false;
@@ -3486,11 +3490,25 @@ nir_tex_instr_need_sampler(const nir_tex_instr *instr)
    }
 }
 
+bool
+nir_tex_instr_need_texture_2(const nir_tex_instr *instr)
+{
+   switch (instr->op) {
+   case nir_texop_sample_weighted_qcom:
+   case nir_texop_block_match_sad_qcom:
+   case nir_texop_block_match_ssd_qcom:
+      return true;
+   default:
+      return false;
+   }
+}
+
 unsigned
 nir_tex_instr_result_size(const nir_tex_instr *instr)
 {
    switch (instr->op) {
-   case nir_texop_txs: {
+   case nir_texop_txs:
+   case nir_texop_txs_lod0_intel: {
       unsigned ret;
       switch (instr->sampler_dim) {
       case GLSL_SAMPLER_DIM_1D:
@@ -3543,6 +3561,9 @@ nir_tex_instr_result_size(const nir_tex_instr *instr)
    case nir_texop_sample_pos_nv:
       return 4;
 
+   case nir_texop_dual_pan:
+      return (instr->is_shadow && instr->is_new_style_shadow) ? 2 : 8;
+
    case nir_texop_gradient_pan:
       return 2;
 
@@ -3583,6 +3604,7 @@ nir_tex_instr_is_query(const nir_tex_instr *instr)
    case nir_texop_hdr_dim_nv:
    case nir_texop_tex_type_nv:
    case nir_texop_sample_pos_nv:
+   case nir_texop_txs_lod0_intel:
    case nir_texop_resinfo_intel:
    case nir_texop_sparse_residency_intel:
    case nir_texop_sparse_residency_txf_intel:
@@ -3694,6 +3716,10 @@ nir_tex_instr_src_type(const nir_tex_instr *instr, unsigned src)
    case nir_tex_src_block_size:
    case nir_tex_src_texture_heap_offset:
    case nir_tex_src_sampler_heap_offset:
+   case nir_tex_src_texture_2_heap_offset:
+   case nir_tex_src_sampler_2_heap_offset:
+   case nir_tex_src_var_handle_pan:
+   case nir_tex_src_var_buf_offset_pan:
       return nir_type_uint;
 
    case nir_num_tex_src_types:
@@ -3706,50 +3732,43 @@ nir_tex_instr_src_type(const nir_tex_instr *instr, unsigned src)
 unsigned
 nir_tex_instr_src_size(const nir_tex_instr *instr, unsigned src)
 {
-   if (instr->src[src].src_type == nir_tex_src_coord )
+   switch (instr->src[src].src_type) {
+   case nir_tex_src_coord:
       return instr->coord_components;
-
-   /* The MCS value is expected to be a vec4 returned by a txf_ms_mcs_intel */
-   if (instr->src[src].src_type == nir_tex_src_ms_mcs_intel)
+   case nir_tex_src_ms_mcs_intel:
+      /* The MCS value is expected to be a vec4 returned by a
+       * txf_ms_mcs_intel
+       */
       return 4;
-
-   if (instr->src[src].src_type == nir_tex_src_box_size)
+   case nir_tex_src_box_size:
       return 2;
-
-   /* These are vec2s at the spirv level, but get lowered to 16_16 packed values
-    * in the backend, so they don't have a single known size
-    */
-   if (instr->src[src].src_type == nir_tex_src_ref_coord ||
-       instr->src[src].src_type == nir_tex_src_block_size) {
+   case nir_tex_src_ref_coord:
+   case nir_tex_src_block_size:
+      /* These are vec2s at the spirv level, but get lowered to 16_16 packed
+       * values in the backend, so they don't have a single known size
+       */
       return 0;
-   }
-
-   if (instr->src[src].src_type == nir_tex_src_ddx ||
-       instr->src[src].src_type == nir_tex_src_ddy) {
-
+   case nir_tex_src_ddx:
+   case nir_tex_src_ddy:
       if (instr->is_array && !instr->array_is_lowered_cube)
          return instr->coord_components - 1;
       else
          return instr->coord_components;
-   }
-
-   if (instr->src[src].src_type == nir_tex_src_offset) {
+   case nir_tex_src_offset:
       if (instr->is_array)
          return instr->coord_components - 1;
       else
          return instr->coord_components;
-   }
-
-   if (instr->src[src].src_type == nir_tex_src_backend1 ||
-       instr->src[src].src_type == nir_tex_src_backend2)
+   case nir_tex_src_backend1:
+   case nir_tex_src_backend2:
       return nir_src_num_components(instr->src[src].src);
-
-   /* For AMD, this can be a vec8/vec4 image/sampler descriptor. */
-   if (instr->src[src].src_type == nir_tex_src_texture_handle ||
-       instr->src[src].src_type == nir_tex_src_sampler_handle)
+   case nir_tex_src_texture_handle:
+   case nir_tex_src_sampler_handle:
+      /* For AMD, this can be a vec8/vec4 image/sampler descriptor. */
       return 0;
-
-   return 1;
+   default:
+      return 1;
+   }
 }
 
 /**

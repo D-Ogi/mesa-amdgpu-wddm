@@ -1180,6 +1180,7 @@ void st_init_extensions(struct pipe_screen *screen,
    EXT_CAP(OES_texture_view,                 sampler_view_target);
    EXT_CAP(INTEL_blackhole_render,           frontend_noop);
    EXT_CAP(ARM_shader_framebuffer_fetch_depth_stencil, fbfetch_zs);
+   EXT_CAP(MESA_map_buffer_client_pointer,   map_client_pointer);
    EXT_CAP(MESA_texture_const_bandwidth,     has_const_bw);
 
 #undef EXT_CAP
@@ -1645,7 +1646,10 @@ void st_init_extensions(struct pipe_screen *screen,
    unsigned max_fb_fetch_rts = screen->caps.fbfetch;
    bool coherent_fb_fetch = screen->caps.fbfetch_coherent;
 
-   if (screen->caps.blend_equation_advanced)
+   consts->NativeAdvancedBlendModes = screen->caps.blend_equation_advanced;
+
+   if ((screen->caps.blend_equation_advanced &
+        PIPE_ADVANCED_BLEND_KHR_MODES_MASK) == PIPE_ADVANCED_BLEND_KHR_MODES_MASK)
       extensions->KHR_blend_equation_advanced = true;
 
    if (max_fb_fetch_rts > 0) {

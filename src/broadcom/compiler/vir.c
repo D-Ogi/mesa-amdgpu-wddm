@@ -1473,9 +1473,9 @@ v3d_instr_delay_cb(nir_instr *instr, void *data)
       case nir_op_ushr: {
          nir_scalar s = nir_get_scalar(alu->src[1].src.ssa, 0);
          if (!nir_scalar_is_const(s))
-            return false;
+            return 1;
 
-         return nir_scalar_as_uint(s) == 16u;
+         return nir_scalar_as_uint(s) != 16u;
       }
 
       default:
@@ -2035,6 +2035,7 @@ v3d_attempt_compile(struct v3d_compile *c)
 
                 NIR_PASS(_, c->s, nir_lower_robust_access,
                          should_lower_robustness, c->key);
+                c->robust_access_lowered = true;
         }
 
         NIR_PASS(_, c->s, nir_lower_vars_to_scratch,
@@ -2097,6 +2098,8 @@ v3d_attempt_compile(struct v3d_compile *c)
                 NIR_PASS(_, c->s, nir_opt_dce);
                 NIR_PASS(_, c->s, nir_opt_cse);
         }
+
+        NIR_PASS(_, c->s, nir_opt_uadd_carry, 32);
 
         NIR_PASS(_, c->s, nir_lower_bool_to_int32);
         nir_divergence_analysis(c->s);

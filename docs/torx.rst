@@ -5,56 +5,33 @@ Torx is Mesa's ExecuTorch backend: it can make use of NPUs to accelerate ML
 inference, implemented as a custom backend for the
 `ExecuTorch <https://github.com/pytorch/executorch>`_ on-device AI framework.
 
-Build ExecuTorch
-----------------
+Install ExecuTorch
+------------------
 
-Torx requires the ExecuTorch runtime library (``libexecutorch.so``) at build
-time, and the ExecuTorch Python wheel at run time (for exporting models).
+Torx needs the ExecuTorch runtime library and its headers to build, and the
+ExecuTorch Python package to export models. The ExecuTorch wheel provides all
+of them, so there is nothing to build from source.
 
-Clone and initialise the repository:
-
-.. code-block:: console
-
-   ~ $ git clone https://github.com/pytorch/executorch.git
-   ~ $ cd executorch
-   executorch $ git submodule update --init --recursive
-
-Install the Python wheel and the runtime library together using a single build
-via ``pip install``. A CPU-only PyTorch must already be installed
-(``pip install torch --index-url https://download.pytorch.org/whl/cpu``).
+ExecuTorch does not pull in PyTorch, so install PyTorch too. A regular CPU-only
+release is enough to export models. ExecuTorch has to be a nightly build for
+now, because the nightly wheels are the ones that ship the ``executorch.pc``
+pkg-config file Torx needs:
 
 .. code-block:: console
 
-   executorch $ pip install -r requirements-dev.txt
-   executorch $ CMAKE_ARGS="-DEXECUTORCH_BUILD_SHARED=ON \
-       -DEXECUTORCH_BUILD_EXTENSION_LLM=OFF \
-       -DEXECUTORCH_BUILD_EXTENSION_LLM_RUNNER=OFF \
-       -DEXECUTORCH_BUILD_COREML=OFF" \
-       pip install --break-system-packages --no-build-isolation .
+   ~ $ pip install --break-system-packages torch --index-url https://download.pytorch.org/whl/cpu
+   ~ $ pip install --break-system-packages --pre executorch --extra-index-url https://download.pytorch.org/whl/nightly/cpu
 
-   # Install the runtime library and headers system-wide
-   executorch $ ET_BUILD=$(ls -d pip-out/temp.*/cmake-out | head -1)
-   executorch $ cmake --build $ET_BUILD -j$(nproc)
-   executorch $ sudo cmake --install $ET_BUILD
-
-The ``--no-build-isolation`` flag is needed so the build can find the
-system-installed PyTorch. The ``EXECUTORCH_BUILD_*=OFF`` flags
-disable features which aren't needed but are known to break the build
-with recent compiler versions.
-
-Verify the installation provides a working pkg-config file:
+Point pkg-config at the file the wheel ships, and check that it is found:
 
 .. code-block:: console
 
+   ~ $ export PKG_CONFIG_PATH=$(python3 -c 'import executorch, pathlib; print(pathlib.Path(executorch.__path__[0]) / "lib" / "pkgconfig")')
    ~ $ pkg-config --cflags --libs executorch
 
-To install to a non-standard prefix instead, pass
-``-DCMAKE_INSTALL_PREFIX=/path/to/install`` in ``CMAKE_ARGS`` and set
-``PKG_CONFIG_PATH`` accordingly:
-
-.. code-block:: console
-
-   ~ $ export PKG_CONFIG_PATH=/path/to/install/lib64/pkgconfig
+ExecuTorch built from source with ``-DEXECUTORCH_BUILD_SHARED=ON`` and
+installed with ``cmake --install`` also provides ``executorch.pc``. Set
+``PKG_CONFIG_PATH`` to its ``pkgconfig`` directory instead.
 
 Build Mesa
 ----------

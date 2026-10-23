@@ -346,6 +346,13 @@ LPJit::LPJit() :jit_dylib_count(0) {
          .setJITTargetMachineBuilder(std::move(JTMB))
 #ifdef USE_JITLINK
          .setObjectLinkingLayerCreator(
+#if LLVM_VERSION_MAJOR >= 23
+            /* LLVM 23 added a JITLinkMemoryManager argument, use it as our
+             * JITLinkMemoryManager. */
+            [&](ExecutionSession &ES, llvm::jitlink::JITLinkMemoryManager &MM) {
+               return std::make_unique<ObjectLinkingLayer>(ES, MM);
+            })
+#else
 #if LLVM_VERSION_MAJOR >= 21
             /* LLVM 21 removed the Triple argument */
             [&](ExecutionSession &ES) {
@@ -355,6 +362,7 @@ LPJit::LPJit() :jit_dylib_count(0) {
                return std::make_unique<ObjectLinkingLayer>(
                   ES, ExitOnErr(llvm::jitlink::InProcessMemoryManager::Create()));
             })
+#endif
 #else
 #if LLVM_USE_INTEL_JITEVENTS
          .RegisterJITEventListener(
@@ -689,6 +697,8 @@ gallivm_compile_module(struct gallivm_state *gallivm)
          (void *)os_time_get_nano);
 
    lp_build_coro_add_malloc_hooks(gallivm);
+
+   lp_disable_eh_frame(gallivm);
 
    /* Dump bitcode to a file */
    if (gallivm_debug & GALLIVM_DEBUG_DUMP_BC &&

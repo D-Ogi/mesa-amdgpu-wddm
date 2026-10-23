@@ -1044,17 +1044,6 @@ translate_opcode(enum tgsi_opcode opcode)
    case TGSI_OPCODE_U2D:
       return VGPU10_OPCODE_UTOD;
 
-   case TGSI_OPCODE_SAMPLE_POS:
-      /* Note: we never actually get this opcode because there's no GLSL
-       * function to query multisample resource sample positions.  There's
-       * only the TGSI_SEMANTIC_SAMPLEPOS system value which contains the
-       * position of the current sample in the render target.
-       */
-      FALLTHROUGH;
-   case TGSI_OPCODE_SAMPLE_INFO:
-      /* NOTE: We never actually get this opcode because TXQS is used instead.
-       */
-      FALLTHROUGH;
    default:
       assert(!"Unexpected TGSI opcode in translate_opcode()");
       return VGPU10_OPCODE_NOP;

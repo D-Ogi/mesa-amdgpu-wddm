@@ -1,6 +1,7 @@
 #ifndef _AV1_VDENC_TABLES_H_
 #define _AV1_VDENC_TABLES_H_
 
+#if GFX_VERx10 >= 125
 /* AV1 VDENC cost tables copied from media-driver
  *  Row 0 = intra,
  *  Row 1 = inter, indexed by base_qindex.
@@ -503,5 +504,6 @@ static const uint32_t av1_vdenc_cmd2_dws[] = {
    0x8000fc, 0xb10080, 0x300aa, 0xd30069, 0xe000e9, 0x940003,
    0x56004d, 0x9500fd, 0x17002d, 0xfd001f, 0x2006c, 0x800080,
 };
+#endif
 
 #endif /* _AV1_VDENC_TABLES_H_ */

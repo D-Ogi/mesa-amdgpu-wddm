@@ -35,6 +35,21 @@ PER_TENSOR_QDQ_OPS: Final = (
 )
 PER_CHANNEL_QDQ_OPS: Final = (QUANT_PER_CHANNEL_OP, DEQUANT_PER_CHANNEL_OP)
 
+
+def is_quantize(node) -> bool:
+    return isinstance(node, torch.fx.Node) and node.target in (
+        QUANT_PER_TENSOR_OP,
+        torch.ops.quantized_decomposed.quantize_per_tensor.default,
+    )
+
+
+def is_dequantize(node) -> bool:
+    return isinstance(node, torch.fx.Node) and node.target in (
+        DEQUANT_PER_TENSOR_OP,
+        torch.ops.quantized_decomposed.dequantize_per_tensor.default,
+    )
+
+
 class QuantArgs(NamedTuple):
     scale: list[float] | float
     zp: list[int] | int

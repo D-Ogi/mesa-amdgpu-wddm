@@ -236,7 +236,7 @@ vk_android_import_anb_memory(struct vk_device *device,
 
    uint32_t compatible_types = mem_reqs.memoryTypeBits & fd_props.memoryTypeBits;
    if (!compatible_types) {
-      mesa_loge("No compatible AHB mem types (img_reqs=%#b,fd_reqs=%#b)",
+      mesa_loge("No compatible AHB mem types (img_reqs=%#x,fd_reqs=%#x)",
                  mem_reqs.memoryTypeBits, fd_props.memoryTypeBits);
       return VK_ERROR_INVALID_EXTERNAL_HANDLE;
    }
@@ -744,6 +744,12 @@ vk_ahb_format_to_image_format(uint32_t ahb_format)
 #endif
    case AHARDWAREBUFFER_FORMAT_Y8:
       return VK_FORMAT_R8_UNORM;
+#if ANDROID_API_LEVEL >= 34
+   case AHARDWAREBUFFER_FORMAT_R16_UINT:
+      return VK_FORMAT_R16_UINT;
+   case AHARDWAREBUFFER_FORMAT_R16G16_UINT:
+      return VK_FORMAT_R16G16_UINT;
+#endif
    case AHARDWAREBUFFER_FORMAT_B8G8R8A8_UNORM:
       return VK_FORMAT_B8G8R8A8_UNORM;
    default:
@@ -786,6 +792,12 @@ vk_image_format_to_ahb_format(VkFormat vk_format)
 #if ANDROID_API_LEVEL >= 33
    case VK_FORMAT_R8_UNORM:
       return AHARDWAREBUFFER_FORMAT_R8_UNORM;
+#endif
+#if ANDROID_API_LEVEL >= 34
+   case VK_FORMAT_R16_UINT:
+      return AHARDWAREBUFFER_FORMAT_R16_UINT;
+   case VK_FORMAT_R16G16_UINT:
+      return AHARDWAREBUFFER_FORMAT_R16G16_UINT;
 #endif
    case VK_FORMAT_B8G8R8A8_UNORM:
       return AHARDWAREBUFFER_FORMAT_B8G8R8A8_UNORM;
@@ -1110,6 +1122,12 @@ get_ahb_buffer_format_properties2(
       break;
    case DRM_FORMAT_P210:
       external_format = VK_FORMAT_G10X6_B10X6R10X6_2PLANE_422_UNORM_3PACK16;
+      break;
+   case DRM_FORMAT_YUYV:
+      external_format = VK_FORMAT_G8B8G8R8_422_UNORM;
+      break;
+   case DRM_FORMAT_UYVY:
+      external_format = VK_FORMAT_B8G8R8G8_422_UNORM;
       break;
    case DRM_FORMAT_XBGR8888:
       /* This can be resolved from IMPLEMENTATION_DEFINED AHB format */

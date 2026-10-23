@@ -92,7 +92,7 @@ piglit_folder = "/piglit"
 profile = "gpu"
 process_isolation = true
 timeout = 180.0
-  [piglit.env]
+[piglit.env]
   # Disable validation on piglit.  We end up with use-after-frees from
   # piglit_report() -> exit() having freed validation layer state, with a
   # st_glFlush() -> tc_batch_execute() -> zink_set_vertex_buffers ->

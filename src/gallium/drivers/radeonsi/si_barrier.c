@@ -196,13 +196,13 @@ static void si_emit_barrier(struct si_context *sctx, struct radeon_cmdbuf *cs)
       .eop_bug_va = eop_bug_va,
    };
 
-   if (unlikely(sctx->sqtt_enabled))
+   if (unlikely(si_is_sqtt_active(sctx)))
       si_sqtt_describe_barrier_start(sctx, cs);
 
    ac_emit_barrier(&cs->current, gfx_level, ip_type, &barrier,
                    &sctx->context_roll, &rgp_flush_bits);
 
-   if (unlikely(sctx->sqtt_enabled))
+   if (unlikely(si_is_sqtt_active(sctx)))
       si_sqtt_describe_barrier_end(sctx, cs, rgp_flush_bits);
 
    if (gfx_level >= GFX10_3) {
@@ -238,11 +238,11 @@ void si_barrier_before_internal_op(struct si_context *sctx, unsigned flags,
    }
 
    /* Don't sync if buffers are idle. */
-   const unsigned ps_mask = SI_BIND_CONSTANT_BUFFER(MESA_SHADER_FRAGMENT) |
+   const uint64_t ps_mask = SI_BIND_CONSTANT_BUFFER(MESA_SHADER_FRAGMENT) |
                             SI_BIND_SHADER_BUFFER(MESA_SHADER_FRAGMENT) |
                             SI_BIND_IMAGE_BUFFER(MESA_SHADER_FRAGMENT) |
                             SI_BIND_SAMPLER_BUFFER(MESA_SHADER_FRAGMENT);
-   const unsigned cs_mask = SI_BIND_CONSTANT_BUFFER(MESA_SHADER_COMPUTE) |
+   const uint64_t cs_mask = SI_BIND_CONSTANT_BUFFER(MESA_SHADER_COMPUTE) |
                             SI_BIND_SHADER_BUFFER(MESA_SHADER_COMPUTE) |
                             SI_BIND_IMAGE_BUFFER(MESA_SHADER_COMPUTE) |
                             SI_BIND_SAMPLER_BUFFER(MESA_SHADER_COMPUTE);

@@ -604,6 +604,7 @@ emit_indirect_compute_walker(struct anv_cmd_buffer *cmd_buffer,
          .Post_sync_opn3.MOCS     = anv_mocs(device, NULL, 0),
       };
 
+      assert(comp_state->shader->bind_map.inline_dwords_count <= ARRAY_SIZE(body.InlineData));
       fill_inline_params(body.InlineData, &inline_value);
 
       cmd_buffer->state.last_indirect_dispatch =
@@ -629,6 +630,7 @@ emit_indirect_compute_walker(struct anv_cmd_buffer *cmd_buffer,
          },
       };
 
+      assert(comp_state->shader->bind_map.inline_dwords_count <= ARRAY_SIZE(body.InlineData));
       fill_inline_params(body.InlineData, &inline_value);
 
       cmd_buffer->state.last_indirect_dispatch =
@@ -1658,7 +1660,7 @@ cmd_buffer_trace_rays(struct anv_cmd_buffer *cmd_buffer,
          .Post_sync_opn3.MOCS            = anv_mocs(device, NULL, 0),
          .InterfaceDescriptor            = (struct GENX(INTERFACE_DESCRIPTOR_DATA_2)) {
             .KernelStartPointer                =
-               anv_shader_internal_get_pointer(device, device->rt_trampoline),
+               anv_shader_get_pointer(device, &device->rt_trampoline->kernel),
             .RegistersPerThread                = intel_register_blocks(device->info, cs_prog_data->base.grf_used),
             .NumberofThreadsinGPGPUThreadGroup = dispatch.threads,
             .ThreadGroupDispatchSize           = intel_compute_threads_group_dispatch_size_walker_2(dispatch.threads),
@@ -1702,7 +1704,7 @@ cmd_buffer_trace_rays(struct anv_cmd_buffer *cmd_buffer,
 #endif
 
          .InterfaceDescriptor = (struct GENX(INTERFACE_DESCRIPTOR_DATA)) {
-            .KernelStartPointer = anv_shader_internal_get_pointer(device, device->rt_trampoline),
+            .KernelStartPointer = anv_shader_get_pointer(device, &device->rt_trampoline->kernel),
             .NumberofThreadsinGPGPUThreadGroup = threads_per_group,
             .ThreadGroupDispatchSize =
                intel_compute_threads_group_dispatch_size(threads_per_group),

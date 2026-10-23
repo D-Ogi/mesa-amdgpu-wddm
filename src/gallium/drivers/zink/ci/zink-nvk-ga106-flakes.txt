@@ -212,7 +212,6 @@ spec@arb_gpu_shader_fp64@execution@built-in-functions@gs-greaterthanequal-dvec3-
 spec@arb_pixel_buffer_object@pbo-drawpixels
 spec@arb_pixel_buffer_object@texsubimage pbo
 spec@arb_pixel_buffer_object@texsubimage-unpack pbo
-spec@arb_sample_locations@test
 spec@arb_sample_shading@builtin-gl-sample-mask 4
 spec@arb_shader_image_load_store@coherency
 spec@arb_shader_image_load_store@coherency@Geometry-Fragment shader/'coherent' qualifier coherency test/256x256

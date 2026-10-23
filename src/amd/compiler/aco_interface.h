@@ -30,7 +30,7 @@ typedef struct {
    struct ac_shader_config config;
    unsigned wave_size;
 
-   const struct amd_stats *stats;
+   const struct amd_stats* stats;
 
    const uint32_t* code;
    uint32_t code_dw;
@@ -91,8 +91,8 @@ uint64_t aco_get_codegen_flags();
 
 bool aco_is_gpu_supported(const struct radeon_info* info);
 
-void aco_print_asm(const struct radeon_info *info, unsigned wave_size,
-                   uint32_t *binary, unsigned num_dw);
+void aco_print_asm(const struct radeon_info* info, unsigned wave_size, uint32_t* binary,
+                   unsigned num_dw);
 
 #ifdef __cplusplus
 }

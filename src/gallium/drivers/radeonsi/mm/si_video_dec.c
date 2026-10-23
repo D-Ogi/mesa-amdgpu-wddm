@@ -27,6 +27,8 @@ static void si_dec_begin_frame(struct pipe_video_codec *decoder, struct pipe_vid
    if (vid->bs_buffers[vid->cur_buffer]) {
       vid->bs_ptr = vid->ws->buffer_map(vid->ws, vid->bs_buffers[vid->cur_buffer]->buf,
                                         NULL, PIPE_MAP_WRITE | RADEON_MAP_TEMPORARY);
+      if (!vid->bs_ptr)
+         ERROR("Failed to map bitstream buffer!");
    }
 }
 
@@ -242,6 +244,10 @@ static int si_dec_init_decoder(struct si_video_dec *vid, struct ac_video_dec_ses
       cmd.embedded_va = si_dec_buf_address(vid, emb_buffer, RADEON_USAGE_READWRITE, RADEON_DOMAIN_VRAM);
       cmd.embedded_ptr =
          vid->ws->buffer_map(vid->ws, emb_buffer->buf, NULL, PIPE_MAP_WRITE | RADEON_MAP_TEMPORARY);
+      if (!cmd.embedded_ptr) {
+         ret = -ENOMEM;
+         goto err;
+      }
    }
 
    ret = vid->dec->build_create_cmd(vid->dec, &cmd);
@@ -264,6 +270,10 @@ err_cs:
    if (vid->dec) {
       vid->dec->destroy(vid->dec);
       vid->dec = NULL;
+   }
+   if (vid->ectx) {
+      vid->ectx->destroy(vid->ectx);
+      vid->ectx = NULL;
    }
 
    return ret;
@@ -291,6 +301,8 @@ static int si_dec_destroy_decoder(struct si_video_dec *vid)
       cmd.embedded_va = si_dec_buf_address(vid, emb_buffer, RADEON_USAGE_READWRITE, RADEON_DOMAIN_VRAM);
       cmd.embedded_ptr =
          vid->ws->buffer_map(vid->ws, emb_buffer->buf, NULL, PIPE_MAP_WRITE | RADEON_MAP_TEMPORARY);
+      if (!cmd.embedded_ptr)
+         return -ENOMEM;
    }
 
    int ret = vid->dec->build_destroy_cmd(vid->dec, &cmd);
@@ -395,6 +407,8 @@ static int decode_cmd_build(struct si_video_dec *vid, struct pipe_picture_desc *
       cmd->embedded_va = si_dec_buf_address(vid, emb_buffer, RADEON_USAGE_READWRITE, RADEON_DOMAIN_VRAM);
       cmd->embedded_ptr =
          vid->ws->buffer_map(vid->ws, emb_buffer->buf, NULL, PIPE_MAP_WRITE | RADEON_MAP_TEMPORARY);
+      if (!cmd->embedded_ptr)
+         return -ENOMEM;
    }
 
    struct si_resource *bs_buffer = vid->bs_buffers[vid->cur_buffer];

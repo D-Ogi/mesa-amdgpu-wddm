@@ -306,6 +306,10 @@ def api_special_implementation_vkUpdateDescriptorSetWithTemplateSizedGOOGLE(api,
     cgen.stmt("mReconstruction.addHandles((const uint64_t*)(&handle), 1)")
     cgen.stmt("mReconstruction.setApiTrace(apiCallHandle, apiCallPacket, apiCallPacketSize)")
     cgen.stmt("mReconstruction.addHandleDependency( (const uint64_t*)(&handle), 1, (uint64_t)(uintptr_t)device)")
+    cgen.stmt("mReconstruction.addHandleDependency((const uint64_t*)(&handle), 1, (uint64_t)(uintptr_t)unboxed_to_boxed_non_dispatchable_VkDescriptorSet(descriptorSet))")
+    cgen.stmt("mReconstruction.addHandleDependency((const uint64_t*)(&handle), 1, imageInfoCount, pImageInfos)")
+    cgen.stmt("mReconstruction.addHandleDependency((const uint64_t*)(&handle), 1, bufferInfoCount, pBufferInfos)")
+    cgen.stmt("mReconstruction.addHandleDependency((const uint64_t*)(&handle), 1, bufferViewCount, pBufferViews)")
     cgen.stmt("mReconstruction.forEachHandleAddApi((const uint64_t*)(&handle), 1, apiCallHandle, VkReconstruction::CREATED)")
     cgen.stmt("mReconstruction.setCreatedHandlesForApi(apiCallHandle, (const uint64_t*)(&handle), 1)")
 
@@ -362,6 +366,12 @@ def api_special_implementation_vkResetCommandBuffer(api, cgen):
     cgen.stmt("std::lock_guard<std::mutex> lock(mReconstructionMutex)")
     cgen.stmt("mReconstruction.removeDescendantsOfHandle((uint64_t)(uintptr_t)commandBuffer)")
 
+def api_special_implementation_vkResetDescriptorPool(api, cgen):
+    cgen.line("// Note: special implementation");
+    cgen.stmt("if (input_result != VK_SUCCESS) return")
+    cgen.stmt("std::lock_guard<std::mutex> lock(mReconstructionMutex)")
+    cgen.stmt("mReconstruction.removeDescendantsOfHandle((uint64_t)(uintptr_t)unboxed_to_boxed_non_dispatchable_VkDescriptorPool(descriptorPool))")
+
 def api_special_implementation_vkBindBufferMemory(api, cgen):
     api_special_implementation_common(api, cgen, "Tag_VkBindMemory")
     cgen.stmt("mReconstruction.addHandleDependency( (const uint64_t*)(&handle), 1, (uint64_t)(uintptr_t)unboxed_to_boxed_non_dispatchable_VkDeviceMemory(memory))")
@@ -387,7 +397,9 @@ apiSpecialImplementation = {
     "vkMapMemoryIntoAddressSpaceGOOGLE": api_special_implementation_vkMapMemoryIntoAddressSpaceGOOGLE,
     "vkGetBlobGOOGLE": api_special_implementation_vkMapMemoryIntoAddressSpaceGOOGLE,
     "vkResetCommandBuffer": api_special_implementation_vkResetCommandBuffer,
+    "vkResetCommandBufferAsyncGOOGLE": api_special_implementation_vkResetCommandBuffer,
     "vkResetCommandPool": api_special_implementation_vkResetCommandPool,
+    "vkResetDescriptorPool": api_special_implementation_vkResetDescriptorPool,
     "vkCmdBindVertexBuffers": api_special_implementation_vkCmdBindVertexBuffers,
     "vkCmdBindPipeline": api_special_implementation_vkCmdBindPipeline,
     "vkCmdCopyBufferToImage": api_special_implementation_vkCmdCopyBufferToImage,

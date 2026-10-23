@@ -110,6 +110,8 @@ anv_shader_heap_alloc(struct anv_shader_heap *heap,
    assert(align <= heap->base_chunk_size);
    assert(size <= heap->base_chunk_size);
 
+   size = align64(size, align);
+
    simple_mtx_lock(&heap->mutex);
 
    heap->vma.nospan_shift = MAX2(21, util_last_bit64(size) - 1);

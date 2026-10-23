@@ -24,235 +24,6 @@
 
 #include "mfpipeinterop.h"
 
-// utility to convert from pipe_video_profile to AVEncVProfile
-uint32_t
-ConvertPipeProfileToSpecProfile( pipe_video_profile profile )
-{
-   switch( profile )
-   {
-      case PIPE_VIDEO_PROFILE_MPEG4_AVC_CONSTRAINED_BASELINE:
-         return eAVEncH264VProfile_Base;
-      case PIPE_VIDEO_PROFILE_MPEG4_AVC_MAIN:
-         return eAVEncH264VProfile_Main;
-      case PIPE_VIDEO_PROFILE_MPEG4_AVC_HIGH:
-         return eAVEncH264VProfile_High;
-      case PIPE_VIDEO_PROFILE_MPEG4_AVC_HIGH10:
-         return eAVEncH264VProfile_High10;
-      case PIPE_VIDEO_PROFILE_HEVC_MAIN:
-         return eAVEncH265VProfile_Main_420_8;
-      case PIPE_VIDEO_PROFILE_HEVC_MAIN_10:
-         return eAVEncH265VProfile_Main_420_10;
-      case PIPE_VIDEO_PROFILE_HEVC_MAIN_444:
-         return eAVEncH265VProfile_Main_444_8;
-      default:
-         return 0;
-   }
-}
-
-enum pipe_format
-ConvertAVEncVProfileToPipeFormat( enum eAVEncH264VProfile profile )
-{
-   switch( profile )
-   {
-      case eAVEncH264VProfile_ConstrainedBase:
-      case eAVEncH264VProfile_Base:
-      case eAVEncH264VProfile_Main:
-      case eAVEncH264VProfile_Extended:
-      case eAVEncH264VProfile_ConstrainedHigh:
-      case eAVEncH264VProfile_High:
-         return PIPE_FORMAT_NV12;
-      case eAVEncH264VProfile_High10:
-         return PIPE_FORMAT_P010;
-      case eAVEncH264VProfile_422:
-         return PIPE_FORMAT_YUYV;
-      case eAVEncH264VProfile_444:
-         return PIPE_FORMAT_AYUV;
-      default:
-         UNREACHABLE( "Unsupported H.264 profile" );
-         return PIPE_FORMAT_NONE;
-   }
-}
-
-enum pipe_format
-ConvertAVEncVProfileToPipeFormat( enum eAVEncH265VProfile profile )
-{
-   switch( profile )
-   {
-      case eAVEncH265VProfile_Main_420_8:
-         return PIPE_FORMAT_NV12;
-      case eAVEncH265VProfile_Main_420_10:
-         return PIPE_FORMAT_P010;
-      case eAVEncH265VProfile_Main_422_8:
-         return PIPE_FORMAT_YUYV;
-      case eAVEncH265VProfile_Main_422_10:
-         return PIPE_FORMAT_Y210;
-      case eAVEncH265VProfile_Main_444_8:
-         return PIPE_FORMAT_AYUV;
-      case eAVEncH265VProfile_Main_444_10:
-         return PIPE_FORMAT_Y410;
-      default:
-         UNREACHABLE( "Unsupported H.265 profile" );
-         return PIPE_FORMAT_NONE;
-   }
-}
-
-GUID
-ConvertAVEncVProfileToSubtype( enum eAVEncH264VProfile profile )
-{
-   switch( profile )
-   {
-      case eAVEncH264VProfile_ConstrainedBase:
-      case eAVEncH264VProfile_Base:
-      case eAVEncH264VProfile_Main:
-      case eAVEncH264VProfile_Extended:
-      case eAVEncH264VProfile_ConstrainedHigh:
-      case eAVEncH264VProfile_High:
-         return MFVideoFormat_NV12;
-      case eAVEncH264VProfile_High10:
-         return MFVideoFormat_P010;
-      case eAVEncH264VProfile_422:
-         return MFVideoFormat_YUY2;
-      case eAVEncH264VProfile_444:
-         return MFVideoFormat_AYUV;
-      default:
-         UNREACHABLE( "Unsupported H.264 profile" );
-         return GUID_NULL;
-   }
-}
-
-GUID
-ConvertAVEncVProfileToSubtype( enum eAVEncH265VProfile profile )
-{
-   switch( profile )
-   {
-      case eAVEncH265VProfile_Main_420_8:
-         return MFVideoFormat_NV12;
-      case eAVEncH265VProfile_Main_420_10:
-         return MFVideoFormat_P010;
-      case eAVEncH265VProfile_Main_422_8:
-         return MFVideoFormat_YUY2;
-      case eAVEncH265VProfile_Main_422_10:
-         return MFVideoFormat_Y210;
-      case eAVEncH265VProfile_Main_444_8:
-         return MFVideoFormat_AYUV;
-      case eAVEncH265VProfile_Main_444_10:
-         return MFVideoFormat_Y410;
-      default:
-         UNREACHABLE( "Unsupported H.265 profile" );
-         return GUID_NULL;
-   }
-}
-
-enum pipe_format
-ConvertAVEncVProfileToPipeFormat( enum eAVEncAV1VProfile profile )
-{
-   switch( profile )
-   {
-      case eAVEncAV1VProfile_Main_420_8:
-         return PIPE_FORMAT_NV12;
-      case eAVEncAV1VProfile_Main_420_10:
-         return PIPE_FORMAT_P010;
-      default:
-         UNREACHABLE( "Unsupported H.265 profile" );
-         return PIPE_FORMAT_NONE;
-   }
-}
-
-GUID
-ConvertAVEncVProfileToSubtype( enum eAVEncAV1VProfile profile )
-{
-   switch( profile )
-   {
-      case eAVEncAV1VProfile_Main_420_8:
-         return MFVideoFormat_NV12;
-      case eAVEncAV1VProfile_Main_420_10:
-         return MFVideoFormat_P010;
-      default:
-         UNREACHABLE( "Unsupported AV1 profile" );
-         return GUID_NULL;
-   }
-}
-
-// utility to convert from AVEncVProfile to pipe_video_profile
-enum pipe_video_profile
-ConvertAVEncVProfileToPipeVideoProfile( struct vl_screen *vlScreen, UINT32 profile, D3D12_VIDEO_ENCODER_CODEC codec )
-{
-   enum pipe_video_profile pipeProfile = PIPE_VIDEO_PROFILE_UNKNOWN;
-
-   switch( codec )
-   {
-      case D3D12_VIDEO_ENCODER_CODEC_H264:
-         switch( (eAVEncH264VProfile) profile )
-         {
-            case eAVEncH264VProfile_Base:   // %%%TODO - Revisit, up-promoting this isn't always valid
-            case eAVEncH264VProfile_ConstrainedBase:
-               pipeProfile = PIPE_VIDEO_PROFILE_MPEG4_AVC_CONSTRAINED_BASELINE;
-               break;
-            case eAVEncH264VProfile_Main:
-               pipeProfile = PIPE_VIDEO_PROFILE_MPEG4_AVC_MAIN;
-               break;
-            case eAVEncH264VProfile_Extended:   // We shouldn't get this, SetOutputType() should've already failed
-               pipeProfile = PIPE_VIDEO_PROFILE_MPEG4_AVC_EXTENDED;
-               break;
-            case eAVEncH264VProfile_ConstrainedHigh:   // strict subset, so promote to high
-            case eAVEncH264VProfile_High:
-               pipeProfile = PIPE_VIDEO_PROFILE_MPEG4_AVC_HIGH;
-               break;
-            case eAVEncH264VProfile_High10:
-               pipeProfile = PIPE_VIDEO_PROFILE_MPEG4_AVC_HIGH10;
-               break;
-            case eAVEncH264VProfile_422:
-               pipeProfile = PIPE_VIDEO_PROFILE_MPEG4_AVC_HIGH422;
-               break;
-            case eAVEncH264VProfile_444:
-               pipeProfile = PIPE_VIDEO_PROFILE_MPEG4_AVC_HIGH444;
-               break;
-         }
-         break;
-      case D3D12_VIDEO_ENCODER_CODEC_HEVC:
-         switch( (eAVEncH265VProfile) profile )
-         {
-            case eAVEncH265VProfile_Main_420_8:
-               pipeProfile = PIPE_VIDEO_PROFILE_HEVC_MAIN;
-               break;
-            case eAVEncH265VProfile_Main_420_10:
-               pipeProfile = PIPE_VIDEO_PROFILE_HEVC_MAIN_10;
-               break;
-            case eAVEncH265VProfile_Main_422_8:
-               pipeProfile = PIPE_VIDEO_PROFILE_HEVC_MAIN_422;
-               break;
-            case eAVEncH265VProfile_Main_422_10:
-               pipeProfile = PIPE_VIDEO_PROFILE_HEVC_MAIN10_422;
-               break;
-            case eAVEncH265VProfile_Main_444_8:
-               pipeProfile = PIPE_VIDEO_PROFILE_HEVC_MAIN_444;
-               break;
-            case eAVEncH265VProfile_Main_444_10:
-               pipeProfile = PIPE_VIDEO_PROFILE_HEVC_MAIN10_444;
-               break;
-         }
-         break;
-      case D3D12_VIDEO_ENCODER_CODEC_AV1:
-         switch( (eAVEncAV1VProfile) profile )
-         {
-            case eAVEncAV1VProfile_Main_420_8:
-               pipeProfile = PIPE_VIDEO_PROFILE_AV1_MAIN;
-               break;
-            case eAVEncAV1VProfile_Main_420_10:
-               pipeProfile = PIPE_VIDEO_PROFILE_AV1_MAIN;
-               break;
-         }
-         break;
-   }
-
-   if( !vlScreen->pscreen->get_video_param( vlScreen->pscreen, pipeProfile, PIPE_VIDEO_ENTRYPOINT_ENCODE, PIPE_VIDEO_CAP_SUPPORTED ) )
-   {
-      return PIPE_VIDEO_PROFILE_UNKNOWN;
-   }
-
-   return pipeProfile;
-}
-
 // utility to convert from pipe_h2645_enc_picture_type to eAVEncH264PictureType
 // There is no eAVEncH265PictureType, so this is used for both
 enum eAVEncH264PictureType
@@ -291,7 +62,19 @@ ConvertFourCCToPipeFormat( DWORD dwFourCC )
    {
       return PIPE_FORMAT_YUYV;
    }
-   return PIPE_FORMAT_NONE;
+   else if( dwFourCC == FOURCC_Y210 )
+   {
+      return PIPE_FORMAT_Y210;
+   }
+   else if( dwFourCC == FOURCC_Y410 )
+   {
+      return PIPE_FORMAT_Y410;
+   }
+   else
+   {
+      UNREACHABLE( "Unsupported FourCC" );
+      return PIPE_FORMAT_NONE;
+   }
 }
 
 // utility to convert from pipe_format to image stride
@@ -307,8 +90,17 @@ AdjustStrideForPipeFormatAndWidth( enum pipe_format pipeFormat, UINT32 width )
       case PIPE_FORMAT_P010:
          stride = 2 * width;
          break;
+      case PIPE_FORMAT_YUYV:
+         stride = 2 * width;
+         break;
       case PIPE_FORMAT_AYUV:
-         stride = width;
+         stride = 4 * width;
+         break;
+      case PIPE_FORMAT_Y210:
+         stride = 4 * width;
+         break;
+      case PIPE_FORMAT_Y410:
+         stride = 4 * width;
          break;
    }
    return stride;

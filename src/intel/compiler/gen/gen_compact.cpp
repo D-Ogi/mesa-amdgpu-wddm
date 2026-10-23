@@ -1003,7 +1003,7 @@ static const uint32_t xe3p_3src_dpas_control_index_table[16] = {
 
 static const uint32_t xe3p_3src_source_index_table[16] = {
    /* BitRemap: 114,113:112,98,97:96,91,87:86,85:84,66,65:64,49,47,46,45:44,43,35 */
-   0b010110000000000000001,
+   0b101100000001000000001,
    0b101100000000000000001,
    0b100100000001000000000,
    0b100100000000000000001,
@@ -2094,7 +2094,7 @@ private:
    try_compact()
    {
       /* TODO: implement sendg compact */
-      if (desc->gen_op == GEN_OP_SENDG)
+      if (desc->gen_op == GEN_OP_SENDG || desc->gen_op == GEN_OP_SENDGC)
          return false;
 
       memset(&c_raw, 0, sizeof(c_raw));

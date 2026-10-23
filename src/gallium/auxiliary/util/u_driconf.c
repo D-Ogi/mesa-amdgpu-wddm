@@ -69,6 +69,7 @@ u_driconf_fill_st_options(struct st_config_options *options,
    query_bool_option(allow_draw_out_of_order);
    query_bool_option(glthread_nop_check_framebuffer_status);
    query_bool_option(ignore_map_unsynchronized);
+   query_bool_option(ignore_map_invalidate_buffer);
    query_bool_option(zero_invalidated_buffers);
    query_bool_option(ignore_discard_framebuffer);
    query_bool_option(force_gl_map_buffer_synchronized);

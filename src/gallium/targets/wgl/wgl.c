@@ -75,6 +75,11 @@ static bool use_zink = false;
 
 static const char *created_driver_name = NULL;
 
+/* this must outlive later option lookups, which reuse the getenv buffer on windows */
+#ifdef AMDGPU_WDDM_LAB_FLAVOUR
+DEBUG_GET_ONCE_OPTION(gallium_driver, "GALLIUM_DRIVER", "")
+#endif
+
 static struct pipe_screen *
 wgl_screen_create_by_name(HDC hDC, const char* driver, struct sw_winsys *winsys)
 {
@@ -126,7 +131,7 @@ wgl_screen_create(HDC hDC)
 
    const char *const drivers[] = {
 #ifdef AMDGPU_WDDM_LAB_FLAVOUR
-      debug_get_option("GALLIUM_DRIVER", ""),
+      debug_get_option_gallium_driver(),
 #else
       "",   /* amdgpu-wddm BD-167: no gallium driver override in the release flavour */
 #endif

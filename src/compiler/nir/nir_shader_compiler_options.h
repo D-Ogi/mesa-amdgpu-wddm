@@ -320,8 +320,6 @@ typedef struct nir_shader_compiler_options {
    bool lower_ufind_msb;
    /** Lowers find_lsb to ufind_msb and logic ops */
    bool lower_find_lsb;
-   bool lower_uadd_carry;
-   bool lower_usub_borrow;
    /** Lowers imul_high/umul_high to 16-bit multiplies and carry operations. */
    bool lower_mul_high;
    bool lower_mul_high16;
@@ -1021,6 +1019,19 @@ typedef struct nir_shader_compiler_options {
 
    /** Maximum compute shader / kernel dispatchable work size. */
    unsigned max_workgroup_count[3];
+
+   /**
+    * When set, precise OpenCL log/log2/exp2 are emitted directly as
+    * nir_op_flog2/nir_op_fexp2 (hardware transcendentals) instead of going
+    * through the libclc software polynomial implementation.
+    *
+    * Drivers should only set this when their fp32 log2/exp2 units meet the
+    * OpenCL ULP budget for these functions: 3 ULP for FULL_PROFILE and 4 ULP
+    * for EMBEDDED_PROFILE. Note that rusticl auto-selects between the two
+    * profiles based on hardware capabilities, so a driver enabling this must
+    * meet the budget of whichever profile it targets.
+    */
+   bool has_cl_log2_exp2;
 } nir_shader_compiler_options;
 
 #ifdef __cplusplus

@@ -852,7 +852,8 @@ emit_mimg_instruction_gfx12(asm_context& ctx, std::vector<uint32_t>& out, const 
       vaddr[k++] = reg(ctx, instr->operands[i], 8);
    }
    int num_vaddr = instr->operands.size() - 3;
-   for (int i = 0; i < (int)MIN2(instr->operands.back().size() - 1, ARRAY_SIZE(vaddr) - num_vaddr); i++)
+   for (int i = 0; i < (int)MIN2(instr->operands.back().size() - 1, ARRAY_SIZE(vaddr) - num_vaddr);
+        i++)
       vaddr[num_vaddr + i] = reg(ctx, instr->operands.back(), 8) + i + 1;
 
    encoding = 0;
@@ -1008,7 +1009,8 @@ emit_exp_instruction(asm_context& ctx, std::vector<uint32_t>& out, const Instruc
    /* GFX6 (except OLAND and HAINAN) has a bug that it only looks at the X
     * writemask component.
     */
-   if (ctx.program->dev.has_gfx6_mrt_export_bug && exp.enabled_mask && exp.dest <= V_008DFC_SQ_EXP_MRTZ) {
+   if (ctx.program->dev.has_gfx6_mrt_export_bug && exp.enabled_mask &&
+       exp.dest <= V_008DFC_SQ_EXP_MRTZ) {
       encoding |= 0x1;
    }
 

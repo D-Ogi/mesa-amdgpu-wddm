@@ -1567,14 +1567,14 @@ struct isl_tile_info {
    struct isl_extent2d phys_extent_B;
 
    /**
-    * Swizzle of the virtual address
-    */
-   const uint8_t *swiz;
-
-   /**
     * Number of bit swizzles in swiz[]
     */
    uint8_t swiz_count;
+
+   /**
+    * Swizzle of the virtual address
+    */
+   const uint8_t *swiz;
 };
 
 typedef union {
@@ -3156,6 +3156,7 @@ isl_surf_image_has_unique_tiles(const struct isl_surf *surf,
  */
 void
 isl_surf_get_image_range_B_tile(const struct isl_surf *surf,
+                                const struct isl_tile_info *tile_info,
                                 uint32_t level,
                                 uint32_t logical_array_layer,
                                 uint32_t logical_z_offset_px,

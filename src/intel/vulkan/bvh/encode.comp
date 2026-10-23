@@ -357,8 +357,7 @@ main()
    uint32_t global_id =
       clamp(DEREF(args.header).ir_internal_node_count -
             (gl_GlobalInvocationID.x + push_args.start_node_offset + 1),
-            push_args.start_node_offset,
-            DEREF(args.header).ir_internal_node_count - 1);
+            0, DEREF(args.header).ir_internal_node_count - 1);
 
    uint32_t intermediate_leaf_node_size = vk_ir_node_size(args.geometry_type);
 

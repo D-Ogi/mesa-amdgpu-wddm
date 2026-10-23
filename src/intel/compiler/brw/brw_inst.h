@@ -238,7 +238,7 @@ struct brw_send_inst : brw_inst {
    union {
       struct {
          /**
-          * Turns it into a SENDC.
+          * Turns it into a SENDC or SENDGC.
           */
          bool check_tdr:1;
 

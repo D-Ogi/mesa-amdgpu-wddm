@@ -155,6 +155,9 @@ struct radv_graphics_pipeline {
    /* Whether the pipeline uses a VRS attachment. */
    bool uses_vrs_attachment;
 
+   /* Whether depth/stencil states must be ignored because the pipeline has no depth/stencil attachments. */
+   bool ignore_ds_state;
+
    /* For relocation of shaders with RGP. */
    struct radv_sqtt_shaders_reloc *sqtt_shaders_reloc;
 
@@ -628,8 +631,6 @@ void radv_translate_blend_equation(const struct radv_physical_device *pdev, VkBl
                                    VkBlendFactor dstRGB, VkBlendOp eqA, VkBlendFactor srcA, VkBlendFactor dstA,
                                    uint32_t *cb_blend_control_out, uint32_t *sx_mrt_blend_opt_out);
 
-/* bc250: inline, as the push constant flush calls it per stage at every draw that changed push constants, and the
- * vertex descriptor flush and state emission of draws call it as well. */
 static inline struct radv_shader *
 radv_get_shader(struct radv_shader *const *shaders, mesa_shader_stage stage)
 {

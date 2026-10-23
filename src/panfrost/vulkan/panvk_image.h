@@ -92,6 +92,8 @@ panvk_image_use_yuv_tex(unsigned arch, VkFormat format)
       return false;
 
    switch (format) {
+   case VK_FORMAT_G8B8G8R8_422_UNORM:
+   case VK_FORMAT_B8G8R8G8_422_UNORM:
    case VK_FORMAT_G8_B8R8_2PLANE_420_UNORM:
    case VK_FORMAT_G8_B8_R8_3PLANE_420_UNORM:
    case VK_FORMAT_G8_B8R8_2PLANE_422_UNORM:

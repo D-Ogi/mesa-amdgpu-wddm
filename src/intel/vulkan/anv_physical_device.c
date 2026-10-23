@@ -183,6 +183,19 @@ anv_physical_device_init_drirc(struct anv_physical_device *device)
       device->drirc.perf.rt_tile_y = 0;
    }
 
+   switch (device->drirc.perf.code_motion) {
+   case INTEL_CODE_MOTION_DEFAULT:
+   case INTEL_CODE_MOTION_LICM:
+   case INTEL_CODE_MOTION_GCM:
+      break;
+   default:
+      mesa_logw("Invalid value provided for drirc intel_code_motion=%d, "
+                "reverting to the compiler default.",
+                device->drirc.perf.code_motion);
+      device->drirc.perf.code_motion = INTEL_CODE_MOTION_DEFAULT;
+      break;
+   }
+
    return VK_SUCCESS;
 }
 
@@ -325,7 +338,7 @@ get_device_descriptor_limits(const struct anv_physical_device *device,
       ANV_SURFACE_STATE_SIZE;
    const uint32_t sampler_descriptor_size =
       device->indirect_descriptors ?
-      sizeof(struct anv_sampled_image_descriptor) :
+      sizeof(struct anv_image_descriptor) :
       ANV_SAMPLER_STATE_SIZE;
 
    limits->max_ubos = descriptor_heap_size / buffer_descriptor_size;
@@ -380,6 +393,7 @@ get_device_extensions(const struct anv_physical_device *device,
       .KHR_driver_properties                 = true,
       .KHR_dynamic_rendering                 = true,
       .KHR_dynamic_rendering_local_read      = true,
+      .KHR_extended_flags                    = true,
       .KHR_external_fence                    = true,
       .KHR_external_fence_fd                 = true,
       .KHR_external_memory                   = true,
@@ -751,10 +765,10 @@ get_features(const struct anv_physical_device *pdevice,
       .shaderBufferInt64Atomics            = true,
       .shaderSharedInt64Atomics            = false,
       .shaderFloat16                       = !pdevice->drirc.debug.no_16bit,
-      .shaderInt8                          = !pdevice->drirc.debug.no_16bit,
+      .shaderInt8                          = true,
 
       .descriptorIndexing                                 = true,
-      .shaderInputAttachmentArrayDynamicIndexing          = false,
+      .shaderInputAttachmentArrayDynamicIndexing          = true,
       .shaderUniformTexelBufferArrayDynamicIndexing       = true,
       .shaderStorageTexelBufferArrayDynamicIndexing       = true,
       .shaderUniformBufferArrayNonUniformIndexing         = true,
@@ -976,8 +990,8 @@ get_features(const struct anv_physical_device *pdevice,
       .shaderSharedFloat64AtomicAdd =  false,
       .shaderImageFloat32Atomics =     true,
       .shaderImageFloat32AtomicAdd =   pdevice->info.ver >= 20,
-      .sparseImageFloat32Atomics =     false,
-      .sparseImageFloat32AtomicAdd =   false,
+      .sparseImageFloat32Atomics =     has_sparse_or_fake,
+      .sparseImageFloat32AtomicAdd =   has_sparse_or_fake && pdevice->info.ver >= 20,
 
       /* VK_EXT_shader_atomic_float2 */
       .shaderBufferFloat16Atomics      = pdevice->info.has_lsc,
@@ -992,8 +1006,8 @@ get_features(const struct anv_physical_device *pdevice,
       .shaderSharedFloat16AtomicMinMax = pdevice->info.has_lsc,
       .shaderSharedFloat32AtomicMinMax = true,
       .shaderSharedFloat64AtomicMinMax = false,
-      .shaderImageFloat32AtomicMinMax  = false,
-      .sparseImageFloat32AtomicMinMax  = false,
+      .shaderImageFloat32AtomicMinMax  = pdevice->info.ver >= 20,
+      .sparseImageFloat32AtomicMinMax  = has_sparse_or_fake && pdevice->info.ver >= 20,
 
       /* VK_KHR_shader_clock */
       .shaderSubgroupClock = true,
@@ -1304,6 +1318,9 @@ get_features(const struct anv_physical_device *pdevice,
       /* soft fp64 does not support fma */
       .shaderFmaFloat64 = pdevice->info.has_64bit_float &&
                           !INTEL_DEBUG(DEBUG_SOFT64),
+
+      /* VK_KHR_extended_flags */
+      .extendedFlags = true,
    };
 
    /* The new DOOM and Wolfenstein games require depthBounds without
@@ -2735,20 +2752,14 @@ anv_physical_device_init_heaps(struct anv_physical_device *device, int fd)
 static VkResult
 anv_physical_device_init_uuids(struct anv_physical_device *device)
 {
-   const struct build_id_note *note =
-      build_id_find_nhdr_for_addr(anv_physical_device_init_uuids);
-   if (!note) {
+   blake3_hasher build_id_ctx;
+   _mesa_blake3_init(&build_id_ctx);
+   if (!disk_cache_get_function_identifier(anv_physical_device_init_uuids,
+                                           &build_id_ctx)) {
       return vk_errorf(device, VK_ERROR_INITIALIZATION_FAILED,
                        "Failed to find build-id");
    }
-
-   unsigned build_id_len = build_id_length(note);
-   if (build_id_len < BUILD_ID_EXPECTED_HASH_LENGTH) {
-      return vk_errorf(device, VK_ERROR_INITIALIZATION_FAILED,
-                       "build-id too short.  It needs to be a SHA");
-   }
-
-   copy_build_id_to_sha1(device->driver_build_sha1, note);
+   _mesa_blake3_final(&build_id_ctx, device->driver_build_sha1);
 
    /* Fills device->shader_binary_uuid, which the pipeline cache UUID and the
     * disk cache id below are also taken from.
@@ -2797,14 +2808,16 @@ anv_physical_device_free_disk_cache(struct anv_physical_device *device)
 }
 
 static void
-anv_override_engine_counts(int *gc_count, int *g_count, int *c_count, int *v_count, int *blit_count)
+anv_override_engine_counts(struct anv_physical_device *device,
+                           int *gc_count, int *g_count, int *c_count,
+                           int *v_count, int *blit_count)
 {
    int gc_override = -1;
    int g_override = -1;
    int c_override = -1;
    int v_override = -1;
    int blit_override = -1;
-   const char *env_ = os_get_option("ANV_QUEUE_OVERRIDE");
+   const char *env_ = device->drirc.perf.queue_override;
 
    /* Override queues for Android HWUI that expects min 2 queues. */
 #if DETECT_OS_ANDROID
@@ -2829,7 +2842,7 @@ anv_override_engine_counts(int *gc_count, int *g_count, int *c_count, int *v_cou
       } else if (strncmp(next, "b=", 2) == 0) {
          blit_override = strtol(next + 2, NULL, 0);
       } else {
-         mesa_logw("Ignoring unsupported ANV_QUEUE_OVERRIDE token: %s", next);
+         mesa_logw("Ignoring unsupported anv_queue_override token: %s", next);
       }
       next = strtok_r(NULL, ",", &save);
    }
@@ -2839,7 +2852,7 @@ anv_override_engine_counts(int *gc_count, int *g_count, int *c_count, int *v_cou
    if (g_override >= 0)
       *g_count = g_override;
    if (*g_count > 0 && *gc_count <= 0 && (gc_override >= 0 || g_override >= 0))
-      mesa_logw("ANV_QUEUE_OVERRIDE: gc=0 with g > 0 violates the "
+      mesa_logw("anv_queue_override: gc=0 with g > 0 violates the "
                 "Vulkan specification");
    if (c_override >= 0)
       *c_count = c_override;
@@ -2890,7 +2903,7 @@ anv_physical_device_init_queue_families(struct anv_physical_device *pdevice)
          blit_count = pdevice->info.engine_class_supported_count[INTEL_ENGINE_CLASS_COPY];
       }
 
-      anv_override_engine_counts(&gc_count, &g_count, &c_count, &v_count, &blit_count);
+      anv_override_engine_counts(pdevice, &gc_count, &g_count, &c_count, &v_count, &blit_count);
 
       enum intel_engine_class compute_class =
          pdevice->info.engine_class_supported_count[INTEL_ENGINE_CLASS_COMPUTE] &&
@@ -2956,7 +2969,8 @@ anv_physical_device_init_queue_families(struct anv_physical_device *pdevice)
       if (blit_count > 0) {
          pdevice->queue.families[family_count++] = (struct anv_queue_family) {
             .queueFlags = VK_QUEUE_TRANSFER_BIT |
-                          protected_flag,
+                          protected_flag |
+                          sparse_flags,
             .queueCount = blit_count,
             .engine_class = INTEL_ENGINE_CLASS_COPY,
          };
@@ -3132,6 +3146,7 @@ anv_physical_device_try_create(struct vk_instance *vk_instance,
          device->has_astc_ldr && !device->emu_astc_ldr;
    }
    device->brw_disable_subgroup_size_control =
+      !intel_use_jay_for_stage(&devinfo, MESA_SHADER_COMPUTE) &&
       device->drirc.debug.disable_subgroup_size_control;
 
    result = anv_physical_device_init_heaps(device, fd);

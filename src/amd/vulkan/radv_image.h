@@ -21,8 +21,8 @@
 #include "vk_format.h"
 #include "vk_image.h"
 
-#define RADV_IMAGE_USAGE_WRITE_BITS                                                                                   \
-   (VK_IMAGE_USAGE_2_TRANSFER_DST_BIT_KHR | VK_IMAGE_USAGE_2_COLOR_ATTACHMENT_BIT_KHR |                               \
+#define RADV_IMAGE_USAGE_WRITE_BITS                                                                                    \
+   (VK_IMAGE_USAGE_2_TRANSFER_DST_BIT_KHR | VK_IMAGE_USAGE_2_COLOR_ATTACHMENT_BIT_KHR |                                \
     VK_IMAGE_USAGE_2_DEPTH_STENCIL_ATTACHMENT_BIT_KHR | VK_IMAGE_USAGE_2_STORAGE_BIT_KHR)
 
 struct radv_image_plane {
@@ -69,9 +69,6 @@ struct radv_image {
     * track whether HiZ metadata are in-sync with main image data, per-level.
     */
    uint64_t hiz_metadata_offset;
-
-   /* For VK_ANDROID_native_buffer, the WSI image owns the memory, */
-   VkDeviceMemory owned_memory;
 
    unsigned plane_count;
    bool disjoint;
@@ -411,9 +408,6 @@ void radv_compose_swizzle(const struct util_format_description *desc, const VkCo
 void radv_image_get_metadata(struct radv_device *device, struct radv_image *image,
                              enum radeon_bo_metadata_type type, struct radeon_bo_metadata *md);
 
-void radv_image_override_offset_stride(struct radv_device *device, struct radv_image *image, uint64_t offset,
-                                       uint32_t stride);
-
 bool radv_image_can_fast_clear(const struct radv_device *device, const struct radv_image *image);
 
 struct ac_surf_info radv_get_ac_surf_info(struct radv_device *device, const struct radv_image *image);
@@ -425,6 +419,10 @@ struct radv_image_create_info {
    bool prime_blit_src;
    const struct radeon_bo_metadata *bo_metadata;
 };
+
+VkResult radv_image_init_layout(struct radv_device *device, struct radv_image_create_info create_info,
+                                uint64_t modifier, const struct VkImageDrmFormatModifierExplicitCreateInfoEXT *mod_info,
+                                const struct VkVideoProfileListInfoKHR *profile_list, struct radv_image *image);
 
 VkResult radv_image_create_layout(struct radv_device *device, struct radv_image_create_info create_info,
                                   const struct VkImageDrmFormatModifierExplicitCreateInfoEXT *mod_info,
@@ -464,9 +462,12 @@ enum radv_fmask_compression radv_layout_fmask_compression(const struct radv_devi
 
 unsigned radv_image_queue_family_mask(const struct radv_image *image, enum radv_queue_family qf);
 
-bool radv_image_is_renderable(const struct radv_image *image);
+bool radv_image_is_renderable(const struct radv_physical_device *pdev, const struct radv_image *image);
 
 bool radv_image_is_l2_coherent(const struct radv_device *device, const struct radv_image *image,
                                const VkImageSubresourceRange *range);
+
+void radv_image_get_cmask_clear_copy_buffer_range(const struct radv_image *image, unsigned z, unsigned layer_count,
+                                                  uint64_t *offset, uint64_t *size);
 
 #endif /* RADV_IMAGE_H */

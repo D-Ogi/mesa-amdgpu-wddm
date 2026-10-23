@@ -881,17 +881,10 @@ spec@!opengl 1.1@texwrap formats@GL_RGBA16- swizzled,Fail
 spec@!opengl 1.1@texwrap formats@GL_RGBA8,Fail
 spec@!opengl 1.1@texwrap formats@GL_RGBA8- NPOT,Fail
 spec@!opengl 1.1@texwrap formats@GL_RGBA8- swizzled,Fail
-spec@!opengl 1.2@lodclamp,Fail
-spec@!opengl 1.2@lodclamp-between,Fail
-spec@!opengl 1.2@lodclamp-between-max,Fail
-spec@!opengl 1.2@mipmap-setup,Fail
 spec@!opengl 1.4@gl-1.4-polygon-offset,Fail
 spec@!opengl 1.4@tex-miplevel-selection,Fail
-spec@!opengl 1.4@tex-miplevel-selection-lod,Fail
-spec@!opengl 1.4@tex-miplevel-selection-lod-bias,Fail
 spec@!opengl 1.5@depth-tex-compare,Fail
 spec@!opengl 2.0@attrib-assignments,Fail
-spec@arb_depth_texture@depth-level-clamp,Fail
 spec@arb_depth_texture@texwrap formats,Fail
 spec@arb_depth_texture@texwrap formats@GL_DEPTH_COMPONENT16,Fail
 spec@arb_depth_texture@texwrap formats@GL_DEPTH_COMPONENT16- NPOT,Fail
@@ -914,7 +907,6 @@ spec@arb_fragment_program@fp-indirections2,Fail
 spec@arb_fragment_program@minmax,Fail
 spec@arb_framebuffer_object@fbo-attachments-blit-scaled-linear,Fail
 spec@arb_framebuffer_object@fbo-blit-stretch,Fail
-spec@arb_framebuffer_object@fbo-mipmap-copypix,Fail
 spec@arb_framebuffer_object@framebuffer-blit-oblong tall,Fail
 spec@arb_framebuffer_object@framebuffer-blit-oblong wide,Fail
 spec@arb_framebuffer_object@mixed-buffer-sizes,Fail
@@ -942,7 +934,6 @@ spec@arb_occlusion_query@occlusion_query_conform@GetObjivAval_multi2,Fail
 spec@arb_pixel_buffer_object@fbo-pbo-readpixels-small,Fail
 spec@arb_pixel_buffer_object@pbo-getteximage,Fail
 spec@arb_provoking_vertex@arb-provoking-vertex-render,Fail
-spec@arb_sampler_objects@sampler-objects,Fail
 spec@arb_texture_rectangle@1-1-linear-texture,Fail
 spec@arb_texture_rectangle@texrect-many,Crash
 spec@arb_vertex_program@minmax,Fail
@@ -959,8 +950,38 @@ spec@ext_framebuffer_blit@fbo-blit-check-limits,Fail
 spec@glsl-1.10@execution@loops@glsl-fs-unroll-explosion,Crash
 spec@glsl-1.10@execution@loops@glsl-vs-unroll-explosion,Crash
 
-# https://gitlab.freedesktop.org/mesa/piglit/-/merge_requests/1206
-spec@egl_mesa_configless_context@basic,Fail
+# Hardware does not support MIN_LOD nor MAX_LOD
+spec@!opengl 1.2@lodclamp,Fail
+spec@!opengl 1.2@lodclamp-between,Fail
+spec@!opengl 1.2@lodclamp-between-max,Fail
+spec@!opengl 1.2@mipmap-setup,Fail
+spec@!opengl 1.4@tex-miplevel-selection-lod,Fail
+spec@!opengl 1.4@tex-miplevel-selection-lod-bias,Fail
+spec@arb_depth_texture@depth-level-clamp,Fail
+spec@arb_framebuffer_object@fbo-mipmap-copypix,Fail
+spec@arb_sampler_objects@sampler-objects,Fail
+spec@glsl-1.20@execution@tex-miplevel-selection gl2:texture() 1d,Fail
+spec@glsl-1.20@execution@tex-miplevel-selection gl2:texture() 1dshadow,Fail
+spec@glsl-1.20@execution@tex-miplevel-selection gl2:texture() 2d,Fail
+spec@glsl-1.20@execution@tex-miplevel-selection gl2:texture() 2dshadow,Fail
+spec@glsl-1.20@execution@tex-miplevel-selection gl2:texture() cube,Crash
+spec@glsl-1.20@execution@tex-miplevel-selection gl2:texture(bias) 1d,Fail
+spec@glsl-1.20@execution@tex-miplevel-selection gl2:texture(bias) 1dshadow,Fail
+spec@glsl-1.20@execution@tex-miplevel-selection gl2:texture(bias) 2d,Fail
+spec@glsl-1.20@execution@tex-miplevel-selection gl2:texture(bias) 2dshadow,Fail
+spec@glsl-1.20@execution@tex-miplevel-selection gl2:texture(bias) cube,Crash
+spec@glsl-1.20@execution@tex-miplevel-selection gl2:textureproj 1d,Fail
+spec@glsl-1.20@execution@tex-miplevel-selection gl2:textureproj 1d_projvec4,Fail
+spec@glsl-1.20@execution@tex-miplevel-selection gl2:textureproj 1dshadow,Fail
+spec@glsl-1.20@execution@tex-miplevel-selection gl2:textureproj 2d,Fail
+spec@glsl-1.20@execution@tex-miplevel-selection gl2:textureproj 2d_projvec4,Fail
+spec@glsl-1.20@execution@tex-miplevel-selection gl2:textureproj 2dshadow,Fail
+spec@glsl-1.20@execution@tex-miplevel-selection gl2:textureproj(bias) 1d,Fail
+spec@glsl-1.20@execution@tex-miplevel-selection gl2:textureproj(bias) 1d_projvec4,Fail
+spec@glsl-1.20@execution@tex-miplevel-selection gl2:textureproj(bias) 1dshadow,Fail
+spec@glsl-1.20@execution@tex-miplevel-selection gl2:textureproj(bias) 2d,Fail
+spec@glsl-1.20@execution@tex-miplevel-selection gl2:textureproj(bias) 2d_projvec4,Fail
+spec@glsl-1.20@execution@tex-miplevel-selection gl2:textureproj(bias) 2dshadow,Fail
 
 # Driver is not handling VERT_{ATTRIB,BIT}_EDFLAG at all
 spec@!opengl 1.0@gl-1.0-edgeflag,Fail
@@ -1113,28 +1134,6 @@ spec@glsl-1.20@built-in constants,Fail
 spec@glsl-1.20@built-in constants@gl_MaxVertexAttribs,Fail
 spec@glsl-1.20@execution@fs-nan-builtin-max,Fail
 spec@glsl-1.20@execution@fs-nan-builtin-min,Fail
-spec@glsl-1.20@execution@tex-miplevel-selection gl2:texture() 1d,Fail
-spec@glsl-1.20@execution@tex-miplevel-selection gl2:texture() 1dshadow,Fail
-spec@glsl-1.20@execution@tex-miplevel-selection gl2:texture() 2d,Fail
-spec@glsl-1.20@execution@tex-miplevel-selection gl2:texture() 2dshadow,Fail
-spec@glsl-1.20@execution@tex-miplevel-selection gl2:texture() cube,Crash
-spec@glsl-1.20@execution@tex-miplevel-selection gl2:texture(bias) 1d,Fail
-spec@glsl-1.20@execution@tex-miplevel-selection gl2:texture(bias) 1dshadow,Fail
-spec@glsl-1.20@execution@tex-miplevel-selection gl2:texture(bias) 2d,Fail
-spec@glsl-1.20@execution@tex-miplevel-selection gl2:texture(bias) 2dshadow,Fail
-spec@glsl-1.20@execution@tex-miplevel-selection gl2:texture(bias) cube,Crash
-spec@glsl-1.20@execution@tex-miplevel-selection gl2:textureproj 1d,Fail
-spec@glsl-1.20@execution@tex-miplevel-selection gl2:textureproj 1d_projvec4,Fail
-spec@glsl-1.20@execution@tex-miplevel-selection gl2:textureproj 1dshadow,Fail
-spec@glsl-1.20@execution@tex-miplevel-selection gl2:textureproj 2d,Fail
-spec@glsl-1.20@execution@tex-miplevel-selection gl2:textureproj 2d_projvec4,Fail
-spec@glsl-1.20@execution@tex-miplevel-selection gl2:textureproj 2dshadow,Fail
-spec@glsl-1.20@execution@tex-miplevel-selection gl2:textureproj(bias) 1d,Fail
-spec@glsl-1.20@execution@tex-miplevel-selection gl2:textureproj(bias) 1d_projvec4,Fail
-spec@glsl-1.20@execution@tex-miplevel-selection gl2:textureproj(bias) 1dshadow,Fail
-spec@glsl-1.20@execution@tex-miplevel-selection gl2:textureproj(bias) 2d,Fail
-spec@glsl-1.20@execution@tex-miplevel-selection gl2:textureproj(bias) 2d_projvec4,Fail
-spec@glsl-1.20@execution@tex-miplevel-selection gl2:textureproj(bias) 2dshadow,Fail
 
 spec@glsl-1.20@execution@vs-nan-builtin-max,Fail
 spec@glsl-1.20@execution@vs-nan-builtin-min,Fail
@@ -1221,12 +1220,6 @@ arm32-dEQP-GLES2.functional.texture.mipmap.2d.basic.linear_linear_mirror_non_squ
 arm32-dEQP-GLES2.functional.texture.mipmap.2d.basic.linear_linear_clamp_non_square,Fail
 dEQP-GLES2.functional.texture.mipmap.2d.basic.linear_linear_mirror_non_square,Fail
 dEQP-GLES2.functional.texture.mipmap.2d.basic.linear_linear_clamp_non_square,Fail
-
-# uprev Piglit in Mesa
-spec@glsl-1.20@execution@vs-loop-uint-induction-var-1,Fail
-spec@glsl-1.20@execution@vs-loop-uint-induction-var-3,Fail
-spec@glsl-1.20@execution@vs-loop-uint-induction-var-2,Fail
-spec@glsl-1.20@execution@vs-loop-uint-induction-var-4,Fail
 
 # Bisected to d6958a5e ("gallium: kill off pipe_surface::context")
 spec@arb_framebuffer_srgb@blit renderbuffer linear downsample disabled clear,Fail
