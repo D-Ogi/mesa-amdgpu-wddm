@@ -362,13 +362,13 @@ zink_bind_blend_state(struct pipe_context *pctx, void *cso)
       state->blend_state = cso;
       if (!screen->have_full_ds3) {
          state->blend_id = blend ? blend->id : 0;
-         state->dirty = true;
+         zink_gfx_pipeline_state_dirty(ctx);
       }
       bool force_dual_color_blend = screen->driconf.dual_color_blend_by_location &&
                                     blend && blend->dual_src_blend && state->blend_state->attachments[0].blendEnable;
       if (force_dual_color_blend != zink_get_fs_base_key(ctx)->force_dual_color_blend)
          zink_set_fs_base_key(ctx)->force_dual_color_blend = force_dual_color_blend;
-      ctx->blend_state_changed = true;
+      zink_mark_atom_dirty(ctx, ZINK_ATOM_BLEND);
 
       if (cso && screen->have_full_ds3) {
 #define STATE_CHECK(NAME, FLAG) \
@@ -517,7 +517,8 @@ zink_update_depth_state(struct zink_context *ctx)
       ctx->depth_op_promoted = false;
       ctx->can_promote_depth_op = false;
    }
-   ctx->dsa_state_changed |= prev_op != ctx->dsa_state->hw_state.depth_compare_op;
+   if (prev_op != ctx->dsa_state->hw_state.depth_compare_op)
+      zink_mark_atom_dirty(ctx, ZINK_ATOM_DSA);
 }
 
 static void
@@ -531,8 +532,9 @@ zink_bind_depth_stencil_alpha_state(struct pipe_context *pctx, void *cso)
       struct zink_gfx_pipeline_state *state = &ctx->gfx_pipeline_state;
       if (state->dyn_state1.depth_stencil_alpha_state != &ctx->dsa_state->hw_state) {
          state->dyn_state1.depth_stencil_alpha_state = &ctx->dsa_state->hw_state;
-         state->dirty |= !zink_screen(pctx->screen)->info.have_EXT_extended_dynamic_state;
-         ctx->dsa_state_changed = true;
+         if (!zink_screen(pctx->screen)->info.have_EXT_extended_dynamic_state)
+            zink_gfx_pipeline_state_dirty(ctx);
+         zink_mark_atom_dirty(ctx, ZINK_ATOM_DSA);
          ctx->dsa_state->hw_state.depth_compare_op = compare_op(ctx->dsa_state->base.depth_func);
          if (ctx->in_rp)
             zink_update_depth_state(ctx);
@@ -686,19 +688,23 @@ zink_bind_rasterizer_state(struct pipe_context *pctx, void *cso)
          zink_batch_no_rp(ctx);
       memcpy(&ctx->gfx_pipeline_state.dyn_state3, &ctx->rast_state->hw_state, sizeof(struct zink_rasterizer_hw_state));
 
-      ctx->gfx_pipeline_state.dirty |= !zink_screen(pctx->screen)->info.have_EXT_extended_dynamic_state3;
-      ctx->rast_state_changed = true;
+      if (!zink_screen(pctx->screen)->info.have_EXT_extended_dynamic_state3)
+         zink_gfx_pipeline_state_dirty(ctx);
+      /* the rasterized primitive and the depth bias depend on this state */
+      zink_mark_atom_dirty(ctx, ZINK_ATOM_PRIMITIVE);
+      zink_mark_atom_dirty(ctx, ZINK_ATOM_RASTERIZER);
 
       if (clip_halfz != ctx->rast_state->base.clip_halfz) {
          if (screen->info.have_EXT_depth_clip_control) {
-            ctx->gfx_pipeline_state.dirty |= !screen->have_full_ds3;
-            ctx->gfx_pipeline_state.mesh_dirty |= !screen->have_full_ds3;
+            if (!screen->have_full_ds3)
+               zink_gfx_mesh_pipeline_state_dirty(ctx);
          }
          else
             zink_set_last_vertex_key(ctx)->clip_halfz = ctx->rast_state->base.clip_halfz;
-         ctx->vp_state_changed = true;
+         zink_mark_atom_dirty(ctx, ZINK_ATOM_VIEWPORT);
       }
-      ctx->sample_locations_changed |= screen->base.caps.programmable_sample_locations && (multisample != ctx->rast_state->base.multisample);
+      if (screen->base.caps.programmable_sample_locations && multisample != ctx->rast_state->base.multisample)
+         zink_mark_atom_dirty(ctx, ZINK_ATOM_SAMPLE_LOCATIONS);
 
       if (screen->info.have_EXT_extended_dynamic_state3) {
 #define STATE_CHECK(NAME, FLAG) \
@@ -730,7 +736,7 @@ zink_bind_rasterizer_state(struct pipe_context *pctx, void *cso)
          VKCTX(CmdSetRepresentativeFragmentTestEnableNV)(ctx->bs->cmdbuf, ctx->rast_state->base.representative_fragment_test);
 
       if (fabs(ctx->rast_state->base.line_width - line_width) > FLT_EPSILON)
-         ctx->line_width_changed = true;
+         zink_mark_atom_dirty(ctx, ZINK_ATOM_LINE_WIDTH);
 
       bool lower_gl_point = !screen->info.maint5_props.polygonModePointSize;
       lower_gl_point &= ctx->rast_state->base.fill_front == PIPE_POLYGON_MODE_POINT;
@@ -739,11 +745,13 @@ zink_bind_rasterizer_state(struct pipe_context *pctx, void *cso)
 
       if (ctx->gfx_pipeline_state.dyn_state1.front_face != ctx->rast_state->front_face) {
          ctx->gfx_pipeline_state.dyn_state1.front_face = ctx->rast_state->front_face;
-         ctx->gfx_pipeline_state.dirty |= !zink_screen(pctx->screen)->info.have_EXT_extended_dynamic_state;
+         if (!zink_screen(pctx->screen)->info.have_EXT_extended_dynamic_state)
+            zink_gfx_pipeline_state_dirty(ctx);
       }
       if (ctx->gfx_pipeline_state.dyn_state1.cull_mode != ctx->rast_state->cull_mode) {
          ctx->gfx_pipeline_state.dyn_state1.cull_mode = ctx->rast_state->cull_mode;
-         ctx->gfx_pipeline_state.dirty |= !zink_screen(pctx->screen)->info.have_EXT_extended_dynamic_state;
+         if (!zink_screen(pctx->screen)->info.have_EXT_extended_dynamic_state)
+            zink_gfx_pipeline_state_dirty(ctx);
       }
       if (!ctx->primitives_generated_active)
          zink_set_rasterizer_discard(ctx, false);
@@ -754,26 +762,26 @@ zink_bind_rasterizer_state(struct pipe_context *pctx, void *cso)
           ctx->rast_state->base.point_quad_rasterization != point_quad_rasterization)
          zink_set_fs_point_coord_key(ctx);
       if (ctx->rast_state->base.scissor != scissor)
-         ctx->scissor_changed = true;
+         zink_mark_atom_dirty(ctx, ZINK_ATOM_SCISSOR);
 
       if (ctx->rast_state->base.force_persample_interp != force_persample_interp) {
          zink_set_fs_base_key(ctx)->force_persample_interp = ctx->rast_state->base.force_persample_interp;
-         ctx->gfx_pipeline_state.dirty = true;
+         zink_gfx_pipeline_state_dirty(ctx);
       }
       ctx->gfx_pipeline_state.force_persample_interp = ctx->rast_state->base.force_persample_interp;
 
       if (ctx->rast_state->base.half_pixel_center != half_pixel_center)
-         ctx->vp_state_changed = true;
+         zink_mark_atom_dirty(ctx, ZINK_ATOM_VIEWPORT);
 
 #define FLT_DIFF(a) (fabs(prev_state->a - ctx->rast_state->a) > FLT_EPSILON)
-      if (prev_state)
-         ctx->depth_bias_changed = prev_state->offset_fill != ctx->rast_state->offset_fill ||
-                                   FLT_DIFF(offset_units) ||
-                                   FLT_DIFF(offset_clamp) ||
-                                   FLT_DIFF(offset_scale);
-      else
-         ctx->depth_bias_changed = true;
-      if (ctx->depth_bias_changed && ctx->rast_state->offset_fill) {
+      const bool depth_bias_changed = !prev_state ||
+                                      prev_state->offset_fill != ctx->rast_state->offset_fill ||
+                                      FLT_DIFF(offset_units) ||
+                                      FLT_DIFF(offset_clamp) ||
+                                      FLT_DIFF(offset_scale);
+      if (depth_bias_changed)
+         zink_mark_atom_dirty(ctx, ZINK_ATOM_DEPTH_BIAS);
+      if (depth_bias_changed && ctx->rast_state->offset_fill) {
          /* tricky to calculate this, safer to skip entirely */
          ctx->can_promote_depth_op = false;
          if (ctx->in_rp)

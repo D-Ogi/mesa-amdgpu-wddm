@@ -28,6 +28,7 @@
 #include <stdlib.h>
 
 #include "util/hash_table.h"
+#include "util/perf/cpu_trace.h"
 #include "util/u_math.h"
 
 #include "etnaviv_drmif.h"
@@ -208,6 +209,7 @@ static uint32_t bo2idx(struct etna_cmd_stream *stream, struct etna_bo *bo,
 void etna_cmd_stream_flush(struct etna_cmd_stream *stream, int in_fence_fd,
 		int *out_fence_fd, bool is_noop)
 {
+	MESA_TRACE_FUNC();
 	struct etna_cmd_stream_priv *priv = etna_cmd_stream_priv(stream);
 	struct etna_gpu *gpu = priv->pipe->gpu;
 	int fence_fd = -1;

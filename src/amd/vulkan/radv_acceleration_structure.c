@@ -291,39 +291,38 @@ radv_get_build_config(VkDevice _device, struct vk_acceleration_structure_build_s
    }
 
    state->config.build_flags = radv_default_build_flags(pdev);
-   if (state->build_info->mode == VK_BUILD_ACCELERATION_STRUCTURE_MODE_BUILD_KHR) {
-      if (radv_use_bvh8(pdev)) {
-         /*
-          * Leaf nodes are not written in the order provided by the application when BVH8 encoding is used.
-          * The proper order leaf nodes is used...
-          *    1. When fetching vertex positions for triangles.
-          *    2. When applying/writing BLAS pointers during TLAS deserialization/serialization. The type
-          *       compared to VK_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL_KHR to handle the
-          *       VK_ACCELERATION_STRUCTURE_TYPE_GENERIC_KHR case when the application queries the
-          *       acceleration structure size.
-          */
-         if ((state->build_info->flags & VK_BUILD_ACCELERATION_STRUCTURE_ALLOW_DATA_ACCESS_KHR) ||
-             state->build_info->type != VK_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL_KHR)
-            state->config.build_flags |= RADV_BUILD_FLAG_WRITE_LEAF_NODE_OFFSETS;
+   if (radv_use_bvh8(pdev)) {
+      /*
+       * Leaf nodes are not written in the order provided by the application when BVH8 encoding is used.
+       * The proper order leaf nodes is used...
+       *    1. When fetching vertex positions for triangles.
+       *    2. When applying/writing BLAS pointers during TLAS deserialization/serialization. The type
+       *       compared to VK_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL_KHR to handle the
+       *       VK_ACCELERATION_STRUCTURE_TYPE_GENERIC_KHR case when the application queries the
+       *       acceleration structure size.
+       */
+      if ((state->build_info->flags & VK_BUILD_ACCELERATION_STRUCTURE_ALLOW_DATA_ACCESS_KHR) ||
+          state->build_info->type != VK_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL_KHR)
+         state->config.build_flags |= RADV_BUILD_FLAG_WRITE_LEAF_NODE_OFFSETS;
 
-         if (!(state->build_info->flags & (VK_BUILD_ACCELERATION_STRUCTURE_ALLOW_UPDATE_BIT_KHR |
-                                           VK_BUILD_ACCELERATION_STRUCTURE_ALLOW_DATA_ACCESS_KHR)) &&
-             geometry_type == VK_GEOMETRY_TYPE_TRIANGLES_KHR)
+      if (!(state->build_info->flags & VK_BUILD_ACCELERATION_STRUCTURE_ALLOW_DATA_ACCESS_KHR) &&
+          geometry_type == VK_GEOMETRY_TYPE_TRIANGLES_KHR) {
+         if (state->build_info->flags & VK_BUILD_ACCELERATION_STRUCTURE_ALLOW_UPDATE_BIT_KHR)
+            state->config.build_flags |= RADV_BUILD_FLAG_PAIR_COMPRESS_TRIANGLES;
+         else
             state->config.build_flags |= RADV_BUILD_FLAG_BATCH_COMPRESS_TRIANGLES;
-      } else if (!radv_emulate_rt(pdev)) {
-         if (!(state->build_info->flags & VK_BUILD_ACCELERATION_STRUCTURE_ALLOW_UPDATE_BIT_KHR))
-            state->config.build_flags |= RADV_BUILD_FLAG_USE_BOX16;
       }
-   } else {
-      if (state->build_info->srcAccelerationStructure == state->build_info->dstAccelerationStructure)
-         state->config.build_flags |= RADV_BUILD_FLAG_UPDATE_IN_PLACE;
-
-      if (state->build_info->geometryCount == 1)
-         state->config.build_flags |= RADV_BUILD_FLAG_UPDATE_SINGLE_GEOMETRY;
-
-      if (device->meta_state.accel_struct_build.build_args.propagate_cull_flags)
-         state->config.build_flags |= VK_BUILD_FLAG_PROPAGATE_CULL_FLAGS;
+   } else if (!radv_emulate_rt(pdev)) {
+      if (!(state->build_info->flags & VK_BUILD_ACCELERATION_STRUCTURE_ALLOW_UPDATE_BIT_KHR))
+         state->config.build_flags |= RADV_BUILD_FLAG_USE_BOX16;
    }
+
+   /* Build flags for updates. They can be set unconditionally because passes filter out unused build flags. */
+   if (state->build_info->srcAccelerationStructure == state->build_info->dstAccelerationStructure)
+      state->config.build_flags |= RADV_BUILD_FLAG_UPDATE_IN_PLACE;
+
+   if (state->build_info->geometryCount == 1)
+      state->config.build_flags |= RADV_BUILD_FLAG_UPDATE_SINGLE_GEOMETRY;
 }
 
 static void
@@ -387,7 +386,8 @@ radv_init_update_scratch(VkCommandBuffer commandBuffer, const struct vk_accelera
 
       /* Prepare ready counts for internal nodes */
       radv_fill_memory(cmd_buffer, scratch + layout.internal_ready_count_offset,
-                       layout.size - layout.internal_ready_count_offset, 0x0, VK_ADDRESS_COPY_DEVICE_LOCAL_BIT_KHR);
+                       layout.size - layout.internal_ready_count_offset, 0x0, VK_ADDRESS_COPY_DEVICE_LOCAL_BIT_KHR,
+                       false);
    }
 
    for (uint32_t i = 0; i < build_count; i++) {
@@ -1066,7 +1066,6 @@ pack_geometry_id_and_flags(uint32_t geometry_id, uint32_t flags)
    return geometry_id_and_flags;
 }
 
-
 static void
 radv_write_buffer_cp(VkCommandBuffer commandBuffer, VkDeviceAddress addr, void *data, uint32_t size)
 {
@@ -1080,6 +1079,8 @@ radv_flush_buffer_write_cp(VkCommandBuffer commandBuffer)
    VK_FROM_HANDLE(radv_cmd_buffer, cmd_buffer, commandBuffer);
    const struct radv_device *device = radv_cmd_buffer_device(cmd_buffer);
    const struct radv_physical_device *pdev = radv_device_physical(device);
+
+   cmd_buffer->state.flush_bits |= AC_BARRIER_SYNC_CP_DMA;
 
    if (pdev->info.cp_sdma_ge_use_system_memory_scope)
       cmd_buffer->state.flush_bits |= AC_BARRIER_INV_L2;
@@ -1096,7 +1097,7 @@ static void
 radv_cmd_fill_buffer_addr(VkCommandBuffer commandBuffer, VkDeviceAddress addr, VkDeviceSize size, uint32_t data)
 {
    VK_FROM_HANDLE(radv_cmd_buffer, cmd_buffer, commandBuffer);
-   radv_fill_memory(cmd_buffer, addr, size, data, VK_ADDRESS_COPY_DEVICE_LOCAL_BIT_KHR);
+   radv_fill_memory(cmd_buffer, addr, size, data, VK_ADDRESS_COPY_DEVICE_LOCAL_BIT_KHR, false);
 }
 
 static void

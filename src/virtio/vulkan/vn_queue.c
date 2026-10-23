@@ -391,7 +391,7 @@ vn_queue_submission_init_pnext(struct vn_queue_submission *submit)
             uint32_t j = 0;
             for (uint32_t i = 0; i < submit->wait_index_count; i++) {
                VkSemaphore sem_handle = vn_get_wait_semaphore(submit, i);
-               if (vn_semaphore_is_sync_fd(sem_handle))
+               if (vn_wait_semaphore_is_sync_fd(sem_handle))
                   continue;
 
                submit->temp.wait_indices[j++] =
@@ -413,7 +413,7 @@ vn_queue_submission_init_pnext(struct vn_queue_submission *submit)
             uint32_t j = 0;
             for (uint32_t i = 0; i < submit->sig_index_count; i++) {
                VkSemaphore sem_handle = vn_get_signal_semaphore(submit, i);
-               if (vn_semaphore_is_sync_fd(sem_handle))
+               if (vn_signal_semaphore_is_sync_fd(sem_handle))
                   continue;
 
                submit->temp.sig_indices[j++] =
@@ -443,7 +443,7 @@ vn_queue_submission_init_pnext(struct vn_queue_submission *submit)
             uint32_t j = 0;
             for (uint32_t i = 0; i < submit->wait_val_count; i++) {
                VkSemaphore sem_handle = vn_get_wait_semaphore(submit, i);
-               if (vn_semaphore_is_sync_fd(sem_handle))
+               if (vn_wait_semaphore_is_sync_fd(sem_handle))
                   continue;
 
                submit->temp.wait_vals[j++] =
@@ -466,7 +466,7 @@ vn_queue_submission_init_pnext(struct vn_queue_submission *submit)
             uint32_t j = 0;
             for (uint32_t i = 0; i < submit->sig_val_count; i++) {
                VkSemaphore sem_handle = vn_get_signal_semaphore(submit, i);
-               if (vn_semaphore_is_sync_fd(sem_handle))
+               if (vn_signal_semaphore_is_sync_fd(sem_handle))
                   continue;
 
                submit->temp.sig_vals[j++] =
@@ -520,14 +520,14 @@ vn_queue_submission_count_semaphore(struct vn_queue_submission *submit)
    const uint32_t wait_count = vn_get_wait_semaphore_count(submit);
    for (uint32_t i = 0; i < wait_count; i++) {
       VkSemaphore sem_handle = vn_get_wait_semaphore(submit, i);
-      fix.wait_sync_fd |= vn_semaphore_is_sync_fd(sem_handle);
+      fix.wait_sync_fd |= vn_wait_semaphore_is_sync_fd(sem_handle);
       fix.wait_timeline |= vn_semaphore_is_timeline(sem_handle);
    }
 
    const uint32_t sig_count = vn_get_signal_semaphore_count(submit);
    for (uint32_t i = 0; i < sig_count; i++) {
       VkSemaphore sem_handle = vn_get_signal_semaphore(submit, i);
-      if (vn_semaphore_is_sync_fd(sem_handle)) {
+      if (vn_signal_semaphore_is_sync_fd(sem_handle)) {
          fix.sig_sync_fd = true;
          submit->fix.sync_sem = true;
          submit->sync_count++;
@@ -939,7 +939,7 @@ vn_queue_submission_init_wait_semaphores(struct vn_queue_submission *submit)
    const uint32_t wait_count = vn_get_wait_semaphore_count(submit);
    for (uint32_t i = 0; i < wait_count; i++) {
       VkSemaphore sem_handle = vn_get_wait_semaphore(submit, i);
-      if (vn_semaphore_is_sync_fd(sem_handle)) {
+      if (vn_wait_semaphore_is_sync_fd(sem_handle)) {
          if (!vn_semaphore_wait_sync_fd(dev_handle, sem_handle))
             return VK_ERROR_DEVICE_LOST;
 
@@ -988,7 +988,7 @@ vn_queue_submission_init_signal_semaphores(struct vn_queue_submission *submit)
    const uint32_t sig_count = vn_get_signal_semaphore_count(submit);
    for (uint32_t i = 0; i < sig_count; i++) {
       VkSemaphore sem_handle = vn_get_signal_semaphore(submit, i);
-      if (vn_semaphore_is_sync_fd(sem_handle)) {
+      if (vn_signal_semaphore_is_sync_fd(sem_handle)) {
          /* drop the sync fd semaphore */
          continue;
       }
@@ -1072,7 +1072,7 @@ vn_queue_submission_init(struct vn_queue_submission *submit)
    vn_queue_submission_init_pnext(submit);
 
    /* wait semaphores are initialized the last to ensure validity of
-    * vn_semaphore_is_sync_fd used in init pnext
+    * vn_wait_semaphore_is_sync_fd used in init pnext
     */
    result = vn_queue_submission_init_wait_semaphores(submit);
    if (result != VK_SUCCESS)

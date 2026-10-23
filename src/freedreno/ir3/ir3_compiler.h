@@ -56,6 +56,9 @@ struct ir3_compiler_options {
    bool dual_color_blend_by_location;
 
    uint64_t uche_trap_base;
+
+   /* If draw_id should be lowered in nir */
+   bool lower_draw_id;
 };
 
 struct ir3_compiler {
@@ -268,10 +271,6 @@ struct ir3_compiler *ir3_compiler_create(struct fd_device *dev,
 void ir3_disk_cache_init(struct ir3_compiler *compiler);
 void ir3_disk_cache_init_shader_key(struct ir3_compiler *compiler,
                                     struct ir3_shader *shader);
-struct ir3_shader_variant *ir3_retrieve_variant(struct blob_reader *blob,
-                                                struct ir3_compiler *compiler,
-                                                void *mem_ctx);
-void ir3_store_variant(struct blob *blob, const struct ir3_shader_variant *v);
 bool ir3_disk_cache_retrieve(struct ir3_shader *shader,
                              struct ir3_shader_variant *v);
 void ir3_disk_cache_store(struct ir3_shader *shader,
@@ -389,5 +388,24 @@ bool ir3_shader_bisect_select(struct ir3_shader_variant *v);
 bool ir3_shader_bisect_disasm_select(struct ir3_shader_variant *v);
 
 ENDC;
+
+#ifdef __cplusplus
+struct ir3_blob_write : mesa::blob_write {
+   using mesa::blob_write::blob_write;
+
+   void variant(const struct ir3_shader_variant *&v);
+};
+
+struct ir3_blob_read : mesa::blob_read {
+   struct ir3_compiler *const compiler;
+
+   ir3_blob_read(struct blob_reader *r, struct ir3_compiler *c)
+       : mesa::blob_read(r), compiler(c)
+   {
+   }
+
+   void variant(const struct ir3_shader_variant *&v_out);
+};
+#endif /* __cplusplus */
 
 #endif /* IR3_COMPILER_H_ */

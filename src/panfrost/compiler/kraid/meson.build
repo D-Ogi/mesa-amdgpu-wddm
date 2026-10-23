@@ -108,17 +108,23 @@ _libkraid_proc_macros_rs = rust.proc_macro(
   rust_args : rust_global_args,
 )
 
+_libkraid_rust_args = [
+  panfrost_rust_args,
+  '--cfg', 'kraid_isa_xml_path="' + meson.current_source_dir() + '"',
+  # Otherwise, rustc trips up on -pthread
+  '-Clink-arg=-Wno-unused-command-line-argument',
+]
+
+if with_panfrost_disassemble
+  _libkraid_rust_args += [ '--cfg', 'kraid_disasm' ]
+endif
+
 libpanfrost_kraid = static_library(
   'kraid',
   files('lib.rs'),
   gnu_symbol_visibility : 'hidden',
   rust_abi : 'c',
-  rust_args : [
-    panfrost_rust_args,
-    '--cfg', 'kraid_isa_xml_path="' + meson.current_source_dir() + '"',
-    # Otherwise, rustc trips up on -pthread
-    '-Clink-arg=-Wno-unused-command-line-argument',
-  ],
+  rust_args : _libkraid_rust_args,
   dependencies : [
     dep_bitflags,
     dep_paste,
@@ -137,12 +143,7 @@ libpanfrost_kraid_rs = static_library(
   files('lib.rs'),
   gnu_symbol_visibility : 'hidden',
   rust_abi : 'rust',
-  rust_args : [
-    panfrost_rust_args,
-    '--cfg', 'kraid_isa_xml_path="' + meson.current_source_dir() + '"',
-    # Otherwise, rustc trips up on -pthread
-    '-Clink-arg=-Wno-unused-command-line-argument',
-  ],
+  rust_args : _libkraid_rust_args,
   dependencies : [
     dep_bitflags,
     dep_paste,
@@ -166,13 +167,15 @@ if with_tools.contains('panfrost')
     native : true,
   )
 
-  executable(
-    'pan-dis',
-    files('tools/disassembler.rs'),
-    link_with : [
-      libpanfrost_kraid_rs,
-    ],
-  )
+  if with_panfrost_disassemble
+    executable(
+      'pan-dis',
+      files('tools/disassembler.rs'),
+      link_with : [
+        libpanfrost_kraid_rs,
+      ],
+    )
+  endif
 endif
 
 # TODO: Linking Rust executables (such as unit tests) doesn't play nicely

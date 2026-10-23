@@ -89,6 +89,7 @@ void si_shader_cache_insert_shader(struct si_screen *sscreen, unsigned char ir_b
                                    struct si_shader *shader, bool insert_into_disk_cache);
 
 /* si_sqtt.c */
+bool si_is_sqtt_active(const struct si_context *sctx);
 void si_sqtt_write_event_marker(struct si_context* sctx, struct radeon_cmdbuf *rcs,
                                 enum rgp_sqtt_marker_event_type api_type,
                                 uint32_t vertex_offset_user_data,
@@ -113,7 +114,8 @@ MESAPROC void
 si_sqtt_describe_barrier_end(struct si_context* sctx, struct radeon_cmdbuf *rcs, enum ac_rgp_flush_bits flush_bits) TAILV;
 bool si_init_sqtt(struct si_context *sctx);
 void si_destroy_sqtt(struct si_context *sctx);
-MESAPROC void si_handle_sqtt(struct si_context *sctx, struct radeon_cmdbuf *rcs) TAILV;
+MESAPROC void si_handle_sqtt(struct si_context *sctx, struct radeon_cmdbuf *rcs, bool end_of_frame) TAILV;
+MESAPROC void si_sqtt_finish_capture(struct si_context *sctx) TAILV;
 MESAPROC void si_sqtt_describe_begin(struct si_context *sctx, struct radeon_cmdbuf *rcs) TAILV;
 MESAPROC void si_sqtt_describe_flush(struct si_context *sctx) TAILV;
 

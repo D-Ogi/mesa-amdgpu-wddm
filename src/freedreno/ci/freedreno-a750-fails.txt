@@ -68,6 +68,8 @@ angle-dEQP-GLES2.functional.shaders.algorithm.rgb_to_hsl_vertex,Fail
 vkd3d-test_sampler_feedback_implicit_lod_aniso,Fail
 
 vkd3d-test_query_heap_cpu_resolve_timestamp,Fail
+vkd3d-test_shader_instructions_dxil,Fail
+vkd3d-test_open_heap_from_address,Fail
 
 #
 # OpenCL-CTS

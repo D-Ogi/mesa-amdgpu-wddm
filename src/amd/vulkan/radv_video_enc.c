@@ -649,8 +649,8 @@ radv_enc_slice_control(struct radv_cmd_buffer *cmd_buffer, const struct VkVideoE
    }
 
    RADEON_ENC_BEGIN(pdev->vcn_enc_cmds.slice_control_h264);
-   RADEON_ENC_CS(slice_control_mode);                        // slice control mode
-   RADEON_ENC_CS(num_mbs_in_slice);                          // num mbs per slice
+   RADEON_ENC_CS(slice_control_mode); // slice control mode
+   RADEON_ENC_CS(num_mbs_in_slice);   // num mbs per slice
    RADEON_ENC_END();
 }
 
@@ -1817,9 +1817,8 @@ radv_enc_ctx2(struct radv_cmd_buffer *cmd_buffer, const VkVideoEncodeInfoKHR *in
       RADEON_ENC_CS(0);
       RADEON_ENC_CS(0);
       RADEON_ENC_CS(0);
-      RADEON_ENC_CS(pdev->info.gfx_level >= GFX12 ?
-                    RENCODE_REC_SWIZZLE_MODE_256B_D_GFX12 :
-                    RENCODE_REC_SWIZZLE_MODE_256B_D);
+      RADEON_ENC_CS(pdev->info.gfx_level >= GFX12 ? RENCODE_REC_SWIZZLE_MODE_256B_D_GFX12
+                                                  : RENCODE_REC_SWIZZLE_MODE_256B_D);
       RADEON_ENC_CS(fcb_va >> 32);
       RADEON_ENC_CS(fcb_va & 0xffffffff);
       RADEON_ENC_CS(RENCODE_MAX_METADATA_BUFFER_SIZE_PER_FRAME); // colloc/cdf offset
@@ -1869,7 +1868,7 @@ radv_enc_feedback(struct radv_cmd_buffer *cmd_buffer, uint64_t feedback_query_va
    RADEON_ENC_CS(RENCODE_FEEDBACK_BUFFER_MODE_LINEAR);
    RADEON_ENC_CS(feedback_query_va >> 32);
    RADEON_ENC_CS(feedback_query_va & 0xffffffff);
-   RADEON_ENC_CS(16); // buffer_size
+   RADEON_ENC_CS(16);                                                  // buffer_size
    RADEON_ENC_CS(RADV_ENC_FEEDBACK_PARTITION_SIZE * sizeof(uint32_t)); // data_size
    RADEON_ENC_END();
 }
@@ -2109,7 +2108,7 @@ radv_enc_params(struct radv_cmd_buffer *cmd_buffer, const VkVideoEncodeInfoKHR *
                       array_idx * src_img->planes[0].surface.u.gfx9.surf_slice_size;
    uint64_t chroma_va = src_img->plane_count > 1 ? (va + src_img->planes[1].surface.u.gfx9.surf_offset +
                                                     array_idx * src_img->planes[1].surface.u.gfx9.surf_slice_size)
-                                                  : 0;
+                                                 : 0;
    uint32_t pic_type;
    unsigned int slot_idx = 0xffffffff;
    unsigned int max_layers = cmd_buffer->video.enc.rate_control_num_layers;
@@ -2165,9 +2164,9 @@ radv_enc_params(struct radv_cmd_buffer *cmd_buffer, const VkVideoEncodeInfoKHR *
    RADEON_ENC_CS(luma_va & 0xffffffff);
    RADEON_ENC_CS(chroma_va >> 32);
    RADEON_ENC_CS(chroma_va & 0xffffffff);
-   RADEON_ENC_CS(src_img->planes[0].surface.u.gfx9.surf_pitch);   // luma pitch
+   RADEON_ENC_CS(src_img->planes[0].surface.u.gfx9.surf_pitch);                                // luma pitch
    RADEON_ENC_CS(src_img->plane_count > 1 ? src_img->planes[1].surface.u.gfx9.surf_pitch : 0); // chroma pitch
-   RADEON_ENC_CS(src_img->planes[0].surface.u.gfx9.swizzle_mode); // swizzle mode
+   RADEON_ENC_CS(src_img->planes[0].surface.u.gfx9.swizzle_mode);                              // swizzle mode
 
    if (pdev->enc_hw_ver < RADV_VIDEO_ENC_HW_5)
       RADEON_ENC_CS(slot_idx); // ref0_idx
@@ -2280,9 +2279,9 @@ radv_enc_params_h264(struct radv_cmd_buffer *cmd_buffer, const VkVideoEncodeInfo
       RADEON_ENC_CS(slot_idx_0[0]); // ref_list0[0]
       RADEON_ENC_CS(slot_idx_0[1]); // ref_list0[1]
       for (int i = 2; i < RENCODE_H264_MAX_REFERENCE_LIST_SIZE; i++)
-         RADEON_ENC_CS(0);                             // ref_list0[i]
-      RADEON_ENC_CS(num_active_l0_refs);               // num_active_references_l0
-      RADEON_ENC_CS(slot_idx_1);                       // ref_list1[0]
+         RADEON_ENC_CS(0);               // ref_list0[i]
+      RADEON_ENC_CS(num_active_l0_refs); // num_active_references_l0
+      RADEON_ENC_CS(slot_idx_1);         // ref_list1[0]
       for (int i = 1; i < RENCODE_H264_MAX_REFERENCE_LIST_SIZE; i++)
          RADEON_ENC_CS(0);
       RADEON_ENC_CS(slot_idx_1 != 0xffffffff ? 1 : 0); // num_active_references_l1
@@ -2486,13 +2485,13 @@ radv_enc_input_format(struct radv_cmd_buffer *cmd_buffer)
       color_volume = radv_get_encode_color_volume(vid->vk.rgb_conv.rgb_model);
 
    RADEON_ENC_BEGIN(pdev->vcn_enc_cmds.input_format);
-   RADEON_ENC_CS(color_volume);               // input color volume
-   RADEON_ENC_CS(color_space);                // input color space
-   RADEON_ENC_CS(0);                          // input color range (ignored)
-   RADEON_ENC_CS(chroma_subsampling);         // input chroma subsampling
-   RADEON_ENC_CS(0);                          // input chroma location (ignored for RGB)
-   RADEON_ENC_CS(color_bit_depth);            // input color bit depth
-   RADEON_ENC_CS(color_packing_format);       // input color packing format
+   RADEON_ENC_CS(color_volume);         // input color volume
+   RADEON_ENC_CS(color_space);          // input color space
+   RADEON_ENC_CS(0);                    // input color range (ignored)
+   RADEON_ENC_CS(chroma_subsampling);   // input chroma subsampling
+   RADEON_ENC_CS(0);                    // input chroma location (ignored for RGB)
+   RADEON_ENC_CS(color_bit_depth);      // input color bit depth
+   RADEON_ENC_CS(color_packing_format); // input color packing format
    RADEON_ENC_END();
 }
 

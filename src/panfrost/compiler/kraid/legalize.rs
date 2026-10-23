@@ -20,14 +20,28 @@ fn move_src_to_tmp(b: &mut impl SSABuilder, src: &mut Src, bytes: u8) {
     b.copy_to(tmp.into(), DataType::i(bytes * 8), src_ref.into());
 }
 
+/// Legalizes immediate sources by ensuring the following:
+///
+///  1. For 32-bit immediates, ensure that the instruction supports it.
+///
+///  2. For 64-bit immediates, only OpCopy supports them.
 fn legalize_imm_src(b: &mut impl SSABuilder, op: &mut Op, src_idx: usize) {
     let src = &op.srcs()[src_idx];
-    let SrcRef::Imm32(imm32) = &src.src_ref else {
-        return;
-    };
-    if !b.model().op_src_supports_imm32(op, src, (*imm32).into()) {
-        let bytes = src.src_ref.bytes_read();
-        move_src_to_tmp(b, &mut op.srcs_mut()[src_idx], bytes);
+
+    match &src.src_ref {
+        SrcRef::Imm32(imm32) => {
+            if !b.model().op_src_supports_imm32(op, src, (*imm32).into()) {
+                let bytes = src.src_ref.bytes_read();
+                move_src_to_tmp(b, &mut op.srcs_mut()[src_idx], bytes);
+            }
+        }
+        SrcRef::Imm64(_) if !matches!(op, Op::Copy(_)) => {
+            // No real instruction can read 64-bit immediates.  If any
+            // instruction is left reading them, lower it into a copy.
+            let bytes = src.src_ref.bytes_read();
+            move_src_to_tmp(b, &mut op.srcs_mut()[src_idx], bytes);
+        }
+        _ => {}
     }
 }
 
@@ -86,6 +100,11 @@ fn legalize_fixed_srcs(
     let mut clobbered = RegByteSet::new();
     for reg in ra::instr_clobbered_regs(b.model(), &instr.op) {
         clobbered.insert_range(reg.byte_range());
+    }
+    for dst in instr.dsts() {
+        if let Some(reg) = b.model().op_fixed_dst_reg(&instr.op, dst) {
+            clobbered.insert_range(reg.byte_range());
+        }
     }
 
     for src_idx in 0..instr.srcs().len() {
@@ -245,6 +264,11 @@ impl LegalizeFAU<'_> {
 
     fn extract_srcs(&mut self, model: &dyn Model, op: &Op) {
         for (src_idx, src) in op.srcs().iter().enumerate() {
+            // Fake sources don't count towards FAU bounds
+            if model.op_src_is_fake(op, src) {
+                continue;
+            }
+
             if matches!(src.src_ref, SrcRef::Zero) {
                 self.reads_k0 = true;
             }
@@ -252,10 +276,17 @@ impl LegalizeFAU<'_> {
                 continue;
             };
 
+            // The hardware doesn't make a distinction between a 64-bit FAU
+            // source with a swizzle which only reads a subset of the bytes
+            // and a source which reads the whole 64-bit FAU.  If it uses
+            // SourceEncoding64 and isn't a small constant, it's 64-bit.
+            let is64 = fau.page != FAUPage::SmallConst
+                && model.op_src_is_64bit(&op, src);
+
             let idx64 = fau.idx >> 1;
             let word = fau.idx & 1;
 
-            if word == 1 && model.op_src_is_64bit(&op, src) {
+            if is64 && word == 1 {
                 self.src64_w1.insert(src_idx);
 
                 // We can't handle .w1 in most 64-bit ops.  If we can't compose
@@ -285,11 +316,7 @@ impl LegalizeFAU<'_> {
             };
 
             slot.use_count += 1;
-            slot.words_used |= if fau.load64 {
-                0b11
-            } else {
-                1 << (fau.idx & 0b1)
-            };
+            slot.words_used |= if is64 { 0b11 } else { 1 << word };
         }
     }
 
@@ -473,6 +500,11 @@ fn legalize_fau_srcs(
     if !ctx.slots.is_empty() {
         if b.model().op_is_message(op) {
             ctx.legalize_message();
+            // BLEND and ATEST act either as ALU or as message instructions
+            // depending on state so we have to legalize both ways.
+            if matches!(op, Op::Blend(_) | Op::BlendCall(_) | Op::ATest(_)) {
+                ctx.legalize_execution_unit();
+            }
         } else {
             ctx.legalize_execution_unit();
         }

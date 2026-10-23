@@ -33,7 +33,6 @@ typedef struct glsl_type glsl_type;
 /* Minimum number of inlined shaders to use binary search to select which shader to run. */
 #define INLINED_SHADER_BSEARCH_THRESHOLD 16
 
-
 /*
  *
  * Shader Inlining
@@ -57,7 +56,6 @@ void radv_visit_inlined_shaders(nir_builder *b, nir_def *sbt_idx, bool can_have_
 
 /* Transfer inline constant data from src to dst, to prepare inlining src into dst */
 void radv_nir_inline_constants(nir_shader *dst, nir_shader *src);
-
 
 /*
  *

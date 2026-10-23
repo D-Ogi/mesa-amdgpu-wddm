@@ -1504,7 +1504,7 @@ VkResult pvr_arch_render_job_submit(struct pvr_render_ctx *ctx,
          (rt_dataset->rt_data_idx + 1) % ARRAY_SIZE(rt_dataset->rt_datas);
 
       rt_dataset->need_frag = false;
-   } else {
+   } else if (rt_dataset != device->dummy_rt.rt_dataset) {
       rt_dataset->need_frag = true;
    }
 

@@ -60,7 +60,7 @@ static void radeon_vcn_enc_quality_modes(struct radeon_encoder *enc,
     * VCN 5.0.0, where only pre_encode_mode is enabled.
     */
    enc->enc_pic.quality_params.two_pass_search_center_map_mode =
-      (sscreen->info.vcn_ip_version < VCN_5_0_0 &&
+      (sscreen->info.vcn_ip_version != VCN_5_0_0 &&
          enc->enc_pic.quality_modes.pre_encode_mode &&
          !enc->enc_pic.spec_misc.b_picture_enabled) ? 1 : 0;
    enc->enc_pic.quality_params.vbaq_strength = 0;
@@ -1316,7 +1316,7 @@ static void pre_encode_size(struct radeon_encoder *enc,
          *offset += align((pre_size * 4 + full_size) * sizeof(uint32_t), enc->alignment);
       else if (!is_h264)
          *offset += align((pre_size * 52 + full_size) * sizeof(uint32_t), enc->alignment);
-   } else { /* only for vcn5.x rather than VCN5_0_0 */
+   } else if (sscreen->info.vcn_ip_version != VCN_5_0_0) {
       if (is_h264 && !has_b)
          *offset += align(full_size * 8, enc->alignment);
       else if (!is_h264)
@@ -1337,7 +1337,7 @@ static int setup_dpb(struct radeon_encoder *enc, uint32_t num_reconstructed_pict
    uint32_t aligned_height = align(enc->base.height, rec_alignment);
    uint32_t pitch = align(aligned_width, enc->alignment);
    uint32_t luma_size, chroma_size, offset;
-   uint32_t pre_luma_size = 0, pre_chroma_size = 0, pre_input_plane_size = 0;
+   uint32_t pre_luma_size = 0, pre_chroma_size = 0, pre_input_plane_size = 0, pre_input_pitch = 0;
    struct radeon_enc_pic *enc_pic = &enc->enc_pic;
    int i;
    bool has_b = enc_pic->spec_misc.b_picture_enabled; /* for h264 only */
@@ -1352,9 +1352,11 @@ static int setup_dpb(struct radeon_encoder *enc, uint32_t num_reconstructed_pict
       uint32_t scale = enc_pic->quality_modes.pre_encode_mode;
       uint32_t pre_pitch = align(aligned_width / scale, enc->alignment);
       uint32_t pre_aligned_height = MAX2(align(aligned_height / scale, enc->alignment), 256);
+      /* If preenc_pitch_wa is set, VCN FW always writes the preencode input
+       * picture using the input picture pitch. */
+      pre_input_pitch = enc->caps->preenc_pitch_wa ? pitch : pre_pitch;
 
-      /* VCN FW always writes the preencode input picture using the input picture pitch. */
-      pre_input_plane_size = align(pitch * pre_aligned_height, enc->alignment);
+      pre_input_plane_size = align(pre_input_pitch * pre_aligned_height, enc->alignment);
       pre_luma_size = align(pre_pitch * pre_aligned_height, enc->alignment);
       pre_chroma_size = align(pre_luma_size / 2, enc->alignment);
    }
@@ -1369,8 +1371,8 @@ static int setup_dpb(struct radeon_encoder *enc, uint32_t num_reconstructed_pict
 
    assert(num_reconstructed_pictures <= RENCODE_MAX_NUM_RECONSTRUCTED_PICTURES);
 
-   enc_pic->ctx_buf.rec_luma_pitch   = pitch;
-   enc_pic->ctx_buf.pre_encode_picture_luma_pitch   = pitch;
+   enc_pic->ctx_buf.rec_luma_pitch = pitch;
+   enc_pic->ctx_buf.pre_encode_picture_luma_pitch = pre_input_pitch;
    enc_pic->ctx_buf.num_reconstructed_pictures = num_reconstructed_pictures;
    enc_pic->total_coloc_bytes = total_coloc_bytes;
 
@@ -1378,7 +1380,7 @@ static int setup_dpb(struct radeon_encoder *enc, uint32_t num_reconstructed_pict
    enc->metadata_size = 0;
    if (sscreen->info.vcn_ip_version < VCN_5_0_0) {
       enc_pic->ctx_buf.rec_chroma_pitch = pitch;
-      enc_pic->ctx_buf.pre_encode_picture_chroma_pitch = pitch;
+      enc_pic->ctx_buf.pre_encode_picture_chroma_pitch = pre_input_pitch;
       if (has_b) {
          enc_pic->ctx_buf.colloc_buffer_offset = offset;
          offset += total_coloc_bytes;
@@ -1424,7 +1426,7 @@ static int setup_dpb(struct radeon_encoder *enc, uint32_t num_reconstructed_pict
       enc->dpb_size = offset;
    } else { /* vcn 5.0 */
       enc_pic->ctx_buf.rec_chroma_pitch = pitch / 2;
-      enc_pic->ctx_buf.pre_encode_picture_chroma_pitch = pitch / 2;
+      enc_pic->ctx_buf.pre_encode_picture_chroma_pitch = pre_input_pitch / 2;
       /* dpb buffer */
       if (is_av1) {
          enc_pic->ctx_buf.av1.av1_sdb_intermediate_context_offset = offset;
@@ -1858,18 +1860,19 @@ static void radeon_enc_encode_bitstream(struct pipe_video_codec *encoder,
    if (enc->error)
       return;
 
+   struct si_resource *fb_buf = si_vid_create_buffer(enc->screen, PIPE_USAGE_STAGING, 0, 4096);
+   if (!fb_buf) {
+      RADEON_ENC_ERR("Can't create feedback buffer.\n");
+      return;
+   }
+
    enc->get_buffer(destination, &enc->bs_handle, NULL);
    enc->bs_size = destination->width0;
    enc->bs_offset = 0;
 
    *fb = enc->fb = CALLOC_STRUCT(radeon_enc_fb_buffer);
 
-   enc->fb->res = si_vid_create_buffer(enc->screen, PIPE_USAGE_STAGING, 0, 4096);
-   if (!enc->fb->res) {
-      RADEON_ENC_ERR("Can't create feedback buffer.\n");
-      return;
-   }
-
+   enc->fb->res = fb_buf;
    enc->fb->data = radeon_vcn_enc_encode_headers(enc);
    enc->fb->max_bitstream_size = enc->bs_size - enc->bs_offset;
    enc->enc_pic.enc_params.allowed_max_bitstream_size = enc->fb->max_bitstream_size;

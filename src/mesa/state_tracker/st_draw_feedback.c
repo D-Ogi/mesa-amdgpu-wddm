@@ -93,7 +93,7 @@ set_feedback_vertex_format(struct gl_context *ctx)
  */
 void
 st_feedback_draw_vbo(struct gl_context *ctx,
-                     const struct pipe_draw_info *info,
+                     struct pipe_draw_info *info,
                      unsigned drawid_offset,
                      const struct pipe_draw_indirect_info *indirect,
                      const struct pipe_draw_start_count_bias *draws,
@@ -116,6 +116,9 @@ st_feedback_draw_vbo(struct gl_context *ctx,
 
    ST_PIPELINE_RENDER_STATE_MASK(mask);
    st_prepare_draw(ctx, mask);
+
+   if (!st_prepare_index_bounds(ctx, info, indirect, draws, num_draws))
+      return;
 
    /* must get these after state validation! */
    struct st_common_variant_key key = {
@@ -474,6 +477,7 @@ st_feedback_draw_vbo_multi_mode(struct gl_context *ctx,
 {
    for (unsigned i = 0; i < num_draws; i++) {
       info->mode = mode[i];
+      info->index_bounds_valid = false;
       st_feedback_draw_vbo(ctx, info, 0, NULL, &draws[i], 1);
    }
 }

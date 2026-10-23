@@ -833,11 +833,15 @@ radv_GetPipelineExecutableStatisticsKHR(VkDevice _device, const VkPipelineExecut
    const struct radv_physical_device *pdev = radv_device_physical(device);
    const enum amd_gfx_level gfx_level = pdev->info.gfx_level;
 
+   struct radv_shader_binary_debug_info dbg = {0};
+   if (pStatistics && *pStatisticCount)
+      dbg = radv_parse_binary_debug_info(&device->compiler_info, shader->binary);
+
    VK_OUTARRAY_MAKE_TYPED(VkPipelineExecutableStatisticKHR, out, pStatistics, pStatisticCount);
 
    struct amd_stats stats = {0};
-   if (shader->dbg.statistics)
-      stats = *shader->dbg.statistics;
+   if (dbg.statistics)
+      stats = *dbg.statistics;
    stats.driverhash = pipeline->pipeline_hash;
    stats.sgprs = shader->config.num_sgprs;
    stats.vgprs = shader->config.num_vgprs;
@@ -847,6 +851,8 @@ radv_GetPipelineExecutableStatisticsKHR(VkDevice _device, const VkPipelineExecut
    stats.lds = align(shader->config.lds_size, ac_shader_get_lds_alloc_granularity(gfx_level));
    stats.scratch = shader->config.scratch_bytes_per_wave;
    stats.maxwaves = shader->max_waves;
+
+   radv_free_binary_debug_info(&dbg);
 
    switch (stage) {
    case MESA_SHADER_VERTEX:
@@ -1013,6 +1019,8 @@ radv_GetPipelineExecutableInternalRepresentationsKHR(
    struct radv_shader *shader =
       radv_get_shader_from_executable_index(pipeline, pExecutableInfo->executableIndex, &stage);
 
+   struct radv_shader_binary_debug_info dbg = radv_parse_binary_debug_info(&device->compiler_info, shader->binary);
+
    VkPipelineExecutableInternalRepresentationKHR *p = pInternalRepresentations;
    VkPipelineExecutableInternalRepresentationKHR *end =
       p + (pInternalRepresentations ? *pInternalRepresentationCount : 0);
@@ -1037,20 +1045,22 @@ radv_GetPipelineExecutableInternalRepresentationsKHR(
          VK_COPY_STR(p->name, "ACO IR");
          VK_COPY_STR(p->description, "The ACO IR after some optimizations");
       }
-      if (radv_copy_representation(p->pData, &p->dataSize, shader->dbg.ir_string) != VK_SUCCESS)
+      if (radv_copy_representation(p->pData, &p->dataSize, dbg.ir_string) != VK_SUCCESS)
          result = VK_INCOMPLETE;
    }
    ++p;
 
    /* Disassembler */
-   if (p < end && shader->dbg.disasm_string) {
+   if (p < end && dbg.disasm_string) {
       p->isText = true;
       VK_COPY_STR(p->name, "Assembly");
       VK_COPY_STR(p->description, "Final Assembly");
-      if (radv_copy_representation(p->pData, &p->dataSize, shader->dbg.disasm_string) != VK_SUCCESS)
+      if (radv_copy_representation(p->pData, &p->dataSize, dbg.disasm_string) != VK_SUCCESS)
          result = VK_INCOMPLETE;
    }
    ++p;
+
+   radv_free_binary_debug_info(&dbg);
 
    if (!pInternalRepresentations)
       *pInternalRepresentationCount = p - pInternalRepresentations;

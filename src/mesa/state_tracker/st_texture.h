@@ -30,6 +30,7 @@
 
 
 #include "pipe/p_context.h"
+#include "util/format/u_format.h"
 #include "util/u_sampler.h"
 #include "util/simple_mtx.h"
 
@@ -47,6 +48,12 @@ struct st_texture_image_transfer
    GLubyte *temp_data; /**< Temporary compressed texture storage. */
    unsigned temp_stride; /**< Stride of the compressed texture storage. */
    struct pipe_box box; /**< Region of the transfer's resource to write. */
+
+   /* For a resource with a byte-swapped format: the mapping of it, and the
+    * host-endian copy that is handed out instead.
+    */
+   uint8_t *transfer_map;
+   uint8_t *swapped_map;
 };
 
 
@@ -116,6 +123,20 @@ st_get_texture_object(struct gl_context *ctx,
 {
    const GLuint texUnit = prog->SamplerUnits[unit];
    return ctx->Texture.Unit[texUnit]._Current;
+}
+
+/**
+ * The format to use a resource with that the frontend describes as \p format.
+ * This is the resource's format if it is the fixed little-endian variant of
+ * \p format, which is what a frontend allocates and imports on a big-endian
+ * host.
+ */
+static inline enum pipe_format
+st_get_surface_format(enum pipe_format format, const struct pipe_resource *pt)
+{
+   if (util_format_le_byte_order(format) == pt->format)
+      return pt->format;
+   return format;
 }
 
 static inline enum pipe_format
@@ -219,6 +240,21 @@ st_astc_format_fallback(const struct st_context *st, mesa_format format);
 
 bool
 st_compressed_format_fallback(struct st_context *st, mesa_format format);
+
+static inline unsigned
+st_image_access(GLenum access)
+{
+   switch (access) {
+   case GL_READ_ONLY:
+      return PIPE_IMAGE_ACCESS_READ;
+   case GL_WRITE_ONLY:
+      return PIPE_IMAGE_ACCESS_WRITE;
+   case GL_READ_WRITE:
+      return PIPE_IMAGE_ACCESS_READ_WRITE;
+   default:
+      UNREACHABLE("bad image access");
+   }
+}
 
 void
 st_convert_image(const struct st_context *st, const struct gl_image_unit *u,

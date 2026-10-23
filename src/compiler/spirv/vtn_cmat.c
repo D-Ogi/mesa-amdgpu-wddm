@@ -587,10 +587,11 @@ vtn_create_internal_uint_type(struct vtn_builder *b) {
 }
 
 static struct vtn_type *
-vtn_create_internal_tvec_type(struct vtn_builder *b, int dim) {
+vtn_create_internal_tvec_type(struct vtn_builder *b, enum glsl_base_type base_type,
+                              int dim) {
    struct vtn_type *t = vtn_zalloc(b, struct vtn_type);
    t->base_type = vtn_base_type_vector;
-   t->type = glsl_vector_type(GLSL_TYPE_UINT, dim);
+   t->type = glsl_vector_type(base_type, dim);
    return t;
 }
 
@@ -601,7 +602,8 @@ vtn_handle_tensor_layout_type(struct vtn_builder *b, struct vtn_value *val,
    int dim = vtn_constant_uint(b, w[2]);
    int num_fields = 6;
 
-   struct vtn_type *vec_type = vtn_create_internal_tvec_type(b, dim);
+   struct vtn_type *uvec_type = vtn_create_internal_tvec_type(b, GLSL_TYPE_UINT, dim);
+   struct vtn_type *vec_type = vtn_create_internal_tvec_type(b, GLSL_TYPE_INT, dim);
    struct vtn_type *uint_type = vtn_create_internal_uint_type(b);
 
    if (opcode == SpvOpTypeTensorLayoutNV) {
@@ -609,10 +611,13 @@ vtn_handle_tensor_layout_type(struct vtn_builder *b, struct vtn_value *val,
       val->type->tensor_layout_clamp_mode = vtn_constant_uint(b, w[3]);
       val->type->tensor_layout_members = vtn_alloc_array(b, struct vtn_type *, num_fields);
 
-      for (unsigned i = 0; i < 5; i++) {
-         val->type->tensor_layout_members[i] = vec_type;
-      }
-      val->type->tensor_layout_members[5] = uint_type;
+      struct vtn_type **members = val->type->tensor_layout_members;
+      members[NIR_TENSOR_LAYOUT_BLOCKSIZE]   = uvec_type;
+      members[NIR_TENSOR_LAYOUT_LAYOUT_DIM]  = uvec_type;
+      members[NIR_TENSOR_LAYOUT_STRIDE]      = uvec_type;
+      members[NIR_TENSOR_LAYOUT_OFFSET]      = vec_type;
+      members[NIR_TENSOR_LAYOUT_SPAN]        = uvec_type;
+      members[NIR_TENSOR_LAYOUT_CLAMP_VALUE] = uint_type;
 
 #define FILL_ST_FIELD(idx, ftype, fname) \
       fields[(idx)] = (struct glsl_struct_field) {   \
@@ -644,10 +649,10 @@ vtn_handle_tensor_layout_type(struct vtn_builder *b, struct vtn_value *val,
       val->type->tensor_view_members = vtn_alloc_array(b, struct vtn_type *, num_fields);
 
       for (unsigned i = 0; i < 2; i++) {
-         val->type->members[i] = vec_type;
+         val->type->tensor_view_members[i] = uvec_type;
       }
       for (unsigned i = 2; i < 6; i++) {
-         val->type->members[i] = uint_type;
+         val->type->tensor_view_members[i] = uint_type;
       }
 
       STACK_ARRAY(struct glsl_struct_field, fields, num_fields);
@@ -711,8 +716,7 @@ init_clip_scalars(struct vtn_builder *b,
       uint32_t this_index = index_base + f;
       struct vtn_ssa_value *field = vtn_composite_extract(b, src, &this_index, 1);
       struct vtn_ssa_value *new_field = vtn_create_ssa_value(b, field->type);
-      int nc = glsl_get_vector_elements(field->type);
-      assert(nc <= 1);
+      assert(glsl_get_vector_elements(field->type) <= 1);
       new_field->def = vtn_get_nir_ssa(b, w[4 + f]);
 
       new = vtn_composite_insert(b, new, src_type, new_field, &this_index, 1);

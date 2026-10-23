@@ -186,7 +186,7 @@ make_image_handle_resident(struct gl_context *ctx,
       _mesa_hash_table_u64_insert(ctx->ResidentImageHandles, handle,
                                   imgHandleObj);
 
-      ctx->pipe->make_image_handle_resident(ctx->pipe, handle, access, GL_TRUE);
+      ctx->pipe->make_image_handle_resident(ctx->pipe, handle, st_image_access(access), GL_TRUE);
 
       /* Reference the texture object to be sure it won't be deleted until it
        * is not bound anywhere and there are no handles using the object that
@@ -198,7 +198,7 @@ make_image_handle_resident(struct gl_context *ctx,
 
       _mesa_hash_table_u64_remove(ctx->ResidentImageHandles, handle);
 
-      ctx->pipe->make_image_handle_resident(ctx->pipe, handle, access, GL_FALSE);
+      ctx->pipe->make_image_handle_resident(ctx->pipe, handle, st_image_access(access), GL_FALSE);
 
       /* Unreference the texture object but keep the pointer intact, if
        * refcount hits zero, the texture and all handles will be deleted.

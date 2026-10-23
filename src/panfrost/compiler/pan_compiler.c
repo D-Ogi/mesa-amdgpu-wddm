@@ -13,6 +13,7 @@
 #include "bifrost/valhall/disassemble.h"
 #include "midgard/disassemble.h"
 #include "midgard/midgard_compile.h"
+#include "midgard/midgard_quirks.h"
 #include "kraid/kraid.h"
 
 #include "panfrost/model/pan_model.h"
@@ -52,7 +53,7 @@ static const struct debug_named_value pan_use_kraid_flags[] = {
 };
 
 DEBUG_GET_ONCE_FLAGS_OPTION(use_kraid, "PAN_USE_KRAID",
-                            pan_use_kraid_flags, 0)
+                            pan_use_kraid_flags, USE_KRAID_ALL)
 #endif
 
 bool
@@ -152,20 +153,22 @@ pan_get_nir_shader_compiler_options(unsigned arch,
 }
 
 void
-pan_preprocess_nir(nir_shader *nir, uint64_t gpu_id)
+pan_preprocess_nir(nir_shader *nir, unsigned arch)
 {
-   if (pan_arch(gpu_id) >= 6)
-      bifrost_preprocess_nir(nir, gpu_id);
+   if (arch >= 6)
+      bifrost_preprocess_nir(nir, arch);
    else
-      midgard_preprocess_nir(nir, gpu_id);
+      midgard_preprocess_nir(nir);
 
+   bool is_kraid = pan_use_kraid(arch, nir->info.stage,
+                                 nir->info.internal);
    /* Lower textures early */
    nir_lower_tex_options lower_tex_options = {
       .lower_txs_lod = true,
-      .lower_txp = ~0,
+      .lower_txp = (is_kraid && arch >= 11) ? 0 : ~0,
       .lower_tg4_offsets = true,
       .lower_tg4_broadcom_swizzle = true,
-      .lower_txd = pan_arch(gpu_id) < 6,
+      .lower_txd = arch < 6,
       .lower_txd_cube_map = true,
       .lower_invalid_implicit_lod = true,
    };
@@ -179,10 +182,11 @@ pan_postprocess_nir(nir_shader *nir, const struct pan_compile_inputs *inputs,
 {
    memset(info, 0, sizeof(*info));
 
-   if (pan_arch(inputs->gpu_id) >= 6)
+   unsigned arch = inputs->arch;
+   if (arch >= 6)
       bifrost_postprocess_nir(nir, inputs, info);
    else
-      midgard_postprocess_nir(nir, inputs->gpu_id);
+      midgard_postprocess_nir(nir, arch);
 }
 
 /** Converts a per-component mask to a byte mask */
@@ -253,10 +257,8 @@ pan_lookup_pushed_imm(const struct pan_fau_layout *fau, uint32_t imm)
 
 void
 pan_shader_update_info(struct pan_shader_info *info, nir_shader *s,
-                       const struct pan_compile_inputs *inputs)
+                       unsigned arch)
 {
-   unsigned arch = pan_arch(inputs->gpu_id);
-
    info->stage = s->info.stage;
    info->contains_barrier =
       s->info.uses_memory_barrier || s->info.uses_control_barrier;
@@ -369,7 +371,7 @@ void
 pan_shader_compile(nir_shader *s, struct pan_compile_inputs *inputs,
                    struct util_dynarray *binary, struct pan_shader_info *info)
 {
-   unsigned arch = pan_arch(inputs->gpu_id);
+   unsigned arch = inputs->arch;
 
    NIR_PASS(_, s, nir_inline_sysval, nir_intrinsic_load_printf_buffer_size,
             PAN_PRINTF_BUFFER_SIZE - 8);
@@ -379,7 +381,7 @@ pan_shader_compile(nir_shader *s, struct pan_compile_inputs *inputs,
       /* pan_shader_update_info done in the compile */
    } else {
       midgard_compile_shader_nir(s, inputs, binary, info);
-      pan_shader_update_info(info, s, inputs);
+      pan_shader_update_info(info, s, arch);
    }
 }
 
@@ -520,6 +522,7 @@ void
 pan_disassemble(FILE *fp, const void *code, size_t size, uint64_t gpu_id,
                 bool verbose)
 {
+#ifdef WITH_PANFROST_DISASSEMBLE
    if (pan_arch(gpu_id) >= 9) {
 #ifdef WITH_PANFROST_RUST
       kraid_disassemble(fp, code, size, verbose, pan_arch(gpu_id));
@@ -529,8 +532,14 @@ pan_disassemble(FILE *fp, const void *code, size_t size, uint64_t gpu_id,
    }
    else if (pan_arch(gpu_id) >= 6)
       disassemble_bifrost(fp, code, size, verbose);
-   else
-      disassemble_midgard(fp, code, size, gpu_id, verbose);
+   else {
+      unsigned quirks = midgard_get_quirks(pan_prod_id(gpu_id));
+      disassemble_midgard(fp, code, size, quirks, verbose);
+   }
+#else
+   fprintf(fp, "Disassembler disabled, enable it with "
+               "-Dpanfrost-disassemble=true\n");
+#endif
 }
 
 /*
@@ -622,19 +631,19 @@ static const char *bool_str(bool x) {
 }
 
 void
-pan_stats_verbose_prologue(FILE *f, const char* prefix, uint64_t gpu_id,
-                           uint32_t gpu_variant, unsigned arch)
+pan_stats_verbose_prologue(FILE *f, const char* prefix, unsigned arch,
+                           const struct pan_model *model)
 {
-   const struct pan_model *model = pan_get_model(gpu_id, gpu_variant);
    const char *archname[] = {
       "Unknown",              /* 0 must always be "Unknown" */
-      "Lima", "Lima", "Lima", /* 1-3 */
-      "Utgard", "Midgard", "Bifrost", "Bifrost", /* 4-7 */
+      "Unknown", "Unknown", "Unknown", /* 1-3 */
+      "Midgard", "Midgard", "Bifrost", "Bifrost", /* 4-7 */
       "Valhall", "Valhall", "Valhall", "Valhall", /* 8-11 */
       "Arm 5th Gen", "Arm 5th Gen", "Arm 5th Gen" /* 12-14 */
    };
 
    fprintf(f, "\n");
+   fprintf(f, "Arch: %u\n", arch);
    fprintf(f, "Model: %s\n", model ? model->name : "Unknown");
    fprintf(f, "Shader type: %s\n", prefix);
    fprintf(f, "Architecture: %s\n", archname[arch < ARRAY_SIZE(archname) ? arch : 0]);

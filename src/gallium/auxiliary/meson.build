@@ -447,9 +447,7 @@ if with_gallium_zink
   files_libgalliumvlwinsys += files('vl/vl_winsys_kopper.c')
 endif
 
-if with_glx == 'xlib'
-  files_libgalliumvlwinsys += files('vl/vl_winsys_xlib_swrast.c')
-elif with_gallium_drisw_kms
+if with_gallium_drisw_kms
   files_libgalliumvlwinsys += files('vl/vl_winsys_dri_vgem.c')
 endif
 

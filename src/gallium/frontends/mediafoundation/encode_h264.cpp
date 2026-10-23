@@ -30,6 +30,54 @@
 extern DWORD
 CalculateQualityFromQP( DWORD QP );
 
+enum pipe_format
+ConvertAVEncVProfileToPipeFormat( enum eAVEncH264VProfile profile )
+{
+   switch( profile )
+   {
+      case eAVEncH264VProfile_ConstrainedBase:
+      case eAVEncH264VProfile_Base:
+      case eAVEncH264VProfile_Main:
+      case eAVEncH264VProfile_Extended:
+      case eAVEncH264VProfile_ConstrainedHigh:
+      case eAVEncH264VProfile_High:
+         return PIPE_FORMAT_NV12;
+      case eAVEncH264VProfile_High10:
+         return PIPE_FORMAT_P010;
+      case eAVEncH264VProfile_422:
+         return PIPE_FORMAT_YUYV;
+      case eAVEncH264VProfile_444:
+         return PIPE_FORMAT_AYUV;
+      default:
+         UNREACHABLE( "Unsupported H.264 profile" );
+         return PIPE_FORMAT_NONE;
+   }
+}
+
+GUID
+ConvertAVEncVProfileToSubtype( enum eAVEncH264VProfile profile )
+{
+   switch( profile )
+   {
+      case eAVEncH264VProfile_ConstrainedBase:
+      case eAVEncH264VProfile_Base:
+      case eAVEncH264VProfile_Main:
+      case eAVEncH264VProfile_Extended:
+      case eAVEncH264VProfile_ConstrainedHigh:
+      case eAVEncH264VProfile_High:
+         return MFVideoFormat_NV12;
+      case eAVEncH264VProfile_High10:
+         return MFVideoFormat_P010;
+      case eAVEncH264VProfile_422:
+         return MFVideoFormat_YUY2;
+      case eAVEncH264VProfile_444:
+         return MFVideoFormat_AYUV;
+      default:
+         UNREACHABLE( "Unsupported H.264 profile" );
+         return GUID_NULL;
+   }
+}
+
 // utility to convert from pipe_h2645_enc_picture_type to string description
 static const char *
 ConvertPipeH2645FrameTypeToString( pipe_h2645_enc_picture_type picType )
@@ -1267,4 +1315,97 @@ done:
    return hr;
 }
 
+// utility to convert from AVEncVProfile to pipe_video_profile
+enum pipe_video_profile
+CDX12EncHMFT::ConvertAVEncVProfileToPipeVideoProfile( struct vl_screen *vlScreen, eAVEncH264VProfile profile )
+{
+   enum pipe_video_profile pipeProfile = PIPE_VIDEO_PROFILE_UNKNOWN;
+
+   switch( profile )
+   {
+      case eAVEncH264VProfile_Base:   // %%%TODO - Revisit, up-promoting this isn't always valid
+      case eAVEncH264VProfile_ConstrainedBase:
+         pipeProfile = PIPE_VIDEO_PROFILE_MPEG4_AVC_CONSTRAINED_BASELINE;
+         break;
+      case eAVEncH264VProfile_Main:
+         pipeProfile = PIPE_VIDEO_PROFILE_MPEG4_AVC_MAIN;
+         break;
+      case eAVEncH264VProfile_Extended:   // We shouldn't get this, SetOutputType() should've already failed
+         pipeProfile = PIPE_VIDEO_PROFILE_MPEG4_AVC_EXTENDED;
+         break;
+      case eAVEncH264VProfile_ConstrainedHigh:   // strict subset, so promote to high
+      case eAVEncH264VProfile_High:
+         pipeProfile = PIPE_VIDEO_PROFILE_MPEG4_AVC_HIGH;
+         break;
+      case eAVEncH264VProfile_High10:
+         pipeProfile = PIPE_VIDEO_PROFILE_MPEG4_AVC_HIGH10;
+         break;
+      case eAVEncH264VProfile_422:
+         pipeProfile = PIPE_VIDEO_PROFILE_MPEG4_AVC_HIGH422;
+         break;
+      case eAVEncH264VProfile_444:
+         pipeProfile = PIPE_VIDEO_PROFILE_MPEG4_AVC_HIGH444;
+         break;
+   }
+
+   if( !vlScreen->pscreen->get_video_param( vlScreen->pscreen, pipeProfile, PIPE_VIDEO_ENTRYPOINT_ENCODE, PIPE_VIDEO_CAP_SUPPORTED ) )
+   {
+      return PIPE_VIDEO_PROFILE_UNKNOWN;
+   }
+
+   return pipeProfile;
+}
+
+HRESULT
+CDX12EncHMFT::CheckOutputMediaSubType( IMFMediaType *pmt, enum pipe_video_profile &videoProfile )
+{
+   HRESULT hr;
+   enum eAVEncH264VProfile AVEncProfile = eAVEncH264VProfile_Main; // default value when user don't set profile explicitly
+   GUID subType;
+
+   videoProfile = PIPE_VIDEO_PROFILE_UNKNOWN;
+   CHECKHR_GOTO( pmt->GetGUID( MF_MT_SUBTYPE, &subType ), done );
+   CHECKBOOL_GOTO( subType.Data1 == FOURCC_H264, MF_E_INVALIDMEDIATYPE, done );
+   (void) ( pmt->GetUINT32( MF_MT_VIDEO_PROFILE, (UINT32 *) &AVEncProfile ) );   // use default value if not set by user
+   CHECKBOOL_GOTO( ( AVEncProfile == eAVEncH264VProfile_Base ) || ( AVEncProfile == eAVEncH264VProfile_ConstrainedBase ) ||
+                      ( AVEncProfile == eAVEncH264VProfile_Main ) || ( AVEncProfile == eAVEncH264VProfile_High ) ||
+                      ( AVEncProfile == eAVEncH264VProfile_High10 ) || ( AVEncProfile == eAVEncH264VProfile_ConstrainedHigh ),
+                   MF_E_INVALIDMEDIATYPE,
+                   done );
+   CHECKNULL_GOTO( m_pVlScreen, MF_E_INVALIDMEDIATYPE, done );
+   videoProfile = ConvertAVEncVProfileToPipeVideoProfile( m_pVlScreen, AVEncProfile );
+
+done:
+   if( FAILED( hr ) )
+   {
+      MFE_ERROR( "[dx12 hmft 0x%p] Invalid media subtype - hr=0x%x", this, hr );
+   }
+   return hr;
+}
+
+HRESULT
+CDX12EncHMFT::CheckInputMediaSubType( IMFMediaType *pmt )
+{
+   HRESULT hr;
+   GUID subType;
+
+   CHECKHR_GOTO( pmt->GetGUID( MF_MT_SUBTYPE, &subType ), done );
+
+   switch( subType.Data1 )
+   {
+      case FOURCC_NV12:
+      case FOURCC_P010:
+         hr = S_OK;
+         break;
+      default:
+         hr = MF_E_INVALIDMEDIATYPE;
+         break;
+   }
+done:
+   if( FAILED( hr ) )
+   {
+      MFE_ERROR( "[dx12 hmft 0x%p] Invalid media subtype - hr=0x%x", this, hr );
+   }
+   return hr;
+}
 #endif

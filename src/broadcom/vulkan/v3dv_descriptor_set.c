@@ -812,8 +812,15 @@ v3dv_CreateDescriptorSetLayout(VkDevice _device,
 
          /* Inline uniform blocks are not arrayed, instead descriptorCount
           * specifies the size of the buffer in bytes.
+          *
+          * Round the size up to 32 bytes, the padding descriptor_bo_size()
+          * gives every other type, so the next binding and the next set in
+          * the pool stay aligned. The TMU reads config fields from the low
+          * bits of texture and sampler state addresses, so a misaligned
+          * state record hangs the GPU. The extra V3D_NON_COHERENT_ATOM_SIZE
+          * the pool reserves per inline block covers this padding.
           */
-         set_layout->bo_size += binding->descriptorCount;
+         set_layout->bo_size += align(binding->descriptorCount, 32);
          descriptor_count++;
       }
    }

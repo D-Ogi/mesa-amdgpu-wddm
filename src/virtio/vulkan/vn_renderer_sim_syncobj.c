@@ -208,7 +208,8 @@ sim_syncobj_wait(struct util_sync_provider *p,
             continue;
          }
          mtx_unlock(&syncobj->mutex);
-         return -ETIME;
+         errno = ETIME;
+         return -errno;
       }
       mtx_unlock(&syncobj->mutex);
 

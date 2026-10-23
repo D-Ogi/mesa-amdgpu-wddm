@@ -29,7 +29,9 @@ static uint32_t
 debug_vrt_max_reg_count(struct brw_compiler *compiler, int debug)
 {
    if (unlikely(debug)) {
-      return ROUND_DOWN_TO(XE3_MAX_GRF * 2 / intel_threads_per_eu_min, 32);
+      uint32_t num_threads = intel_threads_per_eu_set != (uint32_t)-1 ?
+                             intel_threads_per_eu_set : intel_threads_per_eu_min;
+      return ROUND_DOWN_TO(XE3_MAX_GRF * 2 / num_threads, 32);
    }
    return -1;
 }
@@ -65,6 +67,12 @@ brw_assign_regs_trivial(brw_shader &s)
       s.alloc.count = s.grf_used;
    }
 
+   if (devinfo->ver >= 30 && intel_threads_per_eu_set != (uint32_t)-1 &&
+       (intel_threads_per_eu_srchash == BRW_SRCHASH_EMPTY ||
+        intel_threads_per_eu_srchash == s.prog_data->source_hash))
+      s.grf_used = MAX2(s.grf_used,
+                        ROUND_DOWN_TO(1024 / intel_threads_per_eu_set, 32));
+
    ralloc_free(hw_reg_mapping);
 }
 
@@ -72,7 +80,7 @@ extern "C" void
 brw_alloc_reg_sets(struct brw_compiler *compiler, int debug)
 {
    const struct intel_device_info *devinfo = compiler->devinfo;
-   int base_reg_count = (devinfo->ver < 30 || INTEL_DEBUG(DEBUG_NO_VRT)) ?
+   int base_reg_count = !intel_has_vrt(devinfo) ?
                         BRW_MAX_GRF :
                         MIN2(XE3_MAX_GRF / reg_unit(devinfo),
                              debug_vrt_max_reg_count(compiler, debug));
@@ -112,7 +120,7 @@ brw_alloc_reg_sets(struct brw_compiler *compiler, int debug)
       for (int reg = 0; reg <= base_reg_count - class_sizes[i]; reg++)
          ra_class_add_reg(classes[i], reg);
 
-      if (devinfo->ver >= 30 && !INTEL_DEBUG(DEBUG_NO_VRT))
+      if (intel_has_vrt(devinfo))
          ra_class_override_p(classes[i], 96 - class_sizes[i] + 1);
    }
 
@@ -283,13 +291,20 @@ public:
       spill_vgrf_ip_alloc = 0;
       spill_node_count = 0;
       debug_limit_registers =
-         intel_threads_per_eu_min != (uint32_t)-1 &&
+         (intel_threads_per_eu_min != (uint32_t)-1 ||
+          intel_threads_per_eu_set != (uint32_t)-1) &&
          (intel_threads_per_eu_srchash == BRW_SRCHASH_EMPTY ||
           intel_threads_per_eu_srchash == fs->prog_data->source_hash);
       if (unlikely(debug_limit_registers)) {
+         if (intel_threads_per_eu_set != (uint32_t)-1) {
+            fprintf(stderr,
+                    "INTEL_THREADS_PER_EU: set=%u for src_hash=0x%" PRIx64 "\n",
+                    intel_threads_per_eu_set, fs->prog_data->source_hash);
+         } else {
             fprintf(stderr,
                     "INTEL_THREADS_PER_EU: min=%u for src_hash=0x%" PRIx64 "\n",
                     intel_threads_per_eu_min, fs->prog_data->source_hash);
+         }
       }
 
       /* Manually managed scratch space (e.g. NIR scratch) is not used for
@@ -1612,6 +1627,11 @@ brw_reg_alloc::assign_regs(bool allow_spilling, bool spill_all)
    }
 
    fs->alloc.count = fs->grf_used;
+
+   if (devinfo->ver >= 30 && intel_threads_per_eu_set != (uint32_t)-1 &&
+       debug_limit_registers)
+      fs->grf_used = MAX2(fs->grf_used,
+                          ROUND_DOWN_TO(1024 / intel_threads_per_eu_set, 32));
 
    ralloc_free(hw_reg_mapping);
 

@@ -155,7 +155,7 @@ void si_init_screen_caps(struct si_screen *sscreen)
    caps->uma = !sscreen->info.has_dedicated_vram;
 
    caps->context_priority_mask = sscreen->info.is_amdgpu ?
-      PIPE_CONTEXT_PRIORITY_LOW | PIPE_CONTEXT_PRIORITY_MEDIUM | PIPE_CONTEXT_PRIORITY_HIGH : 0;
+      PIPE_CONTEXT_PRIORITY_LOW | PIPE_CONTEXT_PRIORITY_MEDIUM | PIPE_CONTEXT_PRIORITY_HIGH | PIPE_CONTEXT_PRIORITY_REALTIME: 0;
 
    caps->fence_signal = sscreen->info.has_syncobj;
 
@@ -164,7 +164,6 @@ void si_init_screen_caps(struct si_screen *sscreen)
    caps->device_type = sscreen->info.has_dedicated_vram
       ? PIPE_DEVICE_TYPE_DISCRETE_GPU
       : PIPE_DEVICE_TYPE_INTEGRATED_GPU;
-   caps->endianness = PIPE_ENDIAN_LITTLE;
    caps->vendor_id = ATI_VENDOR_ID;
    caps->device_id = sscreen->info.pci_id;
    caps->video_memory = sscreen->info.vram_size_kb >> 10;

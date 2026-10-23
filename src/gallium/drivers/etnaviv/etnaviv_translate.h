@@ -24,6 +24,7 @@
 #ifndef H_TRANSLATE
 #define H_TRANSLATE
 
+#include "layout/eil_format.h"
 #include "pipe/p_defines.h"
 #include "util/format/u_formats.h"
 #include "pipe/p_state.h"
@@ -37,6 +38,7 @@
 #include "hw/state_3d.xml.h"
 #include "hw/state_blt.xml.h"
 
+#include "util/blend.h"
 #include "util/format/u_format.h"
 #include "util/u_math.h"
 #include "util/u_pack_color.h"
@@ -160,6 +162,45 @@ translate_blend_factor(unsigned blend_factor)
    }
 }
 
+/* Advanced blend modes the PE blends natively, as a bitmask of
+ * BITFIELD_BIT(enum pipe_advanced_blend_mode). The remaining
+ * KHR_blend_equation_advanced modes need shader lowering.
+ */
+#define ETNA_ADVANCED_BLEND_MODES \
+   (BITFIELD_BIT(PIPE_ADVANCED_BLEND_MULTIPLY) | \
+    BITFIELD_BIT(PIPE_ADVANCED_BLEND_SCREEN) | \
+    BITFIELD_BIT(PIPE_ADVANCED_BLEND_OVERLAY) | \
+    BITFIELD_BIT(PIPE_ADVANCED_BLEND_DARKEN) | \
+    BITFIELD_BIT(PIPE_ADVANCED_BLEND_LIGHTEN) | \
+    BITFIELD_BIT(PIPE_ADVANCED_BLEND_HARDLIGHT) | \
+    BITFIELD_BIT(PIPE_ADVANCED_BLEND_DIFFERENCE) | \
+    BITFIELD_BIT(PIPE_ADVANCED_BLEND_EXCLUSION))
+
+static inline uint32_t
+translate_advanced_blend_mode(enum pipe_advanced_blend_mode mode)
+{
+   switch (mode) {
+   case PIPE_ADVANCED_BLEND_MULTIPLY:
+      return ADVANCED_BLEND_MODE_MULTIPLY;
+   case PIPE_ADVANCED_BLEND_SCREEN:
+      return ADVANCED_BLEND_MODE_SCREEN;
+   case PIPE_ADVANCED_BLEND_OVERLAY:
+      return ADVANCED_BLEND_MODE_OVERLAY;
+   case PIPE_ADVANCED_BLEND_DARKEN:
+      return ADVANCED_BLEND_MODE_DARKEN;
+   case PIPE_ADVANCED_BLEND_LIGHTEN:
+      return ADVANCED_BLEND_MODE_LIGHTEN;
+   case PIPE_ADVANCED_BLEND_HARDLIGHT:
+      return ADVANCED_BLEND_MODE_HARDLIGHT;
+   case PIPE_ADVANCED_BLEND_DIFFERENCE:
+      return ADVANCED_BLEND_MODE_DIFFERENCE;
+   case PIPE_ADVANCED_BLEND_EXCLUSION:
+      return ADVANCED_BLEND_MODE_EXCLUSION;
+   default:
+      UNREACHABLE("advanced blend mode without hardware support");
+   }
+}
+
 static inline uint32_t
 translate_texture_wrapmode(unsigned wrap)
 {
@@ -241,7 +282,7 @@ translate_depth_format(enum pipe_format fmt)
 static inline uint32_t
 translate_ts_format(enum pipe_format fmt)
 {
-   fmt = translate_emulated_format_z32f(fmt);
+   fmt = eil_format_emulated(fmt);
 
    /* Note: Pipe format convention is LSB to MSB, VIVS is MSB to LSB */
    switch (fmt) {
@@ -279,7 +320,7 @@ static inline uint32_t
 translate_rs_format(enum pipe_format fmt, bool halti5)
 {
    fmt = util_format_linear(fmt);
-   fmt = translate_emulated_format_z32f(fmt);
+   fmt = eil_format_emulated(fmt);
 
    /* Note: Pipe format convention is LSB to MSB, VIVS is MSB to LSB */
    switch (fmt) {
@@ -333,7 +374,7 @@ static inline uint32_t
 translate_blt_format(enum pipe_format fmt)
 {
    fmt = util_format_linear(fmt);
-   fmt = translate_emulated_format_z32f(fmt);
+   fmt = eil_format_emulated(fmt);
 
    /* Note: Pipe format convention is LSB to MSB, VIVS is MSB to LSB */
    switch (fmt) {
@@ -510,7 +551,7 @@ static inline uint32_t
 translate_clear_depth_stencil(enum pipe_format format, double depth,
                               uint8_t stencil)
 {
-   format = translate_emulated_format_z32f(format);
+   format = eil_format_emulated(format);
 
    uint32_t clear_value = util_pack_z_stencil(format, depth, stencil);
 

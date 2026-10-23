@@ -368,6 +368,10 @@ struct st_context
    void *winsys_drawable_handle;
 
    bool uses_user_vertex_buffers;
+   /* Whether the current vertex elements have a format that u_vbuf must
+    * translate. Only updated if cso_context::vertex_format_fallbacks is set.
+    */
+   bool vertex_formats_need_vbuf;
 
    unsigned last_used_atomic_bindings[MESA_SHADER_MESH_STAGES];
    unsigned last_num_ssbos[MESA_SHADER_MESH_STAGES];

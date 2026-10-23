@@ -469,6 +469,33 @@ init_render_queue_state(struct anv_queue *queue, bool is_companion_rcs_batch)
     */
    anv_batch_emit(batch, GENX(3DSTATE_WM_HZ_OP), hzp);
 
+#if GFX_VERx10 >= 350
+   /* On GFX35+ platforms, we won't need to emit viewport again in depth fast
+    * clear path once a valid one is emitted. Here we always emit a viewport
+    * so the blorp could drop the viewport emission once it is ready.
+    * (Refer to HSD 14021128246.)
+    *
+    * The vieport we use is from blorp dynamic state that has been setup
+    * prior to this stage.
+    */
+   uint32_t dfc_vp_offset =
+      device->blorp.dynamic_states[BLORP_DYNAMIC_STATE_CC_VIEWPORT].offset;
+   if (device->physical->uses_efficient_64bit) {
+      const struct anv_state_pool *pool =
+         anv_device_get_dynamic_state_pool(device);
+      anv_batch_emit(batch, GENX(3DSTATE_VIEWPORT_STATE_POINTERS_CC_2), vp) {
+         vp.CCViewportPointer = (struct anv_address) {
+            .bo = pool->block_pool.bo,
+            .offset = dfc_vp_offset,
+         };
+      }
+   } else {
+      anv_batch_emit(batch, GENX(3DSTATE_VIEWPORT_STATE_POINTERS_CC), vp) {
+         vp.CCViewportPointer = dfc_vp_offset;
+      }
+   }
+#endif
+
    genX(emit_sample_pattern)(batch, NULL);
 
 #if GFX_VER == 11
@@ -1665,10 +1692,15 @@ genX(init_trtt_context_state)(struct anv_async_submit *submit)
    anv_batch_write_reg(batch, GENX(COMP_CTX0_TRTT_CR), trtt_cr)
       trtt_cr.TRTTEnable = true;
 
-   if (queue->family->engine_class != INTEL_ENGINE_CLASS_COPY) {
+   if (batch->engine_class == INTEL_ENGINE_CLASS_RENDER ||
+       batch->engine_class == INTEL_ENGINE_CLASS_COMPUTE) {
       genx_batch_emit_pipe_control(batch, device->info, _3D,
                                    ANV_PIPE_CS_STALL_BIT |
                                    ANV_PIPE_TLB_INVALIDATE_BIT);
+   } else {
+      anv_batch_emit(batch, GENX(MI_FLUSH_DW), mfd) {
+         mfd.TLBInvalidate = true;
+      }
    }
 #endif
    return VK_SUCCESS;

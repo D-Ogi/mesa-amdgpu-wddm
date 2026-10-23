@@ -490,6 +490,8 @@ vn_GetPipelineCacheData(VkDevice device,
    struct vn_device *dev = vn_device_from_handle(device);
    struct vn_physical_device *physical_dev = dev->physical_device;
    struct vn_ring *target_ring = vn_get_target_ring(dev);
+   if (!target_ring)
+      return vn_error(dev->instance, VK_ERROR_OUT_OF_HOST_MEMORY);
 
    struct vk_pipeline_cache_header *header = pData;
    VkResult result;
@@ -1461,6 +1463,8 @@ vn_fix_graphics_pipeline_create_info_self(
       fix_tmp->infos[index].pColorBlendState = NULL;
    if (ignore->pipeline_layout)
       fix_tmp->infos[index].layout = VK_NULL_HANDLE;
+   if (ignore->render_pass)
+      fix_tmp->infos[index].renderPass = VK_NULL_HANDLE;
    if (ignore->base_pipeline_handle)
       fix_tmp->infos[index].basePipelineHandle = VK_NULL_HANDLE;
 

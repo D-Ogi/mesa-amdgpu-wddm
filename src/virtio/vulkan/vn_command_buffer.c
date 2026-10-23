@@ -709,7 +709,7 @@ vn_CreateCommandPool(VkDevice device,
 
    list_inithead(&pool->free_query_records);
 
-   vn_cached_storage_init(&pool->storage, alloc);
+   vn_cached_storage_init(&pool->storage, &pool->base.vk.alloc);
 
    VkCommandPool pool_handle = vn_command_pool_to_handle(pool);
    vn_async_vkCreateCommandPool(dev->primary_ring, device, pCreateInfo, NULL,
@@ -729,7 +729,7 @@ vn_cmd_reset(struct vn_command_buffer *cmd)
 
    vn_cs_encoder_reset(&cmd->cs);
 
-   cmd->base.vk.state = MESA_VK_COMMAND_BUFFER_STATE_INITIAL;
+   vk_command_buffer_reset(&cmd->base.vk);
 
    /* reset cmd builder */
    vk_free(&cmd->base.vk.pool->alloc, cmd->builder.present_src_images);
@@ -761,13 +761,14 @@ vn_DestroyCommandPool(VkDevice device,
    vn_async_vkDestroyCommandPool(dev->primary_ring, device, commandPool,
                                  NULL);
 
+   vn_cached_storage_fini(&pool->storage);
+
+   vn_command_pool_base_fini(&pool->base);
+
    list_for_each_entry_safe(struct vn_cmd_query_record, record,
                             &pool->free_query_records, head)
       vk_free(alloc, record);
 
-   vn_cached_storage_fini(&pool->storage);
-
-   vn_command_pool_base_fini(&pool->base);
    vk_free(alloc, pool);
 }
 

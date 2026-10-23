@@ -10,7 +10,7 @@
 static VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL
 gfxstream_vk_wsi_proc_addr(VkPhysicalDevice physicalDevice, const char* pName) {
     VK_FROM_HANDLE(gfxstream_vk_physical_device, pdevice, physicalDevice);
-    return vk_instance_get_proc_addr_unchecked(&pdevice->instance->base, pName);
+    return vk_instance_get_proc_addr_unchecked(pdevice->base.instance, pName);
 }
 
 VkResult gfxstream_vk_wsi_init(struct gfxstream_vk_physical_device* physical_device) {
@@ -26,7 +26,7 @@ VkResult gfxstream_vk_wsi_init(struct gfxstream_vk_physical_device* physical_dev
     };
     result = wsi_device_init(
         &physical_device->wsi_device, gfxstream_vk_physical_device_to_handle(physical_device),
-        gfxstream_vk_wsi_proc_addr, &physical_device->instance->base.alloc, -1, NULL, &options);
+        gfxstream_vk_wsi_proc_addr, &physical_device->base.instance->alloc, -1, NULL, &options);
     if (result != VK_SUCCESS) return result;
 
     // Allow guest-side modifier code paths
@@ -41,5 +41,5 @@ VkResult gfxstream_vk_wsi_init(struct gfxstream_vk_physical_device* physical_dev
 
 void gfxstream_vk_wsi_finish(struct gfxstream_vk_physical_device* physical_device) {
     physical_device->base.wsi_device = NULL;
-    wsi_device_finish(&physical_device->wsi_device, &physical_device->instance->base.alloc);
+    wsi_device_finish(&physical_device->wsi_device, &physical_device->base.instance->alloc);
 }

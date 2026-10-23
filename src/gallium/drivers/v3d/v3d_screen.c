@@ -818,6 +818,11 @@ v3d_screen_create(int fd, const struct pipe_screen_config *config,
                 driCheckOption(config->options, nonmsaa_name, DRI_BOOL) &&
                 driQueryOptionb(config->options, nonmsaa_name);
 
+        const char *dual_color_name = "dual_color_blend_by_location";
+        screen->dual_color_blend_by_location =
+                driCheckOption(config->options, dual_color_name, DRI_BOOL) &&
+                driQueryOptionb(config->options, dual_color_name);
+
         screen->heap_memory_percent =
                 driQueryOptionf(config->options, "heap_memory_percent");
         if (screen->heap_memory_percent == OS_GPU_HEAP_SIZE_HEURISTIC)

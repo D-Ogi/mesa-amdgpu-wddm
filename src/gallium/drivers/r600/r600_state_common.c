@@ -4331,6 +4331,7 @@ void r600_init_common_state_functions(struct r600_context *rctx)
 	rctx->b.b.set_active_query_state = r600_set_active_query_state;
 
 	rctx->b.b.draw_vbo = r600_draw_vbo;
+	rctx->b.b.draw_vbo_buffers = util_draw_vbo_buffers;
 	rctx->b.invalidate_buffer = r600_invalidate_buffer;
 	rctx->b.need_gfx_cs_space = r600_need_gfx_cs_space;
 }

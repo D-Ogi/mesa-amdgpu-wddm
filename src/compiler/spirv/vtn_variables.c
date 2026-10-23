@@ -1019,6 +1019,8 @@ vtn_get_builtin_location(struct vtn_builder *b,
    case SpvBuiltInSampleMask:
       if (*mode == nir_var_shader_out) {
          *location = FRAG_RESULT_SAMPLE_MASK;
+         assert(b->shader->info.stage == MESA_SHADER_FRAGMENT);
+         b->shader->info.fs.sample_mask_out_declared = true;
       } else {
          *location = SYSTEM_VALUE_SAMPLE_MASK_IN;
          set_mode_system_value(b, mode);

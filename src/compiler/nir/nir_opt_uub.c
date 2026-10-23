@@ -139,10 +139,15 @@ opt_uub_iand(nir_builder *b, nir_alu_instr *alu, opt_uub_state *state)
    if (!get_src_and_const(alu, &src, &mask, &const_src_idx))
       return false;
 
-   unsigned first_0 = ffsll(~nir_scalar_as_uint(mask));
+   uint32_t mask_u = nir_scalar_as_uint(mask);
+   unsigned first_0 = ffsll(~mask_u);
    uint32_t low_mask = (1ull << (first_0 - 1)) - 1;
 
-   if (low_mask != 0 && uub(state, src) <= low_mask) {
+   if (mask_u != 0 && num_lsb_zero(state, src) >= util_last_bit(mask_u)) {
+      b->cursor = nir_after_def(&alu->def);
+      nir_def_replace(&alu->def, nir_imm_zero(b, 1, alu->def.bit_size));
+      return true;
+   } else if (low_mask != 0 && uub(state, src) <= low_mask) {
       b->cursor = nir_after_def(src.def);
       nir_def_replace(&alu->def, nir_mov_scalar(b, src));
       return true;
@@ -635,6 +640,19 @@ opt_uub_i2i64(nir_builder *b, nir_alu_instr *alu, opt_uub_state *state)
    return false;
 }
 
+/* i2i32 -> u2u32 */
+static bool
+opt_uub_i2i32(nir_builder *b, nir_alu_instr *alu, opt_uub_state *state)
+{
+   nir_scalar src;
+   get_srcs(alu, &src);
+   if (src.def->bit_size != 32 && uub(state, src) <= (uint32_t)u_intN_max(src.def->bit_size)) {
+      alu->op = nir_op_u2u32;
+      return true;
+   }
+   return false;
+}
+
 static bool
 src_is_const(nir_src *src, void *data)
 {
@@ -695,6 +713,8 @@ opt_uub(nir_builder *b, nir_alu_instr *alu, void *data)
       return alu->def.bit_size == 64 && opt_uub_alu_u2u64_ishl(b, alu, state);
    case nir_op_i2i64:
       return opt_uub_i2i64(b, alu, state);
+   case nir_op_i2i32:
+      return opt_uub_i2i32(b, alu, state);
    default:
       return false;
    }

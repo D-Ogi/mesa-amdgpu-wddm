@@ -16,6 +16,7 @@
 #include "intel_nir.h"
 #include "nir.h"
 #include "nir_builder_opcodes.h"
+#include "nir_builtin_builder.h"
 #include "nir_intrinsics.h"
 #include "nir_intrinsics_indices.h"
 #include "shader_enums.h"
@@ -2223,10 +2224,48 @@ brw_nir_lower_phis_to_scalar_cb(const nir_instr *instr, const void *_)
 #define LOOP_OPT BRW_NIR_LOOP_PASS
 #define LOOP_OPT_NOT_IDEMPOTENT BRW_NIR_LOOP_PASS_NOT_IDEMPOTENT
 
+static enum intel_code_motion
+brw_nir_code_motion(const brw_pass_tracker *pt)
+{
+   /* brw_compile_* passes the option in the key. brw_preprocess_nir() runs
+    * before there is a key, so it passes it in brw_nir_compiler_opts instead.
+    * Each one fills in only its own field, so take whichever is there.
+    */
+   assert(pt->key == NULL || pt->code_motion == INTEL_CODE_MOTION_DEFAULT);
+   const enum intel_code_motion driconf =
+      pt->key != NULL ? pt->key->code_motion : pt->code_motion;
+   if (driconf != INTEL_CODE_MOTION_DEFAULT)
+      return driconf;
+
+   return intel_use_jay(pt->compiler->devinfo, pt->nir) ?
+          INTEL_CODE_MOTION_LICM : INTEL_CODE_MOTION_GCM;
+}
+
+static bool
+brw_nir_licm_filter(nir_instr *instr, nir_loop *loop,
+                    bool instr_block_dominates_exit)
+{
+   if (instr_block_dominates_exit)
+      return true;
+
+   if (instr->type != nir_instr_type_intrinsic)
+      return false;
+
+   nir_intrinsic_instr *intrin = nir_instr_as_intrinsic(instr);
+   return nir_intrinsic_has_access(intrin) &&
+          (nir_intrinsic_access(intrin) & ACCESS_CAN_SPECULATE);
+}
+
 void
-brw_nir_optimize(brw_pass_tracker *pt)
+brw_nir_optimize(brw_pass_tracker *pt, bool run_code_motion)
 {
    nir_shader *nir = pt->nir;
+
+   /* brw_nir_code_motion() always picks a pass, so _DEFAULT here means the
+    * caller asked for no code motion at all.
+    */
+   const enum intel_code_motion code_motion =
+      run_code_motion ? brw_nir_code_motion(pt) : INTEL_CODE_MOTION_DEFAULT;
 
    pass_tracker_new_loop(pt);
 
@@ -2299,7 +2338,11 @@ brw_nir_optimize(brw_pass_tracker *pt)
          LOOP_OPT_NOT_IDEMPOTENT(nir_opt_loop_unroll);
       }
       LOOP_OPT(nir_opt_remove_phis);
-      LOOP_OPT(nir_opt_gcm, false);
+      if (code_motion == INTEL_CODE_MOTION_LICM) {
+         LOOP_OPT(nir_opt_licm, brw_nir_licm_filter);
+      } else if (code_motion == INTEL_CODE_MOTION_GCM) {
+         LOOP_OPT(nir_opt_gcm, false);
+      }
       LOOP_OPT(nir_opt_undef);
       LOOP_OPT(nir_lower_pack);
 
@@ -2487,6 +2530,70 @@ lower_xehp_tg4_offset_filter(const nir_instr *instr, UNUSED const void *data)
    return offset_x < -8 || offset_x > 7 || offset_y < -8 || offset_y > 7;
 }
 
+static bool
+lower_txd_cb(const nir_tex_instr *tex, const void *data)
+{
+   const struct intel_device_info *devinfo = data;
+
+   int min_lod_index = nir_tex_instr_src_index(tex, nir_tex_src_min_lod);
+   if (tex->is_shadow && min_lod_index >= 0)
+      return true;
+
+   int offset_index = nir_tex_instr_src_index(tex, nir_tex_src_offset);
+   if (tex->is_shadow && offset_index >= 0 && min_lod_index >= 0)
+      return true;
+
+   /* Cases that require a sampler header and the payload is already too large
+    * for the HW to handle.
+    */
+   const int sampler_offset_idx =
+      nir_tex_instr_src_index(tex, nir_tex_src_sampler_deref);
+   if (min_lod_index >= 0 && sampler_offset_idx >= 0) {
+      /* if (!nir_src_is_const(tex->src[sampler_offset_idx].src) || */
+      /*     (nir_src_is_const(tex->src[sampler_offset_idx].src) && */
+      /*      (tex->sampler_index + */
+      /*       nir_src_as_uint(tex->src[sampler_offset_idx].src)) >= 16)) */
+         return true;
+   }
+
+   const int sampler_handle_idx =
+      nir_tex_instr_src_index(tex, nir_tex_src_sampler_deref);
+   if (sampler_handle_idx >= 0 && min_lod_index >= 0)
+      return true;
+
+   if (tex->sampler_dim == GLSL_SAMPLER_DIM_CUBE)
+      return true;
+
+   if (devinfo->verx10 >= 125) {
+      /* For below, See bspec 45942, "Enable new message layout for cube
+       * array"
+       */
+      if (tex->sampler_dim == GLSL_SAMPLER_DIM_3D)
+         return true;
+
+      if (tex->is_array)
+         return true;
+   }
+
+   if (tex->is_shadow && offset_index >= 0 &&
+       !brw_nir_tex_offset_in_constant_range(tex, offset_index))
+      return true;
+
+   return false;
+}
+
+static nir_def *
+build_txs_lod0_intel(nir_builder *b,
+                     nir_tex_instr *tex,
+                     void *data)
+{
+   b->cursor = nir_before_instr(&tex->instr);
+
+   return nir_build_texture_query(b, tex, nir_texop_txs_lod0_intel,
+                                  nir_tex_instr_dest_size(tex),
+                                  nir_type_int32, false, true);
+}
+
 /* Does some simple lowering and runs the standard suite of optimizations
  *
  * This is intended to be called more-or-less directly after you get the
@@ -2507,6 +2614,7 @@ brw_preprocess_nir(const struct brw_compiler *compiler, nir_shader *nir,
    brw_pass_tracker pt_ = {
       .nir = nir,
       .compiler = compiler,
+      .code_motion = opts->code_motion,
    }, *pt = &pt_;
 
    nir_validate_ssa_dominance(nir, "before brw_preprocess_nir");
@@ -2556,9 +2664,9 @@ brw_preprocess_nir(const struct brw_compiler *compiler, nir_shader *nir,
    if (OPT(nir_opt_memcpy))
       OPT(nir_split_var_copies);
 
-   brw_nir_optimize(pt);
+   brw_nir_optimize(pt, true);
 
-   if (nir->info.ray_queries) {
+   if (devinfo->has_ray_tracing) {
       OPT(nir_opt_ray_queries);
       OPT(nir_opt_ray_query_ranges);
    }
@@ -2681,11 +2789,42 @@ brw_preprocess_nir(const struct brw_compiler *compiler, nir_shader *nir,
     * nir_lower_system_values above.
     */
    if (nir->info.stage == MESA_SHADER_TESS_CTRL &&
-       intel_use_tcs_multi_patch(devinfo))
+       intel_use_tcs_multi_patch(devinfo)) {
       OPT(intel_nir_clamp_per_vertex_loads);
+   }
 
    /* Get rid of split copies */
-   brw_nir_optimize(pt);
+   brw_nir_optimize(pt, true);
+
+   const nir_lower_tex_options tex_options = {
+      .lower_txp = ~0,
+      .lower_txf_offset = true,
+      .lower_rect_offset = true,
+      .lower_txb_shadow_clamp = true,
+      .lower_tg4_offsets = true,
+      .lower_txs_lod = true, /* Wa_14012320009 */
+      .lower_offset_filter =
+         devinfo->verx10 >= 125 ? lower_xehp_tg4_offset_filter : NULL,
+      .lower_invalid_implicit_lod = true,
+      .lower_index_to_offset = true,
+      .lower_txd_cb = lower_txd_cb,
+      .lower_txd_data = devinfo,
+      .build_txs_lod0 = opts->lower_tex_use_txs_lod0_intel ? build_txs_lod0_intel : NULL,
+   };
+
+   /* In the case where TG4 coords are lowered to offsets and we have a
+    * lower_xehp_tg4_offset_filter lowering those offsets further, we need to
+    * rerun the pass because the instructions inserted by the first lowering
+    * are not visible during that first pass.
+    */
+   if (OPT(nir_lower_tex, &tex_options))
+      OPT(nir_lower_tex, &tex_options);
+
+   const nir_lower_image_options image_options = {
+      .lower_cube_size = true,
+      .lower_image_samples_to_one = true,
+   };
+   OPT(nir_lower_image, &image_options);
 }
 
 static bool
@@ -2847,11 +2986,15 @@ brw_nir_link_shaders(const struct brw_compiler *compiler,
    brw_pass_tracker pt_producer = { .nir = producer, .compiler = compiler };
    brw_pass_tracker pt_consumer = { .nir = consumer, .compiler = compiler };
 
-   brw_nir_optimize(&pt_producer);
-   brw_nir_optimize(&pt_consumer);
+   /* Code motion is expensive and linking runs the optimization loop up to
+    * three more times per shader. brw_preprocess_nir() has already run it and
+    * brw_postprocess_nir_opts() runs it again, so skip it here.
+    */
+   brw_nir_optimize(&pt_producer, false);
+   brw_nir_optimize(&pt_consumer, false);
 
    if (nir_link_opt_varyings(producer, consumer))
-      brw_nir_optimize(&pt_consumer);
+      brw_nir_optimize(&pt_consumer, false);
 
    NIR_PASS(_, producer, nir_remove_dead_variables, nir_var_shader_out, NULL);
    NIR_PASS(_, consumer, nir_remove_dead_variables, nir_var_shader_in, NULL);
@@ -2869,8 +3012,8 @@ brw_nir_link_shaders(const struct brw_compiler *compiler,
       NIR_PASS(_, producer, nir_lower_global_vars_to_local);
       NIR_PASS(_, consumer, nir_lower_global_vars_to_local);
 
-      brw_nir_optimize(&pt_producer);
-      brw_nir_optimize(&pt_consumer);
+      brw_nir_optimize(&pt_producer, false);
+      brw_nir_optimize(&pt_consumer, false);
 
       if (producer->info.stage == MESA_SHADER_MESH &&
             consumer->info.stage == MESA_SHADER_FRAGMENT) {
@@ -3117,7 +3260,33 @@ get_mem_access_size_align(nir_intrinsic_op intrin, uint8_t bytes,
          };
       }
 
-      if (align < 4 || bytes < 8) {
+      if (devinfo->ver < 35 && align < 4 && bytes > align && is_load) {
+         /* According to hardware bug report 15016519430 fixed on
+          * xe3p, misaligned writes are completely uncached on the
+          * LSC, and reads hit an extremely slow path that leads to
+          * serialization of individual requests and has been reported
+          * to be up to 48x slower than splitting into reads that are
+          * aligned to their bit size.
+          *
+          * This only applies the workaround to loads since splitting
+          * up misaligned stores into sub-dword chunks skips the LSC
+          * cache in the same way as a misaligned full write would, so
+          * there isn't a performance benefit from splitting and we
+          * take the cost of emitting multiple store messages.  For
+          * loads though splitting is substantially faster because it
+          * avoids the pathological behavior of the LSC causing
+          * serialization.
+          *
+          * XXX - Use W/A framework for decision when W/A number is
+          *       available.
+          */
+         return (nir_mem_access_size_align) {
+            .bit_size = align * 8,
+            .num_components = 1,
+            .align = align,
+            .shift = nir_mem_access_shift_method_scalar,
+         };
+      } else if (align < 4 || bytes < 8) {
          /* Data size:           D8D32,D16D32,D32,D64
           * Address alignment:   1
           * Vector size allowed: 1
@@ -3411,58 +3580,6 @@ nir_shader_has_local_variables(const nir_shader *nir)
 }
 
 static bool
-lower_txd_cb(const nir_tex_instr *tex, const void *data)
-{
-   const struct intel_device_info *devinfo = data;
-
-   int min_lod_index = nir_tex_instr_src_index(tex, nir_tex_src_min_lod);
-   if (tex->is_shadow && min_lod_index >= 0)
-      return true;
-
-   int offset_index = nir_tex_instr_src_index(tex, nir_tex_src_offset);
-   if (tex->is_shadow && offset_index >= 0 && min_lod_index >= 0)
-      return true;
-
-   /* Cases that require a sampler header and the payload is already too large
-    * for the HW to handle.
-    */
-   const int sampler_offset_idx =
-      nir_tex_instr_src_index(tex, nir_tex_src_sampler_offset);
-   if (min_lod_index >= 0 && sampler_offset_idx >= 0) {
-      if (!nir_src_is_const(tex->src[sampler_offset_idx].src) ||
-          (nir_src_is_const(tex->src[sampler_offset_idx].src) &&
-           (tex->sampler_index +
-            nir_src_as_uint(tex->src[sampler_offset_idx].src)) >= 16))
-         return true;
-   }
-
-   const int sampler_handle_idx =
-      nir_tex_instr_src_index(tex, nir_tex_src_sampler_handle);
-   if (sampler_handle_idx >= 0 && min_lod_index >= 0)
-      return true;
-
-   if (tex->sampler_dim == GLSL_SAMPLER_DIM_CUBE)
-      return true;
-
-   if (devinfo->verx10 >= 125) {
-      /* For below, See bspec 45942, "Enable new message layout for cube
-       * array"
-       */
-      if (tex->sampler_dim == GLSL_SAMPLER_DIM_3D)
-         return true;
-
-      if (tex->is_array)
-         return true;
-   }
-
-   if (tex->is_shadow && offset_index >= 0 &&
-       !brw_nir_tex_offset_in_constant_range(tex, offset_index))
-      return true;
-
-   return false;
-}
-
-static bool
 flag_fused_eu_disable_instr(nir_builder *b, nir_instr *instr, void *data)
 {
    switch (instr->type) {
@@ -3558,7 +3675,7 @@ brw_nir_lower_int64(brw_pass_tracker *pt)
       OPT(nir_opt_algebraic_before_lower_int64);
 
    if (OPT(nir_lower_int64))
-      brw_nir_optimize(pt);
+      brw_nir_optimize(pt, true);
 }
 
 /* Prepare the given shader for codegen
@@ -3581,34 +3698,15 @@ brw_postprocess_nir_opts(brw_pass_tracker *pt)
    if (enabled_cases != 0)
       OPT(intel_nir_opt_atomic_branch, enabled_cases);
 
-   const nir_lower_tex_options tex_options = {
-      .lower_txp = ~0,
-      .lower_txf_offset = true,
-      .lower_rect_offset = true,
-      .lower_txb_shadow_clamp = true,
-      .lower_tg4_offsets = true,
-      .lower_txs_lod = true, /* Wa_14012320009 */
-      .lower_offset_filter =
-         devinfo->verx10 >= 125 ? lower_xehp_tg4_offset_filter : NULL,
-      .lower_invalid_implicit_lod = true,
-      .lower_index_to_offset = true,
-      .lower_txd_cb = lower_txd_cb,
-      .lower_txd_data = devinfo,
-   };
-
-   /* In the case where TG4 coords are lowered to offsets and we have a
-    * lower_xehp_tg4_offset_filter lowering those offsets further, we need to
-    * rerun the pass because the instructions inserted by the first lowering
-    * are not visible during that first pass.
-    */
-   if (OPT(nir_lower_tex, &tex_options))
-      OPT(nir_lower_tex, &tex_options);
 
    OPT(brw_nir_lower_mcs_fetch, devinfo);
 
    bool jay = intel_use_jay(devinfo, nir);
 
    OPT(intel_nir_lower_sparse_intrinsics, jay);
+
+   /* Remove texture_index/sampler_index values */
+   OPT(nir_lower_tex, &(nir_lower_tex_options) { .lower_index_to_offset = true, });
 
    /* Any constants leftover should be folded so we have constant textures */
    OPT(nir_opt_constant_folding);
@@ -3656,14 +3754,14 @@ brw_postprocess_nir_opts(brw_pass_tracker *pt)
 
    OPT(brw_nir_tag_speculative_access);
 
-   brw_nir_optimize(pt);
+   brw_nir_optimize(pt, true);
 
    if (nir_shader_has_local_variables(nir)) {
       OPT(nir_lower_vars_to_explicit_types, nir_var_function_temp,
           glsl_get_natural_size_align_bytes);
       OPT(nir_lower_explicit_io, nir_var_function_temp,
           nir_address_format_32bit_offset);
-      brw_nir_optimize(pt);
+      brw_nir_optimize(pt, true);
    }
 
    brw_vectorize_lower_mem_access(pt);
@@ -3780,7 +3878,7 @@ brw_postprocess_nir_opts(brw_pass_tracker *pt)
        * allows the elimination of some loops over, say, a TXF instruction
        * with a non-uniform texture handle.
        */
-      brw_nir_optimize(pt);
+      brw_nir_optimize(pt, true);
 
       OPT(nir_lower_subgroups, &subgroups_options);
    }

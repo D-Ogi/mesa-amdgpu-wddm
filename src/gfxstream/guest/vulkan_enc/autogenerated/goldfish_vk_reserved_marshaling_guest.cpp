@@ -32,9 +32,23 @@
 
 #include <cstring>
 
-#include "Resources.h"
 #include "goldfish_vk_extension_structs_guest.h"
 #include "goldfish_vk_private_defs.h"
+#include "util/log.h"
+
+#ifndef GFXSTREAM_ERROR
+#define GFXSTREAM_ERROR(...) mesa_loge(__VA_ARGS__)
+#endif
+
+#ifndef GFXSTREAM_FATAL
+#define GFXSTREAM_FATAL(...)    \
+    do {                        \
+        mesa_loge(__VA_ARGS__); \
+        abort();                \
+    } while (0)
+#endif
+
+#include "Resources.h"
 
 namespace gfxstream {
 namespace vk {
@@ -10418,6 +10432,23 @@ void reservedmarshal_VkDebugMetadataGuestThreadIdGOOGLE(
     *ptr += sizeof(uint64_t);
 }
 
+void reservedmarshal_VkGuestCapabilitiesGOOGLE(VulkanStreamGuest* vkStream,
+                                               VkStructureType rootType,
+                                               const VkGuestCapabilitiesGOOGLE* forMarshaling,
+                                               uint8_t** ptr) {
+    (void)vkStream;
+    (void)rootType;
+    memcpy(*ptr, (VkStructureType*)&forMarshaling->sType, sizeof(VkStructureType));
+    *ptr += sizeof(VkStructureType);
+    if (rootType == VK_STRUCTURE_TYPE_MAX_ENUM) {
+        rootType = forMarshaling->sType;
+    }
+    reservedmarshal_extension_struct(vkStream, rootType, forMarshaling->pNext, ptr);
+    memcpy(*ptr, (VkGuestCapabilityFlagsGOOGLE*)&forMarshaling->capabilities,
+           sizeof(VkGuestCapabilityFlagsGOOGLE));
+    *ptr += sizeof(VkGuestCapabilityFlagsGOOGLE);
+}
+
 void reservedmarshal_VkDebugMetadataGOOGLE(VulkanStreamGuest* vkStream, VkStructureType rootType,
                                            const VkDebugMetadataGOOGLE* forMarshaling,
                                            uint8_t** ptr) {
@@ -10497,17 +10528,20 @@ void reservedmarshal_extension_struct(VulkanStreamGuest* vkStream, VkStructureTy
         return;
     } else {
         // known or null extension struct
-        memcpy(*ptr, &currExtSize, sizeof(uint32_t));
-        ;
-        gfxstream::aemu::Stream::toBe32((uint8_t*)*ptr);
-        *ptr += sizeof(uint32_t);
         if (!currExtSize) {
+            memcpy(*ptr, &currExtSize, sizeof(uint32_t));
+            ;
+            gfxstream::aemu::Stream::toBe32((uint8_t*)*ptr);
+            *ptr += sizeof(uint32_t);
             // exit if this was a null extension struct (size == 0 in this branch)
             return;
         }
     }
+    uint8_t* sizePtr = *ptr;
+    *ptr += sizeof(uint32_t);
     memcpy(*ptr, structExtension, sizeof(VkStructureType));
     *ptr += sizeof(VkStructureType);
+    uint8_t* structStartPtr = *ptr;
     if (!structExtension) {
         return;
     }
@@ -12141,6 +12175,12 @@ void reservedmarshal_extension_struct(VulkanStreamGuest* vkStream, VkStructureTy
                 reinterpret_cast<const VkDebugMetadataGuestThreadIdGOOGLE*>(structExtension), ptr);
             break;
         }
+        case VK_STRUCTURE_TYPE_GUEST_CAPABILITIES_GOOGLE: {
+            reservedmarshal_VkGuestCapabilitiesGOOGLE(
+                vkStream, rootType,
+                reinterpret_cast<const VkGuestCapabilitiesGOOGLE*>(structExtension), ptr);
+            break;
+        }
 #endif
 #ifdef VK_EXT_border_color_swizzle
         case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_BORDER_COLOR_SWIZZLE_FEATURES_EXT: {
@@ -12176,6 +12216,9 @@ void reservedmarshal_extension_struct(VulkanStreamGuest* vkStream, VkStructureTy
             abort();
         }
     }
+    currExtSize = (uint32_t)(*ptr - structStartPtr);
+    memcpy(sizePtr, &currExtSize, sizeof(uint32_t));
+    gfxstream::aemu::Stream::toBe32(sizePtr);
 }
 
 }  // namespace vk

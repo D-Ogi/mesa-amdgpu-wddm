@@ -15,6 +15,7 @@
 #include "nir.h"
 #include "nir_builder.h"
 #include "nir_format_convert.h"
+#include "nir_xfb_info.h"
 #include "pvr_iface.h"
 #include "pco.h"
 #include "pco_builder.h"
@@ -388,6 +389,7 @@ static bool lower_pfo_load(nir_builder *b,
    enum pipe_format format;
    /* Special case for input attachments. */
    if (location == FRAG_RESULT_COLOR) {
+      assert(base < ARRAY_SIZE(state->fs->ia_formats));
       format = state->fs->ia_formats[base];
    } else {
       assert(location >= FRAG_RESULT_DATA0);
@@ -969,7 +971,7 @@ bool pco_nir_pvi(nir_shader *shader, pco_vs_data *vs)
 }
 
 /**
- * \brief Checks if the point size is written.
+ * \brief Checks if the point size is written, saving the intrinsic if so.
  *
  * \param[in] b NIR builder.
  * \param[in] intr NIR intrinsic instruction.
@@ -977,17 +979,93 @@ bool pco_nir_pvi(nir_shader *shader, pco_vs_data *vs)
  * \return True if the instruction was lowered.
  */
 static bool
-check_psiz_write(nir_builder *b, nir_intrinsic_instr *intr, void *cb_data)
+find_psiz_write(nir_builder *b, nir_intrinsic_instr *intr, void *cb_data)
 {
    if (intr->intrinsic != nir_intrinsic_store_output)
       return false;
 
-   bool *writes_psiz = cb_data;
-
    struct nir_io_semantics io_semantics = nir_intrinsic_io_semantics(intr);
-   *writes_psiz |= (io_semantics.location == VARYING_SLOT_PSIZ);
+   if (io_semantics.location == VARYING_SLOT_PSIZ) {
+      nir_intrinsic_instr **psiz_write = cb_data;
+      *psiz_write = intr;
+   }
 
    return false;
+}
+
+static inline nir_xfb_output_info *
+xfb_output_info_for_varying(const nir_shader *shader, gl_varying_slot location)
+{
+   if (!shader->xfb_info)
+      return NULL;
+
+   for (unsigned u = 0; u < shader->xfb_info->output_count; ++u)
+      if (shader->xfb_info->outputs[u].location == location)
+         return &shader->xfb_info->outputs[u];
+
+   return NULL;
+}
+
+/**
+ * \brief Vertex shader point size pass for xfb.
+ *
+ * \param[in,out] shader NIR shader.
+ * \return True if the pass made progress.
+ */
+bool pco_nir_point_size_xfb(nir_shader *shader)
+{
+   assert(shader->info.stage == MESA_SHADER_VERTEX);
+
+   nir_intrinsic_instr *psiz_write = NULL;
+   nir_shader_intrinsics_pass(shader,
+                              find_psiz_write,
+                              nir_metadata_all,
+                              &psiz_write);
+
+   nir_function_impl *impl = nir_shader_get_entrypoint(shader);
+
+   /* No point size written, nothing to do. */
+   if (!psiz_write)
+      return nir_no_progress(impl);
+
+   nir_xfb_output_info *xfb_output_info =
+      xfb_output_info_for_varying(shader, VARYING_SLOT_PSIZ);
+
+   /* No xfb outputs using point size. */
+   if (!xfb_output_info)
+      return nir_no_progress(impl);
+
+   /* Find unused varying slot to use and create the new variable. */
+   gl_varying_slot clone_slot = VARYING_SLOT_VAR0;
+   nir_foreach_shader_out_variable (var, shader) {
+      clone_slot = MAX2(clone_slot, var->data.location + 1);
+   }
+   assert(clone_slot < VARYING_SLOT_MAX);
+
+   nir_create_variable_with_location(shader,
+                                     nir_var_shader_out,
+                                     clone_slot,
+                                     glsl_float_type());
+
+   xfb_output_info->location = clone_slot;
+
+   nir_builder b = nir_builder_at(
+         nir_after_block(nir_impl_last_block(impl)));
+
+   nir_store_output(&b,
+         psiz_write->src[0].ssa,
+         psiz_write->src[1].ssa,
+         .base = 0,
+         .range = 1,
+         .write_mask = 1,
+         .component = 0,
+         .src_type = nir_type_float32,
+         .io_semantics = (nir_io_semantics){
+         .location = clone_slot,
+         .num_slots = 1,
+         });
+
+   return nir_progress(true, impl, nir_metadata_control_flow);
 }
 
 /**
@@ -1000,14 +1078,14 @@ bool pco_nir_point_size(nir_shader *shader)
 {
    assert(shader->info.stage == MESA_SHADER_VERTEX);
 
-   bool writes_psiz = false;
+   nir_intrinsic_instr *psiz_write = NULL;
    nir_shader_intrinsics_pass(shader,
-                              check_psiz_write,
+                              find_psiz_write,
                               nir_metadata_all,
-                              &writes_psiz);
+                              &psiz_write);
 
    /* Nothing to do if the shader already writes the point size. */
-   if (writes_psiz)
+   if (psiz_write)
       return false;
 
    /* Create a point size variable if there isn't one. */
@@ -1232,12 +1310,19 @@ swap_clip_cull_load(nir_builder *b, nir_intrinsic_instr *intr, void *cb_data)
 bool pco_nir_link_clip_cull_vars(nir_shader *producer, nir_shader *consumer)
 {
    if (producer->info.stage != MESA_SHADER_VERTEX ||
-       consumer->info.stage != MESA_SHADER_FRAGMENT) {
+       (consumer && consumer->info.stage != MESA_SHADER_FRAGMENT)) {
       return false;
    }
 
-   unsigned clip_cull_comps = consumer->info.clip_distance_array_size +
-                              consumer->info.cull_distance_array_size;
+   unsigned clip_cull_comps;
+   if (consumer) {
+      clip_cull_comps = consumer->info.clip_distance_array_size +
+                        consumer->info.cull_distance_array_size;
+   } else {
+      clip_cull_comps = producer->info.clip_distance_array_size +
+                        producer->info.cull_distance_array_size;
+   }
+
    /* Skip if clip/cull comps aren't actually consumed. */
    if (!clip_cull_comps)
       return false;
@@ -1261,14 +1346,76 @@ bool pco_nir_link_clip_cull_vars(nir_shader *producer, nir_shader *consumer)
                               nir_metadata_control_flow,
                               clone_var);
 
-   clone_var =
-      nir_variable_create(consumer, nir_var_shader_in, clone_var_type, NULL);
-   clone_var->data.location = clone_slot;
+   if (consumer) {
+      clone_var =
+         nir_variable_create(consumer, nir_var_shader_in, clone_var_type, NULL);
+      clone_var->data.location = clone_slot;
 
-   nir_shader_intrinsics_pass(consumer,
-                              swap_clip_cull_load,
-                              nir_metadata_control_flow,
-                              clone_var);
+      nir_shader_intrinsics_pass(consumer,
+                                 swap_clip_cull_load,
+                                 nir_metadata_control_flow,
+                                 clone_var);
+   } else {
+      /* TODO: we do this in this manner because of the cloned clip/cull
+       * array(s) being "scalarised" to one varying per element... there are
+       * better ways.
+       */
+      unsigned output_count = 0;
+      nir_xfb_info *xfb_info = producer->xfb_info;
+
+      for (unsigned u = 0; u < xfb_info->output_count; ++u) {
+         gl_varying_slot location = xfb_info->outputs[u].location;
+
+         if (location != VARYING_SLOT_CLIP_DIST0 &&
+             location != VARYING_SLOT_CLIP_DIST1) {
+            ++output_count;
+            continue;
+         }
+
+         output_count += util_bitcount(xfb_info->outputs[u].component_mask);
+      }
+
+      nir_xfb_info *xfb =
+         rzalloc_size(producer, nir_xfb_info_size(output_count));
+      memcpy(xfb, xfb_info, sizeof(*xfb));
+      xfb->output_count = output_count;
+
+      unsigned output = 0;
+      for (unsigned u = 0; u < xfb_info->output_count; ++u) {
+         gl_varying_slot location = xfb_info->outputs[u].location;
+
+         if (location != VARYING_SLOT_CLIP_DIST0 &&
+             location != VARYING_SLOT_CLIP_DIST1) {
+            memcpy(&xfb->outputs[output++],
+                   &xfb_info->outputs[u],
+                   sizeof(*xfb->outputs));
+            continue;
+         }
+
+         unsigned offset = (location - VARYING_SLOT_CLIP_DIST0) * 4;
+
+         unsigned comp = 0;
+         u_foreach_bit (b, xfb_info->outputs[u].component_mask) {
+            xfb->outputs[output++] = (nir_xfb_output_info){
+               .buffer = xfb_info->outputs[u].buffer,
+               .offset = xfb_info->outputs[u].offset + comp,
+               .location = clone_slot + offset + b,
+               .high_16bits = xfb_info->outputs[u].high_16bits,
+               .component_mask = 1,
+               .component_offset = 0,
+            };
+
+            /* TODO: hardcoded size of 4 for now... might be ok overall since
+             * clip/cull array types are fixed?
+             */
+            comp += 4;
+         }
+      }
+      assert(output == output_count);
+
+      ralloc_free(producer->xfb_info);
+      producer->xfb_info = xfb;
+   }
 
    return true;
 }

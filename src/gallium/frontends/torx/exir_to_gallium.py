@@ -3,18 +3,32 @@
 
 import ctypes
 import logging
+import operator
 from dataclasses import dataclass, field
 
 import torch
 from executorch.exir.backend.utils import exir_ops
 
 from . import gallium
+from .dim_order_pass import delegates_layout_op, dim_order, is_data_layout_op
 from .fold_qdq_with_annotated_qparams_pass import QuantArgs
 
 supported_ops = {
     exir_ops.edge.aten.convolution.default: gallium.PIPE_ML_OPERATION_TYPE_CONVOLUTION,
     exir_ops.edge.aten.add.Tensor: gallium.PIPE_ML_OPERATION_TYPE_ADD,
+    exir_ops.edge.aten.cat.default: gallium.PIPE_ML_OPERATION_TYPE_CONCATENATION,
+    exir_ops.edge.aten.sigmoid.default: gallium.PIPE_ML_OPERATION_TYPE_LOGISTIC,
+    exir_ops.edge.aten.upsample_nearest2d.vec: gallium.PIPE_ML_OPERATION_TYPE_RESIZE,
+    exir_ops.edge.aten.view_copy.default: gallium.PIPE_ML_OPERATION_TYPE_RESHAPE,
+    exir_ops.edge.aten.permute_copy.default: gallium.PIPE_ML_OPERATION_TYPE_RESHAPE,
+    exir_ops.edge.aten.max_pool2d_with_indices.default: gallium.PIPE_ML_OPERATION_TYPE_POOLING,
 }
+
+POOLING_STRIDE_MAX = 3
+
+CHANNEL_DIM = 1
+SPATIAL_DIMS = (2, 3)
+
 # Activation ops that are fused into the preceding convolution or add.
 # Two variants: FUSABLE_ACTIVATION_OPS uses ExIR edge-dialect op references
 # (used during lowering and partitioning); FUSABLE_ACTIVATION_OPS_ATEN uses
@@ -60,15 +74,23 @@ def activation_is_absorbable(activation: torch.fx.Node,
     return low == 0.0 and (high is None or high == 6.0)
 
 
+ACTIVATION_ABSORBING_OPS = {
+    gallium.PIPE_ML_OPERATION_TYPE_CONVOLUTION,
+    gallium.PIPE_ML_OPERATION_TYPE_ADD,
+}
+
+
 def fused_activation(node: torch.fx.Node) -> torch.fx.Node | None:
     """Return the activation user absorbed by node's operation, if any."""
     if node.target not in supported_ops:
         return None
+    op_type = supported_ops[node.target]
+    if op_type not in ACTIVATION_ABSORBING_OPS:
+        return None
     users = list(node.users.keys())
     if len(users) != 1 or users[0].target not in FUSABLE_ACTIVATION_OPS:
         return None
-    is_conv = (supported_ops[node.target] ==
-               gallium.PIPE_ML_OPERATION_TYPE_CONVOLUTION)
+    is_conv = (op_type == gallium.PIPE_ML_OPERATION_TYPE_CONVOLUTION)
     return users[0] if activation_is_absorbable(users[0], is_conv) else None
 
 
@@ -79,18 +101,6 @@ def fused_activation(node: torch.fx.Node) -> torch.fx.Node | None:
 IDENTITY_QPARAMS = QuantArgs(
     scale=1.0, zp=0, qmin=-128, qmax=127, dtype=torch.int8
 )
-
-CLONE_OP = exir_ops.edge.dim_order_ops._clone_dim_order.default
-
-
-def is_identity_clone(node: torch.fx.Node) -> bool:
-    """Return whether node is a _clone_dim_order that keeps the dim order."""
-    if node.target != CLONE_OP:
-        return False
-    val = node.meta.get("val")
-    input_val = node.args[0].meta.get("val")
-    return (val is not None and input_val is not None and
-            val.dim_order() == input_val.dim_order())
 
 @dataclass
 class GalliumGraph:
@@ -160,9 +170,7 @@ def _derive_bias_qparams(input_qparams: QuantArgs, weight_qparams: QuantArgs) ->
         per_channel=False,
     )
 
-def fill_tensor(tensor: torch._subclasses.fake_tensor.FakeTensor, ptensor: gallium.pipe_tensor, graph: GalliumGraph, qparams: QuantArgs | None = None, *, index: int | None = None, is_constant: bool = False):
-    translation = [0, 2, 3, 1]  # NCHW to NHWC
-
+def fill_tensor(tensor: torch._subclasses.fake_tensor.FakeTensor, ptensor: gallium.pipe_tensor, graph: GalliumGraph, qparams: QuantArgs | None = None, *, index: int | None = None, is_constant: bool = False, dim_order: tuple):
     if index is not None:
         ptensor.index = index
     else:
@@ -202,13 +210,9 @@ def fill_tensor(tensor: torch._subclasses.fake_tensor.FakeTensor, ptensor: galli
     else:
         ptensor.type_size = tensor.element_size()
 
-    for i in range(4):
-        if tensor.ndim == 4:
-            ptensor.dims[i] = tensor.shape[translation[i]]
-        elif i < tensor.ndim:
-            ptensor.dims[i] = tensor.shape[i]
-        else:
-            ptensor.dims[i] = 1
+    storage = [tensor.shape[axis] for axis in dim_order]
+    assert len(storage) <= 4
+    ptensor.dims[:] = [1] * (4 - len(storage)) + storage
 
 def _set_tensor_data(graph: GalliumGraph, ptensor: gallium.pipe_tensor, data: torch.Tensor):
     """Point ptensor.data at the tensor's storage, which the graph owns."""
@@ -225,30 +229,16 @@ def fill_conv(node: torch.fx.Node, poperation: gallium.pipe_ml_operation, graph:
     input_channels = node.args[0].meta['val'].shape[1]  # NCHW in ExIR
     is_depthwise = (groups == input_channels and input_channels > 1)
 
-    poperation.conv.weight_tensor = ctypes.pointer(gallium.pipe_tensor())
-    fill_tensor(weights.meta['val'], poperation.conv.weight_tensor.contents, graph, weight_qparams, is_constant=True)
+    # PyTorch stores convolution weights [C_out, C_in/g, kH, kW].  Gallium ML
+    # expects a full convolution's as [C_out, kH, kW, C_in] and a depthwise's as
+    # [1, kH, kW, C_out].
+    weight_order = (1, 2, 3, 0) if is_depthwise else (0, 2, 3, 1)
 
-    if is_depthwise:
-        # The Ethos-U NPU (and Teflon/TFLite) expects depthwise weights in
-        # [1, kH, kW, C_out] layout.  PyTorch shape is [C_out, 1, kH, kW];
-        # fill_tensor's NCHW→NHWC translation produces dims [C_out, kH, kW, 1],
-        # which is wrong.  Override dims to match the expected layout.
-        weight_shape = weights.meta['val'].shape  # [C_out, 1, kH, kW]
-        wt = poperation.conv.weight_tensor.contents
-        wt.dims[0] = 1
-        wt.dims[1] = weight_shape[2]  # kH
-        wt.dims[2] = weight_shape[3]  # kW
-        wt.dims[3] = weight_shape[0]  # C_out
+    poperation.conv.weight_tensor = ctypes.pointer(gallium.pipe_tensor())
+    fill_tensor(weights.meta['val'], poperation.conv.weight_tensor.contents, graph, weight_qparams, is_constant=True, dim_order=weight_order)
 
     if 'torx_data' in weights.meta:
-        if is_depthwise:
-            # PyTorch [C_out, 1, kH, kW] → [1, kH, kW, C_out] to match TFLite/Ethos-U
-            contents = weights.meta['torx_data'].permute(1, 2, 3, 0).contiguous()
-        else:
-            # PyTorch stores Conv2d weights in OIHW format; the Gallium driver
-            # expects OHWI.  The graph owns the transposed copy until the
-            # driver has read it.
-            contents = weights.meta['torx_data'].permute(0, 2, 3, 1).contiguous()
+        contents = weights.meta['torx_data'].permute(*weight_order).contiguous()
         _set_tensor_data(graph, poperation.conv.weight_tensor.contents, contents)
 
     biases = node.args[2] if len(node.args) > 2 else None
@@ -257,7 +247,7 @@ def fill_conv(node: torch.fx.Node, poperation: gallium.pipe_ml_operation, graph:
         # The Ethos-U NPU expects biases quantized with scale = input_scale * weight_scale.
         # Use derived qparams (not the independently observed ones from PyTorch).
         driver_bias_qp = _derive_bias_qparams(input_qparams, weight_qparams)
-        fill_tensor(biases.meta['val'], poperation.conv.bias_tensor.contents, graph, driver_bias_qp, is_constant=True)
+        fill_tensor(biases.meta['val'], poperation.conv.bias_tensor.contents, graph, driver_bias_qp, is_constant=True, dim_order=tuple(range(biases.meta['val'].ndim)))
         if 'torx_data' in biases.meta:
             # Re-quantize bias from PyTorch's observed scale to the scale the NPU
             # expects (input_scale * weight_scale).
@@ -367,15 +357,117 @@ def set_conv_activation_range(node: torch.fx.Node,
         poperation.conv.activation_max = min(output_qp.qmax,
                                              zp + int(high / scale + 0.5))
 
+
+def is_2x_resize(node: torch.fx.Node) -> bool:
+    """Return whether a resize node doubles both spatial dimensions.
+
+    Shapes are in the node's own NCHW order, so the spatial dimensions are
+    2 and 3 here; fill_tensor moves them to 1 and 2 when it writes NHWC.
+    """
+    input_node = node.args[0]
+    if not isinstance(input_node, torch.fx.Node):
+        return False
+
+    input_val = input_node.meta.get('val')
+    output_val = node.meta.get('val')
+    if not isinstance(input_val, torch.Tensor) or input_val.dim() != 4:
+        return False
+    if not isinstance(output_val, torch.Tensor) or output_val.dim() != 4:
+        return False
+
+    return all(output_val.shape[dim] == 2 * input_val.shape[dim]
+               for dim in SPATIAL_DIMS)
+
+
+def _spatial_pair(value, default: tuple[int, int]) -> tuple[int, int]:
+    """Normalise an aten int-or-list spatial argument to (height, width)."""
+    if value is None:
+        return default
+    if isinstance(value, (list, tuple)):
+        if not value:
+            return default
+        return (value[0], value[-1])
+    return (value, value)
+
+
+def _max_pool_geometry(node: torch.fx.Node):
+    """Return max pooling's (kernel, stride, padding) as (height, width) pairs."""
+    kernel = _spatial_pair(node.args[1], (1, 1))
+    stride = _spatial_pair(node.args[2] if len(node.args) > 2 else None, kernel)
+    padding = _spatial_pair(node.args[3] if len(node.args) > 3 else None, (0, 0))
+    return kernel, stride, padding
+
+
+def max_pool_values(node: torch.fx.Node) -> torch.fx.Node | None:
+    """Return the getitem carrying max pooling's values output, or None when
+    the node is not a max pooling this frontend can lower.
+
+    aten.max_pool2d decomposes to a two-output node whose second output is
+    the argmax indices; the Gallium pooling member expresses neither those
+    indices nor dilation nor ceil mode.
+    """
+    if node.target != exir_ops.edge.aten.max_pool2d_with_indices.default:
+        return None
+
+    _, stride, _ = _max_pool_geometry(node)
+    if not all(1 <= s <= POOLING_STRIDE_MAX for s in stride):
+        return None
+    if _spatial_pair(node.args[4] if len(node.args) > 4 else None, (1, 1)) != (1, 1):
+        return None
+    if len(node.args) > 5 and node.args[5]:
+        return None
+
+    users = list(node.users.keys())
+    if len(users) != 1:
+        return None
+    values = users[0]
+    if values.target is not operator.getitem or values.args[1] != 0:
+        return None
+    return values
+
+
+def fill_pooling(node: torch.fx.Node, output_node: torch.fx.Node,
+                 poperation: gallium.pipe_ml_operation):
+    kernel, stride, padding = _max_pool_geometry(node)
+
+    poperation.pooling.type = gallium.PIPE_ML_POOLING_TYPE_MAX
+    poperation.pooling.filter_height = kernel[0]
+    poperation.pooling.filter_width = kernel[1]
+    poperation.pooling.stride_y = stride[0]
+    poperation.pooling.stride_x = stride[1]
+    poperation.pooling.padding_top = padding[0]
+    poperation.pooling.padding_left = padding[1]
+
+    # PyTorch pads symmetrically; the NPU needs the padding each output
+    # position actually uses, so derive the trailing sides from the geometry.
+    input_shape = node.args[0].meta['val'].shape   # NCHW
+    output_shape = output_node.meta['val'].shape   # NCHW
+
+    poperation.pooling.padding_bottom = max(
+        0, (output_shape[2] - 1) * stride[0] - padding[0] + kernel[0] - input_shape[2]
+    )
+    poperation.pooling.padding_right = max(
+        0, (output_shape[3] - 1) * stride[1] - padding[1] + kernel[1] - input_shape[3]
+    )
+
+
 def exir_to_operation(node: torch.fx.Node, graph: GalliumGraph) -> gallium.pipe_ml_operation | None:
     if node.target not in supported_ops:
         return None
+
+    # Max pooling's tensor output is carried by a getitem, so that node — not
+    # this one — holds the output shape and the quantisation parameters.
+    output_node = node
+    if node.target == exir_ops.edge.aten.max_pool2d_with_indices.default:
+        output_node = max_pool_values(node)
+        if output_node is None:
+            return None
 
     # Qparams are populated by FoldAndAnnotateQParamsPass during preprocess().
     # During partitioning the pass hasn't run yet, so we fall back to identity
     # quantization (scale=1.0, zp=0) — enough for ml_operation_supported().
     input_qparams = node.meta.get("input_qparams", {})
-    output_qparams = node.meta.get("output_qparams", {})
+    output_qparams = output_node.meta.get("output_qparams", {})
 
     # When a fusable activation follows this node, FoldAndAnnotateQParamsPass
     # places output_qparams on the *activation* node (since Q follows it, not
@@ -386,43 +478,71 @@ def exir_to_operation(node: torch.fx.Node, graph: GalliumGraph) -> gallium.pipe_
         if activation is not None:
             output_qparams = activation.meta.get("output_qparams", {})
 
-    # The runtime backend only maps 4-D delegate IO tensors.
-    output_val = node.meta.get('val')
-    if not isinstance(output_val, torch.Tensor) or output_val.dim() != 4:
+    output_val = output_node.meta.get('val')
+    if not isinstance(output_val, torch.Tensor):
         return None
+    rank = output_val.dim()
 
     operation = gallium.pipe_ml_operation()
     operation.type = supported_ops[node.target]
 
-    is_add = (operation.type == gallium.PIPE_ML_OPERATION_TYPE_ADD)
-    num_inputs = 2 if is_add else 1
-    operation.input_count = num_inputs
+    # Rank 3 is admitted only for the view, permute and concatenation
+    # the dim order pass admitted; every other operation reaches the
+    # driver as rank-4 NHWC, and a rank-4 view or permute is not lowered.
+    layout_op = is_data_layout_op(node)
+    if layout_op:
+        if not delegates_layout_op(node):
+            return None
+    elif rank != 4 or operation.type == gallium.PIPE_ML_OPERATION_TYPE_RESHAPE:
+        return None
+
+    if (operation.type == gallium.PIPE_ML_OPERATION_TYPE_RESIZE and
+            not is_2x_resize(node)):
+        return None
+
+    if operation.type == gallium.PIPE_ML_OPERATION_TYPE_CONCATENATION:
+        if not isinstance(node.args[0], (list, tuple)):
+            return None
+        dim = (node.args[1] if len(node.args) > 1 else 0) % rank
+        if rank == 4 and dim != CHANNEL_DIM:
+            return None
+        input_nodes = list(node.args[0])
+        list_arg_qparams = input_qparams.get(0, IDENTITY_QPARAMS)
+        input_qps = [list_arg_qparams] * len(input_nodes)
+    else:
+        if operation.type == gallium.PIPE_ML_OPERATION_TYPE_ADD:
+            input_nodes = list(node.args[:2])
+        else:
+            input_nodes = [node.args[0]]
+        input_qps = [input_qparams.get(i, IDENTITY_QPARAMS)
+                     for i in range(len(input_nodes))]
+
+    operation.input_count = len(input_nodes)
     operation.input_tensors = (ctypes.POINTER(gallium.pipe_tensor) * operation.input_count)()
 
-    for inp_idx in range(num_inputs):
-        input_node = node.args[inp_idx]
+    for inp_idx, input_node in enumerate(input_nodes):
         if not isinstance(input_node, torch.fx.Node):
             return None
         input_tensor = input_node.meta['val']
-        if input_tensor.dim() != 4:
+        if input_tensor.dim() not in ((3, 4) if layout_op else (4,)):
             return None
-        input_qp = input_qparams.get(inp_idx, IDENTITY_QPARAMS)
+        input_qp = input_qps[inp_idx]
         _require_quant_args_dtype_in(input_qp, f"input{inp_idx}", (torch.qint8, torch.int8))
         operation.input_tensors[inp_idx] = ctypes.pointer(gallium.pipe_tensor())
         existing_idx = graph.node_to_tensor_idx.get(input_node)
-        fill_tensor(input_tensor, operation.input_tensors[inp_idx].contents, graph, input_qp, index=existing_idx)
+        fill_tensor(input_tensor, operation.input_tensors[inp_idx].contents, graph, input_qp, index=existing_idx, dim_order=dim_order(input_node))
         if input_node not in graph.node_to_tensor_idx:
             graph.node_to_tensor_idx[input_node] = operation.input_tensors[inp_idx].contents.index
 
     operation.output_count = 1
     operation.output_tensors = (ctypes.POINTER(gallium.pipe_tensor) * operation.output_count)()
 
-    output_tensor = node.meta['val']
+    output_tensor = output_val
     output_qp = output_qparams.get(0, IDENTITY_QPARAMS)
     _require_quant_args_dtype_in(output_qp, "output", (torch.qint8, torch.int8))
     operation.output_tensors[0] = ctypes.pointer(gallium.pipe_tensor())
-    fill_tensor(output_tensor, operation.output_tensors[0].contents, graph, output_qp)
-    graph.node_to_tensor_idx[node] = operation.output_tensors[0].contents.index
+    fill_tensor(output_tensor, operation.output_tensors[0].contents, graph, output_qp, dim_order=dim_order(output_node))
+    graph.node_to_tensor_idx[output_node] = operation.output_tensors[0].contents.index
 
     if operation.type == gallium.PIPE_ML_OPERATION_TYPE_CONVOLUTION:
         weight_qp = input_qparams.get(1, IDENTITY_QPARAMS)
@@ -443,6 +563,17 @@ def exir_to_operation(node: torch.fx.Node, graph: GalliumGraph) -> gallium.pipe_
 
     elif operation.type == gallium.PIPE_ML_OPERATION_TYPE_ADD:
         operation.add.relu = fused_activation(node) is not None
+
+    elif operation.type == gallium.PIPE_ML_OPERATION_TYPE_CONCATENATION:
+        operation.conc.axis = 4 - rank + dim_order(output_node).index(dim)
+
+    elif operation.type == gallium.PIPE_ML_OPERATION_TYPE_RESHAPE:
+        out = operation.output_tensors[0].contents
+        for i in range(4):
+            operation.reshape.shape[i] = out.dims[i]
+
+    elif operation.type == gallium.PIPE_ML_OPERATION_TYPE_POOLING:
+        fill_pooling(node, output_node, operation)
 
     return operation
 
@@ -476,6 +607,14 @@ def exir_to_gallium(nodes: list[torch.fx.Node]) -> GalliumGraph:
             raise RuntimeError(
                 f"Torx: activation '{n.name}' cannot be absorbed by its "
                 f"producer and has no standalone lowering")
+        if n.target is operator.getitem:
+            producer = n.args[0]
+            if (isinstance(producer, torch.fx.Node) and
+                    max_pool_values(producer) is n):
+                continue
+            raise RuntimeError(
+                f"Torx: '{n.name}' does not select the values output of a "
+                f"delegated max pooling and has no lowering")
         operation = exir_to_operation(n, graph)
         if operation is not None:
             if operation.type == gallium.PIPE_ML_OPERATION_TYPE_CONVOLUTION:
@@ -484,7 +623,9 @@ def exir_to_gallium(nodes: list[torch.fx.Node]) -> GalliumGraph:
                 if operation.conv.bias_tensor and not operation.conv.bias_tensor.contents.data:
                     raise RuntimeError(f"Torx: convolution '{n.name}' has no bias data")
             else:
-                for arg in n.args:
+                args = [a for arg in n.args
+                        for a in (arg if isinstance(arg, (list, tuple)) else [arg])]
+                for arg in args:
                     if isinstance(arg, torch.fx.Node) and 'torx_data' in arg.meta:
                         raise RuntimeError(
                             f"Torx: '{n.name}' reads constant tensor '{arg.name}', "
@@ -495,6 +636,9 @@ def exir_to_gallium(nodes: list[torch.fx.Node]) -> GalliumGraph:
             activation = fused_activation(n)
             if activation is not None:
                 graph.node_to_tensor_idx[activation] = operation.output_tensors[0].contents.index
+        elif n.target in supported_ops:
+            raise RuntimeError(
+                f"Torx: '{n.name}' was delegated but could not be lowered")
     return graph
 
 ml_device = None

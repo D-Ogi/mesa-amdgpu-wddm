@@ -112,6 +112,7 @@ common_per_arch_files += files(
   'pvr_arch_sampler.c',
   'pvr_arch_spm.c',
   'pvr_arch_tex_state.c',
+  'pvr_arch_xfb.c',
 )
 
 if with_imagination_srv

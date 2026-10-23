@@ -119,4 +119,10 @@
 #define V3DV_GL_SHADER_STATE_ATTRIBUTE_RECORD_LENGTH 16
 #define V3DV_STENCIL_CFG_LENGTH 6
 
+/* Size of the zeroed BO used as backing for null index buffers
+ * (VK_KHR_maintenance6). Bigger is safer, see the FIXME in
+ * cmd_buffer_emit_index_buffer.
+ */
+#define V3DV_NULL_BO_SIZE_MAINTENANCE6 (128 * 1024)
+
 #endif /* V3DV_LIMITS_H */

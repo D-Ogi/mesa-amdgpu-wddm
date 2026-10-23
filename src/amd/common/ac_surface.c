@@ -1597,6 +1597,9 @@ static void ac_compute_cmask(const struct radeon_info *info, const struct ac_sur
 
    unsigned base_align = num_pipes * pipe_interleave_bytes;
 
+   if (surf->flags & RADEON_SURF_TC_COMPATIBLE_CMASK && surf->fmask_size)
+      base_align *= surf->u.legacy.color.fmask.num_banks;
+
    unsigned width = align(surf->u.legacy.level[0].nblk_x, cl_width * 8);
    unsigned height = align(surf->u.legacy.level[0].nblk_y, cl_height * 8);
    unsigned slice_elements = (width * height) / (8 * 8);
@@ -1617,8 +1620,23 @@ static void ac_compute_cmask(const struct radeon_info *info, const struct ac_sur
       num_layers = config->info.array_size;
 
    surf->cmask_alignment_log2 = util_logbase2(MAX2(256, base_align));
-   surf->cmask_slice_size = align(slice_bytes, base_align);
+   surf->cmask_slice_size = align(slice_bytes, num_pipes * pipe_interleave_bytes);
    surf->cmask_size = surf->cmask_slice_size * num_layers;
+
+   if (info->gfx_level == GFX8 && surf->flags & RADEON_SURF_TC_COMPATIBLE_CMASK) {
+      /* There is a way to calculate this, but the equation is too complicated. For simplicity,
+       * let's just declare that TC-compatible CMASK always has non-contiguous slices.
+       */
+      surf->cmask_slices_per_group = UINT16_MAX;
+   } else {
+      surf->cmask_slices_per_group = 1;
+   }
+
+   if (surf->flags & RADEON_SURF_REQUIRE_CONTIGUOUS_CMASK_SLICES &&
+       surf->fmask_size && surf->cmask_slices_per_group != 1) {
+      surf->fmask_size = 0;
+      surf->cmask_size = 0;
+   }
 }
 
 static uint64_t ac_estimate_size(const struct ac_surf_config *config,
@@ -2205,6 +2223,7 @@ static int gfx6_compute_surface(struct ac_addrlib *const addrlib,
 
       surf->u.legacy.color.fmask.tiling_index = fout.tileIndex;
       surf->u.legacy.color.fmask.bankh = fout.pTileInfo->bankHeight;
+      surf->u.legacy.color.fmask.num_banks = fout.pTileInfo->banks;
       surf->u.legacy.color.fmask.pitch_in_pixels = fout.pitch;
 
       /* Compute tile swizzle for FMASK. */
@@ -2620,6 +2639,38 @@ static void ac_copy_cmask_equation(const struct radeon_info *info,
          }
       }
    }
+}
+
+/* This is only a debugging helper. Normally unused. */
+static void
+ac_print_meta_equation(const struct radeon_info *info, struct gfx9_meta_equation *eq)
+{
+   if (info->gfx_level >= GFX10)
+      return; /* gfx10-11 equation printing not implemented */
+
+   /* Print the layout. */
+   printf("{");
+   for (unsigned addr_bit = 0; addr_bit < eq->u.gfx9.num_bits; addr_bit++) {
+      bool found = false; /* multiple matches are XOR'd */
+
+      for (unsigned term = 0; term < 5; term++) {
+         unsigned dim = eq->u.gfx9.bit[addr_bit].coord[term].dim;
+         unsigned ord = eq->u.gfx9.bit[addr_bit].coord[term].ord;
+
+         if (dim >= 5)
+            continue;
+
+         printf("%s%c%u", found ? "^" : "", "XYZSM"[dim], ord);
+         found = true;
+      }
+
+      if (!found)
+         printf("0");
+
+      if (addr_bit < eq->u.gfx9.num_bits - 1)
+         printf(", ");
+   }
+   printf("}\n");
 }
 
 static void ac_copy_htile_equation(const struct radeon_info *info,
@@ -3078,6 +3129,44 @@ static int gfx9_compute_miptree(struct ac_addrlib *addrlib, const struct radeon_
          surf->u.gfx9.color.cmask_level0.size = meta_mip_info[0].sliceSize;
 
          ac_copy_cmask_equation(info, &cout, &surf->u.gfx9.color.cmask_equation);
+
+         if (config->info.samples == 8 && (info->family == CHIP_VEGA10 || info->family == CHIP_VEGA20)) {
+            /* This is true for all cases of 32bpp FMASK on Vega10 and Vega20.
+             *
+             * It was inferred by plugging GB_ADDR_CONFIG of those chips into metadata address
+             * equations in addrlib.
+             */
+            const unsigned cmask_blocks_per_slice = DIV_ROUND_UP(in->width, 1024) * DIV_ROUND_UP(in->height, 1024);
+
+            /* The greatest common divisor of cmask_blocks_per_slice and 8. */
+            const unsigned gcd_with_8 = 1 << MIN2(ffs(cmask_blocks_per_slice) - 1, 3);
+            surf->cmask_slices_per_group = 8 / gcd_with_8;
+         } else if (info->family == CHIP_VEGA12) {
+            /* On Vega12, CMASK slices are conditionally non-contiguous for all sample counts, even 1 sample. */
+            const unsigned cmask_blocks_per_slice = DIV_ROUND_UP(in->width, 1024) * DIV_ROUND_UP(in->height, 512);
+
+            if (config->info.samples == 8) {
+               /* 32bpp FMASK.
+                *
+                * The greatest common divisor of cmask_blocks_per_slice and 4.
+                */
+               const unsigned gcd_with_4 = 1 << MIN2(ffs(cmask_blocks_per_slice) - 1, 2);
+               surf->cmask_slices_per_group = 4 / gcd_with_4;
+            } else {
+               /* 8bpp FMASK. */
+               const unsigned gcd_with_2 = 1 << MIN2(ffs(cmask_blocks_per_slice) - 1, 1);
+               surf->cmask_slices_per_group = 2 / gcd_with_2;
+            }
+         } else {
+            /* All other cases have contiguous CMASK slices. */
+            surf->cmask_slices_per_group = 1;
+         }
+
+         if (config->surf_flags & RADEON_SURF_REQUIRE_CONTIGUOUS_CMASK_SLICES &&
+             surf->cmask_slices_per_group != 1) {
+            surf->fmask_size = 0;
+            surf->cmask_size = 0;
+         }
       }
    }
 
@@ -3992,7 +4081,7 @@ static bool gfx12_compute_surface(struct ac_addrlib *addrlib, const struct radeo
                                     /* Always enable compression for Z/S and MSAA color by default. */
                                     (surf->flags & RADEON_SURF_Z_OR_SBUFFER ||
                                      config->info.samples > 1 ||
-                                     ((info->gfx12_supports_display_dcc || !(surf->flags & RADEON_SURF_SCANOUT)) &&
+                                     ((info->gfx_level >= GFX12 || !(surf->flags & RADEON_SURF_SCANOUT)) &&
                                       /* This one is not strictly necessary. */
                                       surf->u.gfx9.swizzle_mode != ADDR3_LINEAR)));
 
@@ -4000,7 +4089,7 @@ static bool gfx12_compute_surface(struct ac_addrlib *addrlib, const struct radeo
    surf->is_linear = surf->u.gfx9.swizzle_mode == ADDR3_LINEAR;
    surf->is_displayable = !(surf->flags & RADEON_SURF_Z_OR_SBUFFER) &&
                           surf->u.gfx9.resource_type != RADEON_RESOURCE_3D &&
-                          (info->gfx12_supports_display_dcc || !surf->u.gfx9.gfx12_enable_dcc);
+                          (info->gfx_level >= GFX12 || !surf->u.gfx9.gfx12_enable_dcc);
    surf->thick_tiling = surf->u.gfx9.swizzle_mode >= ADDR3_4KB_3D;
 
    if (surf->flags & RADEON_SURF_Z_OR_SBUFFER) {
@@ -5099,10 +5188,10 @@ ac_surface_compute_nbc_view(struct ac_addrlib *addrlib, const struct radeon_info
 }
 
 static bool
-gfx10_surface_copy_mem_surface(struct ac_addrlib *addrlib, const struct radeon_info *info,
-                               const struct radeon_surf *surf, const struct ac_surf_info *surf_info,
-                               const struct ac_surface_copy_region *surf_copy_region,
-                               bool surface_is_dst)
+gfx9_surface_copy_mem_surface(struct ac_addrlib *addrlib, const struct radeon_info *info,
+                              const struct radeon_surf *surf, const struct ac_surf_info *surf_info,
+                              const struct ac_surface_copy_region *surf_copy_region,
+                              bool surface_is_dst)
 {
    uint32_t format = bpe_to_format(surf);
    uint32_t bpe = surf->bpe;
@@ -5271,14 +5360,14 @@ ac_surface_copy_mem_surface(struct ac_addrlib *addrlib, const struct radeon_info
                             const struct ac_surface_copy_region *surf_copy_region,
                             bool surface_is_dst)
 {
-   assert(info->gfx_level >= GFX10);
+   assert(info->gfx_level >= GFX9);
 
    if (info->gfx_level >= GFX12) {
       return gfx12_surface_copy_mem_surface(addrlib, info, surf, surf_info,
                                             surf_copy_region, surface_is_dst);
    } else {
-      return gfx10_surface_copy_mem_surface(addrlib, info, surf, surf_info,
-                                            surf_copy_region, surface_is_dst);
+      return gfx9_surface_copy_mem_surface(addrlib, info, surf, surf_info,
+                                           surf_copy_region, surface_is_dst);
    }
 }
 

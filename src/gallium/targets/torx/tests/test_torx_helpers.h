@@ -29,7 +29,6 @@ struct TestMeta {
    std::string error;
    std::vector<float> output_scales;
    std::vector<int> output_zero_points;
-   std::vector<float> max_quant_errors;
 };
 
 /**

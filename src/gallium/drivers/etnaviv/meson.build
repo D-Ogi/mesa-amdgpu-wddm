@@ -97,7 +97,7 @@ libetnaviv = static_library(
   include_directories : [
     inc_include, inc_src, inc_gallium, inc_gallium_aux, inc_etnaviv,
   ],
-  link_with: [libetnaviv_drm, libetnaviv_encode],
+  link_with: [libetnaviv_drm, libetnaviv_encode, libetnaviv_layout],
   dependencies : [dep_libdrm, idep_nir_headers, idep_mesautil, idep_libetnaviv_decode, idep_etna_common],
 )
 

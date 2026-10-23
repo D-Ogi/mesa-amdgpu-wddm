@@ -132,6 +132,8 @@ u_init_pipe_screen_caps(struct pipe_screen *pscreen, int accel)
 
    caps->max_varyings = 8;
 
+   caps->max_texture_upload_memory_budget = 64 * 1024 * 1024;
+
    /* Outputs that GL's MAX_*_OUTPUT_COMPONENTS limits don't apply to, because
     * they get consumed by fixed-function hardware rather than taking up varying
     * storage.  The pre-rasterization stages all feed the same fixed-function

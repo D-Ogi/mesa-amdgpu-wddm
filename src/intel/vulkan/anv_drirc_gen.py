@@ -21,6 +21,7 @@ def declare_options(android_version):
     U64 = drirc_gen.DrircUint64
     E = drirc_gen.DrircEnum
     EV = drirc_gen.DrircEnumValue
+    S = drirc_gen.DrircString
 
     debug_options = [
         # Workaround subgroups
@@ -178,6 +179,12 @@ def declare_options(android_version):
         I("query_copy_with_shader_threshold", 6, 0, 0x7fffffff,
           "Query threshold count above which query copies are executed with a shader",
           c_name="query_copy_with_shader_threshold"),
+        B("anv_disable_jay", False,
+          "Disable Jay and fall back to the brw compiler",
+          c_name="disable_jay"),
+        S("anv_queue_override",
+          description="Override exposed queue families & counts",
+          c_name="queue_override"),
 
         B("anv_enable_alloc_oversubscription", True,
           "Allow the optional alignment of allocation sizes to large page sizes",
@@ -217,6 +224,12 @@ def declare_options(android_version):
         B("intel_force_sampler_prefetch", False,
           "Enable binding table sampler prefteching",
           c_name="sampler_prefetch"),
+        E("intel_code_motion", 0, 0, 2,
+          [EV(0, "compiler default"),
+           EV(1, "nir_opt_licm, hoist out of loops only"),
+           EV(2, "nir_opt_gcm, global code motion")],
+          "Which code motion pass runs in the NIR optimization loop",
+          c_name="code_motion"),
 
         B("force_guc_low_latency", False,
           "Enable low latency GuC strategy.",

@@ -155,6 +155,9 @@ struct radv_graphics_pipeline {
    /* Whether the pipeline uses a VRS attachment. */
    bool uses_vrs_attachment;
 
+   /* Whether depth/stencil states must be ignored because the pipeline has no depth/stencil attachments. */
+   bool ignore_ds_state;
+
    /* For relocation of shaders with RGP. */
    struct radv_sqtt_shaders_reloc *sqtt_shaders_reloc;
 
@@ -628,7 +631,26 @@ void radv_translate_blend_equation(const struct radv_physical_device *pdev, VkBl
                                    VkBlendFactor dstRGB, VkBlendOp eqA, VkBlendFactor srcA, VkBlendFactor dstA,
                                    uint32_t *cb_blend_control_out, uint32_t *sx_mrt_blend_opt_out);
 
-struct radv_shader *radv_get_shader(struct radv_shader *const *shaders, mesa_shader_stage stage);
+static inline struct radv_shader *
+radv_get_shader(struct radv_shader *const *shaders, mesa_shader_stage stage)
+{
+   if (stage == MESA_SHADER_VERTEX) {
+      if (shaders[MESA_SHADER_VERTEX])
+         return shaders[MESA_SHADER_VERTEX];
+      if (shaders[MESA_SHADER_TESS_CTRL])
+         return shaders[MESA_SHADER_TESS_CTRL];
+      if (shaders[MESA_SHADER_GEOMETRY])
+         return shaders[MESA_SHADER_GEOMETRY];
+   } else if (stage == MESA_SHADER_TESS_EVAL) {
+      if (!shaders[MESA_SHADER_TESS_CTRL])
+         return NULL;
+      if (shaders[MESA_SHADER_TESS_EVAL])
+         return shaders[MESA_SHADER_TESS_EVAL];
+      if (shaders[MESA_SHADER_GEOMETRY])
+         return shaders[MESA_SHADER_GEOMETRY];
+   }
+   return shaders[stage];
+}
 
 struct radv_ps_epilog_state {
    uint8_t color_attachment_count;

@@ -198,7 +198,7 @@ def emit_call_log(api, cgen):
         paramLogFormat += "0x%llx "
     for p in paramsToRead:
         paramLogArgs.append("(unsigned long long)%s" % (p.paramName))
-    # cgen.stmt("fprintf(stderr, \"substream %%p: call %s %s\\n\", readStream, %s)" % (api.name, paramLogFormat, ", ".join(paramLogArgs)))
+    # cgen.stmt("GFXSTREAM_ERROR(\"substream %%p: call %s %s\", readStream, %s)" % (api.name, paramLogFormat, ", ".join(paramLogArgs)))
     # cgen.endIf()
 
 

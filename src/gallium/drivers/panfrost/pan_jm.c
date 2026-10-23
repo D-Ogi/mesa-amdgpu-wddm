@@ -14,8 +14,12 @@
 #include "pan_fb_preload.h"
 #include "pan_jm.h"
 #include "pan_job.h"
-#include "pan_precomp.h"
 #include "pan_trace.h"
+#include "kmod/panfrost_kmod.h"
+
+#if PAN_ARCH >= 6
+#include "pan_precomp.h"
+#endif
 
 #if PAN_ARCH >= 10
 #error "JM helpers are only used for gen < 10"
@@ -90,8 +94,8 @@ jm_submit_jc(struct panfrost_batch *batch, uint64_t first_job_desc,
    submit.requirements = reqs;
 
    if (ctx->in_sync_fd >= 0) {
-      ret = drmSyncobjImportSyncFile(panfrost_device_fd(dev), ctx->in_sync_obj,
-                                     ctx->in_sync_fd);
+      ret = pan_kmod_sync_import_file(dev->kmod.dev, ctx->in_sync_obj,
+                                       ctx->in_sync_fd);
       assert(!ret);
 
       in_syncs[submit.in_sync_count++] = ctx->in_sync_obj;
@@ -143,8 +147,7 @@ jm_submit_jc(struct panfrost_batch *batch, uint64_t first_job_desc,
    if (ctx->is_noop)
       ret = 0;
    else
-      ret = pan_kmod_ioctl(panfrost_device_fd(dev), DRM_IOCTL_PANFROST_SUBMIT,
-                           &submit);
+      ret = panfrost_kmod_submit(dev->kmod.dev, &submit);
    free(bo_handles);
 
    if (ret)
@@ -153,8 +156,7 @@ jm_submit_jc(struct panfrost_batch *batch, uint64_t first_job_desc,
    /* Trace the job if we're doing that */
    if (dev->debug & (PAN_DBG_TRACE | PAN_DBG_SYNC)) {
       /* Wait so we can get errors reported back */
-      ret = drmSyncobjWait(panfrost_device_fd(dev), &out_sync, 1, INT64_MAX,
-                           0, NULL);
+      ret = pan_kmod_sync_wait(dev->kmod.dev, &out_sync, 1, INT64_MAX, 0, NULL);
       if (ret)
          return errno;
 
@@ -544,7 +546,7 @@ jm_emit_tiler_draw(struct mali_draw_packed *out, struct panfrost_batch *batch,
          struct panfrost_resource *rsrc =
             pan_resource(ctx->occlusion_query->rsrc);
          cfg.occlusion = rsrc->plane.base;
-         panfrost_batch_write_rsrc(ctx->batch, rsrc);
+         panfrost_batch_write_rsrc(ctx->batch[PANFROST_BATCH_RENDER], rsrc);
       }
 
 #if PAN_ARCH >= 9

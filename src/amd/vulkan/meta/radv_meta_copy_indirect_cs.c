@@ -143,19 +143,16 @@ radv_compute_copy_memory_indirect(struct radv_cmd_buffer *cmd_buffer,
    struct radv_device *device = radv_cmd_buffer_device(cmd_buffer);
    const uint32_t copy_count = pCopyMemoryIndirectInfo->copyCount;
    VkPipelineLayout layout;
-   uint32_t alloc_offset;
+   uint64_t va;
    VkPipeline pipeline;
    VkResult result;
 
-   if (!radv_cmd_buffer_upload_alloc_aligned(cmd_buffer, copy_count * sizeof(VkDispatchIndirectCommand), 4,
-                                             &alloc_offset, NULL)) {
+   if (!radv_cmd_buffer_vram_suballoc(cmd_buffer, copy_count * sizeof(VkDispatchIndirectCommand), 4, &va)) {
       vk_command_buffer_set_error(&cmd_buffer->vk, VK_ERROR_OUT_OF_DEVICE_MEMORY);
       return;
    }
 
-   const uint64_t upload_addr = radv_buffer_get_va(cmd_buffer->upload.upload_bo) + alloc_offset;
-
-   result = radv_compute_copy_memory_indirect_preprocess(cmd_buffer, pCopyMemoryIndirectInfo, upload_addr);
+   result = radv_compute_copy_memory_indirect_preprocess(cmd_buffer, pCopyMemoryIndirectInfo, va);
    if (result != VK_SUCCESS) {
       vk_command_buffer_set_error(&cmd_buffer->vk, result);
       return;
@@ -181,7 +178,7 @@ radv_compute_copy_memory_indirect(struct radv_cmd_buffer *cmd_buffer,
       radv_meta_push_constants(cmd_buffer, layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(copy_addr), &copy_addr);
 
       const struct radv_dispatch_info info = {
-         .indirect_va = upload_addr + i * sizeof(VkDispatchIndirectCommand),
+         .indirect_va = va + i * sizeof(VkDispatchIndirectCommand),
          .unaligned = true,
       };
 
@@ -380,20 +377,16 @@ radv_compute_copy_memory_to_image_indirect(struct radv_cmd_buffer *cmd_buffer,
    struct radv_cmd_stream *cs = cmd_buffer->cs;
    uint32_t texel_scale = 1;
    VkPipelineLayout layout;
-   uint32_t alloc_offset;
+   uint64_t va;
    VkPipeline pipeline;
    VkResult result;
 
-   if (!radv_cmd_buffer_upload_alloc_aligned(cmd_buffer, copy_count * sizeof(VkDispatchIndirectCommand), 4,
-                                             &alloc_offset, NULL)) {
+   if (!radv_cmd_buffer_vram_suballoc(cmd_buffer, copy_count * sizeof(VkDispatchIndirectCommand), 4, &va)) {
       vk_command_buffer_set_error(&cmd_buffer->vk, VK_ERROR_OUT_OF_DEVICE_MEMORY);
       return;
    }
 
-   const uint64_t upload_addr = radv_buffer_get_va(cmd_buffer->upload.upload_bo) + alloc_offset;
-
-   result =
-      radv_compute_copy_memory_to_image_indirect_preprocess(cmd_buffer, pCopyMemoryToImageIndirectInfo, upload_addr);
+   result = radv_compute_copy_memory_to_image_indirect_preprocess(cmd_buffer, pCopyMemoryToImageIndirectInfo, va);
    if (result != VK_SUCCESS) {
       vk_command_buffer_set_error(&cmd_buffer->vk, result);
       return;
@@ -531,7 +524,7 @@ radv_compute_copy_memory_to_image_indirect(struct radv_cmd_buffer *cmd_buffer,
          radv_meta_push_constants(cmd_buffer, layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(constants), constants);
 
          const struct radv_dispatch_info info = {
-            .indirect_va = upload_addr + i * sizeof(VkDispatchIndirectCommand),
+            .indirect_va = va + i * sizeof(VkDispatchIndirectCommand),
             .unaligned = true,
          };
 

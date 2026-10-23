@@ -1075,7 +1075,7 @@ struct pipe_video_codec *si_vce_create_encoder(struct pipe_context *context,
       goto error;
    }
 
-   enc->fw_version = (sscreen->info.vce_fw_version & (0xff << 24)) >> 24;
+   enc->fw_version = (sscreen->info.vce_fw_version & (0xffu << 24)) >> 24;
 
    return &enc->base;
 
@@ -1091,7 +1091,7 @@ error:
  */
 bool si_vce_is_fw_version_supported(struct si_screen *sscreen)
 {
-   unsigned version = (sscreen->info.vce_fw_version & (0xff << 24)) >> 24;
+   unsigned version = (sscreen->info.vce_fw_version & (0xffu << 24)) >> 24;
    return version >= 40;
 }
 

@@ -983,20 +983,15 @@ compile_jit_sample_function(struct lp_sampler_matrix *matrix, uint32_t sample_ke
    LLVMValueRef functions_ptr =
       LLVMBuildAdd(builder, texture_descriptor, functions_offset, "");
 
-   LLVMTypeRef functions_ptr_type = LLVMInt64TypeInContext(gallivm->context);
-   LLVMTypeRef functions_ptr_ptr_type = LLVMPointerType(functions_ptr_type, 0);
-
-   functions_ptr = LLVMBuildIntToPtr(builder, functions_ptr, functions_ptr_ptr_type, "");
    /* struct lp_texture_functions * */
-   functions_ptr = LLVMBuildLoad2(builder, functions_ptr_type, functions_ptr, "");
+   functions_ptr = lp_build_load_pointer_as_int64(gallivm, functions_ptr);
 
    LLVMValueRef matrix_offset =
       lp_build_const_int64(gallivm, offsetof(struct lp_texture_functions, matrix));
    LLVMValueRef matrix_ptr = LLVMBuildAdd(builder, functions_ptr, matrix_offset, "");
 
-   matrix_ptr = LLVMBuildIntToPtr(builder, matrix_ptr, functions_ptr_ptr_type, "");
    /* struct lp_sampler_matrix * */
-   matrix_ptr = LLVMBuildLoad2(builder, functions_ptr_type, matrix_ptr, "");
+   matrix_ptr = lp_build_load_pointer_as_int64(gallivm, matrix_ptr);
 
    LLVMTypeRef compile_function_type = lp_build_compile_sample_function_type(gallivm);
    LLVMTypeRef compile_function_ptr_type = LLVMPointerType(compile_function_type, 0);
@@ -1102,20 +1097,15 @@ compile_jit_fetch_function(struct lp_sampler_matrix *matrix, uint32_t sample_key
    LLVMValueRef functions_ptr =
       LLVMBuildAdd(builder, texture_descriptor, functions_offset, "");
 
-   LLVMTypeRef functions_ptr_type = LLVMInt64TypeInContext(gallivm->context);
-   LLVMTypeRef functions_ptr_ptr_type = LLVMPointerType(functions_ptr_type, 0);
-
-   functions_ptr = LLVMBuildIntToPtr(builder, functions_ptr, functions_ptr_ptr_type, "");
    /* struct lp_texture_functions * */
-   functions_ptr = LLVMBuildLoad2(builder, functions_ptr_type, functions_ptr, "");
+   functions_ptr = lp_build_load_pointer_as_int64(gallivm, functions_ptr);
 
    LLVMValueRef matrix_offset =
       lp_build_const_int64(gallivm, offsetof(struct lp_texture_functions, matrix));
    LLVMValueRef matrix_ptr = LLVMBuildAdd(builder, functions_ptr, matrix_offset, "");
 
-   matrix_ptr = LLVMBuildIntToPtr(builder, matrix_ptr, functions_ptr_ptr_type, "");
    /* struct lp_sampler_matrix * */
-   matrix_ptr = LLVMBuildLoad2(builder, functions_ptr_type, matrix_ptr, "");
+   matrix_ptr = lp_build_load_pointer_as_int64(gallivm, matrix_ptr);
 
    LLVMTypeRef compile_function_type = lp_build_compile_fetch_function_type(gallivm);
    LLVMTypeRef compile_function_ptr_type = LLVMPointerType(compile_function_type, 0);
@@ -1226,20 +1216,15 @@ compile_jit_size_function(struct lp_sampler_matrix *matrix, bool samples)
    LLVMValueRef functions_ptr =
       LLVMBuildAdd(builder, texture_descriptor, functions_offset, "");
 
-   LLVMTypeRef functions_ptr_type = LLVMInt64TypeInContext(gallivm->context);
-   LLVMTypeRef functions_ptr_ptr_type = LLVMPointerType(functions_ptr_type, 0);
-
-   functions_ptr = LLVMBuildIntToPtr(builder, functions_ptr, functions_ptr_ptr_type, "");
    /* struct lp_texture_functions * */
-   functions_ptr = LLVMBuildLoad2(builder, functions_ptr_type, functions_ptr, "");
+   functions_ptr = lp_build_load_pointer_as_int64(gallivm, functions_ptr);
 
    LLVMValueRef matrix_offset =
       lp_build_const_int64(gallivm, offsetof(struct lp_texture_functions, matrix));
    LLVMValueRef matrix_ptr = LLVMBuildAdd(builder, functions_ptr, matrix_offset, "");
 
-   matrix_ptr = LLVMBuildIntToPtr(builder, matrix_ptr, functions_ptr_ptr_type, "");
    /* struct lp_sampler_matrix * */
-   matrix_ptr = LLVMBuildLoad2(builder, functions_ptr_type, matrix_ptr, "");
+   matrix_ptr = lp_build_load_pointer_as_int64(gallivm, matrix_ptr);
 
    LLVMTypeRef compile_function_type = lp_build_compile_size_function_type(gallivm);
    LLVMTypeRef compile_function_ptr_type = LLVMPointerType(compile_function_type, 0);

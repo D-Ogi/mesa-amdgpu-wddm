@@ -31,6 +31,11 @@ struct radv_winsys_cs {
    uint64_t chain_ib_va;
    bool is_secondary;
 
+   /* The header of the last CP DMA packet in the current IB, or NULL. radv_cp_dma_wait_for_idle sets
+    * the SYNC bit in it when it is close, instead of a zero-byte CP DMA. Every switch to a new IB and
+    * every reset clears it, as the amdgpu winsys does. */
+   uint32_t *last_cp_dma_header;
+
    unsigned hw_ip;
 
    struct hash_table *annotations;
@@ -131,6 +136,7 @@ radv_winsys_cs_get_new_ib(struct radv_winsys_cs *cs, uint32_t ib_size)
    cs->base.cdw = 0;
    cs->base.reserved_dw = 0;
    cs->base.max_dw = ib_size / 4 - 4;
+   cs->last_cp_dma_header = NULL;
    cs->chain_ib_va = cs->ib_buffer->va;
    cs->chain_ib_size = 0;
 
@@ -310,6 +316,7 @@ radv_winsys_cs_reset(struct radv_winsys_cs *cs)
    cs->base.cdw = 0;
    cs->base.reserved_dw = 0;
    cs->status = VK_SUCCESS;
+   cs->last_cp_dma_header = NULL;
 
    /* When the CS is finalized and IBs are not allowed, use last IB. */
    assert(cs->ib_buffer || cs->num_ib_buffers);
@@ -385,6 +392,23 @@ radv_winsys_cs_grow(struct ac_cmdbuf *_cs, size_t min_size)
    cs->base.cdw = 0;
    cs->base.reserved_dw = 0;
    cs->base.max_dw = ib_size / 4 - 4;
+   cs->last_cp_dma_header = NULL;
+}
+
+static void
+radv_winsys_cs_set_last_cp_dma_header(struct ac_cmdbuf *_cs, uint32_t *ib_ptr)
+{
+   struct radv_winsys_cs *cs = radv_winsys_cs(_cs);
+
+   cs->last_cp_dma_header = ib_ptr;
+}
+
+static uint32_t *
+radv_winsys_cs_get_last_cp_dma_header(struct ac_cmdbuf *_cs)
+{
+   struct radv_winsys_cs *cs = radv_winsys_cs(_cs);
+
+   return cs->last_cp_dma_header;
 }
 
 static VkResult
@@ -632,6 +656,7 @@ radv_winsys_cs_chain_dgc_ib(struct ac_cmdbuf *_cs, uint64_t va, uint32_t cdw, ui
       cs->base.cdw = 0;
       cs->base.reserved_dw = 0;
       cs->base.max_dw = ib_size / 4 - 4;
+      cs->last_cp_dma_header = NULL;
    }
 }
 

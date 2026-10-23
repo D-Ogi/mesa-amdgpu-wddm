@@ -111,7 +111,8 @@ void
 zink_bo_deinit(struct zink_screen *screen);
 
 struct pb_buffer_lean *
-zink_bo_create(struct zink_screen *screen, uint64_t size, unsigned alignment, enum zink_heap heap, enum zink_alloc_flag flags, unsigned mem_type_idx, const void *pNext);
+zink_bo_create(struct zink_screen *screen, uint64_t size, unsigned alignment, enum zink_heap heap, enum zink_alloc_flag flags, unsigned mem_type_idx, const void *pNext,
+               struct zink_clientptr_heap *clientptr_heap);
 
 void
 zink_bo_destroy(struct zink_screen *screen, struct zink_bo *bo);
@@ -141,6 +142,31 @@ void *
 zink_bo_map(struct zink_screen *screen, struct zink_bo *bo);
 void
 zink_bo_unmap(struct zink_screen *screen, struct zink_bo *bo);
+
+bool
+zink_bo_clientptr_heap_init(struct zink_screen *screen, struct zink_clientptr_heap *clientptr_heap);
+void
+zink_bo_clientptr_heap_deinit(struct zink_clientptr_heap *clientptr_ranges);
+
+/** Maps the BO to a client pointer range and returns the address
+ *
+ * \param bo must belong to a clientptr_heap
+ * \param new_clientptr_range  Can point an unused client pointer range.
+ *                             If consumed, the object is emptied.
+ *
+ * \return true if the bo can be mapped: in this case either
+ *           \param ptr is set to the mapped address, or if a new range is needed
+ *           \param range_size is set to the needed size of \param new_clientptr_range
+ * \return false on failure
+ */
+bool
+zink_bo_map_clientptr(struct zink_screen *screen, struct zink_bo *bo,
+                      struct pipe_clientptr_range *new_clientptr_range,
+                      uint8_t **ptr, uint32_t *range_size);
+
+bool
+zink_bo_reclaim_clientptr(struct zink_screen *screen, struct zink_clientptr_heap *clientptr_heap,
+                          bool release_all, struct pipe_clientptr_range *range);
 
 bool
 zink_bo_commit(struct zink_context *ctx, struct zink_resource *res, unsigned level, struct pipe_box *box, bool commit, VkSemaphore *sem);

@@ -253,7 +253,7 @@ class VulkanMarshalingCodegen(VulkanTypeIterator):
         if needConsistencyCheck and featureExpr is None:
             self.cgen.beginIf("!(%s)" % checkName)
             self.cgen.stmt(
-                "fprintf(stderr, \"fatal: %s inconsistent between guest and host\\n\")" % (access))
+                "GFXSTREAM_ERROR(\"fatal: %s inconsistent between guest and host\")" % (access))
             self.cgen.endIf()
 
 
@@ -941,13 +941,21 @@ class VulkanMarshaling(VulkanWrapperGenerator):
 
         if direction == "write":
             cgen.stmt("vkStream->putBe32(%s)" % sizeVar)
+            cgen.beginIf("!%s" % (sizeVar))
+            cgen.line("// exit if this was a null extension struct (size == 0 in this branch)")
+            cgen.stmt("return")
+            cgen.endIf()
         elif not self.dynAlloc:
-            cgen.stmt("vkStream->getBe32()");
-
-        cgen.beginIf("!%s" % (sizeVar))
-        cgen.line("// exit if this was a null extension struct (size == 0 in this branch)")
-        cgen.stmt("return")
-        cgen.endIf()
+            cgen.stmt("uint32_t hostExtSize = vkStream->getBe32()")
+            cgen.beginIf("!%s || !hostExtSize" % (sizeVar))
+            cgen.line("// exit if this was a null extension struct (size == 0 in this branch)")
+            cgen.stmt("return")
+            cgen.endIf()
+        else:
+            cgen.beginIf("!%s" % (sizeVar))
+            cgen.line("// exit if this was a null extension struct (size == 0 in this branch)")
+            cgen.stmt("return")
+            cgen.endIf()
 
         cgen.endIf()
 
@@ -955,16 +963,24 @@ class VulkanMarshaling(VulkanWrapperGenerator):
         if direction == "write":
             cgen.stmt("vkStream->write(%s, sizeof(VkStructureType))" % extParam.paramName)
         elif not self.dynAlloc:
-            cgen.stmt("uint64_t pNext_placeholder")
+            cgen.stmt("uint64_t pNext_placeholder = 0")
             placeholderAccess = "(&pNext_placeholder)"
             cgen.stmt("vkStream->read((void*)(&pNext_placeholder), sizeof(VkStructureType))")
             cgen.stmt("(void)pNext_placeholder")
+            cgen.line("// Find the struct corresponding to the next struct returned from the host")
+            cgen.line("// passing over any structs that were skipped by the host (e.g. due to being unknown).")
+            cgen.beginWhile("%s && goldfish_vk_struct_type(%s) != goldfish_vk_struct_type(%s)" % (
+                extParam.paramName, extParam.paramName, placeholderAccess))
+            cgen.stmt("%s = (void*)((VkBaseInStructure*)%s)->pNext" % (
+                extParam.paramName, extParam.paramName))
+            cgen.endWhile()
 
         def fatalDefault(cgen):
             cgen.line("// fatal; the switch is only taken if the extension struct is known")
             if self.variant != "guest":
-                cgen.stmt("fprintf(stderr, \" %s, Unhandled Vulkan structure type %s [%d], aborting.\\n\", __func__, string_VkStructureType(VkStructureType(structType)), structType)")
-            cgen.stmt("abort()")
+                cgen.stmt("GFXSTREAM_FATAL(\"%s, Unhandled Vulkan structure type %s [%d], aborting.\", __func__, string_VkStructureType(VkStructureType(structType)), structType)")
+            else:
+                cgen.stmt("abort()")
             pass
 
         self.emitForEachStructExtension(

@@ -44,8 +44,8 @@ no_mans_sky_CreateImageView(VkDevice _device, const VkImageViewCreateInfo *pCrea
    VK_FROM_HANDLE(radv_image_view, iview, *pView);
 
    if ((iview->vk.aspects == (VK_IMAGE_ASPECT_DEPTH_BIT | VK_IMAGE_ASPECT_STENCIL_BIT)) &&
-       (iview->vk.usage &
-        (VK_IMAGE_USAGE_2_SAMPLED_BIT_KHR | VK_IMAGE_USAGE_2_STORAGE_BIT_KHR | VK_IMAGE_USAGE_2_INPUT_ATTACHMENT_BIT_KHR))) {
+       (iview->vk.usage & (VK_IMAGE_USAGE_2_SAMPLED_BIT_KHR | VK_IMAGE_USAGE_2_STORAGE_BIT_KHR |
+                           VK_IMAGE_USAGE_2_INPUT_ATTACHMENT_BIT_KHR))) {
       /* No Man's Sky creates descriptors with depth/stencil aspects (only when Intel XESS is
        * enabled apparently). and this is illegal in Vulkan. Ignore them by using NULL descriptors
        * to workaroud GPU hangs.

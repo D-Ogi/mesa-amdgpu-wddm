@@ -3598,6 +3598,7 @@ emit_subgroup_rotate(struct ntv_context *ctx, nir_intrinsic_instr *intr)
 {
    SpvOp op = SpvOpGroupNonUniformRotateKHR;
    spirv_builder_emit_cap(&ctx->builder, SpvCapabilityGroupNonUniformRotateKHR);
+   spirv_builder_emit_extension(&ctx->builder, "SPV_KHR_subgroup_rotate");
 
    nir_alu_type atype, unused;
    SpvId src0 = get_src(ctx, &intr->src[0], &atype);

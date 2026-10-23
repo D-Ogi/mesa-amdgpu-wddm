@@ -506,8 +506,6 @@ lower_bit_size_callback(const nir_instr *instr, enum amd_gfx_level chip, bool di
       switch (alu->op) {
       case nir_op_imul_high:
       case nir_op_umul_high:
-      case nir_op_uadd_carry:
-      case nir_op_usub_borrow:
          return 32;
       case nir_op_iabs:
       case nir_op_imax:

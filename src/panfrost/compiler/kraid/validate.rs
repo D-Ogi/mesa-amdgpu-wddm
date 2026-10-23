@@ -35,6 +35,7 @@ fn validate_instr(instr: &Instr, ssa_vals: &mut FxHashSet<SSAValue>) {
             let src_ref_byte_mask = match &src.src_ref {
                 SrcRef::Zero => 0xff,
                 SrcRef::Imm32(_) => 0xf,
+                SrcRef::Imm64(_) => 0xff,
                 SrcRef::FAU(fau) => {
                     if fau.load64 {
                         0xff
@@ -74,6 +75,12 @@ fn validate_instr(instr: &Instr, ssa_vals: &mut FxHashSet<SSAValue>) {
         if dst.lanes.is_f16_narrow() {
             assert_eq!(dst_type, DataType::F32);
             assert_eq!(dst.dst_ref.bytes_written(), 2);
+            continue;
+        }
+
+        if dst_type == DataType::SR {
+            let dst_bytes = dst.dst_ref.bytes_written();
+            assert_eq!(dst_bytes, dst.lanes.bytes(dst_bytes));
             continue;
         }
 

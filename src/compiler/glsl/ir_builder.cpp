@@ -178,12 +178,18 @@ ir_expression *div(operand a, operand b)
 
 ir_expression *carry(operand a, operand b)
 {
-   return expr(ir_binop_carry, a, b);
+   assert(a.val->type->base_type == GLSL_TYPE_UINT &&
+          b.val->type->base_type == GLSL_TYPE_UINT);
+
+   return i2u(b2i(less(add(a, b), a)));
 }
 
 ir_expression *borrow(operand a, operand b)
 {
-   return expr(ir_binop_borrow, a, b);
+   assert(a.val->type->base_type == GLSL_TYPE_UINT &&
+          b.val->type->base_type == GLSL_TYPE_UINT);
+
+   return i2u(b2i(less(a, b)));
 }
 
 ir_expression *trunc(operand a)

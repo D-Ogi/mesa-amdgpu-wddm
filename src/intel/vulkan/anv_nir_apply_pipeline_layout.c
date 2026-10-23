@@ -31,6 +31,8 @@
 
 #include "genxml/genX_bits.h"
 
+#define bitsizeof(type, field) (8 * sizeof(((type *)0)->field))
+
 /* Sampler tables don't actually have a maximum size but we pick one just so
  * that we don't end up emitting too much state on-the-fly.
  */
@@ -70,9 +72,18 @@ struct apply_pipeline_layout_state {
    bool is_device_bindable;
    uint8_t constants_offset;
 
+   /* Maps a set to binding table entry or bindless surface state on Gfx12.5+ */
    nir_variable *set_idx_to_bti;
-   nir_variable *set_idx_to_base_addr;
-   nir_variable *set_idx_to_offset;
+   /* Maps a set to an offset in the binding table entry */
+   nir_variable *set_idx_to_bti_offset;
+   /* Maps a set to a upper 32bit of the 64bit address to the set */
+   nir_variable *set_idx_to_addr_base;
+   /* Maps a set to a lower 32bit of the 64bit address to the set */
+   nir_variable *set_idx_to_addr_offset;
+   /* Maps a set to a bindless offset in the STATE_BASE_ADDRESS bindless
+    * surface state heap
+    */
+   nir_variable *set_idx_to_bindless_offset;
 
    struct {
       bool desc_buffer_used;
@@ -239,15 +250,15 @@ add_tex_src_binding(struct apply_pipeline_layout_state *state,
                             deref_src_type == nir_tex_src_sampler_deref);
 
    /* Track input attachments use */
-   nir_variable *var =
-      nir_deref_instr_get_variable(
-         nir_src_as_deref(tex->src[deref_src_idx].src));
-   if (var->data.fb_fetch_output) {
-      assert(var->data.index == NIR_VARIABLE_NO_INDEX ||
-             var->data.index < MAX_DESCRIPTOR_SET_INPUT_ATTACHMENTS);
-      const uint32_t index = var->data.index == NIR_VARIABLE_NO_INDEX ?
-         MAX_DESCRIPTOR_SET_INPUT_ATTACHMENTS : var->data.index;
-      BITSET_SET(state->bind_map->input_attachments, index);
+   if (tex->sampler_dim == GLSL_SAMPLER_DIM_SUBPASS ||
+       tex->sampler_dim == GLSL_SAMPLER_DIM_SUBPASS_MS) {
+      BITSET_SET_COUNT(state->bind_map->input_attachments,
+                       (tex->input_attachment_depth ||
+                        tex->input_attachment_stencil) ?
+                       MAX_DESCRIPTOR_SET_INPUT_ATTACHMENTS :
+                       tex->texture_index,
+                       MAX2(1, tex->texture_array_size));
+      tex->texture_index = 0;
    }
 
    /* This is likely a fallout of Wa_14020375314 but hasn't fully be
@@ -503,15 +514,15 @@ build_load_descriptor_mem_from_res_index(nir_builder *b,
 {
    struct res_index_defs res = unpack_res_index(b, res_index);
 
-   nir_def *offset32 = nir_iadd_imm(
-      b,
-      nir_iadd(b,
-               nir_load_array_var(b, state->set_idx_to_offset, res.set),
-               nir_iadd(b, res.desc_offset_base,
-                           nir_imul(b, res.array_index, res.desc_stride))),
-      imm_offset);
-
    if (state->pdevice->info.has_lsc || !state->is_device_bindable) {
+      nir_def *offset32 = nir_iadd_imm(
+         b,
+         nir_iadd(b,
+                  nir_load_array_var(b, state->set_idx_to_bti_offset, res.set),
+                  nir_iadd(b, res.desc_offset_base,
+                           nir_imul(b, res.array_index, res.desc_stride))),
+         imm_offset);
+
       nir_def *surface_index = nir_load_array_var(b, state->set_idx_to_bti, res.set);
 
       return nir_load_ubo(b, num_components, bit_size,
@@ -521,10 +532,18 @@ build_load_descriptor_mem_from_res_index(nir_builder *b,
                           .range_base = 0,
                           .range = num_components * bit_size / 8);
    } else {
+      nir_def *offset32 = nir_iadd_imm(
+         b,
+         nir_iadd(b,
+                  nir_load_array_var(b, state->set_idx_to_addr_offset, res.set),
+                  nir_iadd(b, res.desc_offset_base,
+                           nir_imul(b, res.array_index, res.desc_stride))),
+         imm_offset);
+
       return nir_load_global_constant(
          b, num_components, bit_size,
          nir_pack_64_2x32_split(b, offset32,
-                                nir_load_array_var(b, state->set_idx_to_base_addr,
+                                nir_load_array_var(b, state->set_idx_to_addr_base,
                                                    res.set)),
          .align_mul = 8,
          .align_offset = imm_offset % 8);
@@ -683,10 +702,11 @@ build_load_storage_3d_image_depth(nir_builder *b,
    const struct intel_device_info *devinfo = &state->pdevice->info;
 
    if (state->bind_map->binding_mode == ANV_SHADER_BINDING_MODE_LEGACY_INDIRECT) {
-      return build_load_descriptor_mem_from_res_index(
-         b, res_index,
-         offsetof(struct anv_storage_image_descriptor, image_depth),
-         1, 32, state);
+      return nir_i2i32(b, build_load_descriptor_mem_from_res_index(
+                          b, res_index,
+                          offsetof(struct anv_image_descriptor, z_slice_count),
+                          1, bitsizeof(struct anv_image_descriptor, z_slice_count),
+                          state));
    } else {
       nir_def *data = build_load_descriptor_mem_from_res_index(
          b, res_index,
@@ -768,10 +788,11 @@ build_descriptor_set_bti(nir_builder *b,
    }
 }
 
+/* Upper 32bit of the 64bit address of a set */
 static nir_def *
-build_descriptor_set_base_address(nir_builder *b,
-                                  uint32_t set,
-                                  const struct apply_pipeline_layout_state *state)
+build_descriptor_set_addr_base(nir_builder *b,
+                               uint32_t set,
+                               const struct apply_pipeline_layout_state *state)
 {
    const bool is_push_set = set < state->set_count &&
       state->set_layouts[set] != NULL &&
@@ -799,10 +820,11 @@ build_descriptor_set_base_address(nir_builder *b,
    return nir_load_reloc_const_intel(b, reloc_id);
 }
 
+/* Offset in the STATE_BASE_ADDRESS::BindlessSurfaceState heap of a set */
 static nir_def *
-build_descriptor_set_offset(nir_builder *b,
-                            uint32_t set,
-                            const struct apply_pipeline_layout_state *state)
+build_descriptor_set_bindless_offset(nir_builder *b,
+                                     uint32_t set,
+                                     const struct apply_pipeline_layout_state *state)
 {
    switch (state->bind_map->binding_mode) {
    case ANV_SHADER_BINDING_MODE_LEGACY:
@@ -817,6 +839,19 @@ build_descriptor_set_offset(nir_builder *b,
    default:
       UNREACHABLE("invalid binding mode");
    }
+}
+
+/* Lower 32bit of the 64bit address of a set */
+static nir_def *
+build_descriptor_set_addr_offset(nir_builder *b,
+                                 uint32_t set,
+                                 const struct apply_pipeline_layout_state *state)
+{
+   nir_def *offset = build_descriptor_set_bindless_offset(b, set, state);
+   if (!state->pdevice->info.has_lsc &&
+       state->bind_map->binding_mode == ANV_SHADER_BINDING_MODE_BUFFER)
+      offset = nir_iadd(b, offset, anv_load_driver_uniform(b, 1, buffer.surfaces_base_offset));
+   return offset;
 }
 
 static nir_def *
@@ -836,15 +871,13 @@ build_descriptor_set_sampler_offset(nir_builder *b,
 }
 
 static nir_def *
-build_descriptor_set_offset_buffers(nir_builder *b,
-                                    uint32_t set,
-                                    const struct apply_pipeline_layout_state *state)
+build_descriptor_set_bti_offset(nir_builder *b,
+                                uint32_t set,
+                                const struct apply_pipeline_layout_state *state)
 {
-   if (state->pdevice->info.has_lsc || state->is_device_bindable) {
-      return build_descriptor_set_offset(b, set, state);
-   } else {
-      return nir_imm_int(b, 0);
-   }
+   return state->pdevice->info.has_lsc ?
+          build_descriptor_set_bindless_offset(b, set, state) :
+          nir_imm_int(b, 0);
 }
 
 /** Build a 32bit_index_offset address for a descriptor set */
@@ -862,7 +895,7 @@ build_desc_address32(nir_builder *b,
                       nir_channel(b, surface, 0),
                       nir_channel(b, surface, 1),
                       nir_iadd(b,
-                               nir_load_array_var(b, state->set_idx_to_offset,
+                               nir_load_array_var(b, state->set_idx_to_bti_offset,
                                                   set < MAX_SETS ?
                                                   nir_imm_int(b, set) : set_idx),
                                offset));
@@ -872,7 +905,7 @@ build_desc_address32(nir_builder *b,
                                          set < MAX_SETS ?
                                          nir_imm_int(b, set) : set_idx),
                       nir_iadd(b,
-                               nir_load_array_var(b, state->set_idx_to_offset,
+                               nir_load_array_var(b, state->set_idx_to_bti_offset,
                                                   set < MAX_SETS ?
                                                   nir_imm_int(b, set) : set_idx),
                                offset));
@@ -887,16 +920,13 @@ build_desc_address64(nir_builder *b,
                      uint32_t range,
                      const struct apply_pipeline_layout_state *state)
 {
-   /* This helper is only use pre Gfx12.5 */
-   assert(!state->pdevice->info.has_lsc);
-   assert(!state->pdevice->uses_efficient_64bit);
    return nir_vec4(b,
                    nir_iadd(b,
-                            nir_load_array_var(b, state->set_idx_to_offset,
+                            nir_load_array_var(b, state->set_idx_to_addr_offset,
                                                set < MAX_SETS ?
                                                nir_imm_int(b, set) : set_idx),
                             offset),
-                   nir_load_array_var(b, state->set_idx_to_base_addr,
+                   nir_load_array_var(b, state->set_idx_to_addr_base,
                                       set < MAX_SETS ?
                                       nir_imm_int(b, set) : set_idx),
                    nir_imm_int(b, range),
@@ -991,11 +1021,12 @@ build_surface_index_for_binding(nir_builder *b,
             final_offset += plane * bind_layout->descriptor_data_surface_size;
          }
 
+         /* First component of anv_image_descriptor */
          surface_index = build_load_descriptor_mem_from_res_index(
             b, build_res_index(b, set, binding, array_index, state),
             final_offset, 1, 32, state);
       } else {
-         set_offset = build_descriptor_set_offset(b, set, state);
+         set_offset = build_descriptor_set_bindless_offset(b, set, state);
 
          /* With bindless indexes are offsets in the descriptor buffer */
          surface_index =
@@ -1092,7 +1123,7 @@ build_sampler_handle_for_binding(nir_builder *b,
             final_offset += plane * bind_layout->descriptor_data_surface_size;
          }
 
-         /* This is anv_sampled_image_descriptor, the sampler handle is always
+         /* This is anv_image_descriptor, the sampler handle is always
           * in component 1.
           */
          nir_def *desc_data = build_load_descriptor_mem_from_res_index(
@@ -1704,38 +1735,41 @@ lower_image_load_intel_intrinsic(nir_builder *b, nir_intrinsic_instr *intrin,
       case ISL_SURF_PARAM_BASE_ADDRESSS:
          desc = build_load_descriptor_mem_from_res_index(
             b, res_index,
-            offsetof(struct anv_storage_image_descriptor, image_address),
-            1, 64, state);
+            offsetof(struct anv_image_descriptor, address),
+            1, bitsizeof(struct anv_image_descriptor, address), state);
          break;
       case ISL_SURF_PARAM_TILE_MODE:
-         desc = build_load_descriptor_mem_from_res_index(
-            b, res_index,
-            offsetof(struct anv_storage_image_descriptor, tile_mode),
-            1, 32, state);
+         desc = nir_i2i32(
+            b, build_load_descriptor_mem_from_res_index(
+               b, res_index,
+               offsetof(struct anv_image_descriptor, tile_mode),
+               1, bitsizeof(struct anv_image_descriptor, tile_mode), state));
          break;
       case ISL_SURF_PARAM_PITCH:
          desc = build_load_descriptor_mem_from_res_index(
             b, res_index,
-            offsetof(struct anv_storage_image_descriptor, row_pitch_B),
-            1, 32, state);
+            offsetof(struct anv_image_descriptor, row_pitch_B),
+            1, bitsizeof(struct anv_image_descriptor, row_pitch_B), state);
          break;
       case ISL_SURF_PARAM_QPITCH:
          desc = build_load_descriptor_mem_from_res_index(
             b, res_index,
-            offsetof(struct anv_storage_image_descriptor, qpitch),
-            1, 32, state);
+            offsetof(struct anv_image_descriptor, qpitch),
+            1, bitsizeof(struct anv_image_descriptor, qpitch), state);
          break;
       case ISL_SURF_PARAM_FORMAT:
-         desc = build_load_descriptor_mem_from_res_index(
-            b, res_index,
-            offsetof(struct anv_storage_image_descriptor, format),
-            1, 32, state);
+         desc = nir_i2i32(
+            b, build_load_descriptor_mem_from_res_index(
+               b, res_index,
+               offsetof(struct anv_image_descriptor, format),
+               1, bitsizeof(struct anv_image_descriptor, format), state));
          break;
       case ISL_SURF_PARAM_MIN_ARRAY_ELEMENT:
-         desc = build_load_descriptor_mem_from_res_index(
-            b, res_index,
-            offsetof(struct anv_storage_image_descriptor, min_array_element),
-            1, 32, state);
+         desc = nir_i2i32(
+            b, build_load_descriptor_mem_from_res_index(
+               b, res_index,
+               offsetof(struct anv_image_descriptor, base_array_layer),
+               1, bitsizeof(struct anv_image_descriptor, base_array_layer), state));
          break;
       default:
          UNREACHABLE("Invalid surface parameter");
@@ -1843,6 +1877,44 @@ lower_image_intrinsic(nir_builder *b, nir_intrinsic_instr *intrin,
    return true;
 }
 
+static nir_def *
+build_image_resinfo(nir_builder *b,
+                    unsigned set,
+                    unsigned binding,
+                    unsigned plane,
+                    nir_def *array_index,
+                    nir_def *lod,
+                    unsigned num_components,
+                    enum glsl_sampler_dim dim,
+                    bool is_array, bool is_storage,
+                    struct apply_pipeline_layout_state *state)
+{
+   const struct anv_descriptor_set_binding_layout *bind_layout =
+      &state->set_layouts[set]->binding[binding];
+
+   nir_def *addr64 = nir_pack_64_2x32(
+      b, nir_trim_vector(
+         b, build_desc_address64(
+            b, NULL, set,
+            nir_iadd_imm(
+               b,
+               nir_iadd_imm(
+                  b,
+                  nir_imul_imm(b,
+                               array_index,
+                               binding_descriptor_stride(state, bind_layout, false)),
+                  plane * bind_layout->descriptor_data_surface_size),
+               binding_descriptor_offset(state, bind_layout, false)),
+            0, state), 2));
+
+   return anv_resinfo(b, &state->pdevice->info, addr64,
+                      lod == NULL ? nir_imm_int(b, 0) : lod,
+                      nir_imm_int(b, num_components),
+                      nir_imm_int(b, dim),
+                      nir_imm_bool(b, is_array),
+                      state->bind_map->binding_mode == ANV_SHADER_BINDING_MODE_LEGACY_INDIRECT);
+}
+
 static bool
 lower_image_size_intrinsic(nir_builder *b, nir_intrinsic_instr *intrin,
                            struct apply_pipeline_layout_state *state)
@@ -1944,6 +2016,28 @@ lower_tex_deref(nir_builder *b, nir_tex_instr *tex,
 
    nir_src_rewrite(&tex->src[deref_src_idx].src, index);
    tex->src[deref_src_idx].src_type = offset_src_type;
+
+   if (tex->op == nir_texop_txs_lod0_intel) {
+      int sampler_src_idx = nir_tex_instr_src_index(tex, nir_tex_src_sampler_deref);
+      if (sampler_src_idx >= 0)
+         nir_tex_instr_remove_src(tex, sampler_src_idx);
+
+      b->cursor = nir_after_instr(&tex->instr);
+      nir_def *lod = nir_get_tex_src(tex, nir_tex_src_lod);
+      lod = lod == NULL ? nir_imm_int(b, 0) : lod;
+
+      nir_def *resinfo_sw =
+         build_image_resinfo(b, set, binding, plane,
+                             array_index, lod,
+                             tex->def.num_components,
+                             tex->sampler_dim,
+                             tex->is_array,
+                             false,
+                             state);
+
+      nir_def_replace(&tex->def,
+                      nir_trim_vector(b, resinfo_sw, tex->def.num_components));
+   }
 }
 
 static uint32_t
@@ -1981,6 +2075,14 @@ lower_tex(nir_builder *b, nir_tex_instr *tex,
    unsigned plane = tex_instr_get_and_remove_plane_src(tex);
 
    b->cursor = nir_before_instr(&tex->instr);
+
+   /* Remove input attachment offsets. */
+   if (tex->input_attachment_index) {
+      int offset_idx =
+         nir_tex_instr_src_index(tex, nir_tex_src_texture_offset);
+      if (offset_idx >= 0)
+         nir_tex_instr_remove_src(tex, offset_idx);
+   }
 
    lower_tex_deref(b, tex, nir_tex_src_texture_deref,
                    tex->texture_index, plane, state);
@@ -2607,7 +2709,7 @@ build_descriptor_sets_bti_array(nir_builder *b,
    nir_variable *set_to_bti =
       nir_local_variable_create(b->impl, type, "set_to_bti");
 
-   for (uint32_t i = 0; i < MAX_SETS; i++) {
+   for (uint32_t i = 0; i < state->set_count; i++) {
       nir_store_array_var(b, set_to_bti, nir_imm_int(b, i),
                           build_descriptor_set_bti(b, i, state),
                           state->pdevice->uses_efficient_64bit ? 0x3 : 0x1);
@@ -2617,35 +2719,67 @@ build_descriptor_sets_bti_array(nir_builder *b,
 }
 
 static nir_variable *
-build_descriptor_sets_base_addr_array(nir_builder *b,
-                                      const struct apply_pipeline_layout_state *state)
+build_descriptor_sets_bti_offset_array(nir_builder *b,
+                                       const struct apply_pipeline_layout_state *state)
 {
-   nir_variable *set_to_base_addr = nir_local_variable_create(
+   nir_variable *set_to_bti_offset = nir_local_variable_create(
       b->impl, glsl_array_type(glsl_uint_type(), MAX_SETS, 0),
-      "set_to_base_addr");
+      "set_to_bti_offset");
 
-   for (uint32_t i = 0; i < MAX_SETS; i++) {
-      nir_store_array_var(b, set_to_base_addr, nir_imm_int(b, i),
-                          build_descriptor_set_base_address(b, i, state), 0x1);
+   for (uint32_t i = 0; i < state->set_count; i++) {
+      nir_store_array_var(b, set_to_bti_offset, nir_imm_int(b, i),
+                          build_descriptor_set_bti_offset(b, i, state), 0x1);
    }
 
-   return set_to_base_addr;
+   return set_to_bti_offset;
 }
 
 static nir_variable *
-build_descriptor_sets_offset_array(nir_builder *b,
-                                   const struct apply_pipeline_layout_state *state)
+build_descriptor_sets_addr_base_array(nir_builder *b,
+                                      const struct apply_pipeline_layout_state *state)
 {
-   nir_variable *set_to_offset = nir_local_variable_create(
+   nir_variable *set_to_addr_base = nir_local_variable_create(
       b->impl, glsl_array_type(glsl_uint_type(), MAX_SETS, 0),
-      "set_to_offset");
+      "set_to_addr_base");
 
-   for (uint32_t i = 0; i < MAX_SETS; i++) {
-      nir_store_array_var(b, set_to_offset, nir_imm_int(b, i),
-                          build_descriptor_set_offset_buffers(b, i, state), 0x1);
+   for (uint32_t i = 0; i < state->set_count; i++) {
+      nir_store_array_var(b, set_to_addr_base, nir_imm_int(b, i),
+                          build_descriptor_set_addr_base(b, i, state), 0x1);
    }
 
-   return set_to_offset;
+   return set_to_addr_base;
+}
+
+static nir_variable *
+build_descriptor_sets_addr_offset_array(nir_builder *b,
+                                        const struct apply_pipeline_layout_state *state)
+{
+   nir_variable *set_to_addr_offset = nir_local_variable_create(
+      b->impl, glsl_array_type(glsl_uint_type(), MAX_SETS, 0),
+      "set_to_addr_offset");
+
+   for (uint32_t i = 0; i < state->set_count; i++) {
+      nir_store_array_var(b, set_to_addr_offset, nir_imm_int(b, i),
+                          build_descriptor_set_addr_offset(b, i, state), 0x1);
+   }
+
+   return set_to_addr_offset;
+}
+
+static nir_variable *
+build_descriptor_sets_bindless_offset_array(nir_builder *b,
+                                            const struct apply_pipeline_layout_state *state)
+{
+   nir_variable *set_to_bindless_offset = nir_local_variable_create(
+      b->impl, glsl_array_type(glsl_uint_type(), MAX_SETS, 0),
+      "set_to_bindless_offset");
+
+   for (uint32_t i = 0; i < state->set_count; i++) {
+      nir_store_array_var(b, set_to_bindless_offset, nir_imm_int(b, i),
+                          build_descriptor_set_bindless_offset(b, i, state), 0x1);
+   }
+
+   return set_to_bindless_offset;
 }
 
 bool
@@ -2736,8 +2870,10 @@ anv_nir_apply_pipeline_layout(nir_shader *shader,
    nir_foreach_function_impl(impl, shader) {
       nir_builder _b = nir_builder_at(nir_before_impl(impl)), *b = &_b;
       state.set_idx_to_bti = build_descriptor_sets_bti_array(b, &state);
-      state.set_idx_to_base_addr = build_descriptor_sets_base_addr_array(b, &state);
-      state.set_idx_to_offset = build_descriptor_sets_offset_array(b, &state);
+      state.set_idx_to_bti_offset = build_descriptor_sets_bti_offset_array(b, &state);
+      state.set_idx_to_addr_base = build_descriptor_sets_addr_base_array(b, &state);
+      state.set_idx_to_addr_offset = build_descriptor_sets_addr_offset_array(b, &state);
+      state.set_idx_to_bindless_offset = build_descriptor_sets_bindless_offset_array(b, &state);
       progress |= nir_function_instructions_pass(impl,
                                                  lower_direct_buffer_instr,
                                                  nir_metadata_control_flow,

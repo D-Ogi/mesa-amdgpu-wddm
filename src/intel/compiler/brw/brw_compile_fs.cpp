@@ -1222,31 +1222,31 @@ limit_fs_dispatch_width(const struct intel_device_info *devinfo,
 
 const unsigned *
 brw_compile_fs(const struct brw_compiler *compiler,
-               struct brw_compile_fs_params *params)
+               struct brw_compile_params *params)
 {
-   struct nir_shader *nir = params->base.nir;
+   struct nir_shader *nir = params->nir;
    const struct brw_fs_prog_key *key =
-      (const struct brw_fs_prog_key *)params->base.key;
+      (const struct brw_fs_prog_key *)params->key;
    struct brw_fs_prog_data *prog_data =
-      (struct brw_fs_prog_data *)params->base.prog_data;
+      (struct brw_fs_prog_data *)params->prog_data;
    bool allow_spilling = true;
    const bool debug_enabled =
-      brw_should_print_shader(nir, params->base.debug_flag ?
-                                   params->base.debug_flag : DEBUG_WM,
+      brw_should_print_shader(nir, params->debug_flag ?
+                                   params->debug_flag : DEBUG_WM,
                                    prog_data->base.source_hash);
 
-   brw_prog_data_init(&prog_data->base, &params->base);
+   brw_prog_data_init(&prog_data->base, params);
 
    const struct intel_device_info *devinfo = compiler->devinfo;
    const unsigned max_subgroup_size = 32;
-   unsigned max_polygons = MAX2(1, params->max_polygons);
+   unsigned max_polygons = MAX2(1, params->fs.max_polygons);
 
    brw_pass_tracker pt_ = {
       .nir = nir,
       .dispatch_width = 0,
       .compiler = compiler,
       .key = &key->base,
-      .archiver = params->base.archiver,
+      .archiver = params->archiver,
    }, *pt = &pt_;
 
    BRW_NIR_SNAPSHOT("first");
@@ -1254,10 +1254,10 @@ brw_compile_fs(const struct brw_compiler *compiler,
    brw_nir_apply_key(pt, &key->base, max_subgroup_size);
 
    if (brw_nir_fragment_shader_needs_wa_18019110168(devinfo, key->mesh_input, nir)) {
-      if (params->mue_map) {
-         if (params->mue_map->wa_18019110168_active) {
+      if (params->fs.mue_map) {
+         if (params->fs.mue_map->wa_18019110168_active) {
             brw_nir_frag_convert_attrs_prim_to_vert(
-               nir, params->mue_map->per_primitive_offsets);
+               nir, params->fs.mue_map->per_primitive_offsets);
          }
       } else {
          BRW_NIR_PASS(brw_nir_frag_convert_attrs_prim_to_vert_indirect,
@@ -1275,7 +1275,7 @@ brw_compile_fs(const struct brw_compiler *compiler,
    BRW_NIR_SNAPSHOT("after_lower_io");
 
    if (!brw_can_coherent_fb_fetch(devinfo))
-      BRW_NIR_PASS(brw_nir_lower_fs_load_output, key);
+      BRW_NIR_PASS(brw_nir_lower_fs_load_output, key, 0);
 
    /* Do this lowering before brw_nir_populate_fs_prog_data(). */
    BRW_NIR_PASS(nir_opt_frag_coord_to_pixel_coord);
@@ -1301,14 +1301,14 @@ brw_compile_fs(const struct brw_compiler *compiler,
                 (key->nr_color_regions > 1 &&
                  alpha_to_coverage_enabled(nir, key->alpha_to_coverage) &&
                  !(nir->info.outputs_written & BITFIELD64_BIT(FRAG_RESULT_SAMPLE_MASK))),
-                params->rt_write_cb,
-                params->rt_write_data);
+                params->fs.rt_write_cb,
+                params->fs.rt_write_data);
 
    int per_primitive_offsets[VARYING_SLOT_MAX];
    memset(per_primitive_offsets, -1, sizeof(per_primitive_offsets));
 
    brw_nir_populate_fs_prog_data(nir, compiler->devinfo, key, prog_data,
-                                 params->vue_map, params->mue_map,
+                                 params->fs.vue_map, params->fs.mue_map,
                                  per_primitive_offsets);
 
 
@@ -1354,15 +1354,15 @@ brw_compile_fs(const struct brw_compiler *compiler,
 
    const brw_shader_params base_shader_params = {
       .compiler                = compiler,
-      .mem_ctx                 = params->base.mem_ctx,
+      .mem_ctx                 = params->mem_ctx,
       .nir                     = nir,
       .key                     = &key->base,
       .prog_data               = &prog_data->base,
       .per_primitive_offsets   = per_primitive_offsets,
-      .needs_register_pressure = params->base.stats != NULL,
-      .log_data                = params->base.log_data,
+      .needs_register_pressure = params->stats != NULL,
+      .log_data                = params->log_data,
       .debug_enabled           = debug_enabled,
-      .archiver                = params->base.archiver,
+      .archiver                = params->archiver,
    };
 
    if (min_dispatch_width == 8) {
@@ -1372,8 +1372,8 @@ brw_compile_fs(const struct brw_compiler *compiler,
 
       v8 = std::make_unique<brw_shader>(&shader_params);
       if (!run_fs(*v8, allow_spilling, false /* do_rep_send */)) {
-         params->base.error_str = ralloc_strdup(params->base.mem_ctx,
-                                                v8->fail_msg);
+         params->error_str = ralloc_strdup(params->mem_ctx,
+                                           v8->fail_msg);
          return NULL;
       }
 
@@ -1406,7 +1406,7 @@ brw_compile_fs(const struct brw_compiler *compiler,
             max_dispatch_width = std::min(max_dispatch_width, vmulti->dispatch_width);
 
             if (!run_fs(*vmulti, false, false)) {
-               brw_shader_perf_log(compiler, params->base.log_data,
+               brw_shader_perf_log(compiler, params->log_data,
                                    "Quad-SIMD8 shader failed to compile: %s\n",
                                    vmulti->fail_msg);
                vmulti.reset();
@@ -1427,7 +1427,7 @@ brw_compile_fs(const struct brw_compiler *compiler,
             max_dispatch_width = std::min(max_dispatch_width, vmulti->dispatch_width);
 
             if (!run_fs(*vmulti, false, false)) {
-               brw_shader_perf_log(compiler, params->base.log_data,
+               brw_shader_perf_log(compiler, params->log_data,
                                    "Dual-SIMD16 shader failed to compile: %s\n",
                                    vmulti->fail_msg);
                vmulti.reset();
@@ -1448,7 +1448,7 @@ brw_compile_fs(const struct brw_compiler *compiler,
             max_dispatch_width = std::min(max_dispatch_width, vmulti->dispatch_width);
 
             if (!run_fs(*vmulti, false, false)) {
-               brw_shader_perf_log(compiler, params->base.log_data,
+               brw_shader_perf_log(compiler, params->log_data,
                                    "Dual-SIMD8 shader failed to compile: %s\n",
                                    vmulti->fail_msg);
                vmulti.reset();
@@ -1468,7 +1468,7 @@ brw_compile_fs(const struct brw_compiler *compiler,
          v32 = std::make_unique<brw_shader>(&shader_params);
 
          if (!run_fs(*v32, false, false)) {
-            brw_shader_perf_log(compiler, params->base.log_data,
+            brw_shader_perf_log(compiler, params->log_data,
                                 "SIMD32 shader failed to compile: %s\n",
                                 v32->fail_msg);
             v32.reset();
@@ -1487,8 +1487,8 @@ brw_compile_fs(const struct brw_compiler *compiler,
          shader_params.num_polygons   = 1;
          v16 = std::make_unique<brw_shader>(&shader_params);
 
-         if (!run_fs(*v16, allow_spilling, params->use_rep_send)) {
-            brw_shader_perf_log(compiler, params->base.log_data,
+         if (!run_fs(*v16, allow_spilling, params->fs.use_rep_send)) {
+            brw_shader_perf_log(compiler, params->log_data,
                                 "SIMD16 shader failed to compile: %s\n",
                                 v16->fail_msg);
             v16.reset();
@@ -1513,8 +1513,8 @@ brw_compile_fs(const struct brw_compiler *compiler,
 
          v16 = std::make_unique<brw_shader>(&shader_params);
 
-         if (!run_fs(*v16, allow_spilling, params->use_rep_send)) {
-            brw_shader_perf_log(compiler, params->base.log_data,
+         if (!run_fs(*v16, allow_spilling, params->fs.use_rep_send)) {
+            brw_shader_perf_log(compiler, params->log_data,
                                 "SIMD16 shader failed to compile: %s\n",
                                 v16->fail_msg);
             v16.reset();
@@ -1546,7 +1546,7 @@ brw_compile_fs(const struct brw_compiler *compiler,
          v32 = std::make_unique<brw_shader>(&shader_params);
 
          if (!run_fs(*v32, allow_spilling, false)) {
-            brw_shader_perf_log(compiler, params->base.log_data,
+            brw_shader_perf_log(compiler, params->log_data,
                                 "SIMD32 shader failed to compile: %s\n",
                                 v32->fail_msg);
             v32.reset();
@@ -1555,7 +1555,7 @@ brw_compile_fs(const struct brw_compiler *compiler,
 
             if (!INTEL_SIMD_FORCE(32) && !key->prefer_simd32 &&
                 throughput >= perf.throughput) {
-               brw_shader_perf_log(compiler, params->base.log_data,
+               brw_shader_perf_log(compiler, params->log_data,
                                    "SIMD32 shader inefficient\n");
                v32.reset();
             } else {
@@ -1584,8 +1584,8 @@ brw_compile_fs(const struct brw_compiler *compiler,
             shader_params.num_polygons   = 4;
             vmulti = std::make_unique<brw_shader>(&shader_params);
 
-            if (!run_fs(*vmulti, false, params->use_rep_send)) {
-               brw_shader_perf_log(compiler, params->base.log_data,
+            if (!run_fs(*vmulti, false, params->fs.use_rep_send)) {
+               brw_shader_perf_log(compiler, params->log_data,
                                    "Quad-SIMD8 shader failed to compile: %s\n",
                                    vmulti->fail_msg);
                vmulti.reset();
@@ -1605,8 +1605,8 @@ brw_compile_fs(const struct brw_compiler *compiler,
             shader_params.num_polygons   = 2;
 
             vmulti = std::make_unique<brw_shader>(&shader_params);
-            if (!run_fs(*vmulti, false, params->use_rep_send)) {
-               brw_shader_perf_log(compiler, params->base.log_data,
+            if (!run_fs(*vmulti, false, params->fs.use_rep_send)) {
+               brw_shader_perf_log(compiler, params->log_data,
                                    "Dual-SIMD16 shader failed to compile: %s\n",
                                    vmulti->fail_msg);
                vmulti.reset();
@@ -1626,8 +1626,8 @@ brw_compile_fs(const struct brw_compiler *compiler,
 
             vmulti = std::make_unique<brw_shader>(&shader_params);
 
-            if (!run_fs(*vmulti, allow_spilling, params->use_rep_send)) {
-               brw_shader_perf_log(compiler, params->base.log_data,
+            if (!run_fs(*vmulti, allow_spilling, params->fs.use_rep_send)) {
+               brw_shader_perf_log(compiler, params->log_data,
                                    "Dual-SIMD8 shader failed to compile: %s\n",
                                    vmulti->fail_msg);
                vmulti.reset();
@@ -1645,7 +1645,7 @@ brw_compile_fs(const struct brw_compiler *compiler,
 
    brw_to_binary_params to_binary_params = {
       .compiler = compiler,
-      .params = &params->base,
+      .params = params,
       .prog_data = &prog_data->base,
    };
 
@@ -1682,8 +1682,8 @@ brw_compile_fs(const struct brw_compiler *compiler,
       prog_data->prog_offset_32 = v32->start_offset;
 
    /* Override per-variant max_dispatch_width to make reports more useful. */
-   for (unsigned i = 0; i < num_variants && params->base.stats; i++)
-      params->base.stats[i].max_dispatch_width = max_dispatch_width;
+   for (unsigned i = 0; i < num_variants && params->stats; i++)
+      params->stats[i].max_dispatch_width = max_dispatch_width;
 
    return assembly;
 }
