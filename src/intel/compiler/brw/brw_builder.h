@@ -68,6 +68,24 @@ public:
       return bld;
    }
 
+   /**
+    * Construct a builder that inserts instructions at the start of the
+    * shader.
+    * Unlike at_start(), this can also be used before the CFG has been created,
+    * while instructions still live in brw_shader::instructions.
+    */
+   brw_builder
+   at_shader_start() const
+   {
+      if (shader->cfg && shader->cfg->num_blocks > 0)
+         return at_start(shader->cfg->first_block());
+
+      brw_builder bld = *this;
+      bld.block = NULL;
+      bld.cursor = shader->instructions.head_sentinel.next;
+      return bld;
+   }
+
    brw_builder
    at_end(bblock_t *block) const
    {

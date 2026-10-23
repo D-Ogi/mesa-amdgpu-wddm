@@ -761,6 +761,8 @@ brw_64bit_render_target_msg_desc(const struct intel_device_info *devinfo,
                                  unsigned components)
 {
    uint8_t component_mask = (1 << components) - 1;
+   /* Bspec 71862 (r74860) HSD 14023691226 */
+   assert(component_mask != 0);
    uint64_t msg = SET_BITS_64(msg_type, 5, 0) |
                   SET_BITS_64(component_mask, 10, 7) |
                   SET_BITS_64(last_render_target, 14, 14) |

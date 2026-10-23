@@ -65,6 +65,8 @@ nv30_transfer_blit(XFER_ARGS)
       return false;
    if (src->cpp > 4)
       return false;
+   if (dst->domain != NOUVEAU_BO_VRAM)
+       return false;
    return true;
 }
 

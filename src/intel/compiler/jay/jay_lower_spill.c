@@ -42,7 +42,7 @@ insert_spill_fill(jay_builder *b,
 
    jay_SEND(b, .sfid = GEN_SFID_UGM, .msg_desc = desc, .srcs = srcs,
             .nr_srcs = load ? 1 : 2, .dst = load ? gpr : jay_null(),
-            .type = JAY_TYPE_U32, .ex_desc = ADDRESS_REG);
+            .type = JAY_TYPE_U32, .ex_desc = ADDRESS_REG, .bindless = true);
 }
 
 void
@@ -88,6 +88,7 @@ jay_lower_spill(jay_function *func)
 
    /* We use a 32-bit strided stack: SP = scratch + (lane ID * 4) */
    unsigned disp_width = b.shader->dispatch_width;
+   unsigned native_width = 8 * reg_unit(b.shader->devinfo);
    jay_LANE_ID_8(&b, jay_bare_regs(UGPR, ugpr_reservation, 4), 0);
 
    if (disp_width >= 16) {
@@ -101,7 +102,23 @@ jay_lower_spill(jay_function *func)
 
    jay_def lid = jay_bare_regs(UGPR, ugpr_reservation, disp_width / 2);
    jay_SHL(&b, JAY_TYPE_U16, lid, lid, util_logbase2(4));
-   jay_CVT(&b, JAY_TYPE_U32, sp, lid, JAY_TYPE_U16, JAY_ROUND, 0);
+
+   /* We want to convert U16 -> U32 in place. However, doing so with a
+    * compressed SIMD32 instruction has a hazard since the first half's write
+    * clobbers the second half's read. Instead, use uncompressed native
+    * instructions in reverse-order to avoid all the read-after-write hazards.
+    * This emits code like:
+    *
+    *    (16&W) mov.u32 u127, r126.16:u16
+    *    (16&W) mov.u32 u126, r126:u16
+    */
+   for (signed i = disp_width - native_width; i >= 0; i -= native_width) {
+      jay_CVT(&b, JAY_TYPE_U32,
+              jay_bare_regs(UGPR, ugpr_reservation + i, native_width),
+              jay_bare_regs(UGPR, ugpr_reservation + (i / 2), native_width / 2),
+              JAY_TYPE_U16, JAY_ROUND, 0);
+   }
+
    if (b.shader->scratch_size) {
       jay_ADD(&b, JAY_TYPE_U32, sp, sp, b.shader->scratch_size);
    }

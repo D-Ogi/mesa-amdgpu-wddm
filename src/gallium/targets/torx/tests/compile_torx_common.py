@@ -5,12 +5,12 @@
 """Shared helpers for compile_torx_model.py and compile_torx_tests.py."""
 
 import json
+import math
 import os
 import sys
 import warnings
 from pathlib import Path
 
-import numpy as np
 
 # Make the torx frontend package importable.
 sys.path.insert(0, str(Path(__file__).resolve().parents[3] / "frontends"))
@@ -127,16 +127,35 @@ def quantize_module(module, example_inputs, *, is_prepared=False):
     return convert_pt2e(module)
 
 
-def compute_max_quant_error(float_ref_path, quant_output):
-    """Return the max absolute error between the float reference and quantised output.
+# Taken from the TOSA test suite in the Executorch backend for Arm
+QUANTISATION_ERROR_MAX = 0.15
+QUANTISATION_COSINE_MIN = 0.9
 
-    quant_output is expected to be a single tensor (callers iterate over multi-output
-    results themselves).
-    """
-    float_ref = np.fromfile(str(float_ref_path), dtype=np.float32)
-    return float(
-        np.abs(float_ref - quant_output.detach().numpy().flatten()).max()
-    )
+
+class QuantisationError(Exception):
+    pass
+
+
+def check_quantisation(float_outputs, quant_outputs, output_qparams, name):
+    if len(quant_outputs) != len(float_outputs):
+        raise QuantisationError(
+            f"{name}: the quantised model returns {len(quant_outputs)} "
+            f"outputs, the float model {len(float_outputs)}")
+    for i, (ref, out) in enumerate(zip(float_outputs, quant_outputs)):
+        ref = ref.detach().flatten().to(torch.float32)
+        out = out.detach().flatten().to(torch.float32)
+        scale, _ = output_qparams[i]
+        ref_norm = torch.linalg.norm(ref).item()
+        if ref_norm <= float(scale) * math.sqrt(ref.numel()):
+            continue
+        error = torch.linalg.norm(out - ref).item() / ref_norm
+        cosine = torch.nn.functional.cosine_similarity(out, ref, dim=0).item()
+        if not (error <= QUANTISATION_ERROR_MAX
+                and cosine >= QUANTISATION_COSINE_MIN):
+            raise QuantisationError(
+                f"{name} output {i}: quantisation error {error:.3f} "
+                f"(limit {QUANTISATION_ERROR_MAX}), cosine similarity "
+                f"{cosine:.4f} (limit {QUANTISATION_COSINE_MIN})")
 
 
 def write_stamp(stamp_file):

@@ -136,6 +136,7 @@ disk_cache_get_function_identifier(void *ptr, blake3_hasher *ctx)
 #include <sys/mman.h>
 #include <sys/types.h>
 #include <sys/stat.h>
+#include <sys/statvfs.h>
 #include <unistd.h>
 #include "utime.h"
 
@@ -952,7 +953,7 @@ write_all(int fd, const void *buf, size_t count)
 #endif
 
 /* Evict least recently used cache item */
-void
+bool
 disk_cache_evict_lru_item(struct disk_cache *cache)
 {
    char *dir_path;
@@ -964,7 +965,7 @@ disk_cache_evict_lru_item(struct disk_cache *cache)
     */
    uint64_t rand64 = rand_xorshift128plus(cache->seed_xorshift128plus);
    if (asprintf(&dir_path, "%s/%02" PRIx64 , cache->path, rand64 & 0xff) < 0)
-      return;
+      return false;
 
    size_t size = unlink_lru_file_from_directory(dir_path);
 
@@ -972,7 +973,7 @@ disk_cache_evict_lru_item(struct disk_cache *cache)
 
    if (size) {
       p_atomic_add(&cache->size->value, - (uint64_t)size);
-      return;
+      return true;
    }
 
    /* In the case where the random choice of directory didn't find
@@ -986,7 +987,7 @@ disk_cache_evict_lru_item(struct disk_cache *cache)
    struct list_head *lru_file_list =
       choose_lru_file_matching(cache->path, is_two_character_sub_directory);
    if (lru_file_list == NULL)
-      return;
+      return false;
 
    assert(!list_is_empty(lru_file_list));
 
@@ -999,7 +1000,177 @@ disk_cache_evict_lru_item(struct disk_cache *cache)
 
    if (size)
       p_atomic_add(&cache->size->value, - (uint64_t)size);
+
+   return size > 0;
 }
+
+#define DISK_CACHE_STALE_TMP_AGE (60 * 60)
+
+#if DETECT_OS_WINDOWS
+
+/* The Windows counterparts of the two functions below. The size counter holds cache_file_size() values, which are
+ * multiples of 512 as st_blocks * 512 is on POSIX, and it cannot be larger than the volume the cache is on. */
+bool
+disk_cache_size_is_valid(struct disk_cache *cache)
+{
+   uint64_t size = p_atomic_read_relaxed(&cache->size->value);
+
+   if (size % 512)
+      return false;
+
+   wchar_t *wpath = utf8_to_wide(cache->path);
+   if (!wpath)
+      return true;
+
+   ULARGE_INTEGER total_bytes;
+   bool queried = GetDiskFreeSpaceExW(wpath, NULL, &total_bytes, NULL);
+   free(wpath);
+
+   return !queried || size <= total_bytes.QuadPart;
+}
+
+/* Sums cache_file_size() over the entries of the 256 subdirectories and stores the sum in the index. A temporary
+ * file older than DISK_CACHE_STALE_TMP_AGE is deleted when no writer holds it: a writer opens its temporary file
+ * without FILE_SHARE_DELETE (disk_cache_write_item_to_disk), so the delete-on-close open below fails while it is
+ * written, as the flock() test of the POSIX version does. */
+void
+disk_cache_recompute_size(struct disk_cache *cache)
+{
+   uint64_t total = 0;
+   FILETIME now_ft;
+   GetSystemTimeAsFileTime(&now_ft);
+   const uint64_t now = ((uint64_t)now_ft.dwHighDateTime << 32) | now_ft.dwLowDateTime;
+   const uint64_t stale_age = (uint64_t)DISK_CACHE_STALE_TMP_AGE * 10000000; /* FILETIME counts 100 ns */
+
+   for (unsigned i = 0; i < 256; i++) {
+      char *pattern;
+      if (asprintf(&pattern, "%s/%02x/*", cache->path, i) < 0)
+         continue;
+
+      wchar_t *wpattern = utf8_to_wide(pattern);
+      free(pattern);
+      if (!wpattern)
+         continue;
+
+      WIN32_FIND_DATAW fd;
+      HANDLE find = FindFirstFileExW(wpattern, FindExInfoBasic, &fd, FindExSearchNameMatch, NULL, 0);
+      if (find == INVALID_HANDLE_VALUE) {
+         free(wpattern);
+         continue;
+      }
+
+      /* The directory part of the pattern, with its trailing backslash, for the full path of a stale file. */
+      size_t dir_len = wcslen(wpattern) - 1;
+
+      do {
+         if (fd.dwFileAttributes & (FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_REPARSE_POINT))
+            continue;
+
+         const uint64_t length = ((uint64_t)fd.nFileSizeHigh << 32) | fd.nFileSizeLow;
+         size_t len = wcslen(fd.cFileName);
+         if (len >= 4 && wcscmp(&fd.cFileName[len - 4], L".tmp") == 0) {
+            const uint64_t written =
+               ((uint64_t)fd.ftLastWriteTime.dwHighDateTime << 32) | fd.ftLastWriteTime.dwLowDateTime;
+            if (now > written && now - written > stale_age) {
+               wchar_t *wfile = malloc((dir_len + len + 1) * sizeof(wchar_t));
+               if (wfile) {
+                  memcpy(wfile, wpattern, dir_len * sizeof(wchar_t));
+                  memcpy(wfile + dir_len, fd.cFileName, (len + 1) * sizeof(wchar_t));
+                  HANDLE file = CreateFileW(wfile, DELETE, 0, NULL, OPEN_EXISTING,
+                                            FILE_ATTRIBUTE_NORMAL | FILE_FLAG_DELETE_ON_CLOSE, NULL);
+                  if (file != INVALID_HANDLE_VALUE)
+                     CloseHandle(file);
+                  free(wfile);
+               }
+            }
+            continue;
+         }
+
+         total += cache_file_size(length);
+      } while (FindNextFileW(find, &fd));
+
+      FindClose(find);
+      free(wpattern);
+   }
+
+   p_atomic_set(&cache->size->value, total);
+}
+
+#else
+
+bool
+disk_cache_size_is_valid(struct disk_cache *cache)
+{
+   uint64_t size = p_atomic_read_relaxed(&cache->size->value);
+
+   if (size % 512)
+      return false;
+
+   struct statvfs vfs;
+   if (statvfs(cache->path, &vfs) == 0 &&
+       size > (uint64_t)vfs.f_blocks * vfs.f_frsize)
+      return false;
+
+   return true;
+}
+
+void
+disk_cache_recompute_size(struct disk_cache *cache)
+{
+   uint64_t total = 0;
+   time_t now = time(NULL);
+
+   for (unsigned i = 0; i < 256; i++) {
+      char *dir_path;
+      if (asprintf(&dir_path, "%s/%02x", cache->path, i) < 0)
+         continue;
+
+      DIR *dir = opendir(dir_path);
+      free(dir_path);
+      if (dir == NULL)
+         continue;
+
+      const int dir_fd = dirfd(dir);
+      struct dirent *dir_ent;
+      while ((dir_ent = readdir(dir)) != NULL) {
+         struct stat sb;
+         if (fstatat(dir_fd, dir_ent->d_name, &sb, AT_SYMLINK_NOFOLLOW) != 0 ||
+             !S_ISREG(sb.st_mode))
+            continue;
+
+         size_t len = strlen(dir_ent->d_name);
+         if (len >= 4 && strcmp(&dir_ent->d_name[len - 4], ".tmp") == 0) {
+            if (now - sb.st_mtime > DISK_CACHE_STALE_TMP_AGE) {
+               int fd = openat(dir_fd, dir_ent->d_name, O_WRONLY | O_CLOEXEC);
+               if (fd != -1) {
+#ifdef HAVE_FLOCK
+                  int err = flock(fd, LOCK_EX | LOCK_NB);
+#else
+                  struct flock lock = {
+                     .l_start = 0,
+                     .l_len = 0,
+                     .l_type = F_WRLCK,
+                     .l_whence = SEEK_SET
+                  };
+                  int err = fcntl(fd, F_SETLK, &lock);
+#endif
+                  if (err == 0)
+                     unlinkat(dir_fd, dir_ent->d_name, 0);
+                  close(fd);
+               }
+            }
+            continue;
+         }
+
+         total += (uint64_t)sb.st_blocks * 512;
+      }
+      closedir(dir);
+   }
+
+   p_atomic_set(&cache->size->value, total);
+}
+
+#endif
 
 #if DETECT_OS_WINDOWS
 
@@ -1024,10 +1195,10 @@ disk_cache_evict_item(struct disk_cache *cache, char *filename)
       return;
    }
 
-   unlink(filename);
+   int ret = unlink(filename);
    free(filename);
 
-   if (sb.st_blocks)
+   if (ret == 0 && sb.st_blocks)
       p_atomic_add(&cache->size->value, - (uint64_t)sb.st_blocks * 512);
 }
 
@@ -1968,7 +2139,9 @@ disk_cache_mmap_cache_index(void *mem_ctx, struct disk_cache *cache)
    cache->index_mmap = MapViewOfFile(mapping, FILE_MAP_READ | FILE_MAP_WRITE, 0, 0, size);
    if (cache->index_mmap == NULL)
       goto path_fail;
-   cache->index_mmap_size = size;
+   /* No guard pages around the view: index_reserve is the POSIX mapping's reservation. */
+   cache->index_reserve = NULL;
+   cache->index_reserve_size = 0;
 
    cache->size = (p_atomic_uint64_t *) cache->index_mmap;
    cache->stored_keys = cache->index_mmap + sizeof(uint64_t);
@@ -2073,11 +2246,21 @@ disk_cache_mmap_cache_index(void *mem_ctx, struct disk_cache *cache)
     * guarantees of the cryptographic hash, a corrupt entry is
     * unlikely to ever match a real cache key).
     */
-   cache->index_mmap = mmap(NULL, size, PROT_READ | PROT_WRITE,
-                            MAP_SHARED, fd, 0);
-   if (cache->index_mmap == MAP_FAILED)
+   const size_t page_size = sysconf(_SC_PAGESIZE);
+   const size_t reserve_size = ALIGN_POT(size, page_size) + 2 * page_size;
+   uint8_t *reserve = mmap(NULL, reserve_size, PROT_NONE,
+                           MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+   if (reserve == MAP_FAILED)
       goto path_fail;
-   cache->index_mmap_size = size;
+
+   cache->index_mmap = mmap(reserve + page_size, size, PROT_READ | PROT_WRITE,
+                            MAP_SHARED | MAP_FIXED, fd, 0);
+   if (cache->index_mmap == MAP_FAILED) {
+      munmap(reserve, reserve_size);
+      goto path_fail;
+   }
+   cache->index_reserve = reserve;
+   cache->index_reserve_size = reserve_size;
 
    cache->size = (p_atomic_uint64_t *) cache->index_mmap;
    cache->stored_keys = cache->index_mmap + sizeof(uint64_t);
@@ -2093,7 +2276,7 @@ path_fail:
 void
 disk_cache_destroy_mmap(struct disk_cache *cache)
 {
-   munmap(cache->index_mmap, cache->index_mmap_size);
+   munmap(cache->index_reserve, cache->index_reserve_size);
 }
 
 #endif

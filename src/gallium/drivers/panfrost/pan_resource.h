@@ -12,7 +12,6 @@
 #include "pan_screen.h"
 
 #define LAYOUT_CONVERT_THRESHOLD 8
-#define PAN_MAX_BATCHES          32
 
 #define PAN_BIND_SHARED_MASK                                                   \
    (PIPE_BIND_DISPLAY_TARGET | PIPE_BIND_SCANOUT | PIPE_BIND_SHARED)

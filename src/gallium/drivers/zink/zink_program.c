@@ -1361,9 +1361,10 @@ gfx_program_init(struct zink_context *ctx, struct zink_gfx_program *prog)
       if (prog->shaders[i]) {
          util_queue_fence_wait(&prog->shaders[i]->precompile.fence);
          /* this may have already been precompiled for separate shader */
-         if (prog->shaders[i]->info.stage == MESA_SHADER_TESS_CTRL && prog->shaders[i]->non_fs.is_generated && prog->shaders[MESA_SHADER_TESS_CTRL]->nir)
+         if (prog->shaders[i]->info.stage == MESA_SHADER_TESS_CTRL && prog->shaders[i]->non_fs.is_generated && prog->shaders[MESA_SHADER_TESS_CTRL]->nir) {
             zink_shader_tcs_init(screen, prog->shaders[MESA_SHADER_TESS_CTRL], nir[MESA_SHADER_TESS_EVAL], &nir[i]);
-         else
+            prog->shaders[MESA_SHADER_TESS_CTRL]->nir = NULL;
+         } else
             nir[i] = zink_shader_deserialize(screen, prog->shaders[i]);
       } else {
          nir[i] = NULL;
@@ -2007,8 +2008,12 @@ bind_gfx_stage(struct zink_context *ctx, mesa_shader_stage stage, struct zink_sh
    }
 
    ctx->gfx_stages[stage] = shader;
-   if (stage < MESA_SHADER_COMPUTE)
+   if (stage < MESA_SHADER_COMPUTE) {
       ctx->gfx_dirty = ctx->gfx_stages[MESA_SHADER_FRAGMENT] && ctx->gfx_stages[MESA_SHADER_VERTEX];
+      /* the shaders can change the rasterized primitive */
+      zink_mark_atom_dirty(ctx, ZINK_ATOM_PRIMITIVE);
+      zink_mark_atom_dirty(ctx, ZINK_ATOM_PIPELINE);
+   }
    if (stage == MESA_SHADER_FRAGMENT || stage > MESA_SHADER_COMPUTE)
       ctx->mesh_dirty = ctx->gfx_stages[MESA_SHADER_FRAGMENT] && ctx->gfx_stages[MESA_SHADER_MESH];
    if (stage <= MESA_SHADER_FRAGMENT)
@@ -2131,7 +2136,7 @@ bind_last_vertex_stage(struct zink_context *ctx, mesa_shader_stage stage, struct
       if (!zink_screen(ctx->base.screen)->optimal_keys) {
          if (old != MESA_SHADER_STAGES) {
             memset(&ctx->gfx_pipeline_state.shader_keys.key[old].key.vs_base, 0, sizeof(struct zink_vs_key_base));
-            ctx->dirty_gfx_stages |= BITFIELD_BIT(old);
+            zink_update_dirty_gfx_stages(ctx, BITFIELD_BIT(old));
          } else {
             /* always unset vertex shader values when changing to a non-vs last stage */
             memset(&ctx->gfx_pipeline_state.shader_keys.key[MESA_SHADER_VERTEX].key.vs_base, 0, sizeof(struct zink_vs_key_base));
@@ -2152,10 +2157,11 @@ bind_last_vertex_stage(struct zink_context *ctx, mesa_shader_stage stage, struct
       } else {
          ctx->vp_state.num_viewports = 1;
       }
-      ctx->vp_state_changed |= num_viewports != ctx->vp_state.num_viewports;
+      if (num_viewports != ctx->vp_state.num_viewports)
+         zink_mark_atom_dirty(ctx, ZINK_ATOM_VIEWPORT);
       if (!screen->info.have_EXT_extended_dynamic_state) {
          if (ctx->gfx_pipeline_state.dyn_state1.num_viewports != ctx->vp_state.num_viewports)
-            ctx->gfx_pipeline_state.dirty = true;
+            zink_gfx_pipeline_state_dirty(ctx);
          ctx->gfx_pipeline_state.dyn_state1.num_viewports = ctx->vp_state.num_viewports;
       }
    }
@@ -2179,6 +2185,7 @@ zink_bind_vs_state(struct pipe_context *pctx,
       ctx->shader_reads_drawid = false;
       ctx->shader_reads_basevertex = false;
    }
+   zink_mark_atom_dirty(ctx, ZINK_ATOM_DRAW_ID);
 }
 
 /* if gl_SampleMask[] is written to, we have to ensure that we get a shader with the same sample count:
@@ -2225,7 +2232,7 @@ zink_bind_fs_state(struct pipe_context *pctx,
       bool new_writes_cbuf0 = (info->outputs_written & BITFIELD_BIT(FRAG_RESULT_DATA0)) > 0;
       if (ctx->gfx_pipeline_state.blend_state && ctx->gfx_pipeline_state.blend_state->alpha_to_coverage &&
           writes_cbuf0 != new_writes_cbuf0 && zink_screen(pctx->screen)->info.have_EXT_extended_dynamic_state3) {
-         ctx->blend_state_changed = true;
+         zink_mark_atom_dirty(ctx, ZINK_ATOM_BLEND);
          ctx->ds3_states |= BITFIELD_BIT(ZINK_DS3_BLEND_A2C);
       }
       if (info->fs.uses_fbfetch_output) {
@@ -2236,7 +2243,7 @@ zink_bind_fs_state(struct pipe_context *pctx,
       zink_update_fs_key_samples(ctx);
       if (zink_screen(pctx->screen)->info.have_EXT_rasterization_order_attachment_access) {
          if (ctx->gfx_pipeline_state.rast_attachment_order != info->fs.uses_fbfetch_output)
-            ctx->gfx_pipeline_state.dirty = ctx->gfx_pipeline_state.mesh_dirty = true;
+            zink_gfx_mesh_pipeline_state_dirty(ctx);
          ctx->gfx_pipeline_state.rast_attachment_order = info->fs.uses_fbfetch_output;
       }
       zink_set_zs_needs_shader_swizzle_key(ctx, MESA_SHADER_FRAGMENT, false);
@@ -2734,8 +2741,8 @@ zink_set_rasterizer_discard(struct zink_context *ctx, bool disable)
    if (!changed)
       return false;
    if (!zink_screen(ctx->base.screen)->info.have_EXT_extended_dynamic_state2)
-      ctx->gfx_pipeline_state.dirty |= true;
-   ctx->rasterizer_discard_changed = true;
+      zink_gfx_pipeline_state_dirty(ctx);
+   zink_mark_atom_dirty(ctx, ZINK_ATOM_RASTERIZER_DISCARD);
    return true;
 }
 

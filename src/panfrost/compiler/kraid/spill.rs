@@ -59,7 +59,7 @@ impl NextUseSet {
                 }
             }
             if self.0[si].idx == o.idx {
-                let o_next_use = o.next_use + delta;
+                let o_next_use = o.next_use.saturating_add(delta);
                 if self.0[si].next_use > o_next_use {
                     self.0[si].next_use = o_next_use;
                     changed = true;
@@ -534,11 +534,16 @@ fn spill(s: &mut Shader, live: Liveness, limit: u32) {
         .into_iter()
         .map(|_| Default::default())
         .collect();
+    let mut loop_max_pressure = vec![0u32; blocks.len()];
+
     if blocks.has_loop() {
         for b_idx in 0..blocks.len() {
             let Some(lh_idx) = blocks.loop_header_index(b_idx) else {
                 continue;
             };
+
+            loop_max_pressure[lh_idx] = loop_max_pressure[lh_idx]
+                .max(live.block(b_idx).max_live_bytes().reg);
 
             let uses = &mut loop_uses[lh_idx];
             for instr in &blocks[b_idx].instrs {
@@ -569,6 +574,9 @@ fn spill(s: &mut Shader, live: Liveness, limit: u32) {
             let b_uses = &after_b[0];
 
             *p_uses |= b_uses.s(..);
+
+            loop_max_pressure[p_idx] =
+                loop_max_pressure[p_idx].max(loop_max_pressure[b_idx]);
         }
     }
 
@@ -641,19 +649,28 @@ fn spill(s: &mut Shader, live: Liveness, limit: u32) {
                 debug_assert!(live.bytes().reg <= limit);
             }
 
-            // If we still have room, consider values which aren't used
-            // inside the loop.
+            // If we still have room, consider values which aren't used inside
+            // the loop.  We need to be careful, variables defined in the loop
+            // should still have space.
             if !full {
+                let mut live_in_bytes = live.bytes().reg;
                 for idx in live_in.iter() {
                     rev_nu.push(Reverse(NextUse {
                         idx,
                         next_use: next_use_map[idx].0,
                     }));
+                    let ssa = s.ssa_alloc.lookup_by_idx(idx);
+                    debug_assert!(!s.ssa_alloc.lookup_by_idx(idx).is_mem());
+                    live_in_bytes += u32::from(ssa.bytes());
                 }
 
+                debug_assert!(loop_max_pressure[b_idx] >= live_in_bytes);
+                let loop_pressure = loop_max_pressure[b_idx] - live_in_bytes;
+                let entry_limit = limit.saturating_sub(loop_pressure);
                 while let Some(nu) = rev_nu.pop() {
                     let ssa = s.ssa_alloc.lookup_by_idx(nu.0.idx);
-                    if live.bytes().reg + u32::from(ssa.bytes()) > limit {
+                    let ssa_bytes = u32::from(ssa.bytes());
+                    if live.bytes().reg + ssa_bytes > entry_limit {
                         break;
                     }
                     live.insert(ssa);

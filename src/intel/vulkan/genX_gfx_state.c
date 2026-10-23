@@ -659,6 +659,12 @@ calculate_tile_dimensions(const struct anv_device *device,
 
    unsigned pixel_size = 0;
 
+   /* Keep TBIMR disabled until HSDs 14024498401, 14022484703 and 14020415808
+    * are implemented.
+    */
+   if (device->info->verx10 > 30)
+      return false;
+
    /* Perform a rough calculation of the tile cache footprint of the
     * pixel pipeline, approximating it as the sum of the amount of
     * memory used per pixel by every render target, depth, stencil and
@@ -1034,14 +1040,14 @@ update_ps(struct anv_gfx_dynamic_state *hw_state,
                                hw_state->fs_config);
 
    SET(PS, ps.KernelStartPointer0,
-           anv_shader_get_pointer(device, fs) +
+           anv_shader_get_pointer(device, &fs->kernel) +
            brw_fs_prog_data_prog_offset(fs_prog_data, ps, 0));
    SET(PS, ps.KernelStartPointer1,
-           anv_shader_get_pointer(device, fs) +
+           anv_shader_get_pointer(device, &fs->kernel) +
            brw_fs_prog_data_prog_offset(fs_prog_data, ps, 1));
 #if GFX_VER < 20
    SET(PS, ps.KernelStartPointer2,
-           anv_shader_get_pointer(device, fs) +
+           anv_shader_get_pointer(device, &fs->kernel) +
            brw_fs_prog_data_prog_offset(fs_prog_data, ps, 2));
 #endif
 

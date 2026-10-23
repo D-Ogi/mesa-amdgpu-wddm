@@ -126,6 +126,7 @@ pass(jay_function *func)
 {
    jay_foreach_block(func, block) {
       BITSET_DECLARE(inactive_are_0, JAY_MAX_FLAGS) = { 0 };
+      bool a0_valid = false;
 
       jay_foreach_inst_in_block_safe(block, I) {
          jay_builder b = jay_init_builder(func, jay_before_inst(I));
@@ -143,6 +144,20 @@ pass(jay_function *func)
             /* Now just drop the default sources */
             jay_shrink_sources(I, I->num_srcs - (I->predication - 1));
             I->predication = 1;
+         }
+
+         /* For a non-uniform shuffle, we need to make sure a0 has valid
+          * contents in all lanes, not just active lanes, due to hardware
+          * bugs. brw & igc do the same.
+          */
+         if ((I->op == JAY_OPCODE_SHUFFLE && !jay_is_uniform(I->src[1])) &&
+             !a0_valid) {
+
+            jay_MOV(&b, jay_bare_regs(J_ADDRESS, 0, 8), 0);
+            a0_valid = true;
+         } else if (I->dst.file == J_ADDRESS) {
+            /* Assume we're writing a message descriptor or something */
+            a0_valid = false;
          }
 
          if (I->zero_inactive) {

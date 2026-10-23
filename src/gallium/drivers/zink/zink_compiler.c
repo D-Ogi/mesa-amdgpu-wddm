@@ -1288,9 +1288,7 @@ zink_screen_init_compiler(struct zink_screen *screen)
 
       .lower_mul_high = true,
       .lower_to_scalar = true,
-      .lower_uadd_carry = true,
       .compact_arrays = true,
-      .lower_usub_borrow = true,
       .lower_uadd_sat = true,
       .lower_usub_sat = true,
       .lower_int64_options =
@@ -4602,6 +4600,14 @@ create_bindless_image(nir_shader *nir, enum glsl_sampler_dim dim, unsigned descr
    return var;
 }
 
+/* buffer handles are offset by ZINK_MAX_BINDLESS_HANDLES for internal tracking */
+static nir_def *
+bindless_array_index(nir_builder *b, nir_def *handle, bool is_buffer)
+{
+   nir_def *idx = nir_u2uN(b, handle, 32);
+   return is_buffer ? nir_iadd_imm(b, idx, -ZINK_MAX_BINDLESS_HANDLES) : idx;
+}
+
 /* rewrite bindless instructions as array deref instructions */
 static bool
 lower_bindless_instr(nir_builder *b, nir_instr *in, void *data)
@@ -4625,7 +4631,7 @@ lower_bindless_instr(nir_builder *b, nir_instr *in, void *data)
       b->cursor = nir_before_instr(in);
       nir_deref_instr *deref = nir_build_deref_var(b, var);
       if (glsl_type_is_array(var->type))
-         deref = nir_build_deref_array(b, deref, nir_u2uN(b, tex->src[idx].src.ssa, 32));
+         deref = nir_build_deref_array(b, deref, bindless_array_index(b, tex->src[idx].src.ssa, tex->sampler_dim == GLSL_SAMPLER_DIM_BUF));
       nir_src_rewrite(&tex->src[idx].src, &deref->def);
 
       /* bindless sampling uses the variable type directly, which means the tex instr has to exactly
@@ -4679,7 +4685,7 @@ lower_bindless_instr(nir_builder *b, nir_instr *in, void *data)
    b->cursor = nir_before_instr(in);
    nir_deref_instr *deref = nir_build_deref_var(b, var);
    if (glsl_type_is_array(var->type))
-      deref = nir_build_deref_array(b, deref, nir_u2uN(b, instr->src[0].ssa, 32));
+      deref = nir_build_deref_array(b, deref, bindless_array_index(b, instr->src[0].ssa, dim == GLSL_SAMPLER_DIM_BUF));
    nir_src_rewrite(&instr->src[0], &deref->def);
    return true;
 }

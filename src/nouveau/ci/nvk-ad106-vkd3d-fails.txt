@@ -14,3 +14,5 @@ test_large_texel_buffer_view,Crash
 
 test_open_heap_from_address,Fail
 test_structured_buffer_addressing_wrap,Fail
+test_r16_texel_buffer_atomic,Crash
+test_suballocate_va_alignment,Fail

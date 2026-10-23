@@ -165,6 +165,7 @@ typedef union {
       bool is_clear:1;
       unsigned dwords_per_thread:3; /* 1..4 allowed */
       bool clear_value_size_is_12:1;
+      bool clear_value_size_is_4:1;
       bool src_scalarize_for_sparse:1;
       /* Unaligned clears and copies. */
       unsigned src_align_offset:2; /* how much is the source address unaligned */
@@ -173,6 +174,7 @@ typedef union {
       bool dst_single_thread_unaligned:1; /* only 1 thread executes, both previous fields apply */
       bool has_start_thread:1; /* whether the first few threads should be skipped, making later
                                   waves start on a 256B boundary */
+      bool addr_user_data:1;   /* pass src/dst addresses in user data SGPRs */
    };
    uint64_t key;
 } ac_cs_clear_copy_buffer_key;
@@ -181,7 +183,9 @@ typedef struct {
    const nir_shader_compiler_options *nir_options;
    const struct radeon_info *info;
    bool print_key;      /* print the shader key into stderr */
-   bool fail_if_slow;   /* fail if a gfx blit is faster, set to false on compute queues */
+   bool is_compute_queue;
+   bool fail_if_slow;   /* allow failing if CP DMA is faster */
+   bool addr_user_data; /* pass src/dst addresses in user data SGPRs */
 } ac_cs_clear_copy_buffer_options;
 
 typedef struct {
@@ -200,11 +204,13 @@ typedef struct {
 
 typedef struct {
    ac_cs_clear_copy_buffer_key shader_key;
-   uint32_t user_data[6];        /* for nir_intrinsic_load_user_data_amd */
+   uint32_t user_data[16];        /* for nir_intrinsic_load_user_data_amd */
+   unsigned num_user_data;
    unsigned num_ssbos;
    unsigned workgroup_size;
    unsigned num_threads;
    unsigned dispatch_interleave; /* COMPUTE_DISPATCH_INTERLEAVE.INTERLEAVE/INTERLEAVE_1D */
+   bool cpdma_supported;
 
    struct {
       uint64_t offset;

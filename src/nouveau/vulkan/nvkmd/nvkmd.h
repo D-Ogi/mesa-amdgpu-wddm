@@ -15,7 +15,6 @@
 
 #include <assert.h>
 #include <stdbool.h>
-#include <stdbool.h>
 #include <sys/types.h>
 
 struct nvkmd_ctx;
@@ -312,7 +311,7 @@ struct nvkmd_ctx_bind {
    struct nvkmd_va *va;
    uint64_t va_offset_B;
 
-   /* Ignored if op != NVK_BIND_OP_UNBIND */
+   /* Ignored if op != NVKMD_BIND_OP_BIND */
    struct nvkmd_mem *mem;
    uint64_t mem_offset_B;
 

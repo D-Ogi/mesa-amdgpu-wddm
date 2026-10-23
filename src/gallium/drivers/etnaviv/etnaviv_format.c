@@ -283,7 +283,7 @@ uint32_t
 translate_texture_format(enum pipe_format fmt, const struct etna_screen *screen)
 {
    fmt = util_format_linear(fmt);
-   fmt = translate_emulated_format_z32f(fmt);
+   fmt = eil_format_emulated(fmt);
 
    if (!formats[fmt].present)
       return ETNA_NO_MATCH;
@@ -347,12 +347,6 @@ texture_use_int_filter(const struct pipe_sampler_view *sv,
    }
 }
 
-bool
-texture_format_needs_swiz(enum pipe_format fmt)
-{
-   return util_format_linear(fmt) == PIPE_FORMAT_R8_UNORM;
-}
-
 uint32_t
 get_texture_swiz(enum pipe_format fmt, unsigned swizzle_r,
                  unsigned swizzle_g, unsigned swizzle_b, unsigned swizzle_a)
@@ -362,7 +356,7 @@ get_texture_swiz(enum pipe_format fmt, unsigned swizzle_r,
    };
 
    /* 128-bit texels are swizzled in the shader once the halves are joined. */
-   if (format_is_128bit(fmt)) {
+   if (eil_format_is_emulated_128bit(fmt)) {
       swiz[0] = PIPE_SWIZZLE_X;
       swiz[1] = PIPE_SWIZZLE_Y;
       swiz[2] = PIPE_SWIZZLE_Z;
@@ -464,14 +458,4 @@ translate_pe_internal_format(enum pipe_format fmt, const struct etna_screen *scr
    default:
       UNREACHABLE("unexpected rb_swap format");
    }
-}
-
-/* Return type flags for vertex element format */
-uint32_t
-translate_vertex_format_type(enum pipe_format fmt)
-{
-   if (!formats[fmt].present)
-      return ETNA_NO_MATCH;
-
-   return formats[fmt].vtx;
 }

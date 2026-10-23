@@ -101,7 +101,7 @@ get_src_words(struct validate_state *validate, jay_inst *I, unsigned s)
       return 8;
    }
 
-   if (I->op == JAY_OPCODE_ZIP_UGPR16) {
+   if (I->op == JAY_OPCODE_ZIP) {
       return jay_ugpr_per_grf(shader);
    }
 
@@ -334,12 +334,18 @@ validate_inst(struct validate_state *validate, jay_inst *I)
       CHECK(jay_is_flag(I->src[2]) && "SEL src[2] (selector) must be a flag");
    } else if (I->op == JAY_OPCODE_SYNC) {
       CHECK(validate->post_ra && "SYNC does not exist while scheduling");
-   } else if (I->op == JAY_OPCODE_ZIP_UGPR16) {
+   } else if (I->op == JAY_OPCODE_ZIP) {
+      unsigned ugpr_per_grf = jay_ugpr_per_grf(validate->func->shader);
       CHECK(I->dst.file == GPR);
-      CHECK(I->src[0].file == UGPR && I->src[1].file == UGPR);
-      CHECK(jay_num_values(I->src[0]) == 16);
-      CHECK(jay_num_values(I->src[1]) == 16);
-      CHECK(jay_grf_per_gpr(validate->func->shader) == 2);
+
+      jay_foreach_src(I, s) {
+         if (s < jay_grf_per_gpr(validate->func->shader)) {
+            CHECK(I->src[s].file == UGPR &&
+                  jay_num_values(I->src[s]) == ugpr_per_grf);
+         } else {
+            CHECK(jay_is_null(I->src[s]));
+         }
+      }
    } else if (I->op == JAY_OPCODE_SLICE_REPACK) {
       const bool unpack = jay_slice_repack_unpack(I);
       const unsigned pf = 1 << jay_slice_repack_factor_log2(I);

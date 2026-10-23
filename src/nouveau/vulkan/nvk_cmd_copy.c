@@ -472,6 +472,7 @@ nvk_cmd_copy_memory_to_image_ce(struct nvk_cmd_buffer *cmd,
                                 const VkCopyDeviceMemoryImageInfoKHR *pCopyMemoryInfo)
 {
    VK_FROM_HANDLE(nvk_image, dst, pCopyMemoryInfo->image);
+   assert(dst->zcull.nil.size_B == 0);
 
    for (unsigned r = 0; r < pCopyMemoryInfo->regionCount; r++) {
       const VkDeviceMemoryImageCopyKHR *region = &pCopyMemoryInfo->pRegions[r];
@@ -770,6 +771,7 @@ nvk_cmd_copy_image_ce(struct nvk_cmd_buffer *cmd,
 {
    VK_FROM_HANDLE(nvk_image, src, pCopyImageInfo->srcImage);
    VK_FROM_HANDLE(nvk_image, dst, pCopyImageInfo->dstImage);
+   assert(dst->zcull.nil.size_B == 0);
 
    for (unsigned r = 0; r < pCopyImageInfo->regionCount; r++) {
       const VkImageCopy2 *region = &pCopyImageInfo->pRegions[r];

@@ -361,7 +361,7 @@ radv_get_sequence_size_graphics(const struct radv_indirect_command_layout *layou
             struct radv_shader *ms = radv_dgc_get_shader(pipeline_info, eso_info, MESA_SHADER_MESH);
 
             /* PKT3_SET_BASE + PKT3_SET_SH_REG + PKT3_DISPATCH_MESH_INDIRECT_MULTI */
-            *cmd_size += (4 + (ms->info.vs.needs_draw_id ? 3 : 0) + 9) * 4;
+            *cmd_size += (4 + (ms->info.needs_draw_id ? 3 : 0) + 9) * 4;
          }
       } else {
          /* PKT3_SET_BASE + PKT3_DRAW_{INDEX}_INDIRECT_MULTI */
@@ -374,7 +374,7 @@ radv_get_sequence_size_graphics(const struct radv_indirect_command_layout *layou
             *cmd_size += (5 + 2 + 5) * 4;
          } else {
             /* PKT3_SET_BASE + PKT3_SET_SH_REG + PKT3_DRAW_{INDEX}_INDIRECT_MULTI */
-            *cmd_size += (4 + (vs->info.vs.needs_draw_id ? 10 : 5)) * 4;
+            *cmd_size += (4 + (vs->info.needs_draw_id ? 10 : 5)) * 4;
          }
       } else {
          if (layout->vk.dgc_info & BITFIELD_BIT(MESA_VK_DGC_DRAW_MESH)) {
@@ -1342,9 +1342,9 @@ dgc_emit_userdata_vertex(struct dgc_cmdbuf *cs, nir_def *first_vertex, nir_def *
    dgc_cs_emit(nir_pkt3(b, PKT3_SET_SH_REG, pkt_cnt));
    dgc_cs_emit(nir_iand_imm(b, vtx_base_sgpr, 0x3FFF));
    dgc_cs_emit(first_vertex);
-   dgc_cs_emit(nir_bcsel(b, nir_ior(b, has_drawid, has_baseinstance), nir_bcsel(b, has_drawid, drawid, first_instance),
-                         nir_imm_int(b, PKT3_NOP_PAD)));
-   dgc_cs_emit(nir_bcsel(b, nir_iand(b, has_drawid, has_baseinstance), first_instance, nir_imm_int(b, PKT3_NOP_PAD)));
+   dgc_cs_emit(nir_bcsel(b, nir_ior(b, has_drawid, has_baseinstance),
+                         nir_bcsel(b, has_baseinstance, first_instance, drawid), nir_imm_int(b, PKT3_NOP_PAD)));
+   dgc_cs_emit(nir_bcsel(b, nir_iand(b, has_drawid, has_baseinstance), drawid, nir_imm_int(b, PKT3_NOP_PAD)));
    dgc_cs_end();
 }
 
@@ -1413,12 +1413,12 @@ dgc_emit_pkt3_draw_indirect(struct dgc_cmdbuf *cs, nir_def *has_drawid, bool ind
    /* vertex_offset_reg = (base_reg - SI_SH_REG_OFFSET) >> 2 */
    nir_def *vertex_offset_reg = vtx_base_sgpr;
 
-   /* start_instance_reg = (base_reg + (draw_id_enable ? 8 : 4) - SI_SH_REG_OFFSET) >> 2 */
-   nir_def *start_instance_offset = nir_bcsel(b, has_drawid, nir_imm_int(b, 2), nir_imm_int(b, 1));
-   nir_def *start_instance_reg = nir_iadd(b, vtx_base_sgpr, start_instance_offset);
+   /* start_instance_reg = (base_reg + 4 - SI_SH_REG_OFFSET) >> 2 */
+   nir_def *start_instance_reg = nir_iadd_imm(b, vtx_base_sgpr, 1);
 
-   /* draw_id_reg = (base_reg + 4 - SI_SH_REG_OFFSET) >> 2 */
-   nir_def *draw_id_reg = nir_iadd(b, vtx_base_sgpr, nir_imm_int(b, 1));
+   /* draw_id_reg = (base_reg + (start_instance_enable ? 8 : 4) - SI_SH_REG_OFFSET) >> 2 */
+   nir_def *draw_id_offset = nir_bcsel(b, has_baseinstance, nir_imm_int(b, 2), nir_imm_int(b, 1));
+   nir_def *draw_id_reg = nir_iadd(b, vtx_base_sgpr, draw_id_offset);
 
    nir_if *if_drawid = nir_push_if(b, has_drawid);
    {
@@ -1557,11 +1557,11 @@ dgc_emit_draw_with_count(struct dgc_cmdbuf *cs, nir_def *stream_addr, nir_def *s
    dgc_emit_pkt3_set_base(cs, va);
 
    nir_def *vertex_offset_reg = nir_iand_imm(b, vtx_base_sgpr, 0x3FFF);
-   nir_def *start_instance_offset = nir_bcsel(b, has_drawid, nir_imm_int(b, 2), nir_imm_int(b, 1));
    nir_def *start_instance_reg =
-      nir_bcsel(b, has_baseinstance, nir_iadd(b, vertex_offset_reg, start_instance_offset), nir_imm_int(b, 0));
+      nir_bcsel(b, has_baseinstance, nir_iadd_imm(b, vertex_offset_reg, 1), nir_imm_int(b, 0));
+   nir_def *draw_id_offset = nir_bcsel(b, has_baseinstance, nir_imm_int(b, 2), nir_imm_int(b, 1));
    nir_def *draw_id_reg = nir_bcsel(
-      b, has_drawid, nir_ior_imm(b, nir_iadd(b, vertex_offset_reg, nir_imm_int(b, 1)), S_2C4_DRAW_INDEX_ENABLE(1)),
+      b, has_drawid, nir_ior_imm(b, nir_iadd(b, vertex_offset_reg, draw_id_offset), S_2C4_DRAW_INDEX_ENABLE(1)),
       nir_imm_int(b, 0));
 
    nir_def *di_src_sel = nir_imm_int(b, indexed ? V_0287F0_DI_SRC_SEL_DMA : V_0287F0_DI_SRC_SEL_AUTO_INDEX);
@@ -3121,7 +3121,7 @@ radv_CmdPreprocessGeneratedCommandsEXT(VkCommandBuffer commandBuffer,
 
 static void
 radv_prepare_dgc_compute(struct radv_cmd_buffer *cmd_buffer, const VkGeneratedCommandsInfoEXT *pGeneratedCommandsInfo,
-                         struct radv_cmd_buffer *state_cmd_buffer, unsigned *upload_size, unsigned *upload_offset,
+                         struct radv_cmd_buffer *state_cmd_buffer, unsigned *upload_size, uint64_t *out_va,
                          void **upload_data, struct radv_dgc_params *params)
 
 {
@@ -3131,7 +3131,7 @@ radv_prepare_dgc_compute(struct radv_cmd_buffer *cmd_buffer, const VkGeneratedCo
 
    *upload_size = MAX2(*upload_size + alloc_size, 16);
 
-   if (!radv_cmd_buffer_upload_alloc(cmd_buffer, *upload_size, upload_offset, upload_data)) {
+   if (!radv_cmd_buffer_upload_alloc(cmd_buffer, *upload_size, 4, out_va, upload_data)) {
       vk_command_buffer_set_error(&cmd_buffer->vk, VK_ERROR_OUT_OF_HOST_MEMORY);
       return;
    }
@@ -3166,9 +3166,9 @@ radv_prepare_dgc_compute(struct radv_cmd_buffer *cmd_buffer, const VkGeneratedCo
 
 static void
 radv_prepare_dgc_rt(struct radv_cmd_buffer *cmd_buffer, const VkGeneratedCommandsInfoEXT *pGeneratedCommandsInfo,
-                    unsigned *upload_size, unsigned *upload_offset, void **upload_data, struct radv_dgc_params *params)
+                    unsigned *upload_size, uint64_t *out_va, void **upload_data, struct radv_dgc_params *params)
 {
-   if (!radv_cmd_buffer_upload_alloc(cmd_buffer, *upload_size, upload_offset, upload_data)) {
+   if (!radv_cmd_buffer_upload_alloc(cmd_buffer, *upload_size, 4, out_va, upload_data)) {
       vk_command_buffer_set_error(&cmd_buffer->vk, VK_ERROR_OUT_OF_HOST_MEMORY);
       return;
    }
@@ -3198,7 +3198,7 @@ get_dgc_vertex_binding_offset(const struct radv_indirect_command_layout *layout,
 
 static void
 radv_prepare_dgc_graphics(struct radv_cmd_buffer *cmd_buffer, const VkGeneratedCommandsInfoEXT *pGeneratedCommandsInfo,
-                          struct radv_cmd_buffer *state_cmd_buffer, unsigned *upload_size, unsigned *upload_offset,
+                          struct radv_cmd_buffer *state_cmd_buffer, unsigned *upload_size, uint64_t *out_va,
                           void **upload_data, struct radv_dgc_params *params)
 {
    VK_FROM_HANDLE(radv_indirect_command_layout, layout, pGeneratedCommandsInfo->indirectCommandsLayout);
@@ -3216,13 +3216,13 @@ radv_prepare_dgc_graphics(struct radv_cmd_buffer *cmd_buffer, const VkGeneratedC
 
    *upload_size = MAX2(*upload_size + vb_size, 16);
 
-   if (!radv_cmd_buffer_upload_alloc(cmd_buffer, *upload_size, upload_offset, upload_data)) {
+   if (!radv_cmd_buffer_upload_alloc(cmd_buffer, *upload_size, 4, out_va, upload_data)) {
       vk_command_buffer_set_error(&cmd_buffer->vk, VK_ERROR_OUT_OF_HOST_MEMORY);
       return;
    }
 
    uint16_t vtx_base_sgpr = radv_get_user_sgpr(first_shader, AC_UD_VS_BASE_VERTEX_START_INSTANCE);
-   const bool uses_drawid = first_shader->info.vs.needs_draw_id;
+   const bool uses_drawid = first_shader->info.needs_draw_id;
 
    if (uses_drawid)
       vtx_base_sgpr |= DGC_USES_DRAWID;
@@ -3285,7 +3285,7 @@ radv_prepare_dgc(struct radv_cmd_buffer *cmd_buffer, const VkGeneratedCommandsIn
    struct radv_device *device = radv_cmd_buffer_device(cmd_buffer);
    const struct radv_physical_device *pdev = radv_device_physical(device);
    struct radv_dgc_pc_layout_info dgc_pc_info;
-   unsigned upload_offset, upload_size = 0;
+   unsigned upload_size = 0;
    void *upload_data;
 
    const VkGeneratedCommandsPipelineInfoEXT *pipeline_info =
@@ -3347,16 +3347,14 @@ radv_prepare_dgc(struct radv_cmd_buffer *cmd_buffer, const VkGeneratedCommandsIn
    }
 
    if (layout->vk.dgc_info & BITFIELD_BIT(MESA_VK_DGC_DISPATCH)) {
-      radv_prepare_dgc_compute(cmd_buffer, pGeneratedCommandsInfo, state_cmd_buffer, &upload_size, &upload_offset,
+      radv_prepare_dgc_compute(cmd_buffer, pGeneratedCommandsInfo, state_cmd_buffer, &upload_size, &params.params_addr,
                                &upload_data, &params);
    } else if (layout->vk.dgc_info & BITFIELD_BIT(MESA_VK_DGC_RT)) {
-      radv_prepare_dgc_rt(cmd_buffer, pGeneratedCommandsInfo, &upload_size, &upload_offset, &upload_data, &params);
+      radv_prepare_dgc_rt(cmd_buffer, pGeneratedCommandsInfo, &upload_size, &params.params_addr, &upload_data, &params);
    } else {
-      radv_prepare_dgc_graphics(cmd_buffer, pGeneratedCommandsInfo, state_cmd_buffer, &upload_size, &upload_offset,
+      radv_prepare_dgc_graphics(cmd_buffer, pGeneratedCommandsInfo, state_cmd_buffer, &upload_size, &params.params_addr,
                                 &upload_data, &params);
    }
-
-   params.params_addr = radv_buffer_get_va(cmd_buffer->upload.upload_bo) + upload_offset;
 
    if (layout->push_constant_mask) {
       params.const_copy = dgc_pc_info.need_upload;

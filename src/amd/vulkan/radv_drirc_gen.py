@@ -8,7 +8,6 @@ import sys
 VALID_COMMON_VK_OPTIONS = {
     "force_vk_devicename",
     "vk_lower_terminate_to_discard",
-    "vk_zero_vram",
     "vk_require_etc2",
     "vk_require_astc",
 }
@@ -18,6 +17,7 @@ def declare_options():
 
     B = drirc_gen.DrircBool
     I = drirc_gen.DrircInt
+    F = drirc_gen.DrircFloat
     S = drirc_gen.DrircString
 
     debug_options = [
@@ -90,15 +90,25 @@ def declare_options():
         B("radv_force_nan_preserve_min_max", False,
           "Treat FMax/FMin/FClamp like NMax/NMin/NClamp.",
           c_name="force_nan_preserve_min_max"),
+        B("radv_force_exact_glsl_fma", False,
+          "Disallow contract/reassociation for GLSLstd450Fma.",
+          c_name="force_exact_glsl_fma"),
         B("radv_gfx10_descriptor_alias_robust", False,
           "Shader based workaround to make reading storage/uniform/texel buffers as images robust.",
           c_name="gfx10_descriptor_alias_robust"),
         B("radv_disable_binning_gfx11", False,
           "Disable primitive binning on GFX11 to workaround a hw bug.",
           c_name="disable_binning_gfx11"),
+        B("radv_gfx11_full_size_cp_dma", False,
+          ("Don't limit CP DMA to 32K sizes per packet on GFX11+. " +
+           "Please test this and document which GFX11+ chips have broken CP DMA with sizes > 32K."),
+          c_name="gfx11_full_size_cp_dma")
     ]
 
     performance_options = [
+        S("radv_cs_domain",
+          description="Choose where command buffers and upload buffers are allocated. Accepted values are: auto, vram or gtt",
+          c_name="cs_domain"),
         B("radv_disable_ngg_gs", False,
           "Disable NGG GS on GFX10/GFX10.3.",
           c_name="disable_ngg_gs"),
@@ -120,10 +130,19 @@ def declare_options():
         B("radv_force_exclusive_image", False,
           description="Force using exclusive images for apps that incorrectly use concurrent for everything.",
           c_name="force_exclusive_image"),
+        I("radv_buffer_meta_path", 0, -1, 4,
+          ("Override the codepath for buffer clears and copies. " +
+           "(0 = default; -1 = CP DMA; 1,2,4 = compute shader with this number of dwords stored per invocation)"),
+          c_name="buffer_meta_path"),
         I("radv_image_meta_path", 0, 0, 3,
           ("Override the codepath for framebuffer clears, image clears, copies, blits, and MSAA resolves. " +
            "(0 = default, 1 = fragment shader, 2 = compute shader, 3 = fast clear)"),
           c_name="image_meta_path"),
+        F("radv_max_clip_discard_watermark", 0.0, 0.0, 8191.875,
+          ("Keep the guardband clip discard distance at the largest point/line distance seen, up to this value, " +
+           "for all primitive types. This reduces context rolls when switching between lines and triangles. " +
+           "(0 = disabled)"),
+          c_name="max_clip_discard_watermark"),
     ]
 
     features_options = [
@@ -184,7 +203,7 @@ def main():
     parser.add_argument('--drirc-src')
     parser.add_argument('--drirc-hdr')
     parser.add_argument('--rst')
-    parser.add_argument('--validate', required=True)
+    parser.add_argument('--validate', nargs='+', required=True)
     args = parser.parse_args()
 
     if (args.drirc_src is None) != (args.drirc_hdr is None):
@@ -193,7 +212,7 @@ def main():
     sys.path.insert(0, args.import_path)
     import drirc_gen
 
-    drirc_gen.drirc_validate([args.validate], declare_options())
+    drirc_gen.drirc_validate(args.validate, declare_options())
 
     if args.drirc_src and args.drirc_hdr:
         drirc_gen.drirc_generate(args.drirc_src, args.drirc_hdr, "radv", declare_options())

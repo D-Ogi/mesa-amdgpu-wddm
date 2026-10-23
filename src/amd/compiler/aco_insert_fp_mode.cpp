@@ -286,7 +286,7 @@ alu_default_needs(aco_opcode opcode)
          res |= BITFIELD_BIT(mode_fp16_ovfl);
    }
 
-   if (opcode == aco_opcode::v_fma_mixlo_f16 || opcode == aco_opcode::v_fma_mixlo_f16) {
+   if (opcode == aco_opcode::v_fma_mixlo_f16 || opcode == aco_opcode::v_fma_mixhi_f16) {
       res |= BITFIELD_BIT(mode_round32);
    } else if (opcode == aco_opcode::v_fma_mix_f32) {
       /* In theory, this is only needed with opsel_hi, but v_fma_mix_f32 without
@@ -394,8 +394,8 @@ emit_set_mode_block(fp_mode_ctx* ctx, Block* block)
             instr->opcode = aco_opcode::v_cvt_f16_f32;
          else
             instr->opcode = aco_opcode::s_cvt_f16_f32;
-      } else if (instr->opcode ==  aco_opcode::p_v_cvt_f16_f32_rtpi ||
-                 instr->opcode ==  aco_opcode::p_v_cvt_f16_f32_rtni) {
+      } else if (instr->opcode == aco_opcode::p_v_cvt_f16_f32_rtpi ||
+                 instr->opcode == aco_opcode::p_v_cvt_f16_f32_rtni) {
          instr_state.require(mode_round16_64, instr->opcode == aco_opcode::p_v_cvt_f16_f32_rtpi
                                                  ? fp_round_pi
                                                  : fp_round_ni);

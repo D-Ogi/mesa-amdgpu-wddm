@@ -409,13 +409,13 @@ ac_sqtt_emit_start(const struct radeon_info *info, struct ac_pm4_state *pm4,
                                                          V_0367B8_REG_INCLUDE_GFXUDEC | V_0367B8_REG_INCLUDE_COMP |
                                                          V_0367B8_REG_INCLUDE_CONTEXT | V_0367B8_REG_INCLUDE_CONFIG);
 
-         /* Performance counters with SQTT are considered deprecated. */
-         uint32_t token_exclude = 0;
+         /* These two tokens aren't used by any tooling. */
+         uint32_t token_exclude = V_0367B8_TOKEN_EXCLUDE_VMEMEXEC |
+                                  V_0367B8_TOKEN_EXCLUDE_ALUEXEC;
 
          if (!instruction_timing_enabled) {
             /* Reduce SQTT traffic when instruction timing isn't enabled. */
-            token_exclude |= V_0367B8_TOKEN_EXCLUDE_VMEMEXEC | V_0367B8_TOKEN_EXCLUDE_ALUEXEC |
-                             V_0367B8_TOKEN_EXCLUDE_VALUINST | V_0367B8_TOKEN_EXCLUDE_IMMEDIATE |
+            token_exclude |= V_0367B8_TOKEN_EXCLUDE_VALUINST | V_0367B8_TOKEN_EXCLUDE_IMMEDIATE |
                              V_0367B8_TOKEN_EXCLUDE_INST;
          }
 
@@ -450,13 +450,16 @@ ac_sqtt_emit_start(const struct radeon_info *info, struct ac_pm4_state *pm4,
                                                          V_008D18_REG_INCLUDE_GFXUDEC | V_008D18_REG_INCLUDE_COMP |
                                                          V_008D18_REG_INCLUDE_CONTEXT | V_008D18_REG_INCLUDE_CONFIG);
 
-         /* Performance counters with SQTT are considered deprecated. */
-         uint32_t token_exclude = V_008D18_TOKEN_EXCLUDE_PERF;
+         /* Performance counters with SQTT are considered deprecated and the
+          * two other tokens aren't used by any tooling.
+          */
+         uint32_t token_exclude = V_008D18_TOKEN_EXCLUDE_PERF |
+                                  V_008D18_TOKEN_EXCLUDE_VMEMEXEC |
+                                  V_008D18_TOKEN_EXCLUDE_ALUEXEC;
 
          if (!instruction_timing_enabled) {
             /* Reduce SQTT traffic when instruction timing isn't enabled. */
-            token_exclude |= V_008D18_TOKEN_EXCLUDE_VMEMEXEC | V_008D18_TOKEN_EXCLUDE_ALUEXEC |
-                             V_008D18_TOKEN_EXCLUDE_VALUINST | V_008D18_TOKEN_EXCLUDE_IMMEDIATE |
+            token_exclude |= V_008D18_TOKEN_EXCLUDE_VALUINST | V_008D18_TOKEN_EXCLUDE_IMMEDIATE |
                              V_008D18_TOKEN_EXCLUDE_INST;
          }
          sqtt_token_mask |=

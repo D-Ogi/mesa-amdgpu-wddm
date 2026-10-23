@@ -286,6 +286,16 @@ validate_alu_instr(nir_alu_instr *instr, validate_state *state)
          validate_assert(state, src_bit_size == 32 || src_bit_size == 64);
          break;
 
+      /* In nir_opcodes.py, these are defined to take general int sources.
+       * However, for downcasts they are redundant with u2uN opcodes and
+       * in order make things consistent, we only want to use the latter.
+       */
+      case nir_op_i2i8:
+      case nir_op_i2i16:
+      case nir_op_i2i32:
+         validate_assert(state, src_bit_size <= instr->def.bit_size);
+         break;
+
       default:
          break;
       }
@@ -1058,6 +1068,8 @@ validate_tex_src_texture_deref(nir_tex_instr *instr, validate_state *state,
    case nir_texop_query_levels:
    case nir_texop_fragment_mask_fetch_amd:
    case nir_texop_txf_ms_mcs_intel:
+   case nir_texop_txs_lod0_intel:
+   case nir_texop_resinfo_intel:
       validate_assert(state, nir_alu_type_get_base_type(instr->dest_type) == nir_type_int ||
                                 nir_alu_type_get_base_type(instr->dest_type) == nir_type_uint);
       break;

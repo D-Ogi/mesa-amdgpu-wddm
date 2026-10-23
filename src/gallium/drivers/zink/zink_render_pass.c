@@ -202,6 +202,8 @@ zink_render_attachment_shadow(struct zink_context *ctx, uint32_t attachment_shad
       struct pipe_surface dst_view = ctx->fb_state.cbufs[i];
       dst_view.texture = &transient->base.b;
       dst_view.nr_samples = 0;
+      if (transient->base.b.nr_samples > 1)
+         dst_view.level = 0;
       struct pipe_sampler_view src_templ, *src_view;
       struct pipe_box dstbox;
 
@@ -251,7 +253,7 @@ zink_render_fixup_swapchain(struct zink_context *ctx)
       ctx->dynamic_fb.info.renderArea.extent.height = MIN2(ctx->dynamic_fb.info.renderArea.extent.height, ctx->fb_state.height);
       zink_kopper_fixup_depth_buffer(ctx);
       if (ctx->fb_state.width != old_w || ctx->fb_state.height != old_h)
-         ctx->scissor_changed = true;
+         zink_mark_atom_dirty(ctx, ZINK_ATOM_SCISSOR);
       ctx->swapchain_size.width = ctx->swapchain_size.height = 0;
    }
 }

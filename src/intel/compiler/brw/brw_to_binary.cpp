@@ -225,6 +225,7 @@ brw_opcode_to_gen(enum opcode op)
    case BRW_OPCODE_SEND:     return GEN_OP_SEND;
    case BRW_OPCODE_SENDC:    return GEN_OP_SENDC;
    case BRW_OPCODE_SENDG:    return GEN_OP_SENDG;
+   case BRW_OPCODE_SENDGC:   return GEN_OP_SENDGC;
    case BRW_OPCODE_SENDS:    return GEN_OP_SENDS;
    case BRW_OPCODE_SENDSC:   return GEN_OP_SENDSC;
    case BRW_OPCODE_SHL:      return GEN_OP_SHL;
@@ -448,6 +449,7 @@ brw_generator::generate_send(brw_send_inst *inst,
    if (send->check_tdr) {
       if      (gen->opcode == GEN_OP_SEND)  gen->opcode = GEN_OP_SENDC;
       else if (gen->opcode == GEN_OP_SENDS) gen->opcode = GEN_OP_SENDSC;
+      else if (gen->opcode == GEN_OP_SENDG) gen->opcode = GEN_OP_SENDGC;
    }
 
    /* Serialize messages if needed */
@@ -2083,6 +2085,11 @@ brw_generator::generate_code(const brw_shader &s,
       }
    }
 
+   if (INTEL_DEBUG(DEBUG_SHADER_HASH)) {
+      append_MOV(retype(brw_null_reg(), BRW_TYPE_UD), brw_imm_ud(prog_data->source_hash & 0xffffffff));
+      append_MOV(retype(brw_null_reg(), BRW_TYPE_UD), brw_imm_ud(prog_data->source_hash >> 32));
+   }
+
 #ifndef NDEBUG
    /* Pad with NULLs so annotations same size as gen_insts. */
    label_annotations.resize(gen_insts.size(), NULL);
@@ -2097,10 +2104,8 @@ brw_generator::generate_code(const brw_shader &s,
             gen.src[1].region = { 0, 1, 0 };
 
       }
-      if ((gen.dst.file == GEN_GRF || gen.dst.file == GEN_ARF) &&
-           gen.dst.region.hstride == 0) {
+      if (gen.dst.region.hstride == 0)
          gen.dst.region.hstride = 1;
-      }
    }
 
    /* Translate any pre-filled IMM branch sources from absolute indices
@@ -2262,9 +2267,9 @@ brw_generator::generate_code(const brw_shader &s,
          files[0] = stderr;
 
       if (params->archiver) {
-         const char *filename =
-            ralloc_asprintf(mem_ctx, "GEN%d/0", dispatch_width);
-         files[1] = debug_archiver_start_file(params->archiver, filename);
+         files[1] = debug_archiver_start_file(
+            params->archiver,
+            ralloc_asprintf(mem_ctx, "GEN%d/0", dispatch_width));
       }
 
       for (unsigned i = 0; i < ARRAY_SIZE(files); i++) {
@@ -2305,6 +2310,13 @@ brw_generator::generate_code(const brw_shader &s,
       }
 
       if (params->archiver) {
+         debug_archiver_finish_file(params->archiver);
+
+         FILE *bin_dump =
+            debug_archiver_start_file(
+               params->archiver,
+               ralloc_asprintf(mem_ctx, "GEN%d/0.bin", dispatch_width));
+         fwrite(output, 1, output_size, bin_dump);
          debug_archiver_finish_file(params->archiver);
       }
    }
@@ -2600,7 +2612,7 @@ brw_generator::append_reloc(const intel_shader_reloc &r)
 static uint64_t
 brw_bsr(const struct intel_device_info *devinfo,
         uint32_t offset, uint8_t simd_size, uint8_t local_arg_offset,
-        uint8_t grf_used)
+        unsigned grf_used)
 {
    assert(offset % 64 == 0);
    assert(simd_size == 8 || simd_size == 16);

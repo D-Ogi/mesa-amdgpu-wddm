@@ -5072,7 +5072,7 @@ impl fmt::Display for PrmtMode {
             PrmtMode::Backward4Extract => write!(f, ".b4e"),
             PrmtMode::Replicate8 => write!(f, ".rc8"),
             PrmtMode::EdgeClampLeft => write!(f, ".ecl"),
-            PrmtMode::EdgeClampRight => write!(f, ".ecl"),
+            PrmtMode::EdgeClampRight => write!(f, ".ecr"),
             PrmtMode::Replicate16 => write!(f, ".rc16"),
         }
     }
@@ -7054,7 +7054,7 @@ pub struct OpMemBar {
 
 impl DisplayOp for OpMemBar {
     fn fmt_op(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "membar.sc.{}", self.scope)
+        write!(f, "membar.sc{}", self.scope)
     }
 }
 impl_display_for_op!(OpMemBar);
@@ -7117,7 +7117,7 @@ pub struct OpBSSy {
     #[dst_type(Bar)]
     pub bar_out: Dst,
 
-    #[src_type(Pred)]
+    #[src_type(Bar)]
     pub bar_in: Src,
 
     #[src_type(Pred)]
@@ -9376,7 +9376,7 @@ pub struct VertexShaderInfo {
 #[derive(Debug)]
 pub struct FragmentShaderInfo {
     pub uses_kill: bool,
-    pub does_interlock: bool,
+    pub reads_interlock_ticket: bool,
     pub post_depth_coverage: bool,
     pub early_fragment_tests: bool,
     pub uses_sample_shading: bool,

@@ -13,10 +13,11 @@ ExecuTorch orchestrating data movement between delegates.
 
 Output per op or model per device:
 
-  <dir>/<device>.pte            -- compiled program
-  <dir>/<device>-input-{i}.data -- float32 input(s)
-  <dir>/<device>.json           -- quantisation metadata
-  <dir>/output-{i}.data         -- float32 CPU reference (model mode)
+  <dir>/<device>.pte             -- compiled program
+  <dir>/<device>-input-{i}.data  -- float32 input(s)
+  <dir>/<device>.json            -- quantisation metadata
+  <dir>/output-{i}.data          -- quantised CPU output the test compares against
+  <dir>/float-output-{i}.data    -- float32 CPU reference
 
 Usage:
   python compile_torx_tests.py <op_dir> <stamp_file>
@@ -40,9 +41,10 @@ if str(_script_dir) not in sys.path:
     sys.path.insert(0, str(_script_dir))
 
 from compile_torx_common import (
+    QuantisationError,
+    check_quantisation,
     compile_to_pte,
     configure_known_warning_filters,
-    compute_max_quant_error,
     extract_quant_output_params,
     get_device,
     prepare_pt2e,
@@ -64,21 +66,21 @@ def _collect_tensors(obj):
     return []
 
 
-def _write_artifacts(out_dir, module, example_inputs, output_qparams, device):
-    """Persist inputs, quantisation metadata, and the compiled .pte."""
+def _run(module, example_inputs):
+    with torch.no_grad():
+        return _collect_tensors(module(*example_inputs))
+
+
+def _write_artifacts(out_dir, module, example_inputs, quant_outputs,
+                     output_qparams, device):
+    """Persist inputs, the quantised CPU output, metadata, and the .pte."""
     for i, inp in enumerate(example_inputs):
         inp.numpy().tofile(str(out_dir / (device + f"-input-{i}.data")))
 
-    with torch.no_grad():
-        quant_output = module(*example_inputs)
-    quant_outputs = _collect_tensors(quant_output)
-
     num_outputs = len(output_qparams)
-    max_quant_errors = []
     for i in range(num_outputs):
-        max_quant_errors.append(
-            compute_max_quant_error(out_dir / f"output-{i}.data", quant_outputs[i])
-        )
+        quant_outputs[i].detach().numpy().flatten().tofile(
+            str(out_dir / f"output-{i}.data"))
 
     compile_to_pte(module, example_inputs, out_dir / (device + ".pte"))
 
@@ -86,7 +88,6 @@ def _write_artifacts(out_dir, module, example_inputs, output_qparams, device):
         "num_outputs": num_outputs,
         "output_scales": [float(s) for s, _ in output_qparams],
         "output_zero_points": [int(zp) for _, zp in output_qparams],
-        "max_quant_errors": max_quant_errors,
     })
 
 
@@ -108,6 +109,8 @@ def compile_op(op_dir, device):
         example_inputs = (example_inputs_raw,)
     else:
         example_inputs = tuple(example_inputs_raw)
+
+    float_outputs = _run(module, example_inputs)
 
     from torx import TorxQuantizer
 
@@ -134,7 +137,12 @@ def compile_op(op_dir, device):
               file=sys.stderr)
         return
 
-    _write_artifacts(op_dir, module, example_inputs, output_qparams, device)
+    quant_outputs = _run(module, example_inputs)
+    check_quantisation(float_outputs, quant_outputs, output_qparams,
+                       op_dir.name)
+
+    _write_artifacts(op_dir, module, example_inputs, quant_outputs,
+                     output_qparams, device)
 
 
 def compile_model(pt2_path, out_dir, device):
@@ -170,10 +178,9 @@ def compile_model(pt2_path, out_dir, device):
     ep = torch.export.export(module, example_inputs, strict=False)
     module = ep.module()
 
-    with torch.no_grad():
-        float_output = module(*example_inputs)
-    for i, out in enumerate(_collect_tensors(float_output)):
-        out.numpy().tofile(str(out_dir / f"output-{i}.data"))
+    float_outputs = _run(module, example_inputs)
+    for i, out in enumerate(float_outputs):
+        out.numpy().tofile(str(out_dir / f"float-output-{i}.data"))
 
     torch.save(example_inputs, str(out_dir / "example_input.pt"))
 
@@ -184,7 +191,12 @@ def compile_model(pt2_path, out_dir, device):
         print("    ERROR: could not extract quant params", file=sys.stderr)
         sys.exit(1)
 
-    _write_artifacts(out_dir, module, example_inputs, output_qparams, device)
+    quant_outputs = _run(module, example_inputs)
+    check_quantisation(float_outputs, quant_outputs, output_qparams,
+                       out_dir.name)
+
+    _write_artifacts(out_dir, module, example_inputs, quant_outputs,
+                     output_qparams, device)
 
 
 def _compile_op_worker(op_dir_str):
@@ -232,21 +244,26 @@ def main():
     parser.add_argument("paths", nargs="+")
     args = parser.parse_args()
 
-    if args.whole_model:
-        if len(args.paths) != 3:
-            parser.error("--whole-model needs <pt2_file> <out_dir> <stamp_file>")
-        pt2_path, out_dir, stamp_file = (Path(p) for p in args.paths)
-        compile_model(pt2_path, out_dir, get_device())
-    elif args.all:
-        if len(args.paths) != 2:
-            parser.error("--all needs <model_dir> <stamp_file>")
-        model_dir, stamp_file = (Path(p) for p in args.paths)
-        compile_all_ops(model_dir, get_device())
-    else:
-        if len(args.paths) != 2:
-            parser.error("per-op mode needs <op_dir> <stamp_file>")
-        op_dir, stamp_file = (Path(p) for p in args.paths)
-        compile_op(op_dir, get_device())
+    try:
+        if args.whole_model:
+            if len(args.paths) != 3:
+                parser.error(
+                    "--whole-model needs <pt2_file> <out_dir> <stamp_file>")
+            pt2_path, out_dir, stamp_file = (Path(p) for p in args.paths)
+            compile_model(pt2_path, out_dir, get_device())
+        elif args.all:
+            if len(args.paths) != 2:
+                parser.error("--all needs <model_dir> <stamp_file>")
+            model_dir, stamp_file = (Path(p) for p in args.paths)
+            compile_all_ops(model_dir, get_device())
+        else:
+            if len(args.paths) != 2:
+                parser.error("per-op mode needs <op_dir> <stamp_file>")
+            op_dir, stamp_file = (Path(p) for p in args.paths)
+            compile_op(op_dir, get_device())
+    except QuantisationError as e:
+        print(f"    ERROR: {e}", file=sys.stderr)
+        sys.exit(1)
 
     write_stamp(stamp_file)
 

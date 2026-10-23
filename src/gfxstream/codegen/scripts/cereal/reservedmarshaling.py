@@ -324,7 +324,7 @@ class VulkanReservedMarshalingCodegen(VulkanTypeIterator):
         if needConsistencyCheck and featureExpr is None:
             self.cgen.beginIf("!(%s)" % checkName)
             self.cgen.stmt(
-                "fprintf(stderr, \"fatal: %s inconsistent between guest and host\\n\")" % (access))
+                "GFXSTREAM_ERROR(\"fatal: %s inconsistent between guest and host\")" % (access))
             self.cgen.endIf()
 
     def onCheckWithNullOptionalStringFeature(self, vulkanType):
@@ -996,22 +996,33 @@ class VulkanReservedMarshaling(VulkanWrapperGenerator):
             streamNamespace = "gfxstream"
 
         if direction == "write":
+            cgen.beginIf("!%s" % (sizeVar))
             cgen.stmt("memcpy(*%s, &%s, sizeof(uint32_t));" % (self.ptrVarName, sizeVar))
             cgen.stmt("%s::Stream::toBe32((uint8_t*)*%s); *%s += sizeof(uint32_t)" % (streamNamespace, self.ptrVarName, self.ptrVarName))
+            cgen.line("// exit if this was a null extension struct (size == 0 in this branch)")
+            cgen.stmt("return")
+            cgen.endIf()
         elif not self.dynAlloc:
             cgen.stmt("memcpy(&%s, *%s, sizeof(uint32_t));" % (sizeVar, self.ptrVarName))
             cgen.stmt("%s::Stream::fromBe32((uint8_t*)&%s); *%s += sizeof(uint32_t)" % (streamNamespace, sizeVar, self.ptrVarName))
-
-        cgen.beginIf("!%s" % (sizeVar))
-        cgen.line("// exit if this was a null extension struct (size == 0 in this branch)")
-        cgen.stmt("return")
-        cgen.endIf()
+            cgen.beginIf("!%s" % (sizeVar))
+            cgen.line("// exit if this was a null extension struct (size == 0 in this branch)")
+            cgen.stmt("return")
+            cgen.endIf()
+        else:
+            cgen.beginIf("!%s" % (sizeVar))
+            cgen.line("// exit if this was a null extension struct (size == 0 in this branch)")
+            cgen.stmt("return")
+            cgen.endIf()
 
         cgen.endIf()
 
         # Now we can do stream stuff
         if direction == "write":
+            cgen.stmt("uint8_t* sizePtr = *%s" % self.ptrVarName)
+            cgen.stmt("*%s += sizeof(uint32_t)" % self.ptrVarName)
             cgen.stmt("memcpy(*%s, %s, sizeof(VkStructureType)); *%s += sizeof(VkStructureType)" % (self.ptrVarName, extParam.paramName, self.ptrVarName))
+            cgen.stmt("uint8_t* structStartPtr = *%s" % self.ptrVarName)
         elif not self.dynAlloc:
             cgen.stmt("uint64_t pNext_placeholder")
             placeholderAccess = "(&pNext_placeholder)"
@@ -1021,8 +1032,9 @@ class VulkanReservedMarshaling(VulkanWrapperGenerator):
         def fatalDefault(cgen):
             cgen.line("// fatal; the switch is only taken if the extension struct is known")
             if self.variant != "guest":
-                cgen.stmt("fprintf(stderr, \" %s, Unhandled Vulkan structure type %s [%d], aborting.\\n\", __func__, string_VkStructureType(VkStructureType(structType)), structType)")
-            cgen.stmt("abort()")
+                cgen.stmt("GFXSTREAM_FATAL(\"%s, Unhandled Vulkan structure type %s [%d], aborting.\", __func__, string_VkStructureType(VkStructureType(structType)), structType)")
+            else:
+                cgen.stmt("abort()")
             pass
 
         self.emitForEachStructExtension(
@@ -1032,6 +1044,11 @@ class VulkanReservedMarshaling(VulkanWrapperGenerator):
             forEach,
             defaultEmit=fatalDefault,
             rootTypeVar=ROOT_TYPE_PARAM)
+
+        if direction == "write":
+            cgen.stmt("%s = (uint32_t)(*%s - structStartPtr)" % (sizeVar, self.ptrVarName))
+            cgen.stmt("memcpy(sizePtr, &%s, sizeof(uint32_t))" % sizeVar)
+            cgen.stmt("%s::Stream::toBe32(sizePtr)" % streamNamespace)
 
     def onEnd(self,):
         VulkanWrapperGenerator.onEnd(self)

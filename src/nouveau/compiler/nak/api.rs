@@ -168,8 +168,6 @@ fn nir_options(dev: &nv_device_info) -> nir_shader_compiler_options {
         lower_ffract: true,
         lower_fpow: true,
         lower_scmp: true,
-        lower_uadd_carry: true,
-        lower_usub_borrow: true,
         has_rotate32: dev.sm >= 32,
         has_shfr32: dev.sm >= 32,
         has_iadd3: dev.sm >= 70,

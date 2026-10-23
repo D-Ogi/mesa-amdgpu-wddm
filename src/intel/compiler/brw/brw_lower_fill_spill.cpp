@@ -151,7 +151,7 @@ brw_lower_lsc64_fill(const intel_device_info *devinfo, brw_shader &s,
                                                     0 /* surface_state_index */);;
 
    unspill_inst->dst = dst;
-   unspill_inst->src[SENDG_SRC_IND_0_DESC] = brw_s0(BRW_TYPE_UQ, 7);
+   unspill_inst->src[SENDG_SRC_IND_0_DESC] = brw_get_scratch64_surface_state_addr(&s);
    unspill_inst->src[SENDG_SRC_IND_1_DESC] = brw_reg();
    unspill_inst->src[SEND_SRC_PAYLOAD1] = offset;
    unspill_inst->src[SEND_SRC_PAYLOAD2] = brw_reg();
@@ -258,7 +258,7 @@ brw_lower_lsc64_spill(const intel_device_info *devinfo, brw_scratch_inst *inst)
                                                   (inst->use_base_offset ? inst->offset : 0) / 4,
                                                   0 /* surface_state_index */);
 
-   spill_inst->src[SENDG_SRC_IND_0_DESC] = brw_s0(BRW_TYPE_UQ, 7);
+   spill_inst->src[SENDG_SRC_IND_0_DESC] = brw_get_scratch64_surface_state_addr(bld.shader);
    spill_inst->src[SENDG_SRC_IND_1_DESC] = brw_reg();
    spill_inst->src[SEND_SRC_PAYLOAD1] = offset;
    spill_inst->src[SEND_SRC_PAYLOAD2] = src;
@@ -285,17 +285,6 @@ bool
 brw_lower_fill_and_spill(brw_shader &s)
 {
    bool progress = false;
-
-   if (s.key->use_efficient_64bit) {
-      brw_inst *first_inst =
-         s.cfg->first_block()->start();
-      const brw_builder ubld = brw_builder(first_inst).exec_all().group(1, 0);
-      ubld.emit(SHADER_OPCODE_MOV_RELOC_IMM, brw_s0(BRW_TYPE_UD, 14),
-                brw_imm_ud(BRW_SHADER_RELOC_SCRATCH64_SURFACE_LOW), brw_imm_ud(0));
-      ubld.emit(SHADER_OPCODE_MOV_RELOC_IMM, brw_s0(BRW_TYPE_UD, 15),
-                brw_imm_ud(BRW_SHADER_RELOC_SCRATCH64_SURFACE_HIGH), brw_imm_ud(0));
-   }
-
 
    foreach_block_and_inst_safe(block, brw_inst, inst, s.cfg) {
       switch (inst->opcode) {

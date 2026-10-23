@@ -22,13 +22,14 @@ radv_drirc_rst = custom_target(
     join_paths(dir_source_root, 'src/amd/vulkan/radv_drirc_gen.py'),
     drirc_gen,
     join_paths(dir_source_root, 'src/amd/vulkan/00-radv-defaults.conf'),
+    join_paths(dir_source_root, 'src/amd/vulkan/01-radv-performance.conf'),
   ],
   output : 'radv_drirc.rst',
   command : [
     prog_python, '@INPUT0@',
     '--import-path', join_paths(dir_source_root, 'src/util'),
     '--rst', '@OUTPUT@',
-    '--validate', '@INPUT2@',
+    '--validate', '@INPUT2@', '@INPUT3@',
   ],
 )
 

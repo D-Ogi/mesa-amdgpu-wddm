@@ -211,7 +211,6 @@ nv50_init_screen_caps(struct nv50_screen *screen)
    caps->device_type = dev->info.type == NV_DEVICE_TYPE_DIS
       ? PIPE_DEVICE_TYPE_DISCRETE_GPU
       : PIPE_DEVICE_TYPE_INTEGRATED_GPU;
-   caps->endianness = PIPE_ENDIAN_LITTLE;
    caps->max_texture_gather_components = (class_3d >= NVA3_3D_CLASS) ? 4 : 0;
    caps->max_window_rectangles = NV50_MAX_WINDOW_RECTANGLES;
    caps->max_texture_upload_memory_budget = 16 * 1024 * 1024;

@@ -14,6 +14,10 @@
 extern "C" {
 #endif
 
+/* Minimum required DRM version (Linux kernel 6.11.2+). */
+#define AC_AMDGPU_DRM_MAJOR 3
+#define AC_AMDGPU_DRM_MINOR 59
+
 struct radeon_info;
 
 enum radeon_family

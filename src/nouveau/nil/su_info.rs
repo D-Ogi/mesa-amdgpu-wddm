@@ -306,12 +306,12 @@ pub extern "C" fn nil_fill_su_info(
 
 #[unsafe(no_mangle)]
 pub extern "C" fn nil_buffer_fill_su_info(
-    _dev: &nil_rs_bindings::nv_device_info,
+    dev: &nil_rs_bindings::nv_device_info,
     base_address: u64,
     format: Format,
     num_elements: u32,
 ) -> SuInfo {
-    assert!(format.supports_buffer());
+    assert!(format.supports_buffer(dev));
 
     SuInfo {
         addr_shifted8: (base_address >> 8)

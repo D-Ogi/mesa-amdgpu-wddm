@@ -69,6 +69,11 @@ jay_dst_stride_minmax(jay_inst *I, bool do_max)
     * execution data type to the destination type
     */
    if (I->op == JAY_OPCODE_CVT) {
+      /* ..and refuse mov.u16 dst<4>, src<2>:f */
+      if (min == JAY_STRIDE_2) {
+         max = JAY_STRIDE_4;
+      }
+
       min = MAX2(min, min_stride_for_type(jay_src_type(I, 0)));
 
       /* Conversions between integer and HF must be strided by a DWord on the
@@ -81,7 +86,8 @@ jay_dst_stride_minmax(jay_inst *I, bool do_max)
          min = JAY_STRIDE_4;
    }
 
-   if (I->op == JAY_OPCODE_EXPAND_QUAD) {
+   if (I->op == JAY_OPCODE_EXPAND_QUAD ||
+       I->op == JAY_OPCODE_OFFSET_PACKED_PIXEL_COORDS) {
       return JAY_STRIDE_4;
    }
 

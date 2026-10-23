@@ -1892,6 +1892,7 @@ void
 v3dX(draw_init)(struct pipe_context *pctx)
 {
         pctx->draw_vbo = v3d_draw_vbo;
+        pctx->draw_vbo_buffers = util_draw_vbo_buffers;
         pctx->clear = v3d_clear;
         pctx->clear_render_target = v3d_clear_render_target;
         pctx->clear_depth_stencil = v3d_clear_depth_stencil;

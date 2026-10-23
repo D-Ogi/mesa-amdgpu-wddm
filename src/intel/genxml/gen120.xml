@@ -2031,16 +2031,16 @@
     <field name="VDEnc Statistics Stream-Out" dword="34" bits="95:0" type="VDENC_PICTURE" />
     <field name="DS FWD REF0 4X" dword="37" bits="95:0" type="VDENC_PICTURE" />
     <field name="DS FWD REF1 4X" dword="40" bits="95:0" type="VDENC_PICTURE" />
-    <field name="VDEnc CU Record Stream-Out Buffer" dword="46" bits="95:0" type="VDENC_PICTURE" />
-    <field name="VDEnc LCU PAK_OBJ_CMD Buffer" dword="49" bits="95:0" type="VDENC_PICTURE" />
-    <field name="Scaled Reference Surface 8X" dword="52" bits="95:0" type="VDENC_PICTURE" />
-    <field name="Scaled Reference Surface 4X" dword="55" bits="95:0" type="VDENC_PICTURE" />
-    <field name="VP9 Segmentation Map Stream-In Buffer" dword="58" bits="95:0" type="VDENC_PICTURE" />
-    <field name="VP9 Segmentation Map Stream-Out Buffer" dword="61" bits="31:0" type="VDENC_PICTURE" />
-    <field name="Weights Histogram Stream-Out Offset" dword="62" bits="95:0" type="uint" />
-    <field name="VDEnc Tile Row Store Buffer" dword="65" bits="95:0" type="VDENC_PICTURE" />
-    <field name="VDEnc Cumulative CU Count Stream-Out Surface" dword="68" bits="95:0" type="VDENC_PICTURE" />
-    <field name="VDEnc Palette Mode Stream-Out Surface" dword="71" bits="95:0" type="VDENC_PICTURE" />
+    <field name="VDEnc CU Record Stream-Out Buffer" dword="43" bits="95:0" type="VDENC_PICTURE" />
+    <field name="VDEnc LCU PAK_OBJ_CMD Buffer" dword="46" bits="95:0" type="VDENC_PICTURE" />
+    <field name="Scaled Reference Surface 8X" dword="49" bits="95:0" type="VDENC_PICTURE" />
+    <field name="Scaled Reference Surface 4X" dword="52" bits="95:0" type="VDENC_PICTURE" />
+    <field name="VP9 Segmentation Map Stream-In Buffer" dword="55" bits="95:0" type="VDENC_PICTURE" />
+    <field name="VP9 Segmentation Map Stream-Out Buffer" dword="58" bits="95:0" type="VDENC_PICTURE" />
+    <field name="Weights Histogram Stream-Out Offset" dword="61" bits="31:0" type="uint" />
+    <field name="VDEnc Tile Row Store Buffer" dword="62" bits="95:0" type="VDENC_PICTURE" />
+    <field name="VDEnc Cumulative CU Count Stream-Out Surface" dword="65" bits="95:0" type="VDENC_PICTURE" />
+    <field name="VDEnc Palette Mode Stream-Out Surface" dword="68" bits="95:0" type="VDENC_PICTURE" />
   </instruction>
   <instruction name="VDENC_PIPE_MODE_SELECT" bias="2" length="6" engine="video">
     <field name="DWord Length" dword="0" bits="11:0" type="uint" default="4" />

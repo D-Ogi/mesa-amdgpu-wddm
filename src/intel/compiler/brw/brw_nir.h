@@ -52,6 +52,14 @@ struct brw_nir_compiler_opts {
 
    /* Input vertices for TCS stage (0 means dynamic) */
    unsigned input_vertices;
+
+   /* Which code motion pass to run (0 means let the compiler pick) */
+   enum intel_code_motion code_motion;
+
+   /* Force nir_lower_tex to emit nir_texop_txs_lod0_intel instead of
+    * nir_texop_txs
+    */
+   bool lower_tex_use_txs_lod0_intel;
 };
 
 /* UBO surface index can come in 2 flavors :
@@ -272,7 +280,8 @@ void brw_nir_lower_mesh_outputs(nir_shader *nir,
                                 const struct brw_mue_map *map);
 void brw_nir_lower_fs_outputs(nir_shader *nir);
 bool brw_nir_lower_fs_load_output(nir_shader *shader,
-                                  const struct brw_fs_prog_key *key);
+                                  const struct brw_fs_prog_key *key,
+                                  unsigned texture_base);
 bool brw_nir_lower_fs_config_intel(nir_shader *nir,
                                    const struct brw_fs_prog_key *key,
                                    const struct brw_fs_prog_data *prog_data);
@@ -396,7 +405,7 @@ brw_uniform_block_size(const struct intel_device_info *devinfo,
 }
 
 void brw_nir_cleanup_pre_fs_prog_data(struct brw_pass_tracker *pt);
-void brw_nir_optimize(struct brw_pass_tracker *pt);
+void brw_nir_optimize(struct brw_pass_tracker *pt, bool run_code_motion);
 
 bool brw_nir_move_interpolation_to_top(nir_shader *nir);
 nir_def *brw_nir_load_global_const(nir_builder *b,
@@ -511,7 +520,7 @@ brw_nir_fragment_shader_needs_wa_18019110168(const struct intel_device_info *dev
 
 void
 brw_nir_mesh_convert_attrs_prim_to_vert(struct nir_shader *nir,
-                                        struct brw_compile_mesh_params *params,
+                                        struct brw_compile_params *params,
                                         int *wa_mapping);
 
 bool
@@ -521,7 +530,7 @@ brw_nir_frag_convert_attrs_prim_to_vert(struct nir_shader *nir,
 bool
 brw_nir_frag_convert_attrs_prim_to_vert_indirect(struct nir_shader *nir,
                                                  const struct intel_device_info *devinfo,
-                                                 struct brw_compile_fs_params *params);
+                                                 struct brw_compile_params *params);
 
 bool brw_nir_opt_divergent_atomics(nir_shader *shader, enum brw_divergent_atomics_flags flags);
 

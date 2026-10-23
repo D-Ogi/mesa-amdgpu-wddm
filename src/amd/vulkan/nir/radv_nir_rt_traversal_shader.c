@@ -195,8 +195,7 @@ init_anyhit_vars(nir_shader *shader, struct anyhit_shader_vars *vars)
    vars->opaque = nir_variable_create(shader, nir_var_shader_temp, glsl_bool_type(), "intersection_opaque");
    vars->origin =
       nir_variable_create(shader, nir_var_shader_temp, glsl_vector_type(GLSL_TYPE_FLOAT, 3), "param_origin");
-   vars->dir =
-      nir_variable_create(shader, nir_var_shader_temp, glsl_vector_type(GLSL_TYPE_FLOAT, 3), "param_dir");
+   vars->dir = nir_variable_create(shader, nir_var_shader_temp, glsl_vector_type(GLSL_TYPE_FLOAT, 3), "param_dir");
    vars->tmin = nir_variable_create(shader, nir_var_shader_temp, glsl_float_type(), "ahit_tmin");
    vars->cull_mask_and_flags =
       nir_variable_create(shader, nir_var_shader_temp, glsl_uint_type(), "ahit_cull_mask_and_flags");
@@ -331,8 +330,8 @@ lower_ahit_isec_intrinsics(nir_builder *b, nir_intrinsic_instr *intr, void *_par
          nir_store_var(b, params->anyhit_vars->ahit_accept, nir_imm_true(b), 0x1);
          nir_store_var(b, params->candidate->tmax, intr->src[0].ssa, 1);
          nir_store_var(b, params->candidate->hit_kind, intr->src[1].ssa, 1);
-         nir_def *terminate_on_first_hit =
-            nir_test_mask(b, nir_load_var(b, params->anyhit_vars->cull_mask_and_flags), SpvRayFlagsTerminateOnFirstHitKHRMask);
+         nir_def *terminate_on_first_hit = nir_test_mask(b, nir_load_var(b, params->anyhit_vars->cull_mask_and_flags),
+                                                         SpvRayFlagsTerminateOnFirstHitKHRMask);
          nir_def *terminate = nir_ior(b, terminate_on_first_hit, nir_load_var(b, params->anyhit_vars->ahit_terminate));
          nir_store_var(b, params->anyhit_vars->ahit_terminate, terminate, 1);
 
@@ -721,7 +720,8 @@ radv_build_token_begin(nir_builder *b, const struct radv_compiler_info *compiler
    nir_push_if(b, trace);
 
    static_assert(offsetof(struct radv_ray_history_header, offset) == 0, "Unexpected offset");
-   nir_def *base_offset = nir_global_atomic(b, 32, ray_history_addr, nir_imm_int(b, token_size), .atomic_op = nir_atomic_op_iadd);
+   nir_def *base_offset =
+      nir_global_atomic(b, 32, ray_history_addr, nir_imm_int(b, token_size), .atomic_op = nir_atomic_op_iadd);
 
    /* Abuse the dword alignment of token_size to add an invalid bit to offset. */
    trace = nir_ieq_imm(b, nir_iand_imm(b, base_offset, 1), 0);
@@ -762,7 +762,8 @@ radv_build_token_end(nir_builder *b)
 static void
 radv_build_trace_ray_token(nir_builder *b, struct traversal_data *data)
 {
-   nir_def *dst_addr = radv_build_token_begin(b, data->compiler_info, radv_packed_token_trace_ray, sizeof(struct radv_packed_trace_ray_token));
+   nir_def *dst_addr = radv_build_token_begin(b, data->compiler_info, radv_packed_token_trace_ray,
+                                              sizeof(struct radv_packed_trace_ray_token));
    if (!dst_addr)
       return;
 

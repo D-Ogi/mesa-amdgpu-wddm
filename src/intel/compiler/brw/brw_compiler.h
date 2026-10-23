@@ -19,7 +19,7 @@
 #include "util/u_math.h"
 #include "brw_isa_info.h"
 #include "compiler/intel_nir.h"
-#include "compiler/intel_shader_enums.h"
+#include "compiler/intel_shader.h"
 #include "compiler/intel_nir.h"
 #include "nir_shader_compiler_options.h"
 
@@ -243,7 +243,9 @@ struct brw_base_prog_key {
 
    enum intel_atomic_branch_cases atomic_branch_flags:3;
 
-   uint32_t padding:21;
+   enum intel_code_motion code_motion:2;
+
+   uint32_t padding:19;
 };
 
 /**
@@ -951,7 +953,6 @@ struct brw_vs_prog_data {
 
    bool uses_vertexid;
    bool uses_instanceid;
-   bool uses_is_indexed_draw;
    bool uses_firstvertex;
    bool uses_baseinstance;
    bool uses_drawid;
@@ -1274,13 +1275,58 @@ struct brw_compile_params {
    const struct brw_base_prog_key *key;
    struct brw_stage_prog_data *prog_data;
 
+   /** Filled by the compiler, one entry per compiled variant. */
    struct genisa_stats *stats;
 
    void *log_data;
 
+   /** Filled by the compiler when the compilation fails.  Allocated from
+    * mem_ctx.
+    */
    char *error_str;
 
    uint64_t debug_flag;
+
+   struct {
+      const struct intel_vue_map *input_vue_map;
+   } tes;
+
+   struct {
+      const struct brw_tue_map *tue_map;
+
+      /** Load provoking vertex for wa_18019110168
+       *
+       * The callback returns a 32bit integer representing the provoking vertex.
+       */
+      void *wa_18019110168_data;
+      nir_def *(*wa_18019110168_load_provoking_vertex)(nir_builder *b,
+                                                       void *data);
+   } mesh;
+
+   struct {
+      const struct intel_vue_map *vue_map;
+      const struct brw_mue_map *mue_map;
+
+      bool use_rep_send;
+      uint8_t max_polygons;
+
+      /** Load per primitive remapping offset for wa_18019110168
+       *
+       * The callback returns a 32bit integer representing the offset of the
+       * table in the instruction heap.
+       */
+      void *wa_18019110168_data;
+      nir_def *(*wa_18019110168_load_per_primitive_remap_table_offset)(
+         nir_builder *b, void *data);
+
+      void *rt_write_data;
+      intel_nir_rt_write_cb rt_write_cb;
+   } fs;
+
+   struct {
+      unsigned num_resume_shaders;
+      struct nir_shader **resume_shaders;
+   } bs;
 
    debug_archiver *archiver;
 };
@@ -1288,121 +1334,6 @@ struct brw_compile_params {
 const unsigned *
 brw_compile(const struct brw_compiler *compiler,
             struct brw_compile_params *params);
-
-/**
- * Parameters for compiling a vertex shader.
- *
- * Some of these will be modified during the shader compilation.
- */
-struct brw_compile_vs_params {
-   struct brw_compile_params base;
-};
-
-/**
- * Parameters for compiling a tessellation control shader.
- *
- * Some of these will be modified during the shader compilation.
- */
-struct brw_compile_tcs_params {
-   struct brw_compile_params base;
-};
-
-/**
- * Parameters for compiling a tessellation evaluation shader.
- *
- * Some of these will be modified during the shader compilation.
- */
-struct brw_compile_tes_params {
-   struct brw_compile_params base;
-
-   const struct intel_vue_map *input_vue_map;
-};
-
-/**
- * Parameters for compiling a geometry shader.
- *
- * Some of these will be modified during the shader compilation.
- */
-struct brw_compile_gs_params {
-   struct brw_compile_params base;
-};
-
-struct brw_compile_task_params {
-   struct brw_compile_params base;
-};
-
-struct brw_compile_mesh_params {
-   struct brw_compile_params base;
-
-   const struct brw_tue_map *tue_map;
-
-   /** Load provoking vertex for wa_18019110168
-    *
-    * The callback returns a 32bit integer representing the provoking vertex.
-    */
-   void *wa_18019110168_data;
-   nir_def *(*wa_18019110168_load_provoking_vertex)(nir_builder *b, void *data);
-};
-
-/**
- * Parameters for compiling a fragment shader.
- *
- * Some of these will be modified during the shader compilation.
- */
-struct brw_compile_fs_params {
-   struct brw_compile_params base;
-
-   const struct intel_vue_map *vue_map;
-   const struct brw_mue_map *mue_map;
-
-   bool use_rep_send;
-   uint8_t max_polygons;
-
-   /** Load per primitive remapping offset for wa_18019110168
-    *
-    * The callback returns a 32bit integer representing the offset of the
-    * table in the instruction heap.
-    */
-   void *wa_18019110168_data;
-   nir_def *(*wa_18019110168_load_per_primitive_remap_table_offset)(nir_builder *b, void *data);
-
-   void *rt_write_data;
-   intel_nir_rt_write_cb rt_write_cb;
-};
-
-/**
- * Parameters for compiling a compute shader.
- *
- * Some of these will be modified during the shader compilation.
- */
-struct brw_compile_cs_params {
-   struct brw_compile_params base;
-};
-
-/**
- * Parameters for compiling a Bindless shader.
- *
- * Some of these will be modified during the shader compilation.
- */
-struct brw_compile_bs_params {
-   struct brw_compile_params base;
-
-   unsigned num_resume_shaders;
-   struct nir_shader **resume_shaders;
-};
-
-union brw_any_compile_params {
-   struct brw_compile_params base;
-   struct brw_compile_vs_params vs;
-   struct brw_compile_tcs_params tcs;
-   struct brw_compile_tes_params tes;
-   struct brw_compile_gs_params gs;
-   struct brw_compile_fs_params fs;
-   struct brw_compile_cs_params cs;
-   struct brw_compile_bs_params bs;
-   struct brw_compile_task_params task;
-   struct brw_compile_mesh_params mesh;
-};
 
 unsigned
 brw_cs_push_const_total_size(const struct brw_cs_prog_data *cs_prog_data,
@@ -1557,12 +1488,21 @@ intel_vrt_register_file_size(const struct intel_device_info *devinfo,
                              uint64_t source_hash,
                              unsigned size)
 {
-   if (devinfo->ver < 30)
+   if (!intel_has_vrt(devinfo))
       return 128;
 
    unsigned vrt_size = MIN2(align(size, size > 192 ? 64 : 32), 256);
 
-   if (unlikely(intel_threads_per_eu_min != (uint32_t)-1)) {
+   // Jay uses vrt_size here to determine its number of GRFs before its RA stage
+   if (unlikely(intel_threads_per_eu_set != (uint32_t)-1)) {
+      if (intel_threads_per_eu_srchash == BRW_SRCHASH_EMPTY ||
+          intel_threads_per_eu_srchash == source_hash) {
+         fprintf(stderr,
+                 "INTEL_THREADS_PER_EU: set=%u for src_hash=0x%" PRIx64 "\n",
+                 intel_threads_per_eu_set, source_hash);
+         vrt_size = ROUND_DOWN_TO(1024 / intel_threads_per_eu_set, 32);
+      }
+   } else if (unlikely(intel_threads_per_eu_min != (uint32_t)-1)) {
       if (intel_threads_per_eu_srchash == BRW_SRCHASH_EMPTY ||
           intel_threads_per_eu_srchash == source_hash) {
          fprintf(stderr,

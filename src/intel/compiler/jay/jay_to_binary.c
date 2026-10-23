@@ -109,7 +109,7 @@ to_gen_operand(
          offset_B = (reg % jay_ugpr_per_grf(f->shader)) * 4;
          R = gen_grf(grf, 0);
       } else {
-         R = gen_accumulator(reg / 2);
+         R = gen_accumulator(reg * jay_grf_per_gpr(f->shader) / 2);
       }
       R = gen_retype(gen_restride(R, 0, 1, 0), GEN_TYPE_UD);
 
@@ -119,10 +119,10 @@ to_gen_operand(
       }
 
       /* Handle SIMD split of vectorized uniform code. The mov case comes up
-       * from the SEL_ACTIVE lowering for 64-bit code.
+       * from the SEL_ACTIVE lowering for 64-bit code, CVT with lane IDs.
        */
       if (jay_num_values(d) > jay_type_vector_length(type) &&
-          (I->uniform || I->op == JAY_OPCODE_MOV)) {
+          (I->uniform || I->op == JAY_OPCODE_MOV || I->op == JAY_OPCODE_CVT)) {
          unsigned simd_width = jay_simd_width_physical(f->shader, I);
          uint32_t type_bits = jay_type_size_bits(type);
          unsigned stride_bits = type_bits;
@@ -160,11 +160,25 @@ to_gen_operand(
          }
       }
    } else if (d.file == GPR || d.file == ACCUM) {
+      struct jay_register_block block = { 0 };
       enum jay_stride def_stride =
          d.file == GPR ? jay_def_stride(f->shader, d) : JAY_STRIDE_4;
       uint32_t type_bits = jay_type_size_bits(type);
       unsigned stride_bits = jay_stride_to_bits(def_stride);
-      unsigned simd_width = jay_simd_width_physical(f->shader, I);
+      unsigned simd_width_instr = jay_simd_width_physical(f->shader, I);
+      unsigned simd_width_block = f->shader->dispatch_width;
+
+      if (d.file == GPR) {
+         block = jay_lookup_block(&f->shader->partition, d.reg, d.file);
+         simd_width_block >>= block.split;
+      }
+
+      assert(!(block.split && def_stride == JAY_STRIDE_2) &&
+             "todo: handle this case");
+      assert(simd_width_block >= simd_width_instr);
+
+      unsigned subblock_grf =
+         jay_grf_per_gpr_at_width(f->shader, simd_width_block);
 
       if (def_stride == JAY_STRIDE_2) {
          /* Select between lo/hi halves of the GPR */
@@ -174,17 +188,31 @@ to_gen_operand(
          /* Treat low bits as an offset in 2-byte words into the GRF */
          unsigned r = (reg * 2) + hi;
          unsigned mask = BITFIELD_MASK(stride_bits / 32);
-         grf += ((r & ~mask) / 2) * jay_grf_per_gpr(f->shader);
+         grf += ((r & ~mask) / 2) * subblock_grf;
          offset_B = (r & mask) * 2;
       }
 
       R = d.file == GPR ? gen_grf(grf, 0) : gen_accumulator(grf / 2);
       R = gen_restride(R, 1, 1, 0);
 
-      if (!(I->op == JAY_OPCODE_MUL_32_PART && d.file == ACCUM)) {
-         R = gen_byte_offset(devinfo, R,
-                             simd_offs * simd_width * stride_bits / 8);
+      /* SIMD split multiplication always uses acc0, so skip the usual SIMD
+       * offsetting for this case. Other accumulators use the zero-initialized
+       * (split = 0) default block per the data model.
+       */
+      if (I->op == JAY_OPCODE_MUL_32_PART && d.file == ACCUM) {
+         simd_offs = 0;
       }
+
+      unsigned simd_offs_lanes = simd_offs * simd_width_instr;
+      unsigned offs_in_subblock_lanes = simd_offs_lanes % simd_width_block;
+      unsigned subblock_idx = simd_offs_lanes / simd_width_block;
+
+      unsigned grf_size_B = jay_ugpr_per_grf(f->shader) * 4;
+      unsigned subblock_B = block.len_gpr * subblock_grf * grf_size_B;
+      unsigned subblock_offs_B = subblock_idx * subblock_B;
+      unsigned local_offs_B = offs_in_subblock_lanes * (stride_bits / 8);
+
+      R = gen_byte_offset(devinfo, R, subblock_offs_B + local_offs_B);
 
       if (stride_bits == (type_bits * 4)) {
          R = gen_restride(R, 8, 2, 4);
@@ -197,7 +225,7 @@ to_gen_operand(
       /* Broadcast is equivalent to <8, 8, 1> for SIMD1 instructions. Use that
        * instead due to regioning restrictions.
        */
-      if (simd_width == 1) {
+      if (simd_width_instr == 1) {
          R = gen_restride(R, 0, 1, 0);
       }
    } else if (d.file == FLAG) {
@@ -328,7 +356,7 @@ static const struct {
    OP(SYNC, SYNC, 1),
    OP(WHILE, WHILE, 0),
    OP(XOR, XOR, 2),
-   OP(ZIP_UGPR16, MOV, 0),
+   OP(ZIP, MOV, 0),
    OP(SLICE_REPACK, MOV, 1),
    /* clang-format on */
 };
@@ -394,21 +422,24 @@ emit(struct jay_codegen *jc,
       break;
 
    case JAY_OPCODE_DESWIZZLE_ODD: {
+      unsigned stride = jay_ugpr_per_grf(f->shader) * 4;
       bool hi = I->simd_offs == 0 ? true : jay_deswizzle_odd_src2_hi(I);
       gen->chan_offset = 0;
       gen->src[0] =
          gen_byte_offset(jc->devinfo,
                          to_gen_operand(f, I, I->simd_offs, 0, false),
-                         hi ? 64 : 0);
+                         hi ? stride : 0);
       break;
    }
 
-   case JAY_OPCODE_DESWIZZLE_EVEN:
-      gen->exec_size = 16;
-      gen->dst = gen_byte_offset(jc->devinfo, gen->dst, 64);
+   case JAY_OPCODE_DESWIZZLE_EVEN: {
+      unsigned stride = jay_ugpr_per_grf(f->shader) * 4;
+      gen->exec_size = jc->devinfo->ver < 20 ? 8 : 16;
+      gen->dst = gen_byte_offset(jc->devinfo, gen->dst, stride);
       gen->src[0] = gen_byte_offset(jc->devinfo, gen->src[0],
-                                    jay_deswizzle_even_src_hi(I) * 64);
+                                    jay_deswizzle_even_src_hi(I) * stride);
       break;
+   }
 
    case JAY_OPCODE_CVT: {
       unsigned index = jay_cvt_index(I);
@@ -463,8 +494,11 @@ emit(struct jay_codegen *jc,
       /* Quad swizzle can get split down to SIMD4 even on Xe2 where we don't
        * have NibCtrl, but those cases use NoMask so it doesn't matter.
        */
-      assert(gen->chan_offset == 0 || gen->no_mask);
-      gen->chan_offset = 0;
+      if (gen->chan_offset % 8) {
+         assert(gen->no_mask);
+         gen->chan_offset = 0;
+      }
+
       gen->src[0] = quad_swizzle(jc->devinfo, gen->src[0], I);
       break;
 
@@ -538,7 +572,7 @@ emit(struct jay_codegen *jc,
                 jay_def_stride(f->shader, I->src[s]) <= JAY_STRIDE_4);
       }
 
-      gen->exec_size = 32;
+      gen->exec_size *= 2;
       gen->chan_offset = 0;
       gen->dst = gen_retype(gen->dst, GEN_TYPE_UW);
       gen->src[0] = gen_retype(gen->src[0], GEN_TYPE_UW);
@@ -560,7 +594,7 @@ emit(struct jay_codegen *jc,
       gen->src[0] = gen_imm_uv(0x76543210 + 0x11111111 * jay_lane_id_8_base(I));
       break;
 
-   case JAY_OPCODE_ZIP_UGPR16:
+   case JAY_OPCODE_ZIP:
       gen->src[0] = to_gen_operand(f, I, I->simd_offs, 0, false);
       break;
 
@@ -584,6 +618,13 @@ emit(struct jay_codegen *jc,
       break;
 
    case JAY_OPCODE_MOV_INDIRECT:
+      /* UGPR broadcasts are both useless (degrading to a plain move) and would
+       * generate incorrect code (since we do not zero out the offset). Just
+       * assert that we don't see them, we handled them during isel.
+       */
+      assert(I->src[0].file == GPR ||
+             (I->src[0].file == UGPR && jay_num_values(I->src[0]) > 1));
+
       gen->src[0] = gen_grf(0, I->src[1].reg);
       gen->src[0].type = GEN_TYPE_UD;
       gen->src[0].indirect = true;
@@ -732,7 +773,7 @@ jay_to_binary(jay_shader *s,
          }
 
          jay_foreach_inst_in_block(block, I) {
-            // jay_print_inst(stdout, f, (jay_inst *) I);
+            // jay_print_inst(stderr, f, (jay_inst *) I);
 
             assert(jc.num_insts < jc.insts_cap);
             emit(&jc, &jc.insts[jc.num_insts++], f, I);
@@ -746,8 +787,7 @@ jay_to_binary(jay_shader *s,
    for (int i = 0; i < jc.num_insts; i++) {
       gen_inst *gen = &jc.insts[i];
 
-      if ((gen->dst.file == GEN_GRF || gen->dst.file == GEN_ARF) &&
-          gen->dst.region.hstride == 0)
+      if (gen->dst.region.hstride == 0)
          gen->dst.region.hstride = 1;
 
       if ((gen->src[2].file == GEN_GRF || gen->src[2].file == GEN_ARF) &&
@@ -767,7 +807,7 @@ jay_to_binary(jay_shader *s,
 
    gen_encode_params enc_params = {
       .devinfo = jc.devinfo,
-      .compact_all = true,
+      .compact_all = !INTEL_DEBUG(DEBUG_NO_COMPACTION),
 #ifdef NDEBUG
       .skip_validation = true,
 #endif
@@ -822,15 +862,19 @@ jay_to_binary(jay_shader *s,
       };
 
       if (debug) {
-         print_params.fp = stdout;
+         print_params.fp = stderr;
          gen_print(&print_params);
       }
 
       if (s->archiver) {
-         const char *filename =
-            ralloc_asprintf(s, "GEN%u/0", s->dispatch_width);
-         print_params.fp = debug_archiver_start_file(s->archiver, filename);
+         print_params.fp = debug_archiver_start_file(
+            s->archiver, ralloc_asprintf(s, "GEN%u/0", s->dispatch_width));
          gen_print(&print_params);
+         debug_archiver_finish_file(s->archiver);
+
+         FILE *bin_dump = debug_archiver_start_file(
+            s->archiver, ralloc_asprintf(s, "GEN%u/0.bin", s->dispatch_width));
+         fwrite(jc.output, 1, jc.output_size, bin_dump);
          debug_archiver_finish_file(s->archiver);
       }
    }

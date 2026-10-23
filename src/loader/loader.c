@@ -770,7 +770,7 @@ loader_get_pci_driver(int fd)
    }
 
 out:
-   log_(driver ? _LOADER_DEBUG : _LOADER_WARNING,
+   log_(driver ? _LOADER_DEBUG : _LOADER_INFO,
          "pci id for fd %d: %04x:%04x, driver %s\n",
          fd, vendor_id, chip_id, driver);
    return driver;

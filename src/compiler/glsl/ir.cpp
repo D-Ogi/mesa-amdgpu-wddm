@@ -522,8 +522,6 @@ ir_expression::ir_expression(int op, ir_rvalue *op0, ir_rvalue *op1)
 
    case ir_binop_imul_high:
    case ir_binop_mul_32x16:
-   case ir_binop_carry:
-   case ir_binop_borrow:
    case ir_binop_lshift:
    case ir_binop_rshift:
    case ir_binop_ldexp:

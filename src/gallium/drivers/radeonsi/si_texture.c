@@ -223,8 +223,7 @@ static int si_init_surface(struct si_screen *sscreen, struct radeon_surf *surfac
             flags |= RADEON_SURF_NO_HTILE;
       }
 
-      if (!is_imported && (!(ptex->bind & PIPE_BIND_SCANOUT) ||
-                           sscreen->info.gfx12_supports_display_dcc)) {
+      if (!is_imported) {
          enum pipe_format format = util_format_get_depth_only(ptex->format);
 
          /* These should be set for both color and Z/S. */
@@ -1175,7 +1174,8 @@ static struct si_texture *si_texture_create_object(struct pipe_screen *screen,
        *
        * Sparse textures don't have any backing storage at this point.
        */
-      if (!(base->flags & PIPE_RESOURCE_FLAG_SPARSE))
+      if (!(base->flags & PIPE_RESOURCE_FLAG_SPARSE) &&
+          !(surface->flags & RADEON_SURF_IMPORTED))
          si_set_tex_bo_metadata(sscreen, tex);
       return tex;
    }
@@ -1828,7 +1828,7 @@ static struct pipe_resource *si_texture_from_winsys_buffer(struct si_screen *ssc
           md_flags & (1u << AC_SURF_METADATA_FLAG_FAMILY_OVERRIDEN_BIT)) {
          mesa_loge("si_texture_from_winsys_buffer: fail texture import due to "
                    "AC_SURF_METADATA_FLAG_FAMILY_OVERRIDEN_BIT being set.");
-         return NULL;
+         goto fail;
       }
    } else {
       /**
@@ -1859,7 +1859,7 @@ static struct pipe_resource *si_texture_from_winsys_buffer(struct si_screen *ssc
    r = si_init_surface(sscreen, &surface, templ, metadata.mode, modifier, true,
                        surface.flags & RADEON_SURF_SCANOUT, false, false);
    if (r)
-      return NULL;
+      goto fail;
 
    /* This is a hack to skip alignment checking for 3D textures */
    if (templ->target == PIPE_TEXTURE_3D)
@@ -1868,7 +1868,7 @@ static struct pipe_resource *si_texture_from_winsys_buffer(struct si_screen *ssc
    tex = si_texture_create_object(&sscreen->b, templ, &surface, NULL, buf,
                                   offset, stride, 0, 0);
    if (!tex)
-      return NULL;
+      goto fail;
 
    if (!take_ownership) {
       struct pb_buffer_lean *tmp = NULL;
@@ -1938,6 +1938,11 @@ static struct pipe_resource *si_texture_from_winsys_buffer(struct si_screen *ssc
 
    assert(tex->surface.tile_swizzle == 0);
    return &tex->buffer.b.b;
+
+fail:
+   if (take_ownership)
+      radeon_bo_drop_reference(sscreen->ws, buf);
+   return NULL;
 }
 
 static struct pipe_resource *si_texture_from_handle(struct pipe_screen *screen,

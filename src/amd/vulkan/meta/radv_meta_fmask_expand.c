@@ -156,7 +156,6 @@ radv_process_color_image(struct radv_cmd_buffer *cmd_buffer, struct radv_image *
    radv_unaligned_dispatch(cmd_buffer, image->vk.extent.width, image->vk.extent.height, layer_count);
 
    radv_image_view_finish(&iview);
-
 }
 
 void
@@ -178,7 +177,7 @@ radv_fmask_color_expand(struct radv_cmd_buffer *cmd_buffer, struct radv_image *i
 
    cmd_buffer->state.flush_bits |=
       AC_BARRIER_SYNC_CS | radv_src_access_flush(cmd_buffer, VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
-                                                             VK_ACCESS_2_SHADER_WRITE_BIT, 0, image, subresourceRange);
+                                                 VK_ACCESS_2_SHADER_WRITE_BIT, 0, image, subresourceRange);
 
    /* Re-initialize FMASK in fully expanded mode. */
    cmd_buffer->state.flush_bits |= radv_init_fmask(cmd_buffer, image, subresourceRange);

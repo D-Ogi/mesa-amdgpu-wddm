@@ -218,7 +218,10 @@ traces:
       text: oscillates between the two checksums above
       label: [skip, flakes]
     zink-radv-gfx1201:
-      checksum: be4f37153200f03674134578238f679c
+      # checksum: be4f37153200f03674134578238f679c
+      # checksum: b9cbca1fbe8ad1dd985e9760bc51c5a7
+      text: depends on whether the async optimized pipeline is ready
+      label: [skip, flakes]
 
   humus/VolumetricFogging2-v2.trace:
     gl-zink-anv-adl:

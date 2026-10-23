@@ -89,8 +89,6 @@ struct llvmpipe_context;
 
 
 struct lp_geometry_shader {
-   bool no_tokens;
-   struct pipe_stream_output_info stream_output;
    struct draw_geometry_shader *dgs;
 };
 
