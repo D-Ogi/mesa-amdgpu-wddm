@@ -164,6 +164,13 @@ radv_bc250_device_env_init(struct radv_device *device, const struct radv_physica
    env->task_witness = pdev->bc250_hybrid_task && debug_get_bool_option("RADV_BC250_TASK_WITNESS", true);
    env->task_witness_ms = debug_get_num_option("RADV_BC250_TASK_WITNESS_MS", 12000);
    env->task_witness_draws = debug_get_num_option("RADV_BC250_TASK_WITNESS_DRAWS", 1);
+#ifdef AMDGPU_WDDM_LAB_FLAVOUR
+   env->no_producer_pfp_sync = !debug_get_bool_option("RADV_BC250_TASK_PFP_SYNC", true);
+   if (env->no_producer_pfp_sync)
+      fprintf(stderr, "radv/bc250: RADV_BC250_TASK_PFP_SYNC=0, producer barriers do not hold the PFP\n");
+#else
+   env->no_producer_pfp_sync = false;
+#endif
    simple_mtx_init(&device->bc250_task_witness_mtx, mtx_plain);
    device->bc250_task_witness_armed = env->task_witness ? env->task_witness_draws : 0;
    if (env->local_bos)
@@ -3880,6 +3887,21 @@ struct bc250_task_slot {
    uint32_t pad;
 };
 
+/* The barrier between a producer and the CP command that reads what the producer wrote: indirect
+ * draw or dispatch arguments, a draw count, a COND_EXEC flag. The PFP fetches those arguments, so the
+ * flush must hold the PFP as well as the ME. Since the ac_barrier rework, a GFX10 flush runs its
+ * ACQUIRE_MEM in the ME and syncs the PFP only when AC_BARRIER_PFP_SYNC_ME is set; upstream added the
+ * flag to its own compute-to-indirect barriers (the DGC prepare barrier in radv_cmd_buffer.c is one).
+ * Mesa 26.2.1, the DirectMesh base, ran that ACQUIRE_MEM in the PFP for every flush, which is why the
+ * DirectMesh flushes carry no explicit PFP synchronization. Without the flag the PFP can fetch the
+ * mesh records before the producer has written them, and the mesh draw then launches no workgroup.
+ * The lab flavour can remove the flag (RADV_BC250_TASK_PFP_SYNC=0) to reproduce that case. */
+static enum ac_barrier_flags
+bc250_cp_read_barrier(const struct radv_cmd_buffer *cmd_buffer)
+{
+   return radv_cmd_buffer_device(cmd_buffer)->bc250_env.no_producer_pfp_sync ? 0 : AC_BARRIER_PFP_SYNC_ME;
+}
+
 /* Proven per-dispatch task-group bound. Larger application dispatches are
  * split into sequential chunks of at most this many groups so that scratch
  * allocation stays bounded and each producer dispatch remains inside the range
@@ -6752,7 +6774,7 @@ bc250_emit_chunk(struct radv_cmd_buffer *cmd_buffer, struct radv_graphics_pipeli
    radv_meta_end(cmd_buffer);
 
    cmd_buffer->state.flush_bits |= AC_BARRIER_SYNC_CS | AC_BARRIER_INV_VMEM |
-                                   AC_BARRIER_INV_SMEM | AC_BARRIER_INV_L2;
+                                   AC_BARRIER_INV_SMEM | AC_BARRIER_INV_L2 | bc250_cp_read_barrier(cmd_buffer);
    if (pipeline->bc250_ordered) {
       /* Publish both shader-readable output records and CP-readable draw counts. */
       cmd_buffer->state.flush_bits |= AC_BARRIER_WB_L2;
@@ -6837,7 +6859,7 @@ bc250_emit_indirect_chunk(struct radv_cmd_buffer *cmd_buffer, struct radv_graphi
    radv_meta_end(cmd_buffer);
 
    cmd_buffer->state.flush_bits |= AC_BARRIER_SYNC_CS | AC_BARRIER_INV_VMEM |
-                                   AC_BARRIER_INV_SMEM | AC_BARRIER_INV_L2;
+                                   AC_BARRIER_INV_SMEM | AC_BARRIER_INV_L2 | bc250_cp_read_barrier(cmd_buffer);
    if (pipeline->bc250_ordered) {
       /* Publish both shader-readable output records and CP-readable draw counts. */
       cmd_buffer->state.flush_bits |= AC_BARRIER_WB_L2;
@@ -7082,6 +7104,15 @@ bc250_invalidate_after_task_tail(struct radv_cmd_buffer *cmd_buffer)
  * Only the first device->bc250_env.task_witness_draws draws are witnessed, so the two forced flushes
  * are not a steady-state cost. */
 #define BC250_TASK_WITNESS_WORDS 16u
+/* Words 2-4: record 0 (mesh x, y, z) as the PFP reads it just before the mesh draw. Words 5-7: the same
+ * record as the ME reads it after the producer retired. Words 8-10: payload dwords 0-2 of task group 0,
+ * as the ME reads them. A PFP record of zero with an ME record that is not zero is a PFP read before the
+ * producer wrote the record; an ME record of zero is a producer that wrote no record. Only the direct
+ * draw of fewer than BC250_TASK_CHUNK groups writes these words; every other draw leaves the arm value. */
+#define BC250_TASK_WITNESS_RECORD_PFP 2u
+#define BC250_TASK_WITNESS_RECORD_ME  5u
+#define BC250_TASK_WITNESS_PAYLOAD    8u
+#define BC250_TASK_WITNESS_UNSET      0xffffffffu
 
 static bool
 bc250_task_witness_arm(struct radv_cmd_buffer *cmd_buffer)
@@ -7114,6 +7145,8 @@ bc250_task_witness_arm(struct radv_cmd_buffer *cmd_buffer)
          device->bc250_task_witness_armed--;
          device->bc250_task_witness_map[0] = RADV_BC250_TASK_PHASE_NONE;
          device->bc250_task_witness_map[1]++;
+         for (unsigned i = BC250_TASK_WITNESS_RECORD_PFP; i < BC250_TASK_WITNESS_PAYLOAD + 3; i++)
+            device->bc250_task_witness_map[i] = BC250_TASK_WITNESS_UNSET;
          armed = true;
       }
    }
@@ -7146,6 +7179,29 @@ bc250_task_witness_fence(struct radv_cmd_buffer *cmd_buffer, enum radv_bc250_tas
    bc250_task_witness_mark(cmd_buffer, phase);
 }
 
+/* Copy three dwords at va into witness words word to word + 2. The PFP copy is issued at the same
+ * point of the stream as the next draw's argument fetch, so it reads what that fetch reads. */
+static void
+bc250_task_witness_copy(struct radv_cmd_buffer *cmd_buffer, uint64_t va, unsigned word, bool pfp)
+{
+   struct radv_device *device = radv_cmd_buffer_device(cmd_buffer);
+   radeon_check_space(device->ws, cmd_buffer->cs->b, 3 * 6);
+   for (unsigned i = 0; i < 3; i++)
+      ac_emit_cp_copy_data(cmd_buffer->cs->b, COPY_DATA_SRC_MEM, COPY_DATA_DST_MEM, va + 4 * i,
+                           device->bc250_task_witness_va + 4 * (word + i),
+                           AC_CP_COPY_DATA_WR_CONFIRM | (pfp ? AC_CP_COPY_DATA_ENGINE_PFP : 0), false);
+}
+
+/* After the RETIRED fence: record 0 and payload dwords 0-2 as the ME reads them, then record 0 as the
+ * PFP reads it. Nothing between this point and the mesh draw packet adds a flush. */
+static void
+bc250_task_witness_records(struct radv_cmd_buffer *cmd_buffer, uint64_t records, uint64_t payload)
+{
+   bc250_task_witness_copy(cmd_buffer, records, BC250_TASK_WITNESS_RECORD_ME, false);
+   bc250_task_witness_copy(cmd_buffer, payload, BC250_TASK_WITNESS_PAYLOAD, false);
+   bc250_task_witness_copy(cmd_buffer, records, BC250_TASK_WITNESS_RECORD_PFP, true);
+}
+
 /* Resolve a submitted witnessed draw, without ever waiting. Called after a submit, at the next
  * submit, at vkQueueWaitIdle and once more before the buffer is released. While the phase word is
  * short of DONE and the bound has not passed, the draw stays pending and nothing is reported: the
@@ -7172,8 +7228,11 @@ bc250_task_witness_resolve(struct radv_device *device, const char *where)
    simple_mtx_unlock(&device->bc250_task_witness_mtx);
 
    if (done) {
-      fprintf(stderr, "BC250 TASK WITNESS: draw %u retired, phase=%u after %u ms (%s)\n", draws, phase,
-              waited, where);
+      volatile const uint32_t *w = device->bc250_task_witness_map;
+      fprintf(stderr, "BC250 TASK WITNESS: draw %u retired, phase=%u after %u ms (%s) "
+                      "record_pfp=%08x,%08x,%08x record_me=%08x,%08x,%08x payload=%08x,%08x,%08x pfp_sync=%u\n",
+              draws, phase, waited, where, w[2], w[3], w[4], w[5], w[6], w[7], w[8], w[9], w[10],
+              !device->bc250_env.no_producer_pfp_sync);
       return;
    }
    if (!expired)
@@ -7374,7 +7433,7 @@ bc250_draw_task(struct radv_cmd_buffer *cmd_buffer, uint32_t x, uint32_t y, uint
       bc250_chain_dispatch(cmd_buffer, &setup_dispatch, "indirect_task_setup");
       radv_meta_end(cmd_buffer);
       cmd_buffer->state.flush_bits |= AC_BARRIER_SYNC_CS | AC_BARRIER_INV_VMEM |
-                                      AC_BARRIER_INV_SMEM | AC_BARRIER_INV_L2;
+                                      AC_BARRIER_INV_SMEM | AC_BARRIER_INV_L2 | bc250_cp_read_barrier(cmd_buffer);
       struct radv_device *device = radv_cmd_buffer_device(cmd_buffer);
       const bool skip_suffix = device->bc250_env.skip_inactive_chunks;
       bc250_emit_indirect_chunk(cmd_buffer, pipeline, &constants, address, 0, skip_suffix);
@@ -7464,10 +7523,12 @@ bc250_draw_task(struct radv_cmd_buffer *cmd_buffer, uint32_t x, uint32_t y, uint
       radv_meta_end(cmd_buffer);
 
       cmd_buffer->state.flush_bits |= AC_BARRIER_SYNC_CS | AC_BARRIER_INV_VMEM |
-                                      AC_BARRIER_INV_SMEM | AC_BARRIER_INV_L2;
+                                      AC_BARRIER_INV_SMEM | AC_BARRIER_INV_L2 | bc250_cp_read_barrier(cmd_buffer);
       /* BD-119: the producer's waves have retired when this flush returns. */
-      if (witness)
+      if (witness) {
          bc250_task_witness_fence(cmd_buffer, RADV_BC250_TASK_PHASE_RETIRED);
+         bc250_task_witness_records(cmd_buffer, address, constants.payload);
+      }
       if (pipeline->bc250_ordered) {
          cmd_buffer->state.flush_bits |= AC_BARRIER_WB_L2;
          radv_emit_cache_flush(cmd_buffer, false);
@@ -7737,7 +7798,7 @@ bc250_split_batch_append(struct radv_cmd_buffer *cmd_buffer, const struct bc250_
       radv_meta_end(cmd_buffer);
       /* The flush the per-draw path emits after each setup dispatch, once. */
       cmd_buffer->state.flush_bits |= AC_BARRIER_SYNC_CS | AC_BARRIER_INV_VMEM |
-                                      AC_BARRIER_INV_SMEM;
+                                      AC_BARRIER_INV_SMEM | bc250_cp_read_barrier(cmd_buffer);
       if (!device->bc250_env.no_split_l2_inv)
          cmd_buffer->state.flush_bits |= AC_BARRIER_INV_L2;
       cmd_buffer->bc250_split_batch = list;
@@ -7813,7 +7874,7 @@ bc250_split_setup_dispatch(struct radv_cmd_buffer *cmd_buffer, const struct radv
       radv_meta_end(cmd_buffer);
    }
    cmd_buffer->state.flush_bits |= AC_BARRIER_SYNC_CS | AC_BARRIER_INV_VMEM |
-                                   AC_BARRIER_INV_SMEM;
+                                   AC_BARRIER_INV_SMEM | bc250_cp_read_barrier(cmd_buffer);
    /* Performance A/B (default unchanged): on GFX10 the CP reads the setup
     * shader's records through L2, which the compute writes already reached, so
     * RADV_BC250_PERF_NO_SPLIT_L2_INV=1 skips the per-draw L2 invalidation. */
@@ -8126,7 +8187,7 @@ radv_bc250_draw_merge_indirect(struct radv_cmd_buffer *cmd_buffer, unsigned merg
        * INDIRECT_COMMAND_READ barrier is CS_PARTIAL_FLUSH + INV_SCACHE on
        * GFX9+; the base driver's RADV_BC250_PERF_NO_SPLIT_L2_INV is the same argument).
        * RADV_BC250_MESH_MERGE_PREP_L2_INV=1 adds INV_VCACHE | INV_L2 for an A/B. */
-      cmd_buffer->state.flush_bits |= AC_BARRIER_SYNC_CS | AC_BARRIER_INV_SMEM;
+      cmd_buffer->state.flush_bits |= AC_BARRIER_SYNC_CS | AC_BARRIER_INV_SMEM | bc250_cp_read_barrier(cmd_buffer);
       if (radv_cmd_buffer_device(cmd_buffer)->bc250_env.merge_prep_l2_inv)
          cmd_buffer->state.flush_bits |= AC_BARRIER_INV_VMEM | AC_BARRIER_INV_L2;
    }

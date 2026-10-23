@@ -194,6 +194,10 @@ struct radv_bc250_device_env {
    bool task_witness;
    unsigned task_witness_ms;
    unsigned task_witness_draws;
+   /* Lab flavour, RADV_BC250_TASK_PFP_SYNC=0: the barriers between a producer and the CP read of its
+    * output leave out AC_BARRIER_PFP_SYNC_ME (bc250_cp_read_barrier). Always false in the release
+    * flavour. */
+   bool no_producer_pfp_sync;
 };
 
 #define RADV_BC250_MESH_VERT_GRP_CLAMP 1
