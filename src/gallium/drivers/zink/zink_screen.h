@@ -155,9 +155,9 @@ zink_screen_unlock_context(struct zink_screen *screen);
 VkSemaphore
 zink_create_exportable_semaphore(struct zink_screen *screen);
 VkSemaphore
-zink_screen_export_dmabuf_semaphore(struct zink_screen *screen, struct zink_resource *res);
+zink_screen_export_dmabuf_semaphore(struct zink_screen *screen, struct zink_resource *res, bool write);
 bool
-zink_screen_import_dmabuf_semaphore(struct zink_screen *screen, struct zink_resource *res, VkSemaphore sem);
+zink_screen_import_dmabuf_semaphore(struct zink_screen *screen, struct zink_resource *res, VkSemaphore sem, bool write);
 
 void
 zink_init_format_props(struct zink_screen *screen, enum pipe_format pformat);

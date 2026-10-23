@@ -138,8 +138,8 @@ emit_halti5_only_state(struct etna_context *ctx, int vs_output_count)
    if (unlikely(dirty & (ETNA_DIRTY_SHADER))) {
       /* Magic states (load balancing, inter-unit sync, buffers) */
       /*007C4*/ EMIT_STATE(FE_HALTI5_ID_CONFIG, ctx->shader_state.FE_HALTI5_ID_CONFIG);
-      /*00870*/ EMIT_STATE(VS_HALTI5_OUTPUT_COUNT, vs_output_count | ((vs_output_count * 0x10) << 8));
-      /*008A0*/ EMIT_STATE(VS_HALTI5_UNK008A0, 0x0001000e | ((0x110/vs_output_count) << 20));
+      /*00870*/ EMIT_STATE(VS_HALTI5_OUTPUT_COUNT, ctx->shader_state.VS_HALTI5_OUTPUT_COUNT);
+      /*008A0*/ EMIT_STATE(VS_VERTEX_CACHE_CONFIG, ctx->shader_state.VS_VERTEX_CACHE_CONFIG);
       for (int x = 0; x < VIVS_VS_HALTI5_OUTPUT__LEN; ++x) {
          /*008E0*/ EMIT_STATE(VS_HALTI5_OUTPUT(x), ctx->shader_state.VS_OUTPUT[x]);
       }
@@ -605,6 +605,9 @@ etna_emit_state(struct etna_context *ctx)
    }
    if (unlikely(dirty & (ETNA_DIRTY_FRAMEBUFFER)) && screen->info->halti >= 3)
       /*014BC*/ EMIT_STATE(PE_MEM_CONFIG, ctx->framebuffer.PE_MEM_CONFIG);
+   if (unlikely(dirty & (ETNA_DIRTY_BLEND)) &&
+       VIV_FEATURE(screen, ETNA_FEATURE_PE_ADVANCE_BLEND_PART0))
+      /*014C0*/ EMIT_STATE(PE_ADVANCED_ALPHA_CONFIG, etna_blend_state(ctx->blend)->PE_ADVANCED_ALPHA_CONFIG);
    if (unlikely(dirty & (ETNA_DIRTY_FRAMEBUFFER | ETNA_DIRTY_TS))) {
       /*01654*/ EMIT_STATE(TS_MEM_CONFIG, ctx->framebuffer.TS_MEM_CONFIG);
       /*01658*/ EMIT_STATE_RELOC(TS_COLOR_STATUS_BASE, &ctx->framebuffer.TS_COLOR_STATUS_BASE);
@@ -852,13 +855,13 @@ etna_emit_state(struct etna_context *ctx)
          etna_stall(stream, SYNC_RECIPIENT_RA, SYNC_RECIPIENT_PE);
       }
    } else {
-      if (dirty & (ETNA_DIRTY_CONSTBUF | ctx->shader.vs->uniforms_dirty_bits)) {
+      if (dirty & (ETNA_DIRTY_CONSTBUF_VS | ctx->shader.vs->uniforms_dirty_bits)) {
          if (need_steering)
             etna_set_state(stream, VIVS_SH_CONTROL, 0x0);
          etna_uniforms_write(ctx, ctx->shader.vs, ctx->constant_buffer[MESA_SHADER_VERTEX].cb);
       }
 
-      if (dirty & (ETNA_DIRTY_CONSTBUF | ctx->shader.fs->uniforms_dirty_bits)) {
+      if (dirty & (ETNA_DIRTY_CONSTBUF_FS | ctx->shader.fs->uniforms_dirty_bits)) {
          if (need_steering)
             etna_set_state(stream, VIVS_SH_CONTROL, VIVS_SH_CONTROL_PS_UNIFORM);
          etna_uniforms_write(ctx, ctx->shader.fs, ctx->constant_buffer[MESA_SHADER_FRAGMENT].cb);

@@ -84,12 +84,8 @@ load_texture_functions_ptr(struct gallivm_state *gallivm, LLVMValueRef descripto
    LLVMValueRef texture_base_offset = lp_build_const_int64(gallivm, offset1);
    LLVMValueRef texture_base_ptr = LLVMBuildAdd(builder, descriptor, texture_base_offset, "");
 
-   LLVMTypeRef texture_base_type = LLVMInt64TypeInContext(gallivm->context);
-   LLVMTypeRef texture_base_ptr_type = LLVMPointerType(texture_base_type, 0);
-
-   texture_base_ptr = LLVMBuildIntToPtr(builder, texture_base_ptr, texture_base_ptr_type, "");
    /* struct lp_texture_functions * */
-   LLVMValueRef texture_base = LLVMBuildLoad2(builder, texture_base_type, texture_base_ptr, "");
+   LLVMValueRef texture_base = lp_build_load_pointer_as_int64(gallivm, texture_base_ptr);
 
    LLVMValueRef functions_offset = lp_build_const_int64(gallivm, offset2);
    return LLVMBuildAdd(builder, texture_base, functions_offset, "");
@@ -281,12 +277,12 @@ lp_bld_llvm_sampler_soa_emit_fetch_texel(const struct lp_build_sampler_soa *base
       for (unsigned i = 0; i < ARRAY_SIZE(out_data); i++) {
          params->texel[i] = LLVMBuildExtractValue(builder, result, i, "");
 
+         if (params->type.length != lp_native_vector_width / 32)
+            params->texel[i] = truncate_to_type_width(gallivm, params->texel[i], params->type);
+
          /* Expand the residency code to the expected size. */
          if (i == 4)
             params->texel[i] = LLVMBuildZExt(builder, params->texel[i], out_residency_type, "");
-
-         if (params->type.length != lp_native_vector_width / 32)
-            params->texel[i] = truncate_to_type_width(gallivm, params->texel[i], params->type);
 
          if (!params->exec_mask_nz)
             LLVMBuildStore(builder, params->texel[i], out_data[i]);

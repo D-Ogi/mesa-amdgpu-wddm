@@ -222,10 +222,13 @@ jay_print_inst_with_lu(
 
    /* Software scoreboard dependency info */
    if (I->dep.regdist || I->dep.mode) {
-      fprintf(fp, "%s%s%s", strlen(sep) ? " {" : "{",
-              I->replicate_dep ? "*" : "", I->decrement_dep ? "+" : "");
+      fprintf(fp, "%s", strlen(sep) ? " {" : "{");
       gen_print_swsb(NULL, fp, I->dep);
       fprintf(fp, "}");
+   }
+
+   if (I->simd_split) {
+      fprintf(fp, " [%u/%u]", I->simd_offs, 1 << I->simd_split);
    }
 
    fprintf(fp, "\n");
@@ -245,10 +248,12 @@ comma_separate(FILE *fp, jay_block *block, bool *first)
 void
 jay_print_block(FILE *fp, jay_function *func, jay_block *block)
 {
-   fprintf(fp, "B%d%s%s", block->index, block->uniform ? " [uniform]" : "",
+   fprintf(fp, "B%d%s%s [weight %.3f]", block->index,
+           block->uniform ? " [uniform]" : "",
            block->loop_header          ? " [loop header]" :
            block->physical_loop_header ? " [physical loop header]" :
-                                         "");
+                                         "",
+           block->weight);
    bool first = true;
    jay_foreach_predecessor(block, p, GPR) {
       fprintf(fp, "%s B%d", first ? " <-" : "", (*p)->index);
@@ -266,6 +271,9 @@ jay_print_block(FILE *fp, jay_function *func, jay_block *block)
    jay_foreach_phi_dst_in_block(block, phi) {
       comma_separate(fp, block, &first);
       jay_print_def(fp, func, block, phi, -1, NULL);
+      if (phi->type == JAY_TYPE_U16) {
+         fprintf(fp, "ₕ");
+      }
    }
    fprintf(fp, "%s", first ? "" : " = 𝜙\n");
 
@@ -280,7 +288,8 @@ jay_print_block(FILE *fp, jay_function *func, jay_block *block)
    first = true;
    jay_foreach_phi_src_in_block(block, phi) {
       comma_separate(fp, block, &first);
-      fprintf(fp, "𝜙%u = ", jay_phi_src_index(phi));
+      fprintf(fp, "𝜙%u%s = ", jay_phi_src_index(phi),
+              phi->type == JAY_TYPE_U16 ? "ₕ" : "");
       jay_print_def(fp, func, block, phi, 0, NULL);
    }
    fprintf(fp, "%s", first ? "" : "\n");

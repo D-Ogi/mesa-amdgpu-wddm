@@ -337,7 +337,10 @@ anv_h265_huc_s2l_fill_dmem(struct anv_cmd_buffer *cmd_buffer,
    for (unsigned i = 0; i < frame_info->referenceSlotCount; i++)
       pic->RefIdxMapping[i] = hcp_ref_idx[i];
 
-   uint32_t buffer_offset = frame_info->srcBufferOffset & 4095;
+   ANV_FROM_HANDLE(anv_buffer, src_buffer, frame_info->srcBuffer);
+   struct anv_address src_addr =
+      anv_address_add(src_buffer->address, frame_info->srcBufferOffset);
+   uint32_t buffer_offset = anv_address_physical(src_addr) & 4095;
 
    for (unsigned s = 0; s < h265_pic_info->sliceSegmentCount; s++) {
       slices[s].BSNALunitDataLocation =
@@ -367,6 +370,9 @@ genX(h265_huc_s2l)(struct anv_cmd_buffer *cmd_buffer,
 {
    ANV_FROM_HANDLE(anv_buffer, src_buffer, frame_info->srcBuffer);
    struct anv_device *device = cmd_buffer->device;
+   struct anv_address src_addr =
+      anv_address_add(src_buffer->address, frame_info->srcBufferOffset);
+   uint32_t buffer_offset = anv_address_physical(src_addr) & 4095;
 
    const uint32_t slice_bss_offset =
       offsetof(struct anv_huc_hevc_s2l_bss, SliceBss);
@@ -414,13 +420,11 @@ genX(h265_huc_s2l)(struct anv_cmd_buffer *cmd_buffer,
    }
 
    anv_batch_emit(&cmd_buffer->batch, GENX(HUC_IND_OBJ_BASE_ADDR_STATE), ind) {
-      ind.HUCIndirectStreamInObjectAddress =
-         anv_address_add(src_buffer->address, frame_info->srcBufferOffset & ~4095);
+      ind.HUCIndirectStreamInObjectAddress = anv_address_align_down(src_addr, 4096);
 
       ind.HUCIndirectStreamInObjectAddressAttributes = ANV_VID_ATTR(device, src_buffer->address.bo);
       ind.HUCIndirectStreamInObjectAccessUpperBound =
-         anv_address_add(src_buffer->address,
-                         align64(frame_info->srcBufferRange + frame_info->srcBufferOffset, 4096));
+         anv_address_align(anv_address_add(src_addr, frame_info->srcBufferRange), 4096);
       ind.HUCIndirectStreamOutObjectAddressAttributes = ANV_VID_ATTR(device, NULL);
    }
 
@@ -443,7 +447,6 @@ genX(h265_huc_s2l)(struct anv_cmd_buffer *cmd_buffer,
       dmem.HUCDataLength = dmem_size / 64;
    }
 
-   uint32_t buffer_offset = frame_info->srcBufferOffset & 4095;
    uint32_t last_slice = h265_pic_info->sliceSegmentCount - 1;
 
    for (unsigned s = 0; s <= last_slice; s++) {
@@ -525,10 +528,6 @@ anv_huc_emit_copy(struct anv_cmd_buffer *cmd_buffer,
                   uint32_t size)
 {
    struct anv_device *device = cmd_buffer->device;
-   uint32_t src_offset = src_addr.offset & 4095;
-   uint32_t dst_offset = dst_addr.offset & 4095;
-   struct anv_address src_base = { src_addr.bo, src_addr.offset - src_offset };
-   struct anv_address dst_base = { dst_addr.bo, dst_addr.offset - dst_offset };
 
    anv_batch_emit(&cmd_buffer->batch, GENX(MFX_WAIT), mfx) {
       mfx.MFXSyncControlFlag = 1;
@@ -544,23 +543,23 @@ anv_huc_emit_copy(struct anv_cmd_buffer *cmd_buffer,
    }
 
    anv_batch_emit(&cmd_buffer->batch, GENX(HUC_IND_OBJ_BASE_ADDR_STATE), ind) {
-      ind.HUCIndirectStreamInObjectAddress = src_base;
-      ind.HUCIndirectStreamInObjectAddressAttributes = ANV_VID_ATTR(device, src_base.bo);
+      ind.HUCIndirectStreamInObjectAddress = anv_address_align_down(src_addr, 4096);
+      ind.HUCIndirectStreamInObjectAddressAttributes = ANV_VID_ATTR(device, src_addr.bo);
 
       ind.HUCIndirectStreamInObjectAccessUpperBound =
-         anv_address_add(src_base, align64(src_offset + size, 4096));
+         anv_address_align(anv_address_add(src_addr, size), 4096);
 
-      ind.HUCIndirectStreamOutObjectAddress = dst_base;
-      ind.HUCIndirectStreamOutObjectAddressAttributes = ANV_VID_ATTR(device, dst_base.bo);
+      ind.HUCIndirectStreamOutObjectAddress = anv_address_align_down(dst_addr, 4096);
+      ind.HUCIndirectStreamOutObjectAddressAttributes = ANV_VID_ATTR(device, dst_addr.bo);
       ind.HUCIndirectStreamOutObjectAccessUpperBound =
-         anv_address_add(dst_base, align64(dst_offset + size, 4096));
+         anv_address_align(anv_address_add(dst_addr, size), 4096);
    }
 
    anv_batch_emit(&cmd_buffer->batch, GENX(HUC_STREAM_OBJECT), so) {
       so.IndirectStreamInDataLength = size;
-      so.IndirectStreamInAddress = src_offset;
+      so.IndirectStreamInAddress = anv_address_physical(src_addr) & 4095;
       so.HUCProcessing = true;
-      so.IndirectStreamOutAddress = dst_offset;
+      so.IndirectStreamOutAddress = anv_address_physical(dst_addr) & 4095;
       so.StreamOut = true;
       so.HUCBitstreamEnable = true;
    }

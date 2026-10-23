@@ -233,23 +233,23 @@ enum
 #define DBG(name)       (1ull << DBG_##name)
 
 #define SI_BIND_CONSTANT_BUFFER_SHIFT     0
-#define SI_BIND_SHADER_BUFFER_SHIFT       6
-#define SI_BIND_IMAGE_BUFFER_SHIFT        12
-#define SI_BIND_SAMPLER_BUFFER_SHIFT      18
-#define SI_BIND_OTHER_BUFFER_SHIFT        24
+#define SI_BIND_SHADER_BUFFER_SHIFT       SI_NUM_SHADERS
+#define SI_BIND_IMAGE_BUFFER_SHIFT        (SI_NUM_SHADERS * 2)
+#define SI_BIND_SAMPLER_BUFFER_SHIFT      (SI_NUM_SHADERS * 3)
+#define SI_BIND_OTHER_BUFFER_SHIFT        (SI_NUM_SHADERS * 4)
 
-/* Bind masks for all 6 shader stages. */
-#define SI_BIND_CONSTANT_BUFFER_ALL       (0x3f << SI_BIND_CONSTANT_BUFFER_SHIFT)
-#define SI_BIND_SHADER_BUFFER_ALL         (0x3f << SI_BIND_SHADER_BUFFER_SHIFT)
-#define SI_BIND_IMAGE_BUFFER_ALL          (0x3f << SI_BIND_IMAGE_BUFFER_SHIFT)
-#define SI_BIND_SAMPLER_BUFFER_ALL        (0x3f << SI_BIND_SAMPLER_BUFFER_SHIFT)
+/* Bind masks for all shader stages. */
+#define SI_BIND_CONSTANT_BUFFER_ALL       (BITFIELD64_MASK(SI_NUM_SHADERS) << SI_BIND_CONSTANT_BUFFER_SHIFT)
+#define SI_BIND_SHADER_BUFFER_ALL         (BITFIELD64_MASK(SI_NUM_SHADERS) << SI_BIND_SHADER_BUFFER_SHIFT)
+#define SI_BIND_IMAGE_BUFFER_ALL          (BITFIELD64_MASK(SI_NUM_SHADERS) << SI_BIND_IMAGE_BUFFER_SHIFT)
+#define SI_BIND_SAMPLER_BUFFER_ALL        (BITFIELD64_MASK(SI_NUM_SHADERS) << SI_BIND_SAMPLER_BUFFER_SHIFT)
 
-#define SI_BIND_CONSTANT_BUFFER(shader)   ((1 << (shader)) << SI_BIND_CONSTANT_BUFFER_SHIFT)
-#define SI_BIND_SHADER_BUFFER(shader)     ((1 << (shader)) << SI_BIND_SHADER_BUFFER_SHIFT)
-#define SI_BIND_IMAGE_BUFFER(shader)      ((1 << (shader)) << SI_BIND_IMAGE_BUFFER_SHIFT)
-#define SI_BIND_SAMPLER_BUFFER(shader)    ((1 << (shader)) << SI_BIND_SAMPLER_BUFFER_SHIFT)
-#define SI_BIND_VERTEX_BUFFER             (1 << (SI_BIND_OTHER_BUFFER_SHIFT + 0))
-#define SI_BIND_STREAMOUT_BUFFER          (1 << (SI_BIND_OTHER_BUFFER_SHIFT + 1))
+#define SI_BIND_CONSTANT_BUFFER(shader)   (BITFIELD64_BIT(shader) << SI_BIND_CONSTANT_BUFFER_SHIFT)
+#define SI_BIND_SHADER_BUFFER(shader)     (BITFIELD64_BIT(shader) << SI_BIND_SHADER_BUFFER_SHIFT)
+#define SI_BIND_IMAGE_BUFFER(shader)      (BITFIELD64_BIT(shader) << SI_BIND_IMAGE_BUFFER_SHIFT)
+#define SI_BIND_SAMPLER_BUFFER(shader)    (BITFIELD64_BIT(shader) << SI_BIND_SAMPLER_BUFFER_SHIFT)
+#define SI_BIND_VERTEX_BUFFER             BITFIELD64_BIT(SI_BIND_OTHER_BUFFER_SHIFT + 0)
+#define SI_BIND_STREAMOUT_BUFFER          BITFIELD64_BIT(SI_BIND_OTHER_BUFFER_SHIFT + 1)
 
 /* Only 32-bit buffer allocations are supported, gallium doesn't support more
  * at the moment.
@@ -271,7 +271,7 @@ struct si_resource {
    uint8_t bo_alignment_log2;
    enum radeon_bo_domain domains:8;
    enum radeon_bo_flag flags:16;
-   unsigned bind_history; /* bitmask of SI_BIND_xxx_BUFFER */
+   uint64_t bind_history; /* bitmask of SI_BIND_xxx_BUFFER */
 
    /* The buffer range which is initialized (with a write transfer,
     * streamout, DMA, or as a random access target). The rest of
@@ -1272,14 +1272,26 @@ struct si_context {
    void (*emit_spi_map[33])(struct si_context *sctx, unsigned index);
 
    /* SQTT */
-   struct ac_sqtt *sqtt;
-   struct ac_spm spm;
-   struct pipe_fence_handle *last_sqtt_fence;
-   enum rgp_sqtt_marker_event_type sqtt_next_event;
-   bool sqtt_enabled;
-   struct si_sqtt_timestamp sqtt_timestamp;
-   uint64_t sqtt_device_id;
-   uint32_t sqtt_cb_id;
+   struct {
+      struct ac_sqtt *data;
+      struct radeon_cmdbuf *start_cs[2];
+      struct radeon_cmdbuf *stop_cs[2];
+      struct ac_spm spm;
+      struct pipe_fence_handle *last_fence;
+      enum rgp_sqtt_marker_event_type next_event;
+      enum {
+         SQTT_STATUS_OFF,
+         SQTT_STATUS_TRACING,
+         SQTT_STATUS_STOPPING
+      } status;
+      struct si_sqtt_timestamp timestamp;
+      uint64_t device_id;
+      uint32_t cb_id;
+
+      enum ac_rgp_capture_mode mode;
+      int start_frame, end_frame;
+      char *trigger_file;
+   } sqtt;
 
    bool perfetto_enabled;
 
@@ -1370,7 +1382,7 @@ struct pipe_resource *si_buffer_from_winsys_buffer(struct pipe_screen *screen,
                                                    bool take_ownership);
 void si_replace_buffer_storage(struct pipe_context *ctx, struct pipe_resource *dst,
                                struct pipe_resource *src, unsigned num_rebinds,
-                               uint32_t rebind_mask, uint32_t delete_buffer_id);
+                               uint64_t rebind_mask, uint32_t delete_buffer_id);
 bool si_reallocate_buffer_change_flags(struct si_context *sctx, struct pipe_resource *buf,
                                        unsigned usage, unsigned bind);
 void si_init_screen_buffer_functions(struct si_screen *sscreen);
@@ -1565,9 +1577,9 @@ void si_init_perfcounters(struct si_screen *screen);
 void si_destroy_perfcounters(struct si_screen *screen);
 void si_inhibit_clockgating(struct si_context *sctx, struct radeon_cmdbuf *cs, bool inhibit);
 void si_pc_emit_shaders(struct radeon_cmdbuf *cs, unsigned shaders);
-void si_emit_spm_setup(struct si_context *sctx, struct radeon_cmdbuf *cs);
-bool si_spm_init(struct si_context *sctx);
-void si_spm_finish(struct si_context *sctx);
+void si_emit_spm_setup(struct si_context *sctx, struct ac_spm *spm, struct radeon_cmdbuf *cs);
+bool si_spm_init(struct si_context *sctx, struct ac_spm *spm);
+void si_spm_finish(struct si_context *sctx, struct ac_spm *spm);
 
 /* si_query.c */
 void si_init_screen_query_functions(struct si_screen *sscreen);

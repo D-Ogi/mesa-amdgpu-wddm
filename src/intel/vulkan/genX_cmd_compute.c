@@ -312,9 +312,9 @@ anv_cmd_buffer_push_driver_values(struct anv_cmd_buffer *cmd_buffer,
          uint64_t addr64 = anv_address_physical(indirect_group);
          uint32_t lower_addr32 = addr64 & 0xffffffff;
          uint32_t upper_addr32 = addr64 >> 32;
-         UPDATE_PUSH(push->drv_data.cs.num_workgroups[0], UINT32_MAX);
-         UPDATE_PUSH(push->drv_data.cs.num_workgroups[1], lower_addr32);
-         UPDATE_PUSH(push->drv_data.cs.num_workgroups[2], upper_addr32);
+         UPDATE_PUSH(push->drv_data.cs.num_workgroups[0], lower_addr32);
+         UPDATE_PUSH(push->drv_data.cs.num_workgroups[1], upper_addr32);
+         UPDATE_PUSH(push->drv_data.cs.num_workgroups[2], UINT32_MAX);
       }
    }
 
@@ -585,9 +585,9 @@ emit_indirect_compute_walker(struct anv_cmd_buffer *cmd_buffer,
       .push_addr64 = push_addr64,
       .base_wg = {0, 0, 0},
       .num_wg = {
-         UINT32_MAX,
          indirect_addr64 & 0xffffffff,
          indirect_addr64 >> 32,
+         UINT32_MAX,
       },
       .unaligned_x_offset = 0,
    };
@@ -604,6 +604,7 @@ emit_indirect_compute_walker(struct anv_cmd_buffer *cmd_buffer,
          .Post_sync_opn3.MOCS     = anv_mocs(device, NULL, 0),
       };
 
+      assert(comp_state->shader->bind_map.inline_dwords_count <= ARRAY_SIZE(body.InlineData));
       fill_inline_params(body.InlineData, &inline_value);
 
       cmd_buffer->state.last_indirect_dispatch =
@@ -629,6 +630,7 @@ emit_indirect_compute_walker(struct anv_cmd_buffer *cmd_buffer,
          },
       };
 
+      assert(comp_state->shader->bind_map.inline_dwords_count <= ARRAY_SIZE(body.InlineData));
       fill_inline_params(body.InlineData, &inline_value);
 
       cmd_buffer->state.last_indirect_dispatch =
@@ -681,9 +683,9 @@ emit_compute_walker(struct anv_cmd_buffer *cmd_buffer,
    };
    if (!anv_address_is_null(indirect_addr)) {
       uint64_t indirect_addr64 = anv_address_physical(indirect_addr);
-      inline_value.num_wg[0] = UINT32_MAX;
-      inline_value.num_wg[1] = indirect_addr64 & 0xffffffff;
-      inline_value.num_wg[2] = indirect_addr64 >> 32;
+      inline_value.num_wg[0] = indirect_addr64 & 0xffffffff;
+      inline_value.num_wg[1] = indirect_addr64 >> 32;
+      inline_value.num_wg[2] = UINT32_MAX;
    } else {
       inline_value.num_wg[0] = num_wg[0];
       inline_value.num_wg[1] = num_wg[1];
@@ -1658,7 +1660,7 @@ cmd_buffer_trace_rays(struct anv_cmd_buffer *cmd_buffer,
          .Post_sync_opn3.MOCS            = anv_mocs(device, NULL, 0),
          .InterfaceDescriptor            = (struct GENX(INTERFACE_DESCRIPTOR_DATA_2)) {
             .KernelStartPointer                =
-               anv_shader_internal_get_pointer(device, device->rt_trampoline),
+               anv_shader_get_pointer(device, &device->rt_trampoline->kernel),
             .RegistersPerThread                = intel_register_blocks(device->info, cs_prog_data->base.grf_used),
             .NumberofThreadsinGPGPUThreadGroup = dispatch.threads,
             .ThreadGroupDispatchSize           = intel_compute_threads_group_dispatch_size_walker_2(dispatch.threads),
@@ -1702,7 +1704,7 @@ cmd_buffer_trace_rays(struct anv_cmd_buffer *cmd_buffer,
 #endif
 
          .InterfaceDescriptor = (struct GENX(INTERFACE_DESCRIPTOR_DATA)) {
-            .KernelStartPointer = anv_shader_internal_get_pointer(device, device->rt_trampoline),
+            .KernelStartPointer = anv_shader_get_pointer(device, &device->rt_trampoline->kernel),
             .NumberofThreadsinGPGPUThreadGroup = threads_per_group,
             .ThreadGroupDispatchSize =
                intel_compute_threads_group_dispatch_size(threads_per_group),

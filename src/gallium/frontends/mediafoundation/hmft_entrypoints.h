@@ -447,15 +447,23 @@ class __declspec( uuid( HMFT_GUID ) ) CDX12EncHMFT : CMFD3DManager,
    HRESULT UpdateAvailableInputType();
    HRESULT InternalCheckInputType( IMFMediaType *pType );
    HRESULT InternalCheckOutputType( IMFMediaType *pType );
-   HRESULT CheckMediaType( IMFMediaType *pmt, bool bInputType );
+
+   HRESULT CheckInputMediaType( IMFMediaType *pmt );
+   HRESULT CheckInputMediaSubType( IMFMediaType *pmt );
+
+   HRESULT CheckOutputMediaType( IMFMediaType *pmt );
+   HRESULT CheckOutputMediaSubType( IMFMediaType *pmt, enum pipe_video_profile& videoProfile );
 
 #if MFT_CODEC_H264ENC
+   enum pipe_video_profile ConvertAVEncVProfileToPipeVideoProfile( struct vl_screen *vlScreen, eAVEncH264VProfile profile );
    HRESULT CheckMediaTypeLevel(
       IMFMediaType *pmt, int width, int height, const encoder_capabilities &encoderCapabilities, eAVEncH264VLevel *pLevel ) const;
 #elif MFT_CODEC_H265ENC
+   enum pipe_video_profile ConvertAVEncVProfileToPipeVideoProfile( struct vl_screen *vlScreen, eAVEncH265VProfile profile );
    HRESULT CheckMediaTypeLevel(
       IMFMediaType *pmt, int width, int height, const encoder_capabilities &encoderCapabilities, eAVEncH265VLevel *pLevel ) const;
 #elif MFT_CODEC_AV1ENC
+   enum pipe_video_profile ConvertAVEncVProfileToPipeVideoProfile( struct vl_screen *vlScreen, eAVEncAV1VProfile profile );
    HRESULT CheckMediaTypeLevel(
       IMFMediaType *pmt, int width, int height, const encoder_capabilities &encoderCapabilities, eAVEncAV1VLevel *pLevel ) const;
 #endif

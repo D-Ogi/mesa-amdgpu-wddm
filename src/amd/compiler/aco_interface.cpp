@@ -8,10 +8,10 @@
 
 #include "aco_ir.h"
 
+#include "nir.h"
 #include "util/memstream.h"
 
 #include "ac_gpu_info.h"
-#include "nir.h"
 #include <vector>
 
 using namespace aco;
@@ -361,25 +361,20 @@ aco_is_gpu_supported(const struct radeon_info* info)
    switch (info->gfx_level) {
    case GFX6:
    case GFX7:
-   case GFX8:
-      return true;
-   case GFX9:
-      return info->has_graphics; /* no CDNA support */
+   case GFX8: return true;
+   case GFX9: return info->has_graphics; /* no CDNA support */
    case GFX10:
    case GFX10_3:
    case GFX11:
    case GFX11_5:
    case GFX11_7:
-   case GFX12:
-      return true;
-   default:
-      return false;
+   case GFX12: return true;
+   default: return false;
    }
 }
 
 void
-aco_print_asm(const struct radeon_info *info, unsigned wave_size,
-              uint32_t *binary, unsigned num_dw)
+aco_print_asm(const struct radeon_info* info, unsigned wave_size, uint32_t* binary, unsigned num_dw)
 {
    std::vector<uint32_t> binarray(binary, binary + num_dw);
    aco::Program prog;

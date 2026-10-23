@@ -563,7 +563,7 @@ stage_has_inline_param(const struct intel_device_info *devinfo, mesa_shader_stag
 
 static struct anv_push_range
 compute_final_push_range(const nir_shader *nir,
-                         const struct intel_device_info *devinfo,
+                         const struct anv_physical_device *pdevice,
                          const struct push_data *data,
                          struct anv_pipeline_bind_map *map)
 {
@@ -599,12 +599,19 @@ compute_final_push_range(const nir_shader *nir,
     * (unlike all Gfx stages) and so we can bound+align the allocation there
     * (see anv_cmd_buffer_cs_push_constants).
     */
+   const struct intel_device_info *devinfo = &pdevice->info;
    const bool has_inline_param = stage_has_inline_param(devinfo, nir->info.stage);
+   /* COMPUTE_WALKER_2 has up to 16 dwords, but mesh/task shaders still only
+    * have the 8 dwords.
+    */
+   const uint32_t max_dwords =
+      pdevice->uses_efficient_64bit ?
+      (nir->info.stage == MESA_SHADER_COMPUTE ? 16 : 8) : 8;
 
    map->inline_dwords_count = 0;
 
    /* Can we fit all the push data in the inline parameters? */
-   if (has_inline_param && BITSET_COUNT(data->push_dwords) < 8) {
+   if (has_inline_param && BITSET_COUNT(data->push_dwords) < max_dwords) {
       unsigned i;
       map->inline_dwords_count = 0;
       BITSET_FOREACH_SET(i, data->push_dwords, PUSH_CONSTANTS_DWORDS)
@@ -627,7 +634,7 @@ compute_final_push_range(const nir_shader *nir,
 
       /* Can we fit all the driver data in the inline parameters? */
       if ((BITSET_COUNT(data->push_dwords) -
-           BITSET_PREFIX_SUM(data->push_dwords, MAX_PUSH_CONSTANTS_SIZE / 4)) <= 6) {
+           BITSET_PREFIX_SUM(data->push_dwords, MAX_PUSH_CONSTANTS_SIZE / 4)) <= (max_dwords - 2)) {
          unsigned i;
          BITSET_FOREACH_SET(i, data->push_dwords, PUSH_CONSTANTS_DWORDS) {
             /* Iterate application push constants (not driver values) */
@@ -669,7 +676,7 @@ anv_nir_compute_push_layout(nir_shader *nir,
                        prog_key, map, NULL, NULL);
 
    struct anv_push_range push_constant_range =
-      compute_final_push_range(nir, devinfo, &data, map);
+      compute_final_push_range(nir, pdevice, &data, map);
 
    /* When platforms support Mesh and the fragment shader is not fully linked
     * to the previous shader, payload format can change if the preceding
@@ -791,7 +798,7 @@ anv_nir_compute_push_layout(nir_shader *nir,
 
       /* Update the ranges */
       struct anv_push_range shrinked_push_constant_range =
-         compute_final_push_range(nir, devinfo, &data, map);
+         compute_final_push_range(nir, pdevice, &data, map);
       assert(shrinked_push_constant_range.length <= push_constant_range.length);
 
       if (shrinked_push_constant_range.length > 0) {

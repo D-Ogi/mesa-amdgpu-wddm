@@ -1010,10 +1010,9 @@ impl DeviceBase {
     }
 
     pub fn fp64_is_softfp(&self) -> bool {
-        bit_check(
-            self.get_nir_options().lower_doubles_options as u32,
-            nir_lower_doubles_options::nir_lower_fp64_full_software as u32,
-        )
+        self.get_nir_options()
+            .lower_doubles_options
+            .are_all_bits_set(nir_lower_doubles_options::nir_lower_fp64_full_software)
     }
 
     pub fn int64_supported(&self) -> bool {

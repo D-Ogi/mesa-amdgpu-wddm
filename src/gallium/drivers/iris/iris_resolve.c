@@ -713,8 +713,13 @@ iris_hiz_exec(struct iris_context *ice,
                                 res->aux.usage, level, true);
 
    struct blorp_batch blorp_batch;
-   blorp_batch_init(&ice->blorp, &blorp_batch, batch, 0);
+   blorp_batch_init(&ice->blorp, &blorp_batch, batch,
+                    batch->dfc_vp_sent && op == ISL_AUX_OP_FAST_CLEAR ?
+                    BLORP_BATCH_NO_HIZ_EMIT_DEPTH_CLEAR_VIEWPORT : 0);
    blorp_hiz_op(&blorp_batch, &surf, level, start_layer, num_layers, op);
+
+   batch->dfc_vp_sent = devinfo->ver >= 35;
+
    blorp_batch_finish(&blorp_batch);
 
    /* For gfx8-11, the following stalls and flushes are only documented to be

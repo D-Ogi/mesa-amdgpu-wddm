@@ -190,4 +190,5 @@ dEQP-VK.synchronization2.cross_instance.suballocated.write_ssbo_fragment_read_ve
 
 dEQP-VK.robustness.robustness2.bind.notemplate.r32f.unroll.nonvolatile.storage_image.fmt_qual.img.samples_1.cube_array.vert
 dEQP-VK.robustness.robustness2.bind.notemplate.r32ui.unroll.volatile.storage_image.fmt_qual.img.samples_1.cube_array.vert
+dEQP-VK.robustness.robustness2.bind.notemplate.rgba32i.unroll.volatile.storage_image.fmt_qual.null_descriptor.samples_1.3d.vert
 dEQP-VK.synchronization2.timeline_semaphore.device_host.write_ssbo_compute_indirect_read_vertex_input.buffer_262144

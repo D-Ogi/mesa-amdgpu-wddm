@@ -2480,8 +2480,6 @@ nir_visitor::visit(ir_expression *ir)
       result = (out_type == GLSL_TYPE_INT) ? nir_imul_high(&b, srcs[0], srcs[1])
                                            : nir_umul_high(&b, srcs[0], srcs[1]);
       break;
-   case ir_binop_carry:  result = nir_uadd_carry(&b, srcs[0], srcs[1]);  break;
-   case ir_binop_borrow: result = nir_usub_borrow(&b, srcs[0], srcs[1]); break;
    case ir_binop_less:
       b.fp_math_ctrl |= nir_fp_preserve_inf;
       if (type_is_float(types[0]))

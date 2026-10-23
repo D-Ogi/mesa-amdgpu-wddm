@@ -182,9 +182,7 @@ vk_extent3d_el_to_px(const VkExtent3D extent_el,
 static bool
 isl_tiling_supports_standard_block_shapes(enum isl_tiling tiling)
 {
-   return isl_tiling_is_64(tiling) ||
-          tiling == ISL_TILING_ICL_Ys ||
-          tiling == ISL_TILING_SKL_Ys;
+   return (1 << tiling) & ISL_TILING_STD_64KB_MASK;
 }
 
 static uint32_t
@@ -681,13 +679,13 @@ anv_trtt_first_bind_init(struct anv_device *device)
     * before the TRTT mutex for consistency with the order of other paths
     * (e.g., anv_queue_submit_cmd_buffers_locked()).
     */
-   pthread_mutex_lock(&device->mutex);
+   simple_mtx_lock(&device->mutex);
    simple_mtx_lock(&trtt->mutex);
 
    /* This means we have already initialized the first bind. */
    if (likely(trtt->l3_addr)) {
       simple_mtx_unlock(&trtt->mutex);
-      pthread_mutex_unlock(&device->mutex);
+      simple_mtx_unlock(&device->mutex);
       return VK_SUCCESS;
    }
 
@@ -733,7 +731,7 @@ out:
       trtt->l3_addr = 0;
 
    simple_mtx_unlock(&trtt->mutex);
-   pthread_mutex_unlock(&device->mutex);
+   simple_mtx_unlock(&device->mutex);
    return result;
 }
 
@@ -768,7 +766,7 @@ anv_sparse_bind_trtt(struct anv_device *device,
     * before the TRTT mutex for consistency with the order that locking is
     * done around other paths (e.g., anv_queue_submit_cmd_buffers_locked()).
     */
-   pthread_mutex_lock(&device->mutex);
+   simple_mtx_lock(&device->mutex);
    simple_mtx_lock(&trtt->mutex);
 
    /* Do this so we can avoid reallocs later. */
@@ -875,7 +873,7 @@ anv_sparse_bind_trtt(struct anv_device *device,
    list_addtail(&submit->link, &trtt->in_flight_batches);
 
    simple_mtx_unlock(&trtt->mutex);
-   pthread_mutex_unlock(&device->mutex);
+   simple_mtx_unlock(&device->mutex);
 
    ANV_RMV(vm_binds, device, sparse_submit->binds, sparse_submit->binds_len);
 
@@ -886,7 +884,7 @@ anv_sparse_bind_trtt(struct anv_device *device,
    util_dynarray_fini(&l3l2_binds);
  out_add_bind:
    simple_mtx_unlock(&trtt->mutex);
-   pthread_mutex_unlock(&device->mutex);
+   simple_mtx_unlock(&device->mutex);
    anv_async_submit_fini(&submit->base);
  out_async:
    vk_free(&device->vk.alloc, submit);

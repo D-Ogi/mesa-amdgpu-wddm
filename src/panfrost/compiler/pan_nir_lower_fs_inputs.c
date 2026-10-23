@@ -6,9 +6,6 @@
 #include "pan_nir.h"
 #include "nir_builder.h"
 
-#include "panfrost/model/pan_model.h"
-
-
 struct lower_fs_inputs_ctx {
    unsigned arch;
    const struct pan_varying_layout *varying_layout;
@@ -189,12 +186,12 @@ lower_fs_input_load(struct nir_builder *b,
 }
 
 bool
-pan_nir_lower_fs_inputs(nir_shader *shader, uint64_t gpu_id,
+pan_nir_lower_fs_inputs(nir_shader *shader, unsigned arch,
                         const struct pan_varying_layout *varying_layout,
                         struct pan_shader_info *info)
 {
    const struct lower_fs_inputs_ctx ctx = {
-      .arch = pan_arch(gpu_id),
+      .arch = arch,
       .varying_layout = varying_layout,
       .info = info,
    };

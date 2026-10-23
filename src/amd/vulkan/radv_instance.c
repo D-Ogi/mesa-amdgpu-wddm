@@ -28,10 +28,16 @@
 #include "vk_log.h"
 
 static const struct debug_control_bitset radv_debug_options[] = {
-#define OPT1(name, bit)                                                                                              \
-   { .string = name, .range = {bit, bit}, }
-#define OPT2(name, start, end)                                                                                        \
-   { .string = name, .range = {start, end}, }
+#define OPT1(name, bit)                                                                                                \
+   {                                                                                                                   \
+      .string = name,                                                                                                  \
+      .range = {bit, bit},                                                                                             \
+   }
+#define OPT2(name, start, end)                                                                                         \
+   {                                                                                                                   \
+      .string = name,                                                                                                  \
+      .range = {start, end},                                                                                           \
+   }
    OPT1("nofastclears", RADV_DEBUG_NO_FAST_CLEARS),
    OPT1("nodcc", RADV_DEBUG_NO_DCC),
    OPT2("shaders", RADV_DEBUG_DUMP_SHADERS_BEGIN, RADV_DEBUG_DUMP_SHADERS_END),
@@ -42,7 +48,6 @@ static const struct debug_control_bitset radv_debug_options[] = {
    OPT1("allbos", RADV_DEBUG_ALL_BOS),
    OPT1("noibchaining", RADV_DEBUG_NO_IB_CHAINING),
    OPT1("spirv", RADV_DEBUG_DUMP_SPIRV),
-   OPT1("zerovram", RADV_DEBUG_ZERO_VRAM),
    OPT1("syncshaders", RADV_DEBUG_SYNC_SHADERS),
    OPT1("preoptir", RADV_DEBUG_DUMP_PREOPT_IR),
    OPT1("info", RADV_DEBUG_INFO),
@@ -180,12 +185,8 @@ radv_get_perftest_option_name(int id)
 }
 
 static const struct debug_control trace_options[] = {
-   {"rgp", RADV_TRACE_MODE_RGP},
-   {"rra", RADV_TRACE_MODE_RRA},
-   {"gamma", RADV_TRACE_MODE_GAMMA},
-   {"ctxroll", RADV_TRACE_MODE_CTX_ROLLS},
-   {"ranges", RADV_TRACE_MODE_RANGES},
-   {NULL, 0},
+   {"rgp", RADV_TRACE_MODE_RGP},           {"rra", RADV_TRACE_MODE_RRA},       {"gamma", RADV_TRACE_MODE_GAMMA},
+   {"ctxroll", RADV_TRACE_MODE_CTX_ROLLS}, {"ranges", RADV_TRACE_MODE_RANGES}, {NULL, 0},
 };
 
 static const struct vk_instance_extension_table radv_instance_extensions_supported = {
@@ -303,14 +304,14 @@ radv_CreateInstance(const VkInstanceCreateInfo *pCreateInfo, const VkAllocationC
    instance->queue_disable_flags = 0;
 #endif
 
-   const bool has_shader_stage_flags =
-      RADV_DEBUG(instance, DUMP_VS) || RADV_DEBUG(instance, DUMP_TCS) || RADV_DEBUG(instance, DUMP_TES) ||
-      RADV_DEBUG(instance, DUMP_GS) || RADV_DEBUG(instance, DUMP_PS) || RADV_DEBUG(instance, DUMP_TASK) ||
-      RADV_DEBUG(instance, DUMP_MESH) || RADV_DEBUG(instance, DUMP_CS);
+   const bool has_shader_stage_flags = RADV_DEBUG(instance, DUMP_VS) || RADV_DEBUG(instance, DUMP_TCS) ||
+                                       RADV_DEBUG(instance, DUMP_TES) || RADV_DEBUG(instance, DUMP_GS) ||
+                                       RADV_DEBUG(instance, DUMP_PS) || RADV_DEBUG(instance, DUMP_TASK) ||
+                                       RADV_DEBUG(instance, DUMP_MESH) || RADV_DEBUG(instance, DUMP_CS);
 
-   const bool has_compilation_stage_flags =
-      RADV_DEBUG(instance, DUMP_SPIRV) || RADV_DEBUG(instance, DUMP_NIR) || RADV_DEBUG(instance, DUMP_PREOPT_IR) ||
-      RADV_DEBUG(instance, DUMP_BACKEND_IR) || RADV_DEBUG(instance, DUMP_ASM);
+   const bool has_compilation_stage_flags = RADV_DEBUG(instance, DUMP_SPIRV) || RADV_DEBUG(instance, DUMP_NIR) ||
+                                            RADV_DEBUG(instance, DUMP_PREOPT_IR) ||
+                                            RADV_DEBUG(instance, DUMP_BACKEND_IR) || RADV_DEBUG(instance, DUMP_ASM);
 
    if (has_shader_stage_flags && !has_compilation_stage_flags) {
       /* When shader stages are specified but compilation stages aren't:

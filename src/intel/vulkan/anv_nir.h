@@ -222,6 +222,12 @@ void anv_nir_analyze_push_constants_ranges(nir_shader *nir,
 
 enum anv_pipeline_behavior anv_nir_clear_shader_analysis(nir_shader *shader);
 
+nir_def *anv_resinfo(nir_builder *b, const struct intel_device_info *devinfo,
+                     nir_def *surface_state,
+                     nir_def *load, nir_def *nr_comps,
+                     nir_def *dim, nir_def *is_array,
+                     bool is_indirect);
+
 #ifdef __cplusplus
 }
 #endif

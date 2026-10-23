@@ -32,6 +32,7 @@
 #include "dri_screen.h"
 #include "dri_context.h"
 #include "dri_drawable.h"
+#include "dri_helpers.h"
 
 #include "pipe/p_screen.h"
 #include "util/format/u_format.h"
@@ -41,6 +42,43 @@
 #include "state_tracker/st_context.h"
 
 static uint32_t drifb_ID = 0;
+
+static void
+dri_drawable_allocate_textures(struct dri_context *ctx,
+                               struct dri_drawable *drawable,
+                               const enum st_attachment_type *statts,
+                               unsigned count)
+{
+   switch (drawable->screen->type) {
+   case DRI_SCREEN_DRI3:
+   case DRI_SCREEN_KMS_SWRAST:
+      dri2_allocate_textures(ctx, drawable, statts, count);
+      break;
+   case DRI_SCREEN_SWRAST:
+      drisw_allocate_textures(ctx, drawable, statts, count);
+      break;
+   case DRI_SCREEN_KOPPER:
+      kopper_allocate_textures(ctx, drawable, statts, count);
+      break;
+   }
+}
+
+static void
+dri_drawable_update_info(struct dri_drawable *drawable)
+{
+   switch (drawable->screen->type) {
+   case DRI_SCREEN_DRI3:
+   case DRI_SCREEN_KMS_SWRAST:
+      dri2_update_drawable_info(drawable);
+      break;
+   case DRI_SCREEN_SWRAST:
+      drisw_update_drawable_info(drawable);
+      break;
+   case DRI_SCREEN_KOPPER:
+      kopper_update_drawable_info(drawable);
+      break;
+   }
+}
 
 static bool
 dri_st_framebuffer_validate(struct st_context *st,
@@ -73,10 +111,10 @@ dri_st_framebuffer_validate(struct st_context *st,
       new_stamp = (drawable->texture_stamp != lastStamp);
 
       if (new_stamp || new_mask) {
-         if (new_stamp && drawable->update_drawable_info)
-            drawable->update_drawable_info(drawable);
+         if (new_stamp)
+            dri_drawable_update_info(drawable);
 
-         drawable->allocate_textures(ctx, drawable, statts, count);
+         dri_drawable_allocate_textures(ctx, drawable, statts, count);
 
          /* add existing textures */
          for (i = 0; i < ST_ATTACHMENT_COUNT; i++) {
@@ -127,8 +165,16 @@ dri_st_framebuffer_flush_front(struct st_context *st,
    struct dri_context *ctx = (struct dri_context *)st->frontend_context;
    struct dri_drawable *drawable = (struct dri_drawable *)pdrawable;
 
-   /* XXX remove this and just set the correct one on the framebuffer */
-   return drawable->flush_frontbuffer(ctx, drawable, statt);
+   switch (drawable->screen->type) {
+   case DRI_SCREEN_DRI3:
+   case DRI_SCREEN_KMS_SWRAST:
+      return dri2_flush_frontbuffer(ctx, drawable, statt);
+   case DRI_SCREEN_SWRAST:
+      return drisw_flush_frontbuffer(ctx, drawable, statt);
+   case DRI_SCREEN_KOPPER:
+      return kopper_flush_frontbuffer(ctx, drawable, statt);
+   }
+   UNREACHABLE("unknown dri screen type");
 }
 
 /**
@@ -141,8 +187,18 @@ dri_st_framebuffer_flush_swapbuffers(struct st_context *st,
    struct dri_context *ctx = (struct dri_context *)st->frontend_context;
    struct dri_drawable *drawable = (struct dri_drawable *)pdrawable;
 
-   if (drawable->flush_swapbuffers)
-      drawable->flush_swapbuffers(ctx, drawable);
+   switch (drawable->screen->type) {
+   case DRI_SCREEN_DRI3:
+   case DRI_SCREEN_KMS_SWRAST:
+      dri2_flush_swapbuffers(ctx, drawable);
+      break;
+   case DRI_SCREEN_SWRAST:
+      drisw_flush_swapbuffers(ctx, drawable);
+      break;
+   case DRI_SCREEN_KOPPER:
+      kopper_flush_swapbuffers(ctx, drawable);
+      break;
+   }
 
    return true;
 }
@@ -214,8 +270,18 @@ dri_destroy_drawable(struct dri_drawable *drawable)
    /* Notify the st manager that this drawable is no longer valid */
    st_api_destroy_drawable(&drawable->base);
 
-   if (screen->type == DRI_SCREEN_KOPPER)
+   switch (screen->type) {
+   case DRI_SCREEN_DRI3:
+   case DRI_SCREEN_KMS_SWRAST:
+      dri2_destroy_drawable(drawable);
+      break;
+   case DRI_SCREEN_SWRAST:
+      drisw_destroy_drawable(drawable);
+      break;
+   case DRI_SCREEN_KOPPER:
       kopper_destroy_drawable(drawable);
+      break;
+   }
 
    FREE(drawable->damage_rects);
    FREE(drawable);
@@ -305,10 +371,52 @@ dri_set_tex_buffer2(struct dri_context *ctx, GLint target,
          }
       }
 
-      drawable->update_tex_buffer(drawable, ctx, pt);
+      switch (drawable->screen->type) {
+      case DRI_SCREEN_DRI3:
+      case DRI_SCREEN_KMS_SWRAST:
+         dri2_update_tex_buffer(drawable, ctx, pt);
+         break;
+      case DRI_SCREEN_SWRAST:
+         drisw_update_tex_buffer(drawable, ctx, pt);
+         break;
+      case DRI_SCREEN_KOPPER:
+         kopper_update_tex_buffer(drawable, ctx, pt);
+         break;
+      }
 
       st_context_teximage(ctx->st, target, 0, internal_format, pt, false);
    }
+}
+
+bool
+dri_drawable_bind_images(struct dri_context *ctx,
+                         struct dri_drawable *drawable,
+                         struct __DRIimageList *images)
+{
+   if (images->image_mask & __DRI_IMAGE_BUFFER_FRONT) {
+      struct pipe_resource *texture = images->front->texture;
+
+      drawable->w = texture->width0;
+      drawable->h = texture->height0;
+
+      pipe_resource_reference(&drawable->textures[ST_ATTACHMENT_FRONT_LEFT],
+                              texture);
+      dri_image_fence_sync(ctx, images->front);
+   }
+
+   if (images->image_mask & (__DRI_IMAGE_BUFFER_BACK |
+                             __DRI_IMAGE_BUFFER_SHARED)) {
+      struct pipe_resource *texture = images->back->texture;
+
+      drawable->w = texture->width0;
+      drawable->h = texture->height0;
+
+      pipe_resource_reference(&drawable->textures[ST_ATTACHMENT_BACK_LEFT],
+                              texture);
+      dri_image_fence_sync(ctx, images->back);
+   }
+
+   return images->image_mask & __DRI_IMAGE_BUFFER_SHARED;
 }
 
 /**

@@ -80,6 +80,9 @@ enum radeon_micro_mode
 #define RADEON_SURF_ALIASED               (1ull << 42)
 #define RADEON_SURF_REPLAYABLE            (1ull << 43)
 #define RADEON_SURF_VIEW_3D_AS_2D_ARRAY   (1ull << 44)
+/* This must be set when CMASK_ADDR_TYPE=2, not whether TC-compatible CMASK is actually enabled. */
+#define RADEON_SURF_TC_COMPATIBLE_CMASK   (1ull << 45)
+#define RADEON_SURF_REQUIRE_CONTIGUOUS_CMASK_SLICES (1ull << 46)
 
 struct legacy_surf_level {
    uint32_t offset_256B;   /* divided by 256, the hw can only do 40-bit addresses */
@@ -99,6 +102,7 @@ struct legacy_surf_fmask {
    unsigned slice_tile_max; /* max 4M */
    uint8_t tiling_index;    /* max 31 */
    uint8_t bankh;           /* max 8 */
+   uint8_t num_banks;
    uint16_t pitch_in_pixels;
 };
 
@@ -390,6 +394,12 @@ struct radeon_surf {
 
    uint32_t cmask_size;
    uint32_t cmask_slice_size;
+   /* How many CMASK slices form a contiguous range, i.e. the group can be cleared as a whole,
+    * but not individual slices within the group because CMASK elements from different slices
+    * within a group can be interleaved. The value of 1 means that each slice is contiguous.
+    * (UINT16_MAX means that all slices are non-contiguous)
+    */
+   uint16_t cmask_slices_per_group;
    uint16_t cmask_pitch; /* GFX9+ */
    uint16_t cmask_height; /* GFX9+ */
 
@@ -520,6 +530,28 @@ bool ac_modifier_supports_dcc_image_stores(enum amd_gfx_level gfx_level, uint64_
 bool ac_modifier_supports_video(const struct radeon_info *info, uint64_t modifier);
 void ac_modifier_max_extent(const struct radeon_info *info,
                             uint64_t modifier, uint32_t *width, uint32_t *height);
+
+static inline uint32_t
+ac_surface_get_legacy_tiling_index(const struct radeon_surf *const surf,
+                                   const unsigned level,
+                                   const bool stencil)
+{
+   if (stencil)
+      return surf->u.legacy.zs.stencil_tiling_index[level];
+   else
+      return surf->u.legacy.tiling_index[level];
+}
+
+static inline const struct legacy_surf_level *
+ac_surface_get_legacy_level(const struct radeon_surf *const surf,
+                            const unsigned level,
+                            const bool stencil)
+{
+   if (stencil)
+      return &surf->u.legacy.zs.stencil_level[level];
+   else
+      return &surf->u.legacy.level[level];
+}
 
 unsigned ac_surface_get_nplanes(const struct radeon_surf *surf);
 uint64_t ac_surface_get_plane_offset(enum amd_gfx_level gfx_level,

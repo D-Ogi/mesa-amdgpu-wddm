@@ -713,9 +713,25 @@ class VkEncoder {
         VkPhysicalDevice physicalDevice, const VkPhysicalDeviceSparseImageFormatInfo2* pFormatInfo,
         uint32_t* pPropertyCount, VkSparseImageFormatProperties2* pProperties, uint32_t doLock);
 #endif
+#ifdef VK_KHR_device_group
+    void vkGetDeviceGroupPeerMemoryFeaturesKHR(VkDevice device, uint32_t heapIndex,
+                                               uint32_t localDeviceIndex,
+                                               uint32_t remoteDeviceIndex,
+                                               VkPeerMemoryFeatureFlags* pPeerMemoryFeatures,
+                                               uint32_t doLock);
+    void vkCmdSetDeviceMaskKHR(VkCommandBuffer commandBuffer, uint32_t deviceMask, uint32_t doLock);
+    void vkCmdDispatchBaseKHR(VkCommandBuffer commandBuffer, uint32_t baseGroupX,
+                              uint32_t baseGroupY, uint32_t baseGroupZ, uint32_t groupCountX,
+                              uint32_t groupCountY, uint32_t groupCountZ, uint32_t doLock);
+#endif
 #ifdef VK_KHR_maintenance1
     void vkTrimCommandPoolKHR(VkDevice device, VkCommandPool commandPool,
                               VkCommandPoolTrimFlags flags, uint32_t doLock);
+#endif
+#ifdef VK_KHR_device_group_creation
+    VkResult vkEnumeratePhysicalDeviceGroupsKHR(
+        VkInstance instance, uint32_t* pPhysicalDeviceGroupCount,
+        VkPhysicalDeviceGroupProperties* pPhysicalDeviceGroupProperties, uint32_t doLock);
 #endif
 #ifdef VK_KHR_external_memory_capabilities
     void vkGetPhysicalDeviceExternalBufferPropertiesKHR(
@@ -736,6 +752,16 @@ class VkEncoder {
     VkResult vkGetSemaphoreFdKHR(VkDevice device, const VkSemaphoreGetFdInfoKHR* pGetFdInfo,
                                  int* pFd, uint32_t doLock);
 #endif
+#ifdef VK_KHR_push_descriptor
+    void vkCmdPushDescriptorSetKHR(VkCommandBuffer commandBuffer,
+                                   VkPipelineBindPoint pipelineBindPoint, VkPipelineLayout layout,
+                                   uint32_t set, uint32_t descriptorWriteCount,
+                                   const VkWriteDescriptorSet* pDescriptorWrites, uint32_t doLock);
+    void vkCmdPushDescriptorSetWithTemplateKHR(VkCommandBuffer commandBuffer,
+                                               VkDescriptorUpdateTemplate descriptorUpdateTemplate,
+                                               VkPipelineLayout layout, uint32_t set,
+                                               const void* pData, uint32_t doLock);
+#endif
 #ifdef VK_KHR_descriptor_update_template
     VkResult vkCreateDescriptorUpdateTemplateKHR(
         VkDevice device, const VkDescriptorUpdateTemplateCreateInfo* pCreateInfo,
@@ -748,10 +774,6 @@ class VkEncoder {
     void vkUpdateDescriptorSetWithTemplateKHR(VkDevice device, VkDescriptorSet descriptorSet,
                                               VkDescriptorUpdateTemplate descriptorUpdateTemplate,
                                               const void* pData, uint32_t doLock);
-    void vkCmdPushDescriptorSetWithTemplateKHR(VkCommandBuffer commandBuffer,
-                                               VkDescriptorUpdateTemplate descriptorUpdateTemplate,
-                                               VkPipelineLayout layout, uint32_t set,
-                                               const void* pData, uint32_t doLock);
 #endif
 #ifdef VK_KHR_create_renderpass2
     VkResult vkCreateRenderPass2KHR(VkDevice device, const VkRenderPassCreateInfo2* pCreateInfo,
@@ -814,6 +836,32 @@ class VkEncoder {
                                             VkDescriptorSetLayoutSupport* pSupport,
                                             uint32_t doLock);
 #endif
+#ifdef VK_KHR_draw_indirect_count
+    void vkCmdDrawIndirectCountKHR(VkCommandBuffer commandBuffer, VkBuffer buffer,
+                                   VkDeviceSize offset, VkBuffer countBuffer,
+                                   VkDeviceSize countBufferOffset, uint32_t maxDrawCount,
+                                   uint32_t stride, uint32_t doLock);
+    void vkCmdDrawIndexedIndirectCountKHR(VkCommandBuffer commandBuffer, VkBuffer buffer,
+                                          VkDeviceSize offset, VkBuffer countBuffer,
+                                          VkDeviceSize countBufferOffset, uint32_t maxDrawCount,
+                                          uint32_t stride, uint32_t doLock);
+#endif
+#ifdef VK_KHR_timeline_semaphore
+    VkResult vkGetSemaphoreCounterValueKHR(VkDevice device, VkSemaphore semaphore, uint64_t* pValue,
+                                           uint32_t doLock);
+    VkResult vkWaitSemaphoresKHR(VkDevice device, const VkSemaphoreWaitInfo* pWaitInfo,
+                                 uint64_t timeout, uint32_t doLock);
+    VkResult vkSignalSemaphoreKHR(VkDevice device, const VkSemaphoreSignalInfo* pSignalInfo,
+                                  uint32_t doLock);
+#endif
+#ifdef VK_KHR_dynamic_rendering_local_read
+    void vkCmdSetRenderingAttachmentLocationsKHR(
+        VkCommandBuffer commandBuffer, const VkRenderingAttachmentLocationInfo* pLocationInfo,
+        uint32_t doLock);
+    void vkCmdSetRenderingInputAttachmentIndicesKHR(
+        VkCommandBuffer commandBuffer,
+        const VkRenderingInputAttachmentIndexInfo* pInputAttachmentIndexInfo, uint32_t doLock);
+#endif
 #ifdef VK_KHR_buffer_device_address
     VkDeviceAddress vkGetBufferDeviceAddressKHR(VkDevice device,
                                                 const VkBufferDeviceAddressInfo* pInfo,
@@ -837,6 +885,12 @@ class VkEncoder {
         VkDevice device, const VkPipelineExecutableInfoKHR* pExecutableInfo,
         uint32_t* pInternalRepresentationCount,
         VkPipelineExecutableInternalRepresentationKHR* pInternalRepresentations, uint32_t doLock);
+#endif
+#ifdef VK_KHR_map_memory2
+    VkResult vkMapMemory2KHR(VkDevice device, const VkMemoryMapInfo* pMemoryMapInfo, void** ppData,
+                             uint32_t doLock);
+    VkResult vkUnmapMemory2KHR(VkDevice device, const VkMemoryUnmapInfo* pMemoryUnmapInfo,
+                               uint32_t doLock);
 #endif
 #ifdef VK_KHR_synchronization2
     void vkCmdSetEvent2KHR(VkCommandBuffer commandBuffer, VkEvent event,
@@ -974,6 +1028,10 @@ class VkEncoder {
 #ifdef VK_EXT_line_rasterization
     void vkCmdSetLineStippleEXT(VkCommandBuffer commandBuffer, uint32_t lineStippleFactor,
                                 uint16_t lineStipplePattern, uint32_t doLock);
+#endif
+#ifdef VK_EXT_host_query_reset
+    void vkResetQueryPoolEXT(VkDevice device, VkQueryPool queryPool, uint32_t firstQuery,
+                             uint32_t queryCount, uint32_t doLock);
 #endif
 #ifdef VK_EXT_extended_dynamic_state
     void vkCmdSetCullModeEXT(VkCommandBuffer commandBuffer, VkCullModeFlags cullMode,

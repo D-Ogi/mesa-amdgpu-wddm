@@ -124,8 +124,8 @@ gen_inst_is_unordered(const intel_device_info *devinfo,
                       const gen_inst *inst)
 {
    return inst->opcode == GEN_OP_SEND || inst->opcode == GEN_OP_SENDC ||
-          inst->opcode == GEN_OP_SENDG || inst->opcode == GEN_OP_SENDS ||
-          inst->opcode == GEN_OP_SENDSC ||
+          inst->opcode == GEN_OP_SENDG || inst->opcode == GEN_OP_SENDGC ||
+          inst->opcode == GEN_OP_SENDS || inst->opcode == GEN_OP_SENDSC ||
           (devinfo->ver < 20 && inst->opcode == GEN_OP_MATH) ||
           inst->opcode == GEN_OP_DPAS ||
           (devinfo->has_64bit_float_via_math_pipe &&
@@ -158,7 +158,7 @@ gen_swsb_encode(const struct intel_device_info *devinfo,
                  /* swsb.mode & GEN_SBID_DST */ 0b11;
          } else if (swsb.mode & GEN_SBID_SET) {
             assert(op == GEN_OP_SEND || op == GEN_OP_SENDC ||
-                   op == GEN_OP_SENDG);
+                   op == GEN_OP_SENDG || op == GEN_OP_SENDGC);
             assert(swsb.pipe == GEN_PIPE_ALL ||
                    swsb.pipe == GEN_PIPE_INT ||
                    swsb.pipe == GEN_PIPE_FLOAT);
@@ -497,7 +497,8 @@ gen_swsb_decode(const struct intel_device_info *devinfo,
    if (devinfo->ver >= 20) {
       if (x & 0x300) {
          /* Mode isn't SingleInfo, there's a tuple */
-         if (op == GEN_OP_SEND || op == GEN_OP_SENDC || op == GEN_OP_SENDG) {
+         if (op == GEN_OP_SEND || op == GEN_OP_SENDC || op == GEN_OP_SENDG ||
+             op == GEN_OP_SENDGC) {
             const gen_swsb swsb = {
                (x & 0xe0u) >> 5,
                ((x & 0x300) == 0x300 ? GEN_PIPE_INT :
@@ -662,7 +663,6 @@ struct gen_encoder {
          if (desc->has_dst) {
             set(E::DST_ADDRESS_MODE, inst->dst.indirect);
             set(E::DST_TYPE,         encode_type(inst->dst.file, inst->dst.type));
-            set(E::DST_HSTRIDE,      encode_hstride(inst->dst.region.hstride));
 
             if (inst->dst.indirect)
                encode_indirect_operand(E::DST_OPERAND, inst->dst);
@@ -674,6 +674,9 @@ struct gen_encoder {
                                                             : inst->dst.subnr & 1);
             }
          }
+
+         if (E::TYPE >= GEN_ENCODING_XE || desc->has_dst)
+            set(E::DST_HSTRIDE, encode_hstride(inst->dst.region.hstride));
 
          if constexpr (E::TYPE == GEN_ENCODING_XE)
             set(E::ACC_WR_CONTROL, inst->acc_wr_control);
@@ -877,7 +880,8 @@ struct gen_encoder {
             set(E::SEND_EX_BSO, 1);
 
          if constexpr (E::TYPE >= GEN_ENCODING_XE3P_64BIT) {
-            assert(inst->opcode == GEN_OP_SENDG);
+            assert(inst->opcode == GEN_OP_SENDG ||
+                   inst->opcode == GEN_OP_SENDGC);
             set(E::SENDG_SRC0_LEN, inst->send.src0_len);
             set(E::SEND_SRC1_LEN, inst->send.src1_len);
             set(E::SENDG_DST_REG_FILE, inst->dst.file == GEN_GRF ? 1 : 0);
@@ -1843,7 +1847,8 @@ private:
 
 template <typename E>
 static int
-gen_find_shader_size_xe(const uint64_t *raw,
+gen_find_shader_size_xe(const intel_device_info *devinfo,
+                        const uint64_t *raw,
                         const uint64_t *raw_start,
                         const uint64_t *raw_end)
 {
@@ -1863,10 +1868,20 @@ gen_find_shader_size_xe(const uint64_t *raw,
       if (hw_opcode == E::gen_to_description[GEN_OP_ILLEGAL].hw_opcode)
          break;
 
-      if (!compact &&
-          (hw_opcode == E::gen_to_description[GEN_OP_SEND].hw_opcode ||
-           hw_opcode == E::gen_to_description[GEN_OP_SENDC].hw_opcode) &&
-          (raw - inst_words)[0] & (UINT64_C(1) << ((gen_range)E::SEND_EOT).lo))
+      if (compact)
+         continue;
+
+      const bool send_eot =
+         (hw_opcode == E::gen_to_description[GEN_OP_SEND].hw_opcode ||
+          hw_opcode == E::gen_to_description[GEN_OP_SENDC].hw_opcode) &&
+         ((raw - inst_words)[0] & (UINT64_C(1) << ((gen_range)E::SEND_EOT).lo));
+      const bool sendg_eot =
+         (devinfo->verx10 >= 350) &&
+          (hw_opcode == gen_encoding_xe3p_64bit::gen_to_description[GEN_OP_SENDG].hw_opcode ||
+           hw_opcode == gen_encoding_xe3p_64bit::gen_to_description[GEN_OP_SENDGC].hw_opcode) &&
+         ((raw - inst_words)[0] & (UINT64_C(1) << ((gen_range)gen_encoding_xe3p_64bit::SEND_EOT).lo));
+
+      if (send_eot || sendg_eot)
          break;
    }
 
@@ -1892,9 +1907,9 @@ gen_find_shader_size(const struct intel_device_info *devinfo,
    if (devinfo->ver < 12)
       return gen_find_shader_size_pre_xe(devinfo, raw, raw_start, raw_end);
    else if (devinfo->ver < 20)
-      return gen_find_shader_size_xe<gen_encoding_xe>(raw, raw_start, raw_end);
+      return gen_find_shader_size_xe<gen_encoding_xe>(devinfo, raw, raw_start, raw_end);
    else
-      return gen_find_shader_size_xe<gen_encoding_xe2>(raw, raw_start, raw_end);
+      return gen_find_shader_size_xe<gen_encoding_xe2>(devinfo, raw, raw_start, raw_end);
 }
 
 bool
@@ -1908,8 +1923,6 @@ gen_encode(gen_encode_params *params)
 
    if (!params->raw_bytes)
       return false;
-
-   /* TODO: Implement params->compact_all.  For now it is being ignored. */
 
    const intel_device_info *devinfo = params->devinfo;
 

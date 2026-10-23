@@ -61,6 +61,15 @@ asan-KHR-GL46.packed_pixels.varied_rectangle.compressed_signed_red_rgtc1_format_
 asan-KHR-GL46.packed_pixels.varied_rectangle.compressed_signed_rg_rgtc2_format_bgr,Fail
 asan-KHR-GL46.packed_pixels.varied_rectangle.compressed_signed_rg_rgtc2_format_bgra,Fail
 
-# uprev Piglit in Mesa
-spec@arb_texture_view@tex-view,Fail
-
+# CL issues
+api@clgetdeviceinfo,Fail
+api@clgetextensionfunctionaddressforplatform,Fail
+api@cllinkprogram,Fail
+program@execute@builtin@builtin-float-nextafter-1.0.generated,Fail
+program@execute@builtin@builtin-float-nextafter-1.0.generated@nextafter float1,Fail
+program@execute@builtin@builtin-float-nextafter-1.0.generated@nextafter float16,Fail
+program@execute@builtin@builtin-float-nextafter-1.0.generated@nextafter float2,Fail
+program@execute@builtin@builtin-float-nextafter-1.0.generated@nextafter float4,Fail
+program@execute@builtin@builtin-float-nextafter-1.0.generated@nextafter float8,Fail
+program@execute@vector-conversion,Fail
+asan-api@clgetplatformids,Fail

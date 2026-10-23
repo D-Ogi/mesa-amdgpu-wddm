@@ -57,7 +57,8 @@ get_temp_registers(Instruction* instr)
    return demand_after;
 }
 
-RegisterDemand get_temp_reg_changes(Instruction* instr)
+RegisterDemand
+get_temp_reg_changes(Instruction* instr)
 {
    RegisterDemand available_def_space;
 

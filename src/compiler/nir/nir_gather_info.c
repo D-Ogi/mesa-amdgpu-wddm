@@ -524,8 +524,8 @@ gather_intrinsic_info(nir_intrinsic_instr *instr, nir_shader *shader)
          shader->info.fs.accesses_pixel_local_storage = true;
       break;
    }
-   case nir_intrinsic_image_deref_load:
-   case nir_intrinsic_image_deref_sparse_load: {
+
+   case nir_intrinsic_image_deref_load: {
       nir_deref_instr *deref = nir_src_as_deref(instr->src[0]);
       nir_variable *var = nir_deref_instr_get_variable(deref);
       enum glsl_sampler_dim dim = glsl_get_sampler_dim(glsl_without_array(var->type));
@@ -538,14 +538,33 @@ gather_intrinsic_info(nir_intrinsic_instr *instr, nir_shader *shader)
       break;
    }
 
+   case nir_intrinsic_image_deref_input_attachment_load:
+   case nir_intrinsic_image_deref_depth_input_attachment_load:
+   case nir_intrinsic_image_deref_stencil_input_attachment_load: {
+      nir_deref_instr *deref = nir_src_as_deref(instr->src[0]);
+      nir_variable *var = nir_deref_instr_get_variable(deref);
+      var->data.fb_fetch_output = true;
+      shader->info.fs.uses_fbfetch_output = true;
+      break;
+   }
+
    case nir_intrinsic_bindless_image_load:
-   case nir_intrinsic_bindless_image_sparse_load:
-   case nir_intrinsic_image_heap_load:
-   case nir_intrinsic_image_heap_sparse_load: {
+   case nir_intrinsic_image_heap_load: {
       enum glsl_sampler_dim dim = nir_intrinsic_image_dim(instr);
       if (dim != GLSL_SAMPLER_DIM_SUBPASS &&
           dim != GLSL_SAMPLER_DIM_SUBPASS_MS)
          break;
+
+      shader->info.fs.uses_fbfetch_output = true;
+      break;
+   }
+
+   case nir_intrinsic_bindless_image_input_attachment_load:
+   case nir_intrinsic_bindless_image_depth_input_attachment_load:
+   case nir_intrinsic_bindless_image_stencil_input_attachment_load:
+   case nir_intrinsic_image_heap_input_attachment_load:
+   case nir_intrinsic_image_heap_depth_input_attachment_load:
+   case nir_intrinsic_image_heap_stencil_input_attachment_load: {
       shader->info.fs.uses_fbfetch_output = true;
       break;
    }
@@ -717,6 +736,7 @@ gather_intrinsic_info(nir_intrinsic_instr *instr, nir_shader *shader)
    case nir_intrinsic_load_is_indexed_draw:
    case nir_intrinsic_load_base_instance:
    case nir_intrinsic_load_draw_id:
+   case nir_intrinsic_load_draw_id_offset_ir3:
    case nir_intrinsic_load_invocation_id:
    case nir_intrinsic_load_frag_coord:
    case nir_intrinsic_load_pixel_coord:
@@ -986,6 +1006,7 @@ gather_tex_info(nir_tex_instr *instr, nir_shader *shader)
    case nir_texop_txs:
    case nir_texop_query_levels:
    case nir_texop_texture_samples:
+   case nir_texop_resinfo_intel:
       shader->info.uses_resource_info_query = true;
       break;
    default:

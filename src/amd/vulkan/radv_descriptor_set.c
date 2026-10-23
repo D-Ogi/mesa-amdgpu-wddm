@@ -84,7 +84,8 @@ radv_CreateDescriptorSetLayout(VkDevice _device, const VkDescriptorSetLayoutCrea
       set_layout->ycbcr_sampler_offsets_offset = 0;
 
    VkDescriptorSetLayoutBinding *bindings = NULL;
-   VkResult result = vk_create_sorted_bindings(pCreateInfo->pBindings, pCreateInfo->bindingCount, &bindings, NULL, NULL);
+   VkResult result =
+      vk_create_sorted_bindings(pCreateInfo->pBindings, pCreateInfo->bindingCount, &bindings, NULL, NULL);
    if (result != VK_SUCCESS) {
       vk_descriptor_set_layout_unref(&device->vk, &set_layout->vk);
       return vk_error(device, result);
@@ -256,7 +257,8 @@ radv_GetDescriptorSetLayoutSupport(VkDevice _device, const VkDescriptorSetLayout
    const struct radv_physical_device *pdev = radv_device_physical(device);
 
    VkDescriptorSetLayoutBinding *bindings = NULL;
-   VkResult result = vk_create_sorted_bindings(pCreateInfo->pBindings, pCreateInfo->bindingCount, &bindings, NULL, NULL);
+   VkResult result =
+      vk_create_sorted_bindings(pCreateInfo->pBindings, pCreateInfo->bindingCount, &bindings, NULL, NULL);
    if (result != VK_SUCCESS) {
       pSupport->supported = false;
       return;
@@ -376,7 +378,7 @@ radv_alloc_descriptor_pool_entry(struct radv_device *device, struct radv_descrip
       if (set->header.size) {
          uint64_t pool_vma_offset = util_vma_heap_alloc(&pool->bo_heap, set->header.size, 32);
          if (!pool_vma_offset)
-            return VK_ERROR_FRAGMENTED_POOL;
+            return pool->bo_heap.free_size < set->header.size ? VK_ERROR_OUT_OF_POOL_MEMORY : VK_ERROR_FRAGMENTED_POOL;
 
          assert(pool_vma_offset >= RADV_POOL_HEAP_OFFSET && pool_vma_offset <= pool->size + RADV_POOL_HEAP_OFFSET);
          set->header.offset = pool_vma_offset - RADV_POOL_HEAP_OFFSET;
@@ -447,8 +449,15 @@ radv_descriptor_set_create(struct radv_device *device, struct radv_descriptor_po
    set->header.size = align(layout_size, 32);
 
    result = radv_alloc_descriptor_pool_entry(device, pool, set);
-   if (result != VK_SUCCESS)
+   if (result != VK_SUCCESS) {
+      vk_object_base_finish(&set->header.base);
+      if (pool->host_memory_base) {
+         pool->host_memory_ptr -= mem_size;
+      } else {
+         vk_free2(&device->vk.alloc, NULL, set);
+      }
       return result;
+   }
 
    if (layout->has_immutable_samplers) {
       for (unsigned i = 0; i < layout->binding_count; ++i) {

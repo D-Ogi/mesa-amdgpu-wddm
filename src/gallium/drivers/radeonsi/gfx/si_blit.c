@@ -1081,8 +1081,8 @@ static void si_blit(struct pipe_context *ctx, const struct pipe_blit_info *info)
       simple_mtx_unlock(&sscreen->async_compute_context_lock);
    }
 
-   if (unlikely(sctx->sqtt_enabled))
-      sctx->sqtt_next_event = EventCmdCopyImage;
+   if (unlikely(si_is_sqtt_active(sctx)))
+      sctx->sqtt.next_event = EventCmdCopyImage;
 
    if (si_compute_blit(sctx, info, NULL, 0, 0, true))
       return;
@@ -1106,8 +1106,8 @@ void si_gfx_blit(struct pipe_context *ctx, const struct pipe_blit_info *info)
                              info->src.box.z, info->src.box.z + info->src.box.depth - 1,
                              false);
 
-   if (unlikely(sctx->sqtt_enabled))
-      sctx->sqtt_next_event = EventCmdBlitImage;
+   if (unlikely(si_is_sqtt_active(sctx)))
+      sctx->sqtt.next_event = EventCmdBlitImage;
 
    /* Use a custom MSAA resolving pixel shader. */
    void *fs = NULL;

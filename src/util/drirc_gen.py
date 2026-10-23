@@ -421,4 +421,6 @@ def add_common_vk_wsi_options(debug_options, performance_options, defaults=None)
           "Disable unordered WSI submits to workaround application synchronization bugs"),
         B("vk_x11_ignore_suboptimal", defaults.get("vk_x11_ignore_suboptimal", False),
           "Force the X11 WSI to never report VK_SUBOPTIMAL_KHR"),
+        B("vk_x11_dedicated_event_connection", defaults.get("vk_x11_dedicated_event_connection", False),
+          "Read X11 Present events on a separate connection to the X server instead of the application's connection"),
     ])

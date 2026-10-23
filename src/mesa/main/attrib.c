@@ -1195,6 +1195,10 @@ copy_array_object(struct gl_context *ctx,
    /* skip Name */
    /* skip RefCount */
 
+   dest->FormatFallbackMask =
+      (dest->FormatFallbackMask & ~copy_attrib_mask) |
+      (src->FormatFallbackMask & copy_attrib_mask);
+
    while (copy_attrib_mask) {
       unsigned i = u_bit_scan(&copy_attrib_mask);
 

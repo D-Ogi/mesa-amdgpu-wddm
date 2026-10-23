@@ -677,13 +677,6 @@ ir_expression_operation = [
    operation("imul_high", 2),       # Calculates the high 32-bits of a 64-bit multiply.
    operation("div", 2, printable_name="/", source_types=numeric_types, c_expression={'u': "{src1} == 0 ? 0 : {src0} / {src1}", 'i': "{src1} == 0 ? 0 : {src0} / {src1}", 'u64': "{src1} == 0 ? 0 : {src0} / {src1}", 'i64': "{src1} == 0 ? 0 : {src0} / {src1}", 'default': "{src0} / {src1}"}, flags=vector_scalar_operation),
 
-   # Returns the carry resulting from the addition of the two arguments.
-   operation("carry", 2),
-
-   # Returns the borrow resulting from the subtraction of the second argument
-   # from the first argument.
-   operation("borrow", 2),
-
    # Either (vector % vector) or (vector % scalar)
    #
    # We don't use fmod because it rounds toward zero; GLSL specifies the use

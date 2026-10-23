@@ -44,6 +44,8 @@ anv_vk_priority_to_drm_sched_priority(VkQueueGlobalPriority vk_priority)
       return DRM_SCHED_PRIORITY_NORMAL;
    case VK_QUEUE_GLOBAL_PRIORITY_HIGH:
       return DRM_SCHED_PRIORITY_HIGH;
+   case VK_QUEUE_GLOBAL_PRIORITY_REALTIME:
+      return DRM_SCHED_PRIORITY_KERNEL;
    default:
       UNREACHABLE("Invalid priority");
       return DRM_SCHED_PRIORITY_MIN;

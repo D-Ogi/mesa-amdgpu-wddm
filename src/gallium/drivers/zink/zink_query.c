@@ -960,9 +960,12 @@ begin_query(struct zink_context *ctx, struct zink_query *q)
    if (q->type == PIPE_QUERY_PIPELINE_STATISTICS_SINGLE && q->index == PIPE_STAT_QUERY_IA_VERTICES)  {
       assert(!ctx->vertices_query);
       ctx->vertices_query = q;
+      zink_mark_atom_dirty(ctx, ZINK_ATOM_GS_QUERIES);
    }
-   if (needs_stats_list(q))
+   if (needs_stats_list(q)) {
       list_addtail(&q->stats_list, &ctx->primitives_generated_queries);
+      zink_mark_atom_dirty(ctx, ZINK_ATOM_GS_QUERIES);
+   }
    zink_batch_usage_set(&q->batch_uses, ctx->bs);
    _mesa_set_add(&ctx->bs->active_queries, q);
    if (q->needs_rast_discard_workaround) {

@@ -128,8 +128,6 @@ static const nir_shader_compiler_options ir3_base_options = {
    .lower_isign = true,
    .lower_ifind_msb = true,
    .lower_ufind_msb = true,
-   .lower_uadd_carry = true,
-   .lower_usub_borrow = true,
    .lower_mul_high = true,
    .lower_mul_2x32_64 = true,
    .float_mul_add16 = nir_float_muladd_support_has_fmad | nir_float_muladd_support_fuse,
@@ -158,7 +156,6 @@ static const nir_shader_compiler_options ir3_base_options = {
    .lower_pack_split = true,
    .lower_pack_64_4x16 = true,
    .lower_to_scalar = true,
-   .has_bfm = true,
    .has_find_msb_rev = true,
    .has_imul24 = true,
    .has_umul24 = true,
@@ -384,6 +381,8 @@ ir3_compiler_create(struct fd_device *dev, const struct fd_dev_id *dev_id,
    /* Set up nir shader compiler options, using device-specific overrides of our base settings. */
    compiler->nir_options = ir3_base_options;
    compiler->nir_options.has_iadd3 = dev_info->props.has_sad;
+   /* MGEN.B doesn't seem to produce useful results on FD307 */
+   compiler->nir_options.has_bfm = compiler->gen >= 4;
 
    if (compiler->gen >= 6) {
       compiler->nir_options.force_indirect_unrolling = nir_var_all,

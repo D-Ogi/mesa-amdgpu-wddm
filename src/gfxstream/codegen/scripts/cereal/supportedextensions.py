@@ -11,6 +11,10 @@ class VulkanSupportedExtensions(VulkanWrapperGenerator):
         super().__init__(module, typeInfo)
         self.codegen = CodeGen()
 
+    def isSupported(self, ext):
+        supportedModules = cerealgenerator.SUPPORTED_MODULES.get(ext)
+        return supportedModules is None or self.module.basename in supportedModules
+
     def onBegin(self):
         super().onBegin()
         self.module.appendHeader("""
@@ -29,7 +33,8 @@ GetDeviceExtensionsSupportedByCodegen();
         self.module.appendImpl("        return new std::unordered_set<std::string>{\n")
 
         for ext in sorted(cerealgenerator.SUPPORTED_INSTANCE_EXTENSIONS):
-            self.module.appendImpl(f'            "{ext}",\n')
+            if self.isSupported(ext):
+                self.module.appendImpl(f'            "{ext}",\n')
 
         self.module.appendImpl("        };\n")
         self.module.appendImpl("    }();\n")
@@ -42,7 +47,8 @@ GetDeviceExtensionsSupportedByCodegen();
         self.module.appendImpl("        return new std::unordered_set<std::string>{\n")
 
         for ext in sorted(cerealgenerator.SUPPORTED_DEVICE_EXTENSIONS):
-            self.module.appendImpl(f'            "{ext}",\n')
+            if self.isSupported(ext):
+                self.module.appendImpl(f'            "{ext}",\n')
 
         self.module.appendImpl("        };\n")
         self.module.appendImpl("    }();\n")

@@ -138,7 +138,7 @@ brw_optimize(brw_shader &s)
    if (!OPT(brw_opt_copy_propagation_defs))
       OPT(brw_opt_copy_propagation);
 
-   if (s.devinfo->ver >= 30)
+   if (s.devinfo->ver >= 30 && !s.key->use_efficient_64bit)
       OPT(brw_opt_send_to_send_gather);
 
    OPT(brw_opt_split_sends);

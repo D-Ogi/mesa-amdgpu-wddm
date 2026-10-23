@@ -200,6 +200,47 @@
         *panfrost_bifrost_file_list
       when: manual
 
+.panfrost-panthor-gl-vk-rules:
+  stage: arm
+  rules:
+    - !reference [.test, rules]
+    - !reference [.collabora-farm-rules, rules]
+    - !reference [.gl-rules, rules]
+    - !reference [.vulkan-rules, rules]
+    - changes:
+        *panfrost_common_file_list
+      when: on_success
+    - changes:
+        *panfrost_gallium_file_list
+      when: on_success
+    - changes:
+        *panfrost_bifrost_file_list
+      when: on_success
+    - changes:
+        *panfrost_vulkan_file_list
+      when: on_success
+
+.panfrost-panthor-gl-vk-manual-rules:
+  stage: arm-nightly
+  extends: .no-auto-retry
+  rules:
+    - !reference [.test, rules]
+    - !reference [.collabora-farm-manual-rules, rules]
+    - !reference [.gl-manual-rules, rules]
+    - !reference [.vulkan-manual-rules, rules]
+    - changes:
+        *panfrost_common_file_list
+      when: manual
+    - changes:
+        *panfrost_gallium_file_list
+      when: manual
+    - changes:
+        *panfrost_bifrost_file_list
+      when: manual
+    - changes:
+        *panfrost_vulkan_file_list
+      when: manual
+
 .panfrost-test:
   variables:
     FLAKES_CHANNEL: "#panfrost-ci"
@@ -319,7 +360,7 @@
     VK_DRIVER: panfrost
     LAVA_FIRMWARE: arm
     # Mainline kernel support for MT8196 is still incomplete
-    KERNEL_TAG: "v6.18-pan-mesa-5358"
+    KERNEL_TAG: "v6.18-pan-mesa-ce6c"
 
 # Status: https://lava.collabora.dev/scheduler/device_type/sun50i-h6-pine-h64
 .lava-sun50i-h6-pine-h64:arm64:

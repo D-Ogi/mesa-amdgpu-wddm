@@ -33,6 +33,7 @@
 #include "draw/draw_context.h"
 #include "draw/draw_vbuf.h"
 #include "pipe/p_defines.h"
+#include "util/u_draw.h"
 #include "util/u_math.h"
 #include "util/u_memory.h"
 #include "util/u_inlines.h"
@@ -221,6 +222,7 @@ softpipe_create_context(struct pipe_screen *screen,
    softpipe->pipe.set_debug_callback = u_default_set_debug_callback;
 
    softpipe->pipe.draw_vbo = softpipe_draw_vbo;
+   softpipe->pipe.draw_vbo_buffers = util_draw_vbo_buffers;
 
    softpipe->pipe.launch_grid = softpipe_launch_grid;
 

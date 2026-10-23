@@ -113,6 +113,9 @@ struct spill_block {
 
    /* Map of 32-bit indices to remapped 32-bit indices */
    struct hash_table_u64 *remap;
+
+   /* Active lane byte offset for UGPR fills. */
+   jay_def active_lane_x4;
 };
 
 struct spill_ctx {
@@ -237,10 +240,38 @@ insert_reload(struct spill_ctx *ctx,
       jay_builder_insert(&b, clone);
    } else {
       ensure_spilled(ctx, node);
-      jay_inst *I = jay_MOV(&b, new_def, jay_def_spilled(ctx, node));
+      jay_def spilled = jay_def_spilled(ctx, node);
 
-      if (ctx->file == FLAG) {
-         I->type = jay_flag_type(ctx->func);
+      if (ctx->file == UGPR) {
+         struct spill_block *sb = &ctx->blocks[block->index];
+         /*
+          * Most of the time no actual shuffles are needed so we're lazy
+          * initializing active_lane_x4. The initialization is required
+          * per-block since we need an active lane.
+          */
+         bool initialize = jay_is_null(sb->active_lane_x4);
+         if (initialize)
+            sb->active_lane_x4 = jay_alloc_def(&b, UGPR, 1);
+
+         jay_SHUFFLE(&b, JAY_TYPE_U32, new_def, spilled, sb->active_lane_x4);
+
+         if (initialize) {
+            jay_builder init =
+               jay_init_builder(ctx->func, jay_before_block(block));
+            jay_def ballot = jay_alloc_def(&init, FLAG, 1);
+            jay_def lane = jay_alloc_def(&init, UGPR, 1);
+
+            jay_inst *mov = jay_MOV(&init, jay_null(), 1);
+            jay_set_conditional_mod(&init, mov, ballot, GEN_CONDITION_NE);
+            mov->zero_inactive = true;
+            jay_FBL(&init, lane, ballot);
+
+            jay_SHL(&init, JAY_TYPE_U32, sb->active_lane_x4, lane, 2);
+         }
+      } else {
+         jay_inst *I = jay_MOV(&b, new_def, spilled);
+         if (ctx->file == FLAG)
+            I->type = jay_flag_type(ctx->func);
       }
    }
 
@@ -459,6 +490,7 @@ min_algorithm(struct spill_ctx *ctx,
                if (!u_sparse_bitset_test(&ctx->W, jay_index(I->dst))) {
                   ctx->spill_block[jay_index(I->dst)] = NULL;
                   I->dst = jay_def_spilled(ctx, jay_index(I->dst));
+                  I->uniform = jay_is_uniform(I->dst);
                }
             }
 
@@ -529,7 +561,7 @@ min_algorithm(struct spill_ctx *ctx,
 
       if (jay_debug & JAY_DBG_PRINTDEMAND) {
          printf("(SP) %u: ", ctx->nW);
-         jay_print_inst(stdout, ctx->func, I);
+         jay_print_inst(stderr, ctx->func, I);
       }
    }
 
@@ -743,7 +775,7 @@ add_phi(struct spill_ctx *ctx,
       /* If the value differs across predecessors, insert a phi for it. */
       jay_builder b = jay_init_builder(ctx->func, jay_before_block(succ));
       jay_def def = jay_alloc_def(&b, ctx->file, 1);
-      jay_PHI_DST(&b, def);
+      jay_PHI_DST(&b, ctx->file == FLAG ? JAY_TYPE_U1 : JAY_TYPE_U32, def);
       remapped = jay_index(def);
 
       jay_foreach_predecessor(succ, pred, ctx->cfg) {
@@ -760,48 +792,10 @@ add_phi(struct spill_ctx *ctx,
    }
 }
 
-/*
- * UGPRs spill to GPRs so this (pre-RA) lowering is much simpler: just lower MOV
- * to SHUFFLE to legalize. Most of the time no actual shuffles are needed so
- * we're lazy initializing active_lane_x4. The initialization is required
- * per-block since we need an active lane.
- */
-static void
-lower_ugpr_spill(jay_function *func)
-{
-   jay_foreach_block(func, block) {
-      jay_def active_lane_x4 = jay_null();
-
-      jay_foreach_inst_in_block_safe(block, I) {
-         if (I->op == JAY_OPCODE_MOV &&
-             I->dst.file == UGPR &&
-             I->src[0].file == GPR) {
-
-            jay_builder b = jay_init_builder(func, jay_before_block(block));
-            if (jay_is_null(active_lane_x4)) {
-               jay_def ballot = jay_alloc_def(&b, FLAG, 1);
-               jay_def lane = jay_alloc_def(&b, UGPR, 1);
-
-               jay_inst *mov = jay_MOV(&b, jay_null(), 1);
-               jay_set_conditional_mod(&b, mov, ballot, GEN_CONDITION_NE);
-               mov->zero_inactive = true;
-               jay_FBL(&b, lane, ballot);
-
-               active_lane_x4 = jay_SHL_u32(&b, lane, 2);
-            }
-
-            b.cursor = jay_before_inst(I);
-            jay_SHUFFLE(&b, I->dst, I->src[0], active_lane_x4);
-            jay_remove_instruction(I);
-         }
-      }
-   }
-}
-
 void
 jay_spill(jay_function *func, enum jay_file file, unsigned k)
 {
-   /* lower_ugpr_spill needs a UGPR temporary */
+   /* insert_reload needs a UGPR temporary */
    k -= (file == UGPR) ? 1 : 0;
 
    void *memctx = ralloc_context(NULL);
@@ -842,6 +836,7 @@ jay_spill(jay_function *func, enum jay_file file, unsigned k)
       }
 
       ctx.blocks[block->index].remap = _mesa_hash_table_u64_create(memctx);
+      ctx.blocks[block->index].active_lane_x4 = jay_null();
    }
 
    u_sparse_bitset_init(&ctx.W, ctx.n, memctx);
@@ -938,10 +933,6 @@ jay_spill(jay_function *func, enum jay_file file, unsigned k)
    }
 
    ralloc_free(memctx);
-
-   if (file == UGPR) {
-      lower_ugpr_spill(func);
-   }
 
    /* We've inserted invalid dead phis, clean them up. */
    jay_opt_dead_code(func->shader);

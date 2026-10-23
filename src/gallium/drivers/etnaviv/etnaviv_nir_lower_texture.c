@@ -340,6 +340,41 @@ lower_txf(nir_builder *b, nir_tex_instr *tex, UNUSED void *data)
 }
 
 static bool
+clamp_txf_coords(nir_builder *b, nir_tex_instr *tex, UNUSED void *data)
+{
+   if (tex->op != nir_texop_txf)
+      return false;
+
+   b->cursor = nir_before_instr(&tex->instr);
+
+   int coord_index = nir_tex_instr_src_index(tex, nir_tex_src_coord);
+   int lod_index = nir_tex_instr_src_index(tex, nir_tex_src_lod);
+   assert(coord_index >= 0);
+   assert(lod_index >= 0);
+
+   const unsigned spatial = tex->coord_components - tex->is_array;
+   nir_def *coord = tex->src[coord_index].src.ssa;
+   nir_src *lod = &tex->src[lod_index].src;
+   nir_def *sampler = nir_imm_int(b, tex->texture_index);
+   nir_def *size = nir_load_texture_size_etna(b, 32, sampler);
+   nir_def *limit = nir_trim_vector(b, size, spatial);
+
+   if (!nir_src_is_const(*lod) || nir_src_as_uint(*lod) != 0)
+      limit = level_size(b, limit, lod->ssa);
+
+   nir_def *clamped = nir_imin(b, nir_trim_vector(b, coord, spatial),
+                               nir_iadd_imm(b, limit, -1));
+
+   if (tex->is_array)
+      clamped = nir_vector_insert_imm(b, nir_pad_vector(b, clamped, spatial + 1),
+                                      nir_channel(b, coord, spatial), spatial);
+
+   nir_src_rewrite(&tex->src[coord_index].src, clamped);
+
+   return true;
+}
+
+static bool
 legalize_txf_lod(nir_builder *b, nir_tex_instr *tex, UNUSED void *data)
 {
    if (tex->op != nir_texop_txf)
@@ -565,6 +600,9 @@ etna_nir_lower_texture(nir_shader *s, struct etna_shader_key *key, const struct 
       nir_metadata_control_flow, NULL);
 
    if (etna_core_has_feature(info, ETNA_FEATURE_TX_INTEGER_COORDINATE_V2)) {
+      NIR_PASS(progress, s, nir_shader_tex_pass, clamp_txf_coords,
+         nir_metadata_control_flow, NULL);
+
       NIR_PASS(progress, s, nir_shader_tex_pass, legalize_txf_lod,
          nir_metadata_control_flow, NULL);
    } else {

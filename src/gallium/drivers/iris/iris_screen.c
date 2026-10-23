@@ -543,6 +543,8 @@ iris_screen_destroy(struct iris_screen *screen)
    glsl_type_singleton_decref();
    iris_bo_unreference(screen->workaround_bo);
    iris_bo_unreference(screen->breakpoint_bo);
+   iris_scratch_buffer_reference(&screen->scratch_buffer, NULL);
+   simple_mtx_destroy(&screen->scratch_buffer_mutex);
    u_transfer_helper_destroy(screen->base.transfer_helper);
    iris_bufmgr_unref(screen->bufmgr);
    disk_cache_destroy(screen->disk_cache);
@@ -696,7 +698,7 @@ iris_screen_create(int fd, const struct pipe_screen_config *config)
 
    process_intel_debug_variable();
 
-   screen->bufmgr = iris_bufmgr_get_for_fd(fd, bo_reuse);
+   screen->bufmgr = iris_bufmgr_get_for_fd(fd, bo_reuse, config->options);
    if (!screen->bufmgr)
       return NULL;
 
@@ -758,6 +760,10 @@ iris_screen_create(int fd, const struct pipe_screen_config *config)
    screen->driconf.force_compute_surface_prefetch =
       driQueryOptionb(config->options, "intel_force_compute_surface_prefetch");
    screen->driconf.enable_tbimr =
+      /* Keep TBIMR disabled until HSDs 14024498401, 14022484703 and 14020415808
+       * are implemented.
+       */
+      (screen->devinfo->verx10 < 350) &&
       driQueryOptionb(config->options, "intel_tbimr");
    screen->driconf.enable_vf_distribution =
       driQueryOptionb(config->options, "intel_vf_distribution");

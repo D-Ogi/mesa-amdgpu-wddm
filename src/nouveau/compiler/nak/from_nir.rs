@@ -76,7 +76,7 @@ fn init_info_from_nir(
                 let info_fs = unsafe { &nir.info.__bindgen_anon_1.fs };
                 ShaderStageInfo::Fragment(FragmentShaderInfo {
                     uses_kill: false,
-                    does_interlock: false,
+                    reads_interlock_ticket: false,
                     post_depth_coverage: info_fs.post_depth_coverage(),
                     early_fragment_tests: info_fs.early_fragment_tests(),
                     uses_sample_shading: info_fs.uses_sample_shading(),
@@ -3502,6 +3502,17 @@ impl<'a> ShaderFromNir<'a> {
             }
             nir_intrinsic_load_sysval_nv => {
                 let idx = u8::try_from(intrin.base()).unwrap();
+
+                if idx == NAK_SV_ORDERING_TICKET {
+                    if let ShaderStageInfo::Fragment(info) =
+                        &mut self.info.stage
+                    {
+                        info.reads_interlock_ticket = true;
+                    } else {
+                        panic!("Ordering ticket is only available in fragment shaders");
+                    }
+                }
+
                 debug_assert!(intrin.def.num_components == 1);
                 debug_assert!(
                     intrin.def.bit_size == 32 || intrin.def.bit_size == 64
@@ -3541,7 +3552,7 @@ impl<'a> ShaderFromNir<'a> {
                         buf: CBuf::Binding(idx_imm),
                         offset: off_imm,
                     };
-                    if srcs[1].is_zero() {
+                    if srcs[1].is_zero() && size_B >= 4 {
                         for (i, comp) in dst.iter().enumerate() {
                             let i = u16::try_from(i).unwrap();
                             b.copy_to(
@@ -3596,7 +3607,7 @@ impl<'a> ShaderFromNir<'a> {
                 };
 
                 let dst = b.alloc_ssa_vec(RegFile::GPR, size_B.div_ceil(4));
-                if srcs[1].is_zero() {
+                if srcs[1].is_zero() && size_B >= 4 {
                     for (i, comp) in dst.iter().enumerate() {
                         let i = u16::try_from(i).unwrap();
                         b.copy_to(

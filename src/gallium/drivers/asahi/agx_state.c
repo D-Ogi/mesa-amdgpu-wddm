@@ -5554,6 +5554,7 @@ agx_init_state_functions(struct pipe_context *ctx)
    ctx->sampler_view_release = u_default_sampler_view_release;
    ctx->resource_release = u_default_resource_release;
    ctx->draw_vbo = agx_draw_vbo;
+   ctx->draw_vbo_buffers = util_draw_vbo_buffers;
    ctx->launch_grid = agx_launch_grid;
    ctx->set_global_binding = agx_set_global_binding;
    ctx->texture_barrier = agx_texture_barrier;

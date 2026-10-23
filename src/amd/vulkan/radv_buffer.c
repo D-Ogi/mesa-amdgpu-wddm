@@ -347,7 +347,7 @@ radv_bo_from_fd(struct radv_device *device, int fd, unsigned priority, struct ra
    if (result != VK_SUCCESS)
       return result;
 
-   vk_address_binding_report(&instance->vk, &mem->base, radv_buffer_get_va(mem->bo), mem->bo->size,
+   vk_address_binding_report(&instance->vk, &mem->vk.base, radv_buffer_get_va(mem->bo), mem->bo->size,
                              VK_DEVICE_ADDRESS_BINDING_TYPE_BIND_EXT);
 
    return result;
@@ -366,7 +366,7 @@ radv_bo_from_ptr(struct radv_device *device, void *host_ptr, uint64_t alloc_size
    if (result != VK_SUCCESS)
       return result;
 
-   vk_address_binding_report(&instance->vk, &mem->base, radv_buffer_get_va(mem->bo), mem->bo->size,
+   vk_address_binding_report(&instance->vk, &mem->vk.base, radv_buffer_get_va(mem->bo), mem->bo->size,
                              VK_DEVICE_ADDRESS_BINDING_TYPE_BIND_EXT);
 
    return result;

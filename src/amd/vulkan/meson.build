@@ -52,14 +52,14 @@ radv_entrypoints = custom_target(
 
 radv_drirc = custom_target(
   'radv_drirc',
-  input  : [files('radv_drirc_gen.py'), drirc_gen, '00-radv-defaults.conf'],
+  input  : [files('radv_drirc_gen.py'), drirc_gen, '00-radv-defaults.conf', '01-radv-performance.conf'],
   output : ['radv_drirc.c', 'radv_drirc.h'],
   command : [
     prog_python, '@INPUT0@',
     '--import-path', join_paths(dir_source_root, 'src/util'),
     '--drirc-src', '@OUTPUT0@',
     '--drirc-hdr', '@OUTPUT1@',
-    '--validate', '@INPUT2@',
+    '--validate', '@INPUT2@', '@INPUT3@',
   ],
 )
 
@@ -141,6 +141,7 @@ libradv_files = files(
   'radv_acceleration_structure.c',
   'radv_android.c',
   'radv_android.h',
+  'radv_anti_lag.c',
   'radv_buffer.c',
   'radv_buffer.h',
   'radv_buffer_view.c',
@@ -229,7 +230,9 @@ if not with_platform_windows
   )
 endif
 
-if amd_with_llvm
+radv_with_llvm_backend = amd_with_llvm and not with_mesa_ndebug
+
+if radv_with_llvm_backend
   libradv_files += files(
     'radv_llvm_helper.cpp',
     'radv_llvm_helper.h',
@@ -244,6 +247,7 @@ subdir('layers')
 
 radv_deps = []
 radv_flags = cc.get_supported_arguments(['-Wimplicit-fallthrough', '-Wshadow'])
+radv_flags += '-DRADV_LLVM_BACKEND=@0@'.format(radv_with_llvm_backend.to_int())
 
 if with_amdgpu_virtio
   radv_flags += '-DHAVE_AMDGPU_VIRTIO'

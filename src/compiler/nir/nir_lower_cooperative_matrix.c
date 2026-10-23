@@ -576,7 +576,7 @@ split_cmat_get_coordinate(nir_builder *b,
    adds[1] = nir_umod_imm(b, split_idx, box.outer_cols);
    nir_def *def = nir_cmat_get_coordinate(b, rem_def, .cmat_desc = desc);
 
-   adds[0] = nir_imul_imm(b, adds[0], desc.cols);
+   adds[0] = nir_imul_imm(b, adds[0], desc.rows);
    adds[1] = nir_imul_imm(b, adds[1], desc.cols);
    nir_def *add_vec = nir_vec(b, adds, 2);
    def = nir_iadd(b, def, add_vec);

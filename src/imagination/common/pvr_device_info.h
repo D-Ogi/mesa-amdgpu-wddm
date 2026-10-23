@@ -299,6 +299,7 @@ struct pvr_device_features {
    bool has_tpu_extended_integer_lookup : 1;
    bool has_tpu_image_state_v2 : 1;
    bool has_tpu_parallel_instances : 1;
+   bool has_transform_feedback_query_bits : 1;
    bool has_unified_store_depth : 1;
    bool has_usc_alu_roundingmode_rne : 1;
    bool has_usc_f16sop_u8 : 1;
@@ -332,6 +333,7 @@ struct pvr_device_features {
    uint32_t tile_size_x;
    uint32_t tile_size_y;
    uint32_t tpu_parallel_instances;
+   uint32_t transform_feedback_query_bits;
    uint32_t unified_store_depth;
    uint32_t usc_itr_parallel_instances;
    uint32_t usc_min_output_registers_per_pix;

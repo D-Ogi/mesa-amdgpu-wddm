@@ -90,24 +90,23 @@ blorp_compile_fs_brw(struct blorp_context *blorp, void *mem_ctx,
    debug_archiver *archiver =
       blorp_debug_archiver_open(mem_ctx, nir, key, key_size);
 
-   struct brw_compile_fs_params params = {
-      .base = {
-         .mem_ctx = mem_ctx,
-         .nir = nir,
-         .key = &wm_key.base,
-         .prog_data = (struct brw_stage_prog_data *)fs_prog_data,
-         .log_data = blorp->driver_ctx,
-         .debug_flag = DEBUG_BLORP,
-         .archiver = archiver,
+   struct brw_compile_params params = {
+      .mem_ctx = mem_ctx,
+      .nir = nir,
+      .key = &wm_key.base,
+      .prog_data = (struct brw_stage_prog_data *)fs_prog_data,
+      .log_data = blorp->driver_ctx,
+      .debug_flag = DEBUG_BLORP,
+      .fs = {
+         .use_rep_send = use_repclear,
+         .max_polygons = 1,
+         .rt_write_cb = blorp->config.use_efficient_64bit ?
+                        blorp_nir_rt_write : NULL,
       },
-
-      .rt_write_cb = blorp->config.use_efficient_64bit ? blorp_nir_rt_write : NULL,
-
-      .use_rep_send = use_repclear,
-      .max_polygons = 1,
+      .archiver = archiver,
    };
 
-   const unsigned *kernel = brw_compile(compiler, &params.base);
+   const unsigned *kernel = brw_compile(compiler, &params);
 
    debug_archiver_close(archiver);
 
@@ -141,19 +140,17 @@ blorp_compile_vs_brw(struct blorp_context *blorp, void *mem_ctx,
    debug_archiver *archiver =
       blorp_debug_archiver_open(mem_ctx, nir, key, key_size);
 
-   struct brw_compile_vs_params params = {
-      .base = {
-         .mem_ctx = mem_ctx,
-         .nir = nir,
-         .key = &vs_key.base,
-         .prog_data = (struct brw_stage_prog_data *)vs_prog_data,
-         .log_data = blorp->driver_ctx,
-         .debug_flag = DEBUG_BLORP,
-         .archiver = archiver,
-      },
+   struct brw_compile_params params = {
+      .mem_ctx = mem_ctx,
+      .nir = nir,
+      .key = &vs_key.base,
+      .prog_data = (struct brw_stage_prog_data *)vs_prog_data,
+      .log_data = blorp->driver_ctx,
+      .debug_flag = DEBUG_BLORP,
+      .archiver = archiver,
    };
 
-   const unsigned *kernel = brw_compile(compiler, &params.base);
+   const unsigned *kernel = brw_compile(compiler, &params);
 
    debug_archiver_close(archiver);
 
@@ -256,19 +253,17 @@ blorp_compile_cs_brw(struct blorp_context *blorp, void *mem_ctx,
    debug_archiver *archiver =
       blorp_debug_archiver_open(mem_ctx, nir, key, key_size);
 
-   struct brw_compile_cs_params params = {
-      .base = {
-         .mem_ctx = mem_ctx,
-         .nir = nir,
-         .key = &cs_key.base,
-         .prog_data = (struct brw_stage_prog_data *)cs_prog_data,
-         .log_data = blorp->driver_ctx,
-         .debug_flag = DEBUG_BLORP,
-         .archiver = archiver,
-      },
+   struct brw_compile_params params = {
+      .mem_ctx = mem_ctx,
+      .nir = nir,
+      .key = &cs_key.base,
+      .prog_data = (struct brw_stage_prog_data *)cs_prog_data,
+      .log_data = blorp->driver_ctx,
+      .debug_flag = DEBUG_BLORP,
+      .archiver = archiver,
    };
 
-   const unsigned *kernel = brw_compile(compiler, &params.base);
+   const unsigned *kernel = brw_compile(compiler, &params);
 
    debug_archiver_close(archiver);
 

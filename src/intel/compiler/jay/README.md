@@ -9,9 +9,8 @@ Toronto](https://indico.freedesktop.org/event/12/contributions/527/).
 It currently supports Xe2 (Lunar Lake and Battlemage) and Xe3 (Pantherlake).
 Additional hardware support is in progress.
 
-To use Jay on supported Intel hardware, set the environment variable
-`INTEL_JAY=all`. Specific stages may be used (such as `INTEL_JAY=fs`) for
-debugging.
+Jay is enabled by default on these platforms. For debugging, set
+`INTEL_DEBUG=no-jay` to get the old brw compiler.
 
 ## Contribution policy
 
@@ -43,7 +42,7 @@ you can follow this checklist to narrow the issue:
 Reposting the checklist earlier this summer:
 
 * does it reproduce locally on Xe2 or Xe3 with upstream Mesa?
-* does it go away if you disable Jay? (`INTEL_JAY` env var)
+* does it go away if you disable Jay? (`INTEL_DEBUG=no-jay` env var)
 * does it reproduce in a debug build of Mesa?
 * in a debug build, are there any assertion/validation failures)?
 * ...if so, can you capture a fossil?
@@ -52,9 +51,8 @@ Reposting the checklist earlier this summer:
   (`JAY_DEBUG=sync,strict,noopt,nosched` is a "safe" set).
 * can you bisect it down to a specific shader hash, by selecting between brw and
   Jay with `nir_shader_bisect_select()` and the `nir_shader_bisect.py` script?
-  Pick the patches from
-  <https://gitlab.freedesktop.org/mesa/mesa/-/merge_requests/44246> ... comment
-  out the select call, and use the script to narrow to a single shader.
+  See the comment in the `intel_use_jay()` function in
+  `src/intel/dev/intel_debug.c` for how to enable this.
 * can you dump the affected shader with INTEL_DEBUG=(vs|fs|cs)?
 * can you dump the assembly of that shader with brw?
 * can you diff the before/after assembly to see what Jay is doing different?

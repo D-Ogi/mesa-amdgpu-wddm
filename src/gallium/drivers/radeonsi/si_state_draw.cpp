@@ -11,6 +11,7 @@
 #define XXH_INLINE_ALL
 #include "util/xxhash.h"
 #include "util/u_cpu_detect.h"
+#include "util/u_draw.h"
 #include "util/u_index_modify.h"
 #include "util/u_upload_mgr.h"
 #include "ac_rtld.h"
@@ -318,7 +319,7 @@ static bool si_update_shaders_shared_by_vertex_and_mesh_pipe(struct si_context *
       }
    }
 
-   if (GFX_VERSION >= GFX9 && unlikely(sctx->sqtt)) {
+   if (GFX_VERSION >= GFX9 && unlikely(sctx->sqtt.data)) {
       /* Pretend the bound shaders form a vk pipeline. Include the scratch size in
        * the hash calculation to force re-emitting the pipeline if the scratch bo
        * changes.
@@ -354,7 +355,7 @@ static bool si_update_shaders_shared_by_vertex_and_mesh_pipe(struct si_context *
       XXH64_freeState(xh);
 
       struct si_sqtt_fake_pipeline *pipeline = NULL;
-      if (!si_sqtt_pipeline_is_registered(sctx->sqtt, pipeline_code_hash)) {
+      if (!si_sqtt_pipeline_is_registered(sctx->sqtt.data, pipeline_code_hash)) {
          /* This is a new pipeline. Allocate a new bo to hold all the shaders. Without
           * this, shader code export process creates huge rgp files because RGP assumes
           * the shaders live sequentially in memory (shader N address = shader 0 + offset N)
@@ -410,7 +411,7 @@ static bool si_update_shaders_shared_by_vertex_and_mesh_pipe(struct si_context *
             ac_pm4_finalize(&pipeline->pm4.base);
             sctx->screen->ws->buffer_unmap(sctx->screen->ws, bo->buf);
 
-            _mesa_hash_table_u64_insert(sctx->sqtt->pipeline_bos,
+            _mesa_hash_table_u64_insert(sctx->sqtt.data->pipeline_bos,
                                         pipeline_code_hash, pipeline);
 
             si_sqtt_register_pipeline(sctx, pipeline, gfx_sh_offsets);
@@ -420,12 +421,21 @@ static bool si_update_shaders_shared_by_vertex_and_mesh_pipe(struct si_context *
          }
       } else {
          pipeline = (struct si_sqtt_fake_pipeline *)_mesa_hash_table_u64_search(
-             sctx->sqtt->pipeline_bos, pipeline_code_hash);
+             sctx->sqtt.data->pipeline_bos, pipeline_code_hash);
       }
       assert(pipeline);
 
       si_sqtt_describe_pipeline_bind(sctx, pipeline_code_hash, 0);
+
       si_pm4_bind_state(sctx, sqtt_pipeline, pipeline);
+
+      /* shader states overwrite the pipeline's code addresses when they are emitted, and
+       * shaders with the same code share an already emitted pipeline, which the bind
+       * doesn't mark dirty
+       */
+      if (sctx->dirty_atoms & (SI_STATE_BIT(ls) | SI_STATE_BIT(hs) | SI_STATE_BIT(es) |
+                               SI_STATE_BIT(gs) | SI_STATE_BIT(vs) | SI_STATE_BIT(ps)))
+         sctx->dirty_atoms |= SI_STATE_BIT(sqtt_pipeline);
    }
 
    return true;
@@ -1442,8 +1452,8 @@ static void si_emit_draw_packets(struct si_context *sctx, const struct pipe_draw
 {
    struct radeon_cmdbuf *cs = &sctx->gfx_cs;
 
-   if (unlikely(sctx->sqtt_enabled)) {
-      si_sqtt_write_event_marker(sctx, &sctx->gfx_cs, sctx->sqtt_next_event,
+   if (unlikely(si_is_sqtt_active(sctx))) {
+      si_sqtt_write_event_marker(sctx, &sctx->gfx_cs, sctx->sqtt.next_event,
                                  UINT_MAX, UINT_MAX, UINT_MAX);
    }
 
@@ -1839,7 +1849,7 @@ static void si_emit_draw_packets(struct si_context *sctx, const struct pipe_draw
             }
          }
       } else {
-         if ((GFX_VERSION >= GFX11_5 && GFX_VERSION <= GFX12) && !IS_DRAW_VERTEX_STATE &&
+         if (sctx->screen->info.has_draw_opaque_ge_bug && !IS_DRAW_VERTEX_STATE &&
              indirect && indirect->count_from_stream_output) {
             /* DrawTransformFeedback requires 3 SQ_NON_EVENTs after the packet. */
             assert(num_draws == 1);
@@ -1889,7 +1899,7 @@ static void si_emit_draw_packets(struct si_context *sctx, const struct pipe_draw
       }
    }
 
-   if (GFX_VERSION >= GFX9 && unlikely(sctx->sqtt_enabled))
+   if (GFX_VERSION >= GFX9 && unlikely(si_is_sqtt_active(sctx)))
      radeon_event_write(V_028A90_THREAD_TRACE_MARKER);
    radeon_end();
 }
@@ -2604,9 +2614,7 @@ static void si_draw(struct pipe_context *ctx,
 
    /* Workaround for a VGT hang when streamout is enabled.
     * It must be done after drawing. */
-   if (((GFX_VERSION == GFX7 && sctx->family == CHIP_HAWAII) ||
-        (GFX_VERSION == GFX8 && (sctx->family == CHIP_TONGA || sctx->family == CHIP_FIJI))) &&
-       si_get_streamout_enable_state(sctx)) {
+   if (sctx->screen->info.has_streamout_vgt_hang_bug && si_get_streamout_enable_state(sctx)) {
       radeon_begin(&sctx->gfx_cs);
       radeon_event_write(V_028A90_VGT_STREAMOUT_SYNC);
       radeon_end();
@@ -2814,6 +2822,7 @@ void GFX(si_init_draw_functions_)(struct si_context *sctx)
    sctx->b.draw_vbo = si_invalid_draw_vbo;
    sctx->b.draw_vertex_state = si_invalid_draw_vertex_state;
    sctx->blitter->draw_rectangle = si_draw_rectangle;
+   sctx->b.draw_vbo_buffers = util_draw_vbo_buffers;
 
    si_init_ia_multi_vgt_param_table(sctx);
 }

@@ -234,7 +234,7 @@ cmd_buffer_render_pass_emit_loads(struct v3dv_cmd_buffer *cmd_buffer,
   assert(!pass->multiview_enabled || layer < MAX_MULTIVIEW_VIEW_COUNT);
 
    for (uint32_t i = 0; i < subpass->color_count; i++) {
-      uint32_t attachment_idx = subpass->color_attachments[i].attachment;
+      uint32_t attachment_idx = subpass->color_attachments[i];
 
       if (attachment_idx == VK_ATTACHMENT_UNUSED)
          continue;
@@ -283,7 +283,7 @@ cmd_buffer_render_pass_emit_loads(struct v3dv_cmd_buffer *cmd_buffer,
       }
    }
 
-   uint32_t ds_attachment_idx = subpass->ds_attachment.attachment;
+   uint32_t ds_attachment_idx = subpass->ds_attachment;
    if (ds_attachment_idx != VK_ATTACHMENT_UNUSED) {
       const struct v3dv_render_pass_attachment *ds_attachment =
          &state->pass->attachments[ds_attachment_idx];
@@ -473,7 +473,7 @@ cmd_buffer_render_pass_emit_stores(struct v3dv_cmd_buffer *cmd_buffer,
    assert(!pass->multiview_enabled || layer < MAX_MULTIVIEW_VIEW_COUNT);
 
    /* FIXME: separate stencil */
-   uint32_t ds_attachment_idx = subpass->ds_attachment.attachment;
+   uint32_t ds_attachment_idx = subpass->ds_attachment;
    if (ds_attachment_idx != VK_ATTACHMENT_UNUSED) {
       const struct v3dv_render_pass_attachment *ds_attachment =
          &state->pass->attachments[ds_attachment_idx];
@@ -573,7 +573,7 @@ cmd_buffer_render_pass_emit_stores(struct v3dv_cmd_buffer *cmd_buffer,
          assert(ds_att_state->has_resolve);
          assert(subpass->resolve_depth || subpass->resolve_stencil);
          const uint32_t resolve_attachment_idx =
-            subpass->ds_resolve_attachment.attachment;
+            subpass->ds_resolve_attachment;
          assert(resolve_attachment_idx != VK_ATTACHMENT_UNUSED);
 
          const uint32_t zs_buffer =
@@ -602,7 +602,7 @@ cmd_buffer_render_pass_emit_stores(struct v3dv_cmd_buffer *cmd_buffer,
    }
 
    for (uint32_t i = 0; i < subpass->color_count; i++) {
-      uint32_t attachment_idx = subpass->color_attachments[i].attachment;
+      uint32_t attachment_idx = subpass->color_attachments[i];
 
       if (attachment_idx == VK_ATTACHMENT_UNUSED)
          continue;
@@ -654,7 +654,7 @@ cmd_buffer_render_pass_emit_stores(struct v3dv_cmd_buffer *cmd_buffer,
       if (att_state->use_tlb_resolve) {
          assert(att_state->has_resolve);
          const uint32_t resolve_attachment_idx =
-            subpass->resolve_attachments[i].attachment;
+            subpass->resolve_attachments[i];
          cmd_buffer_render_pass_emit_store(cmd_buffer, cl,
                                            resolve_attachment_idx, layer,
                                            RENDER_TARGET_0 + i,
@@ -908,8 +908,7 @@ cmd_buffer_render_pass_setup_render_target(struct v3dv_cmd_buffer *cmd_buffer,
    if (rt >= subpass->color_count)
       return;
 
-   struct v3dv_subpass_attachment *attachment = &subpass->color_attachments[rt];
-   const uint32_t attachment_idx = attachment->attachment;
+   const uint32_t attachment_idx = subpass->color_attachments[rt];
    if (attachment_idx == VK_ATTACHMENT_UNUSED)
       return;
 
@@ -969,7 +968,7 @@ v3dX(cmd_buffer_emit_render_pass_rcl)(struct v3dv_cmd_buffer *cmd_buffer)
     * updates to the previous HW state.
     */
    bool do_early_zs_clear = false;
-   const uint32_t ds_attachment_idx = subpass->ds_attachment.attachment;
+   const uint32_t ds_attachment_idx = subpass->ds_attachment;
    assert(!tiling->msaa || !tiling->double_buffer);
    cl_emit(rcl, TILE_RENDERING_MODE_CFG_COMMON, config) {
       config.image_width_pixels = framebuffer->width;
@@ -1084,7 +1083,7 @@ v3dX(cmd_buffer_emit_render_pass_rcl)(struct v3dv_cmd_buffer *cmd_buffer)
    uint32_t base_addr = 0;
 #endif
    for (uint32_t i = 0; i < subpass->color_count; i++) {
-      uint32_t attachment_idx = subpass->color_attachments[i].attachment;
+      uint32_t attachment_idx = subpass->color_attachments[i];
       if (attachment_idx == VK_ATTACHMENT_UNUSED) {
 #if V3D_VERSION >= 71
          cl_emit(rcl, TILE_RENDERING_MODE_CFG_RENDER_TARGET_PART1, rt) {
@@ -1892,7 +1891,7 @@ cmd_buffer_update_ez_state(struct v3dv_cmd_buffer *cmd_buffer,
       struct v3dv_cmd_buffer_state *state = &cmd_buffer->state;
       assert(state->subpass_idx < state->pass->subpass_count);
       struct v3dv_subpass *subpass = &state->pass->subpasses[state->subpass_idx];
-      if (subpass->ds_attachment.attachment == VK_ATTACHMENT_UNUSED) {
+      if (subpass->ds_attachment == VK_ATTACHMENT_UNUSED) {
          job->first_ez_state = V3D_EZ_DISABLED;
          job->ez_state = V3D_EZ_DISABLED;
          return false;
@@ -1905,7 +1904,7 @@ cmd_buffer_update_ez_state(struct v3dv_cmd_buffer *cmd_buffer,
        * So we need to disable EZ in these cases.
        */
       const struct v3dv_render_pass_attachment *ds_attachment =
-         &state->pass->attachments[subpass->ds_attachment.attachment];
+         &state->pass->attachments[subpass->ds_attachment];
 
       const VkImageAspectFlags ds_aspects =
          vk_format_aspects(ds_attachment->desc.format);
@@ -2761,23 +2760,53 @@ v3dX(cmd_buffer_emit_index_buffer)(struct v3dv_cmd_buffer *cmd_buffer)
    struct v3dv_job *job = cmd_buffer->state.job;
    assert(job);
 
-   /* We flag all state as dirty when we create a new job so make sure we
-    * have a valid index buffer before attempting to emit state for it.
+   /* We flag all state as dirty when we create a new job so we may get here
+    * without the application having bound an index buffer.
     */
    struct v3dv_buffer *ibuffer =
       v3dv_buffer_from_handle(cmd_buffer->state.index_buffer.buffer);
-   if (ibuffer) {
-      v3dv_cl_ensure_space_with_branch(
-         &job->bcl, cl_packet_length(INDEX_BUFFER_SETUP));
-      v3dv_return_if_oom(cmd_buffer, NULL);
 
-      const uint32_t offset = ibuffer->mem_offset +
-                              cmd_buffer->state.index_buffer.offset;
+   if (!ibuffer && !cmd_buffer->device->null_bo) {
+      /* No index buffer was bound and null index buffers aren't enabled
+       * (neither nullDescriptor nor maintenance6)
+       */
+      cmd_buffer->state.dirty &= ~V3DV_CMD_DIRTY_INDEX_BUFFER;
+      return;
+   }
+
+   struct v3dv_bo *bo;
+   uint32_t offset;
+   uint32_t size;
+
+   if (ibuffer) {
+      offset = ibuffer->mem_offset + cmd_buffer->state.index_buffer.offset;
       assert(ibuffer->mem->bo->size >= offset);
-      cl_emit(&job->bcl, INDEX_BUFFER_SETUP, ib) {
-         ib.address = v3dv_cl_address(ibuffer->mem->bo, offset);
-         ib.size = cmd_buffer->state.index_buffer.size;
-      }
+      bo = ibuffer->mem->bo;
+      size = cmd_buffer->state.index_buffer.size;
+   } else {
+      /* VK_KHR_maintenance6: null index buffer, all fetches return 0.
+       *
+       * FIXME: this is not a complete solution. The hardware has no way to
+       * return 0 for an arbitrary index fetch, so we point it at a zeroed BO
+       * and rely on the draw not fetching past the end of it. If an indexed
+       * draw fetches more indices than fit in null_bo (see
+       * V3DV_NULL_BO_SIZE_MAINTENANCE6), the fetch goes out of bounds and
+       * the result is no longer 0 (and may fault). A complete solution would
+       * need to fetch indices in software, for example from a shader, for
+       * this case only.
+       */
+      bo = cmd_buffer->device->null_bo;
+      offset = 0;
+      size = bo->size;
+   }
+
+   v3dv_cl_ensure_space_with_branch(
+      &job->bcl, cl_packet_length(INDEX_BUFFER_SETUP));
+   v3dv_return_if_oom(cmd_buffer, NULL);
+
+   cl_emit(&job->bcl, INDEX_BUFFER_SETUP, ib) {
+      ib.address = v3dv_cl_address(bo, offset);
+      ib.size = size;
    }
 
    cmd_buffer->state.dirty &= ~V3DV_CMD_DIRTY_INDEX_BUFFER;

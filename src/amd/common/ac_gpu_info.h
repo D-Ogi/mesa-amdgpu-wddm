@@ -325,7 +325,10 @@ struct radeon_info {
                              * the LLVM version doesn't work with multiparts shaders.
                              */
    bool has_smem_partial_oob_access_bug;
+   bool has_streamout_vgt_hang_bug;
+   bool has_draw_opaque_ge_bug;
    bool has_out_of_order_uncached_l2;
+   bool has_cp_dma_unaligned_copy_perf_issue;
 
    /* Display features. */
    /* There are 2 display DCC codepaths, because display expects unaligned DCC. */
@@ -333,7 +336,6 @@ struct radeon_info {
    bool use_display_dcc_unaligned;
    /* Allocate both aligned and unaligned DCC and use the retile blit. */
    bool use_display_dcc_with_retile_blit;
-   bool gfx12_supports_display_dcc;
    bool gfx12_supports_dcc_write_compress_disable;
 
    /* Memory info. */
@@ -356,6 +358,7 @@ struct radeon_info {
    bool r600_has_virtual_memory;
    uint32_t max_tcc_blocks;
    uint32_t tcc_cache_line_size;
+   uint32_t smem_cache_line_size;
    bool tcc_rb_non_coherent; /* whether L2 inv is needed for render->texture transitions */
    bool cp_sdma_ge_use_system_memory_scope;
    bool cp_dma_use_L2;
@@ -408,10 +411,8 @@ struct radeon_info {
    bool has_sparse_image_standard_3d;
    /* Mip levels do not need to be aligned to the sparse block size */
    bool has_sparse_unaligned_mip_size;
-   bool has_gpuvm_fault_query;
    /* Whether SR-IOV is enabled or amdgpu.mcbp=1 was set on the kernel command line. */
    bool has_kernelq_reg_shadowing;
-   bool has_default_zerovram_support;
    bool has_tmz_support;
    bool has_trap_handler_support;
    bool kernel_has_modifiers;
@@ -490,11 +491,6 @@ struct radeon_info {
    } fw_based_mcbp;
 };
 
-enum ac_query_gpu_info_result {
-   AC_QUERY_GPU_INFO_SUCCESS,
-   AC_QUERY_GPU_INFO_FAIL,
-   AC_QUERY_GPU_INFO_UNIMPLEMENTED_HW,
-};
 
 /* If compiler_compat_mode is true, then ac_compiler_info must be identical between:
  * - CHIP_VANGOGH and CHIP_REMBRANDT
@@ -503,9 +499,9 @@ enum ac_query_gpu_info_result {
  *
  * conformant_trunc_coord is an exception, and might differ.
  */
-enum ac_query_gpu_info_result ac_query_gpu_info(int fd, void *dev_p, struct radeon_info *info,
-                                                bool require_pci_bus_info,
-                                                bool compiler_compat_mode);
+bool ac_query_gpu_info(int fd, void *dev_p, struct radeon_info *info,
+                       bool require_pci_bus_info,
+                       bool compiler_compat_mode);
 void ac_fill_compiler_info(struct radeon_info *info,
                            const struct drm_amdgpu_info_device *device_info, bool compat_mode);
 void ac_fill_tiling_info(struct radeon_info *info, const struct amdgpu_gpu_info *amdinfo);

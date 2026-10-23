@@ -213,11 +213,6 @@ if with_gallium_rusticl
   subdir('frontends/rusticl')
   subdir('targets/rusticl')
 endif
-if with_glx == 'xlib'
-  subdir('winsys/sw/xlib')
-  subdir('frontends/glx/xlib')
-  subdir('targets/libgl-xlib')
-endif
 if with_gallium_va
   subdir('frontends/va')
   if not with_dri
@@ -259,4 +254,8 @@ endif
 if with_teflon
   subdir('frontends/teflon')
   subdir('targets/teflon')
+endif
+if with_torx
+  subdir('frontends/torx')
+  subdir('targets/torx')
 endif

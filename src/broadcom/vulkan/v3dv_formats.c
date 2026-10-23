@@ -122,6 +122,19 @@ v3dv_get_compatible_tfu_format(struct v3dv_device *device,
    return format;
 }
 
+/* Host image copy goes through the v3d_tiling helpers, which work on whole
+ * texel blocks of these sizes.
+ */
+static bool
+format_supports_host_transfer(VkFormat vk_format)
+{
+   if (vk_format_get_plane_count(vk_format) != 1)
+      return false;
+
+   uint32_t bs = vk_format_get_blocksize(vk_format);
+   return bs == 1 || bs == 2 || bs == 4 || bs == 8 || bs == 16;
+}
+
 static VkFormatFeatureFlags2
 image_format_plane_features(struct v3dv_physical_device *pdevice,
                             VkFormat vk_format,
@@ -266,6 +279,10 @@ image_format_features(struct v3dv_physical_device *pdevice,
        v3d_X((&pdevice->devinfo), format_supports_blending)(v3dv_format)) {
       flags |= VK_FORMAT_FEATURE_2_COLOR_ATTACHMENT_BLEND_BIT;
    }
+
+   /* Set last, and only if the format already has other features. */
+   if (flags && format_supports_host_transfer(vk_format))
+      flags |= VK_FORMAT_FEATURE_2_HOST_IMAGE_TRANSFER_BIT;
 
    return flags;
 }
@@ -475,6 +492,13 @@ get_image_format_properties(
        */
       if (info->type == VK_IMAGE_TYPE_1D &&
           vk_format_is_depth_or_stencil(info->format)) {
+         goto unsupported;
+      }
+   }
+
+   if (image_usage & VK_IMAGE_USAGE_HOST_TRANSFER_BIT) {
+      if (!(format_feature_flags &
+            VK_FORMAT_FEATURE_2_HOST_IMAGE_TRANSFER_BIT)) {
          goto unsupported;
       }
    }
@@ -698,6 +722,7 @@ v3dv_GetPhysicalDeviceImageFormatProperties2(VkPhysicalDevice physicalDevice,
    const VkPhysicalDeviceExternalImageFormatInfo *external_info = NULL;
    const VkPhysicalDeviceImageDrmFormatModifierInfoEXT *drm_format_mod_info = NULL;
    VkExternalImageFormatProperties *external_props = NULL;
+   VkHostImageCopyDevicePerformanceQuery *hic_props = NULL;
    VkSamplerYcbcrConversionImageFormatProperties *ycbcr_props = NULL;
    VkImageTiling tiling = base_info->tiling;
 
@@ -744,6 +769,9 @@ v3dv_GetPhysicalDeviceImageFormatProperties2(VkPhysicalDevice physicalDevice,
       case VK_STRUCTURE_TYPE_SAMPLER_YCBCR_CONVERSION_IMAGE_FORMAT_PROPERTIES:
          ycbcr_props = s;
          break;
+      case VK_STRUCTURE_TYPE_HOST_IMAGE_COPY_DEVICE_PERFORMANCE_QUERY:
+         hic_props = s;
+         break;
       default:
          vk_debug_ignored_stype(sType);
          break;
@@ -756,6 +784,15 @@ v3dv_GetPhysicalDeviceImageFormatProperties2(VkPhysicalDevice physicalDevice,
                                   ycbcr_props);
    if (result != VK_SUCCESS)
       goto done;
+
+   if (hic_props) {
+      /* Layouts don't affect how images are stored on V3D, and v3dv has no
+       * usage-dependent compression, so host transfer never costs device
+       * performance.
+       */
+      hic_props->optimalDeviceAccess = true;
+      hic_props->identicalMemoryLayout = true;
+   }
 
    if (external_info && external_info->handleType != 0) {
       switch (external_info->handleType) {

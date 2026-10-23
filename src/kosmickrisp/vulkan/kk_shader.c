@@ -601,8 +601,8 @@ kk_lower_fs(struct kk_device *dev, nir_shader *nir,
 }
 
 static bool
-kk_fs_reads_input_attachment(const nir_shader *nir, uint32_t depth_att,
-                             uint32_t stencil_att, bool indices_known)
+kk_fs_reads_ds_input_attachment(const nir_shader *nir, uint32_t depth_att,
+                                uint32_t stencil_att, bool indices_known)
 {
    nir_foreach_function_impl(impl, nir) {
       nir_foreach_block(block, impl) {
@@ -611,20 +611,22 @@ kk_fs_reads_input_attachment(const nir_shader *nir, uint32_t depth_att,
                continue;
 
             const nir_intrinsic_instr *intr = nir_instr_as_intrinsic(instr);
-            if (intr->intrinsic != nir_intrinsic_image_deref_load &&
-                intr->intrinsic != nir_intrinsic_image_deref_sparse_load)
-               continue;
-
-            nir_deref_instr *deref = nir_src_as_deref(intr->src[0u]);
-            enum glsl_sampler_dim dim = glsl_get_sampler_dim(deref->type);
-            if (dim != GLSL_SAMPLER_DIM_SUBPASS &&
-                dim != GLSL_SAMPLER_DIM_SUBPASS_MS)
-               continue;
-
-            nir_variable *var = nir_deref_instr_get_variable(deref);
-            if (!indices_known || var == NULL || var->data.index == depth_att ||
-                var->data.index == stencil_att)
+            switch (intr->intrinsic) {
+            case nir_intrinsic_image_deref_depth_input_attachment_load:
+            case nir_intrinsic_image_deref_stencil_input_attachment_load:
                return true;
+            case nir_intrinsic_image_deref_input_attachment_load: {
+               if (!indices_known || !nir_src_is_const(intr->src[3]))
+                  return true;
+               const uint32_t idx =
+                  nir_intrinsic_base(intr) + nir_src_as_uint(intr->src[3]);
+               if (idx == depth_att || idx == stencil_att)
+                  return true;
+               break;
+            }
+            default:
+               break;
+            }
          }
       }
    }
@@ -672,8 +674,8 @@ kk_fs_needs_forced_depth_write(const nir_shader *nir,
    const bool indices_known =
       !BITSET_TEST(state->dynamic, MESA_VK_DYNAMIC_INPUT_ATTACHMENT_MAP);
 
-   return kk_fs_reads_input_attachment(nir, depth_att, stencil_att,
-                                       indices_known);
+   return kk_fs_reads_ds_input_attachment(nir, depth_att, stencil_att,
+                                          indices_known);
 }
 
 static void
@@ -1015,6 +1017,11 @@ kk_compile_shader(struct kk_device *dev, nir_shader *nir,
        * inputs since we read vertex attributes from UBOs. */
       kk_lower_vs_vbo(nir, state, robustness);
       if (nir->info.next_stage == MESA_SHADER_TESS_CTRL) {
+         /* TODO_KOSMICKRISP: Poly lowering breaks with vectorized I/O less than
+          * 32-bit, which we support. Lower vertex outputs to scalar. */
+         NIR_PASS(_, nir, nir_lower_io_to_scalar, nir_var_shader_out, NULL,
+                  NULL);
+
          NIR_PASS(_, nir, poly_nir_lower_vs_before_gs);
          NIR_PASS(_, nir, kk_nir_lower_vertex_id_zero_base);
          nir->info.stage = MESA_SHADER_COMPUTE;
@@ -1027,6 +1034,11 @@ kk_compile_shader(struct kk_device *dev, nir_shader *nir,
           * For the non-emulated path we need to subtract base_instance... */
          NIR_PASS(_, nir, msl_nir_lower_instance_id);
    } else if (stage == MESA_SHADER_TESS_CTRL) {
+      /* TODO_KOSMICKRISP: Poly lowering breaks with vectorized I/O less than
+       * 32-bit, which we support. Lower TCS inputs & outputs to scalar. */
+      NIR_PASS(_, nir, nir_lower_io_to_scalar,
+               nir_var_shader_in | nir_var_shader_out, NULL, NULL);
+
       NIR_PASS(_, nir, poly_nir_lower_tcs, false);
 
       shader->info.tess.info.ccw = nir->info.tess.ccw;
@@ -1041,6 +1053,10 @@ kk_compile_shader(struct kk_device *dev, nir_shader *nir,
          util_last_bit(nir->info.patch_outputs_written);
       shader->info.tess.tcs_output_stride = poly_tcs_output_stride(nir);
    } else if (stage == MESA_SHADER_TESS_EVAL) {
+      /* TODO_KOSMICKRISP: Poly lowering breaks with vectorized I/O less than
+       * 32-bit, which we support. Lower TES inputs to scalar. */
+      NIR_PASS(_, nir, nir_lower_io_to_scalar, nir_var_shader_in, NULL, NULL);
+
       shader->info.tess.info.ccw = nir->info.tess.ccw;
       shader->info.tess.info.points = nir->info.tess.point_mode;
       shader->info.tess.info.spacing = nir->info.tess.spacing;

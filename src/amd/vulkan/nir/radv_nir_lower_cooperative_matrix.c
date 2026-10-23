@@ -394,10 +394,10 @@ lower_cmat_load_store(nir_builder *b, nir_intrinsic_instr *intr, const lower_cma
          SWAP(col_offset, row_offset);
       }
 
-      col_offset = nir_imul(b, col_offset, stride);
-
       col_offset = nir_u2uN(b, col_offset, idx_bits);
       row_offset = nir_u2uN(b, row_offset, idx_bits);
+
+      col_offset = nir_imul(b, col_offset, nir_u2uN(b, stride, idx_bits));
 
       nir_deref_instr *iter_deref = nir_build_deref_ptr_as_array(b, deref, col_offset);
       iter_deref = nir_build_deref_cast(b, &iter_deref->def, deref->modes, glsl_scalar_type(desc.element_type),
@@ -517,8 +517,7 @@ lower_cmat_tensor_load_store(nir_builder *b, nir_cmat_call_instr *call, const lo
       if (!info.decode_fnptr) {
          if (is_load) {
             if (info.clamp_value) {
-               vars[i * mul] = nir_bcsel(b, info.do_clamp,
-                                         nir_u2uN(b, info.clamp_value, radv_nir_cmat_bits(desc)),
+               vars[i * mul] = nir_bcsel(b, info.do_clamp, nir_u2uN(b, info.clamp_value, radv_nir_cmat_bits(desc)),
                                          nir_load_deref(b, iter_deref));
             } else {
                vars[i * mul] = nir_load_deref(b, iter_deref);
@@ -538,7 +537,6 @@ lower_cmat_tensor_load_store(nir_builder *b, nir_cmat_call_instr *call, const lo
          if (is_load)
             vars[i * mul] = nir_if_phi(b, vars[i * mul], clips[i * mul]);
       }
-
    }
 
    if (is_load) {
@@ -805,8 +803,7 @@ lower_cmat_convert_transpose(nir_builder *b, nir_intrinsic_instr *intr, const lo
 
    nir_cmat_signed cmat_signed_mask = nir_intrinsic_cmat_signed_mask(intr);
 
-   dst_element_type =
-      glsl_apply_signedness_to_base_type(dst_element_type, cmat_signed_mask & NIR_CMAT_RESULT_SIGNED);
+   dst_element_type = glsl_apply_signedness_to_base_type(dst_element_type, cmat_signed_mask & NIR_CMAT_RESULT_SIGNED);
    src_element_type = glsl_apply_signedness_to_base_type(src_element_type, cmat_signed_mask & NIR_CMAT_A_SIGNED);
 
    if (transpose) {
@@ -963,7 +960,8 @@ lower_cmat_reduce_finish_call(nir_builder *b, nir_cmat_call_instr *call, const l
          nir_def *row0_accum = nir_channel(b, src0, i * mul);
          nir_def *row1_accum = nir_channel(b, src1, i * mul);
 
-         nir_variable *row_tmp = nir_local_variable_create(b->impl, glsl_get_bare_type(fnptr->params[0].type), "row_tmp");
+         nir_variable *row_tmp =
+            nir_local_variable_create(b->impl, glsl_get_bare_type(fnptr->params[0].type), "row_tmp");
          nir_deref_instr *row_tmp_deref = nir_build_deref_var(b, row_tmp);
 
          nir_call(b, fnptr, &row_tmp_deref->def, row0_accum, row1_accum);
@@ -1027,7 +1025,8 @@ lower_cmat_reduce_call(nir_builder *b, nir_cmat_call_instr *call, const lower_cm
       for (unsigned i = 0; i < length / mul; ++i) {
          nir_def *row_accum = vars[i * mul];
 
-         nir_variable *row_tmp = nir_local_variable_create(b->impl, glsl_get_bare_type(fnptr->params[0].type), "row_tmp");
+         nir_variable *row_tmp =
+            nir_local_variable_create(b->impl, glsl_get_bare_type(fnptr->params[0].type), "row_tmp");
          nir_deref_instr *row_tmp_deref = nir_build_deref_var(b, row_tmp);
          nir_store_deref(b, row_tmp_deref, row_accum, 1);
 
@@ -1250,7 +1249,8 @@ lower_cmat_get_coordinate(nir_builder *b, nir_intrinsic_instr *intr, const lower
    nir_def *local_idx = nir_load_subgroup_invocation(b);
    nir_def *inner_idx = nir_iand_imm(b, local_idx, 15);
    nir_def *base_row = radv_get_base_row(b, desc, params, local_idx);
-   uint32_t row_increase = params->gfx_level < GFX11_7 && desc.use == GLSL_CMAT_USE_ACCUMULATOR ? params->wave_size / 16 : 1;
+   uint32_t row_increase =
+      params->gfx_level < GFX11_7 && desc.use == GLSL_CMAT_USE_ACCUMULATOR ? params->wave_size / 16 : 1;
 
    comps[0] = nir_iadd(b, base_row, nir_imul_imm(b, intr->src[0].ssa, row_increase));
    comps[1] = inner_idx;
@@ -1387,7 +1387,7 @@ radv_nir_lower_cooperative_matrix(nir_shader *shader, enum amd_gfx_level gfx_lev
 
    _mesa_hash_table_destroy(type_map, NULL);
 
-   nir_foreach_function_impl(fnim, shader)
+   nir_foreach_function_impl (fnim, shader)
       nir_progress(progress, fnim, 0);
 
    return nir_progress(progress, func->impl, 0);

@@ -3655,16 +3655,10 @@ genX(flush_binding_mode)(struct anv_cmd_buffer *cmd_buffer,
          assert((offset & ~ANV_DESCRIPTOR_SET_OFFSET_MASK) == 0);
          assert((dyn_set_offset & ANV_DESCRIPTOR_SET_OFFSET_MASK) == 0);
 
-         /* Plaforms with LSC will use descriptor buffer push constant
-          * offsets, also with device generated commands, shaders are much
-          * more likely to access the offset on pre-LSC platforms.
-          */
-         if (cmd_buffer->device->vk.enabled_features.deviceGeneratedCommands || GFX_VERx10 >= 125) {
-            UPDATE_PUSH(push->legacy.sets[i].surfaces_offset, offset | dyn_set_offset);
-            UPDATE_PUSH(push->legacy.sets[i].samplers_offset,
-                        anv_address_physical(set->desc_sampler_addr) -
-                        anv_physical_device_get_dynamic_state_pool_va(cmd_buffer->device->physical)->addr);
-         }
+         UPDATE_PUSH(push->legacy.sets[i].surfaces_offset, offset | dyn_set_offset);
+         UPDATE_PUSH(push->legacy.sets[i].samplers_offset,
+                     anv_address_physical(set->desc_sampler_addr) -
+                     anv_physical_device_get_dynamic_state_pool_va(cmd_buffer->device->physical)->addr);
          for (uint32_t j = 0; j < set->layout->vk.dynamic_descriptor_count; j++) {
             UPDATE_PUSH(push->legacy.dynamic_offsets[dyn_set_offset + j],
                         bind_state->dynamic_offsets[i].offsets[j]);
@@ -4815,12 +4809,11 @@ anv_pipe_flush_bits_for_access_flags(struct anv_cmd_buffer *cmd_buffer,
             pipe_bits |= ANV_PIPE_UNTYPED_DATAPORT_CACHE_FLUSH_BIT;
          } else {
             /* We can use the data port when trying to stay in compute mode on
-             * the RCS.
+             * the RCS, or in some specific shaders such as indirect
+             * buffer-to-buffer copies or ASTC emulation copies.
              */
-            if (GFX_VER < 20) {
-               pipe_bits |= ANV_PIPE_HDC_PIPELINE_FLUSH_BIT;
-               pipe_bits |= ANV_PIPE_UNTYPED_DATAPORT_CACHE_FLUSH_BIT;
-            }
+            pipe_bits |= ANV_PIPE_HDC_PIPELINE_FLUSH_BIT;
+            pipe_bits |= ANV_PIPE_UNTYPED_DATAPORT_CACHE_FLUSH_BIT;
             /* Most operations are done through RT/detph writes */
             pipe_bits |= ANV_PIPE_RENDER_TARGET_CACHE_FLUSH_BIT;
             pipe_bits |= ANV_PIPE_DEPTH_CACHE_FLUSH_BIT;
@@ -6605,7 +6598,7 @@ void genX(CmdBeginRendering)(
             anv_layout_to_aux_usage(cmd_buffer->device->info,
                                     d_iview->image,
                                     VK_IMAGE_ASPECT_DEPTH_BIT,
-                                    VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT,
+                                    VK_IMAGE_USAGE_2_DEPTH_STENCIL_ATTACHMENT_BIT_KHR,
                                     depth_layout,
                                     cmd_buffer->queue_family->queueFlags);
          clear_value.depth = d_att->clearValue.depthStencil.depth;
@@ -6619,7 +6612,7 @@ void genX(CmdBeginRendering)(
             anv_layout_to_aux_usage(cmd_buffer->device->info,
                                     s_iview->image,
                                     VK_IMAGE_ASPECT_STENCIL_BIT,
-                                    VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT,
+                                    VK_IMAGE_USAGE_2_DEPTH_STENCIL_ATTACHMENT_BIT_KHR,
                                     stencil_layout,
                                     cmd_buffer->queue_family->queueFlags);
          clear_value.stencil = s_att->clearValue.depthStencil.stencil;
@@ -6826,7 +6819,7 @@ void genX(CmdBeginRendering)(
       att->layout = vk_att->imageLayout;
       att->aux_usage = anv_layout_to_aux_usage(
          cmd_buffer->device->info, iview->image,
-         iview->vk.aspects, VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT,
+         iview->vk.aspects, VK_IMAGE_USAGE_2_COLOR_ATTACHMENT_BIT_KHR,
          vk_att->imageLayout, cmd_buffer->queue_family->queueFlags);
 
       att->skip_srgb_decode = vk_att_flags_info &&
@@ -6978,7 +6971,7 @@ void genX(CmdBeginRendering)(
                                    ISL_SURF_USAGE_RENDER_TARGET_BIT,
                                    att->aux_usage, &att_clear->clear_color,
                                    0, /* anv_image_view_state_flags */
-                                   &att->surface_state);
+                                   &att->surface_state, NULL);
 
       add_surface_state_relocs(cmd_buffer, &att->surface_state);
 
@@ -7578,7 +7571,8 @@ VkResult genX(CmdSetPerformanceStreamMarkerINTEL)(
    if (intel_perf_metrics_library_get_stream_marker_cmds(
           cmd_buffer->device->physical->perf, pMarkerInfo->marker,
           NULL, &cmds_size)) {
-      void* cmds = anv_batch_emit_dwords(&cmd_buffer->batch, cmds_size);
+      assert(cmds_size % 4 == 0);
+      void* cmds = anv_batch_emit_dwords(&cmd_buffer->batch, cmds_size / 4);
 
       success = cmds && intel_perf_metrics_library_get_stream_marker_cmds(
          cmd_buffer->device->physical->perf, pMarkerInfo->marker,
@@ -8040,9 +8034,16 @@ genX(write_trtt_entries)(struct anv_async_submit *submit,
       i += extra_writes;
    }
 
-   genx_batch_emit_pipe_control(batch, devinfo, _3D,
-                                ANV_PIPE_CS_STALL_BIT |
-                                ANV_PIPE_TLB_INVALIDATE_BIT);
+   if (batch->engine_class == INTEL_ENGINE_CLASS_RENDER ||
+       batch->engine_class == INTEL_ENGINE_CLASS_COMPUTE) {
+      genx_batch_emit_pipe_control(batch, devinfo, _3D,
+                                   ANV_PIPE_CS_STALL_BIT |
+                                   ANV_PIPE_TLB_INVALIDATE_BIT);
+   } else {
+      anv_batch_emit(batch, GENX(MI_FLUSH_DW), mfd) {
+         mfd.TLBInvalidate = true;
+      }
+   }
 #else
    UNREACHABLE("Not implemented");
 #endif

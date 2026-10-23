@@ -2928,15 +2928,23 @@ emit_intrinsic(struct ir3_context *ctx, nir_intrinsic_instr *intr)
       ir3_split_dest(b, dst, get_frag_coord(ctx, intr), 0, 4);
       break;
    case nir_intrinsic_load_sample_pos_from_id: {
-      /* NOTE: blob seems to always use TYPE_F16 and then cov.f16f32,
-       * but that doesn't seem necessary.
-       */
       struct ir3_instruction *offset =
          ir3_RGETPOS(b, ir3_get_src(ctx, &intr->src[0])[0], 0);
-      offset->dsts[0]->wrmask = 0x3;
-      offset->cat5.type = TYPE_F32;
 
-      ir3_split_dest(b, dst, offset, 0, 2);
+      if (ctx->compiler->gen < 6) {
+         /* a5xx RGETPOS only yields the position as F16 written to all of xyzw. */
+         offset->cat5.type = TYPE_F16;
+         offset->dsts[0]->flags |= IR3_REG_HALF;
+         offset->dsts[0]->wrmask = 0xf;
+         struct ir3_instruction *hpos[4];
+         ir3_split_dest(b, hpos, offset, 0, 4);
+         dst[0] = ir3_COV(b, hpos[0], TYPE_F16, TYPE_F32);
+         dst[1] = ir3_COV(b, hpos[1], TYPE_F16, TYPE_F32);
+      } else {
+         offset->cat5.type = TYPE_F32;
+         offset->dsts[0]->wrmask = 0x3;
+         ir3_split_dest(b, dst, offset, 0, 2);
+      }
 
       break;
    }
@@ -3030,6 +3038,9 @@ emit_intrinsic(struct ir3_context *ctx, nir_intrinsic_instr *intr)
       break;
    case nir_intrinsic_load_draw_id:
       dst[0] = create_driver_param(ctx, IR3_DP_VS(draw_id));
+      break;
+   case nir_intrinsic_load_draw_id_offset_ir3:
+      dst[0] = create_driver_param(ctx, IR3_DP_VS(draw_id_offset));
       break;
    case nir_intrinsic_load_base_instance:
       dst[0] = create_driver_param(ctx, IR3_DP_VS(instid_base));
@@ -5511,6 +5522,14 @@ emit_instructions(struct ir3_context *ctx)
     */
    if (ctx->so->type == MESA_SHADER_FRAGMENT) {
       ctx->ij[IJ_PERSP_PIXEL] = create_input(ctx, 0x3);
+
+      /* a5xx only iterates per sample when a SampleID input is present. */
+      if (ctx->compiler->gen < 6 && ctx->s->info.fs.uses_sample_shading) {
+         ctx->samp_id = create_sysval_input(ctx, SYSTEM_VALUE_SAMPLE_ID, 0x1);
+         ctx->samp_id->dsts[0]->flags |= IR3_REG_HALF;
+         array_insert(ctx->samp_id->block, ctx->samp_id->block->keeps,
+                      ctx->samp_id);
+      }
    }
 
    /* Defer add_sysval_input() stuff until after setup_inputs(),
@@ -5799,10 +5818,7 @@ apply_QCTDD13523866(struct ir3_context *ctx)
    struct ir3 *ir = ctx->ir;
    struct ir3_instruction *alu = NULL;
 
-   foreach_block (block, &ir->block_list) {
-      if (block->in_early_preamble)
-         continue;
-
+   foreach_main_block (block, ir) {
       foreach_instr (instr, &block->instr_list) {
          if (is_mov(instr) || !is_alu(instr))
             continue;

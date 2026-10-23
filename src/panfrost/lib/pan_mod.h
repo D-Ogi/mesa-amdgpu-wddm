@@ -106,6 +106,7 @@ const struct pan_mod_handler *pan_mod_get_handler_v6(uint64_t modifier);
 const struct pan_mod_handler *pan_mod_get_handler_v7(uint64_t modifier);
 const struct pan_mod_handler *pan_mod_get_handler_v9(uint64_t modifier);
 const struct pan_mod_handler *pan_mod_get_handler_v10(uint64_t modifier);
+const struct pan_mod_handler *pan_mod_get_handler_v11(uint64_t modifier);
 const struct pan_mod_handler *pan_mod_get_handler_v12(uint64_t modifier);
 const struct pan_mod_handler *pan_mod_get_handler_v13(uint64_t modifier);
 const struct pan_mod_handler *pan_mod_get_handler_v14(uint64_t modifier);
@@ -126,6 +127,8 @@ pan_mod_get_handler(unsigned arch, uint64_t modifier)
       return pan_mod_get_handler_v9(modifier);
    case 10:
       return pan_mod_get_handler_v10(modifier);
+   case 11:
+      return pan_mod_get_handler_v11(modifier);
    case 12:
       return pan_mod_get_handler_v12(modifier);
    case 13:

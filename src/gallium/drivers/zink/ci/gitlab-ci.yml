@@ -157,6 +157,19 @@ zink-anv-tgl-traces-restricted:
     PIGLIT_REPLAY_EXTRA_ARGS: --db-path ${CI_PROJECT_DIR}/replayer-db/ --minio_bucket=${S3_TRACIE_PRIVATE_BUCKET} --jwt-file=${S3_JWT_FILE}
   allow_failure: true
 
+zink-anv-adl-va:
+  extends:
+    - .lava-x86_64-test-video
+    - .anv-test
+    - .lava-lenovo-500e-gen5-rev3-nissa:x86_64
+    - .zink-anv-vaapi-rules
+    - .zink-test
+    - .test-fluster
+  variables:
+    DEQP_SUITE: zink-vaapi
+    GPU_VERSION: zink-anv-adl
+    ANV_DEBUG: video-decode,video-encode
+
 zink-tu-a618:
   extends:
     - .lava-arm64-test-gl
@@ -256,13 +269,12 @@ zink-radv-navi10-valve:
     HWCI_START_WESTON: 1
     CI_TRON_TIMEOUT__OVERALL__MINUTES: 15
     GPU_VERSION: zink-radv-navi10
-    RADV_EXPERIMENTAL: hic
 
-zink-radv-vangogh-valve:
+zink-radv-vangogh-valve-nocl:
   timeout: 25m
   parallel: 3
   extends:
-    - .radv-zink-test-valve
+    - .radv-zink-test-valve-nocl
     - .vangogh-test-valve
     - .zink-radv-valve-rules
   variables:
@@ -275,7 +287,7 @@ zink-radv-vangogh-valve:
 
 zink-radv-vangogh-traces:
   extends:
-    - zink-radv-vangogh-valve
+    - zink-radv-vangogh-valve-nocl
     - .zink-radv-valve-rules
     - .zink-trace-test
     - .piglit-traces-test
@@ -328,3 +340,16 @@ zink-radv-gfx1201-traces:
   variables:
     CI_TRON_TIMEOUT__OVERALL__MINUTES: 5  # normal runtime = 30-40 sec
     PIGLIT_TRACES_FILE: traces-zink.yml
+
+zink-radv-raven-va:
+  extends:
+    - .lava-x86_64-test-video
+    - .radv-raven-test:x86_64
+    - .zink-radv-collabora-vaapi-rules
+    - .lava-hp-x360-14a-cb0001xx-zork:x86_64
+    - .zink-test
+    - .test-fluster
+  variables:
+    DEQP_SUITE: zink-vaapi
+    GPU_VERSION: zink-radv-raven
+    RADV_EXPERIMENTAL: video_decode,video_encode

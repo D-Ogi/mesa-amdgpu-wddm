@@ -199,13 +199,13 @@ adjust_format(const enum pipe_format attrib_format)
 }
 
 static bool
-location_is_64bit(const unsigned loc, const lower_vs_inputs_state *const s)
+location_is_high_64bit(const unsigned loc, const lower_vs_inputs_state *const s)
 {
    if (!(s->gfx_state->vi.attributes_valid & (1 << loc)))
       return false;
 
    const enum pipe_format f = s->gfx_state->vi.vertex_attribute_formats[loc];
-   return util_format_get_max_channel_size(f) == 64;
+   return util_format_get_max_channel_size(f) == 64 && util_format_get_nr_components(f) > 2;
 }
 
 static unsigned
@@ -226,7 +226,7 @@ location_from_intrinsic(nir_intrinsic_instr *intrin, const lower_vs_inputs_state
     * but 64-bit inputs consume twice as many.
     * 64-bit variables must not have a component of 1 or 3.
     */
-   if (loc > 0 && location_is_64bit(loc - 1, s)) {
+   if (loc > 0 && location_is_high_64bit(loc - 1, s)) {
       *is_high_dvec2 = 1;
       return loc - 1;
    }

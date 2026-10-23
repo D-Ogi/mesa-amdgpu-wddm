@@ -417,7 +417,7 @@ get_features(const struct anv_physical_device *pdevice,
       .shaderBufferInt64Atomics            = false,
       .shaderSharedInt64Atomics            = false,
       .shaderFloat16                       = pdevice->info.ver >= 8 && !pdevice->instance->drirc.performance.no_16bit,
-      .shaderInt8                          = pdevice->info.ver >= 8 && !pdevice->instance->drirc.performance.no_16bit,
+      .shaderInt8                          = pdevice->info.ver >= 8,
 
       .descriptorIndexing                                 = false,
       .shaderInputAttachmentArrayDynamicIndexing          = false,
@@ -1500,7 +1500,7 @@ anv_override_engine_counts(int *gc_count, int *g_count, int *c_count)
       } else if (strncmp(next, "c=", 2) == 0) {
          c_override = strtol(next + 2, NULL, 0);
       } else {
-         mesa_logw("Ignoring unsupported ANV_QUEUE_OVERRIDE token: %s", next);
+         mesa_logw("Ignoring unsupported HASVK_QUEUE_OVERRIDE token: %s", next);
       }
       next = strtok_r(NULL, ",", &save);
    }
@@ -1510,7 +1510,7 @@ anv_override_engine_counts(int *gc_count, int *g_count, int *c_count)
    if (g_override >= 0)
       *g_count = g_override;
    if (*g_count > 0 && *gc_count <= 0 && (gc_override >= 0 || g_override >= 0))
-      mesa_logw("ANV_QUEUE_OVERRIDE: gc=0 with g > 0 violates the "
+      mesa_logw("HASVK_QUEUE_OVERRIDE: gc=0 with g > 0 violates the "
                 "Vulkan specification");
    if (c_override >= 0)
       *c_count = c_override;
@@ -3492,7 +3492,7 @@ anv_bind_buffer_memory(const VkBindBufferMemoryInfo *pBindInfo)
    } else {
       buffer->address = ANV_NULL_ADDRESS;
    }
-   
+
    if (bind_status)
       *bind_status->pResult = VK_SUCCESS;
 }

@@ -56,8 +56,12 @@ test_2d_r8g8b8a8_unorm_16x16x1_levels01_array01_samples01_noaux(const char *plat
                     .tiling_flags = tiling_flags);
    t_assert(ok);
 
+   struct isl_tile_info tile_info;
+   isl_surf_get_tile_info(&surf, &tile_info);
+
    uint64_t start_tile_B, end_tile_B;
-   isl_surf_get_image_range_B_tile(&surf, 0, 0, 0, &start_tile_B, &end_tile_B);
+   isl_surf_get_image_range_B_tile(&surf, &tile_info, 0, 0, 0, &start_tile_B,
+                                   &end_tile_B);
 
    t_assert(end_tile_B - start_tile_B <= surf.size_B);
    t_assert(end_tile_B - start_tile_B >= surf_data_size(&surf, 0));
@@ -90,6 +94,9 @@ test_2d_r8g8b8a8_unorm_256x256x1_levels05_array01_samples01_noaux(const char *pl
                     .tiling_flags = tiling_flags);
    t_assert(ok);
 
+   struct isl_tile_info tile_info;
+   isl_surf_get_tile_info(&surf, &tile_info);
+
    struct isl_surf sub_surf;
    uint32_t x_offset_sa, y_offset_sa;
    uint64_t offset_B;
@@ -101,7 +108,8 @@ test_2d_r8g8b8a8_unorm_256x256x1_levels05_array01_samples01_noaux(const char *pl
                            &y_offset_sa);
 
    uint64_t start_tile_B, end_tile_B;
-   isl_surf_get_image_range_B_tile(&surf, 4, 0, 0, &start_tile_B, &end_tile_B);
+   isl_surf_get_image_range_B_tile(&surf, &tile_info, 4, 0, 0, &start_tile_B,
+                                   &end_tile_B);
 
    t_assert(end_tile_B - start_tile_B <= surf.size_B);
    t_assert(end_tile_B - start_tile_B >= surf_data_size(&surf, 4));
@@ -134,6 +142,9 @@ test_2d_astc_ldr_4x4_u8srgb_unorm_256x256x1_levels05_array01_samples01_noaux(con
                     .tiling_flags = tiling_flags);
    t_assert(ok);
 
+   struct isl_tile_info tile_info;
+   isl_surf_get_tile_info(&surf, &tile_info);
+
    struct isl_surf sub_surf;
    uint32_t x_offset_sa, y_offset_sa;
    uint64_t offset_B;
@@ -145,7 +156,8 @@ test_2d_astc_ldr_4x4_u8srgb_unorm_256x256x1_levels05_array01_samples01_noaux(con
                            &y_offset_sa);
 
    uint64_t start_tile_B, end_tile_B;
-   isl_surf_get_image_range_B_tile(&surf, 4, 0, 0, &start_tile_B, &end_tile_B);
+   isl_surf_get_image_range_B_tile(&surf, &tile_info, 4, 0, 0, &start_tile_B,
+                                   &end_tile_B);
 
    t_assert(end_tile_B - start_tile_B <= surf.size_B);
    t_assert(end_tile_B - start_tile_B >= surf_data_size(&surf, 4));

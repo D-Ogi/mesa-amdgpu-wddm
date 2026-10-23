@@ -141,7 +141,7 @@ i915_gem_create_context_engines(int fd,
    struct drm_i915_gem_context_create_ext_setparam low_latency_param = {
       .param = {
          .param = I915_CONTEXT_PARAM_LOW_LATENCY,
-         .value = flags & INTEL_GEM_CREATE_CONTEXT_EXT_LOW_LATENCY_FLAG,
+         .value = (flags & INTEL_GEM_CREATE_CONTEXT_EXT_LOW_LATENCY_FLAG) != 0,
       }
    };
    struct drm_i915_gem_context_create_ext create = {

@@ -129,7 +129,7 @@ jay_send_src_latency(jay_shader *s, jay_inst *I)
 static unsigned
 jay_occupancy(jay_shader *s, jay_inst *I)
 {
-   unsigned exec_size = jay_simd_width_logical(s, I);
+   unsigned exec_size = jay_simd_width_logical(s, I) >> I->simd_split;
    unsigned native = jay_ugpr_per_grf(s);
    uint16_t scale = (exec_size <= native)     ? 1 :
                     (exec_size == native * 2) ? 2 :
@@ -230,21 +230,42 @@ estimate_block_cycles(jay_function *f, jay_block *block)
          cycle += jay_occupancy(shader, prev);
       }
 
-      if (I->dep.mode && sbid[I->dep.sbid]) {
-         unsigned latency = 0;
-         if (I->dep.mode == GEN_SBID_SRC) {
-            if (sbid[I->dep.sbid]->op == JAY_OPCODE_SEND) {
-               latency = jay_send_src_latency(shader, sbid[I->dep.sbid]);
+      uint32_t wait_src = 0, wait_dst = 0;
+
+      if (I->op == JAY_OPCODE_SYNC) {
+         if (jay_sync_op(I) == TGL_SYNC_ALLWR) {
+            wait_dst = jay_as_uint(I->src[0]);
+         } else if (jay_sync_op(I) == TGL_SYNC_ALLRD) {
+            wait_src = jay_as_uint(I->src[0]);
+         }
+      }
+
+      if (I->dep.mode == GEN_SBID_SRC) {
+         wait_src |= BITFIELD_BIT(I->dep.sbid);
+      } else if (I->dep.mode == GEN_SBID_DST || I->dep.mode == GEN_SBID_SET) {
+         wait_dst |= BITFIELD_BIT(I->dep.sbid);
+      }
+
+      u_foreach_bit(sb, wait_src) {
+         if (sbid[sb]) {
+            unsigned latency = 0;
+            if (sbid[sb]->op == JAY_OPCODE_SEND) {
+               latency = jay_send_src_latency(shader, sbid[sb]);
             } else {
                /* IGC uses occupancy for this. Hit only by DPAS */
-               latency = jay_occupancy(shader, sbid[I->dep.sbid]);
+               latency = jay_occupancy(shader, sbid[sb]);
             }
-         } else {
-            latency = jay_latency(shader, sbid[I->dep.sbid], false);
-            sbid[I->dep.sbid] = NULL;
-         }
 
-         cycle = MAX2(cycle, sbid_issue[I->dep.sbid] + latency);
+            cycle = MAX2(cycle, sbid_issue[sb] + latency);
+         }
+      }
+
+      u_foreach_bit(sb, wait_dst) {
+         if (sbid[sb]) {
+            cycle = MAX2(cycle,
+                         sbid_issue[sb] + jay_latency(shader, sbid[sb], false));
+            sbid[sb] = NULL;
+         }
       }
 
       if (I->dep.regdist) {
@@ -267,7 +288,7 @@ estimate_block_cycles(jay_function *f, jay_block *block)
 
       if (0) {
          printf("%4u: ", cycle);
-         jay_print_inst(stdout, f, I);
+         jay_print_inst(stderr, f, I);
       }
 
       unsigned ready_cycle = cycle + jay_latency(shader, I, false);
@@ -298,11 +319,10 @@ estimate_block_cycles(jay_function *f, jay_block *block)
 unsigned
 jay_estimate_cycles(jay_function *f)
 {
-   unsigned cycles = 0;
+   float cycles = 0;
 
    jay_foreach_block(f, block) {
-      /* TODO: Scale by block repetition */
-      cycles += estimate_block_cycles(f, block);
+      cycles += block->weight * (float) estimate_block_cycles(f, block);
    }
 
    return cycles;

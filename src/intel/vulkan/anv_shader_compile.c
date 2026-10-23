@@ -288,6 +288,9 @@ anv_shader_init_uuid(struct anv_physical_device *device)
    const bool cbv_push_buffer = device->drirc.perf.promote_cbv_push_buffer;
    _mesa_blake3_update(&ctx, &cbv_push_buffer, sizeof(cbv_push_buffer));
 
+   const uint8_t code_motion = device->drirc.perf.code_motion;
+   _mesa_blake3_update(&ctx, &code_motion, sizeof(code_motion));
+
    const bool fs_sample_d_wa = device->drirc.debug.fs_sampler_undef_derivatives_workaround;
    _mesa_blake3_update(&ctx, &fs_sample_d_wa, sizeof(fs_sample_d_wa));
 
@@ -383,6 +386,9 @@ anv_shader_preprocess_nir(struct vk_physical_device *device,
    struct brw_nir_compiler_opts opts = {
       .robust_image_access = rs->images == VK_PIPELINE_ROBUSTNESS_IMAGE_BEHAVIOR_ROBUST_IMAGE_ACCESS ||
                              rs->images == VK_PIPELINE_ROBUSTNESS_IMAGE_BEHAVIOR_ROBUST_IMAGE_ACCESS_2_EXT,
+      /* Must match key->code_motion, see populate_base_prog_key(). */
+      .code_motion = pdevice->drirc.perf.code_motion,
+      .lower_tex_use_txs_lod0_intel = true,
    };
    brw_preprocess_nir(compiler, nir, &opts);
 
@@ -414,6 +420,7 @@ populate_base_prog_key(struct brw_base_prog_key *key,
    if (rs != NULL)
       key->robust_flags = anv_get_robust_flags(rs);
    key->divergent_atomics_flags = pdevice->drirc.perf.opt_divergent_atomics;
+   key->code_motion = pdevice->drirc.perf.code_motion;
    key->use_efficient_64bit = pdevice->uses_efficient_64bit;
 }
 
@@ -1007,7 +1014,7 @@ anv_fixup_subgroup_size(struct anv_device *device,
 }
 
 static void
-populate_compile_params_tes(union brw_any_compile_params *params,
+populate_compile_params_tes(struct brw_compile_params *params,
                             struct anv_shader_data *shader_data,
                             struct anv_shader_data *prev_shader_data)
 {
@@ -1063,7 +1070,7 @@ wa_18019110168_load_per_primitive_remap_table(nir_builder *b, void *data)
 }
 
 static void
-populate_compile_params_mesh(union brw_any_compile_params *params,
+populate_compile_params_mesh(struct brw_compile_params *params,
                              struct anv_shader_data *shader_data,
                              struct anv_shader_data *prev_shader_data)
 {
@@ -1121,7 +1128,7 @@ rt_write_efficient_64bit(nir_builder *b, signed rt, void *data)
 }
 
 static void
-populate_compile_params_fs(union brw_any_compile_params *params,
+populate_compile_params_fs(struct brw_compile_params *params,
                            struct anv_shader_data *shader_data,
                            struct anv_shader_data *prev_shader_data)
 {
@@ -1162,7 +1169,7 @@ should_remat_cb(nir_instr *instr, void *data)
 }
 
 static void
-populate_compile_params_bs(union brw_any_compile_params *params,
+populate_compile_params_bs(struct brw_compile_params *params,
                            const struct intel_device_info *devinfo,
                            void *mem_ctx,
                            struct anv_shader_data *shader_data)
@@ -1940,11 +1947,6 @@ anv_debug_archiver_init(void *mem_ctx, struct anv_shader_data *shaders_data,
 
       shader_data->archiver =
          debug_archiver_open(mem_ctx, name, PACKAGE_VERSION MESA_GIT_SHA1);
-
-      if (shader_data->archiver) {
-         debug_archiver_set_prefix(shader_data->archiver,
-            _mesa_shader_stage_to_abbrev(info->stage));
-      }
    }
 }
 
@@ -1962,7 +1964,7 @@ anv_debug_archiver_finish(struct anv_shader_data *shaders_data,
 static uint64_t
 anv_bsr(const struct intel_device_info *devinfo,
         uint32_t offset, uint8_t simd_size, uint8_t local_arg_offset,
-        uint8_t grf_used)
+        unsigned grf_used)
 {
    assert(offset % 64 == 0);
    assert(simd_size == 8 || simd_size == 16);
@@ -1996,31 +1998,68 @@ anv_bsr(const struct intel_device_info *devinfo,
           SET_BITS(local_arg_offset / 8, 2, 0);
 }
 
+static void
+set_debug_archive_filename(const struct anv_shader_data *shader_data,
+                           bool has_resume, int resume)
+{
+   if (!shader_data->archiver)
+      return;
+
+   if (!has_resume) {
+      debug_archiver_set_prefix(
+         shader_data->archiver,
+         _mesa_shader_stage_to_abbrev(shader_data->info->stage));
+   }
+
+   char directory_name[80];
+   if (resume < 0) {
+      snprintf(directory_name, sizeof(directory_name), "%s_main",
+               _mesa_shader_stage_to_abbrev(shader_data->info->stage));
+   } else {
+      snprintf(directory_name, sizeof(directory_name), "%s_resume%i",
+               _mesa_shader_stage_to_abbrev(shader_data->info->stage),
+               resume);
+   }
+   debug_archiver_set_prefix(shader_data->archiver, directory_name);
+}
+
+
 static struct jay_shader_bin *
 anv_shader_compile_jay(const struct intel_device_info *devinfo, void *mem_ctx,
                        nir_shader *nir,
-                       union brw_any_compile_params params,
+                       const struct brw_compile_params *params,
                        const struct anv_shader_data *shader_data)
 {
-   struct brw_compile_params *compile_params = &params.base;
-   struct jay_shader_bin *main_bin =
-      jay_compile(devinfo, mem_ctx, nir,
-                  (union brw_any_prog_data *)compile_params->prog_data,
-                  (union brw_any_prog_key *)compile_params->key,
-                  shader_data->archiver,
-                  nir->info.stage == MESA_SHADER_FRAGMENT ? params.fs.mue_map
-                                                          : NULL);
+   /* TODO: Once jay_compile_params has all we need, stop using
+    * brw_compile_params here.
+    */
+   const bool has_resume_shaders = mesa_shader_stage_is_rt(nir->info.stage) &&
+      params->bs.num_resume_shaders > 0;
+
+   set_debug_archive_filename(shader_data, has_resume_shaders, -1);
+
+   const struct jay_compile_params jc_params = {
+      .mem_ctx = mem_ctx,
+      .nir = nir,
+      .key = (union brw_any_prog_key *)params->key,
+      .prog_data = (union brw_any_prog_data *)params->prog_data,
+      .fs.mue_map =
+         nir->info.stage == MESA_SHADER_FRAGMENT ? params->fs.mue_map : NULL,
+      .archiver = shader_data->archiver,
+   };
+
+   struct jay_shader_bin *main_bin = jay_compile(devinfo, &jc_params);
 
    /* Early return if there are not resume shaders to compile */
-   if (params.bs.num_resume_shaders == 0 ||
+   if (params->bs.num_resume_shaders == 0 ||
        !mesa_shader_stage_is_rt(shader_data->info->stage))
       return main_bin;
 
    assert(mesa_shader_stage_is_rt(shader_data->info->stage));
-   assert(params.bs.resume_shaders != NULL);
+   assert(params->bs.resume_shaders != NULL);
 
    union brw_any_prog_data *prog_data =
-      (union brw_any_prog_data *)compile_params->prog_data;
+      (union brw_any_prog_data *)params->prog_data;
    union brw_any_prog_data main_prog_data = *prog_data;
 
    /* Account main shader size */
@@ -2029,25 +2068,25 @@ anv_shader_compile_jay(const struct intel_device_info *devinfo, void *mem_ctx,
    /* Tracks resume shader binaries */
    struct jay_shader_bin **resume_shader_bins =
       ralloc_array(mem_ctx, struct jay_shader_bin *,
-                   params.bs.num_resume_shaders);
+                   params->bs.num_resume_shaders);
    /* Tracks how many GRF used by resume shader */
    unsigned *resume_grf_used = ralloc_array(mem_ctx, unsigned,
-                                            params.bs.num_resume_shaders);
+                                            params->bs.num_resume_shaders);
    /* Tracks per-shader dispatch width */
    uint8_t *resume_dispatch_width = ralloc_array(mem_ctx, uint8_t,
-                                                 params.bs.num_resume_shaders);
+                                                 params->bs.num_resume_shaders);
    /* Tracks resume shader prog_data */
    union brw_any_prog_data *resume_prog_data =
       ralloc_array(mem_ctx, union brw_any_prog_data,
-                   params.bs.num_resume_shaders);
+                   params->bs.num_resume_shaders);
 
    const struct intel_shader_reloc *main_relocs = main_prog_data.base.relocs;
    const unsigned main_num_relocs = main_prog_data.base.num_relocs;
    unsigned reloc_count = main_num_relocs;
 
    /* Compile each resume shader */
-   for (unsigned i = 0; i < params.bs.num_resume_shaders; i++) {
-      nir_shader *resume_nir = params.bs.resume_shaders[i];
+   for (unsigned i = 0; i < params->bs.num_resume_shaders; i++) {
+      nir_shader *resume_nir = params->bs.resume_shaders[i];
 
       /* We only have one constant data so we want to make sure they're all the
        * same.
@@ -2061,11 +2100,13 @@ anv_shader_compile_jay(const struct intel_device_info *devinfo, void *mem_ctx,
       resume_nir->constant_data = NULL;
       resume_nir->constant_data_size = 0;
 
-      resume_shader_bins[i] = jay_compile(devinfo, mem_ctx,
-                                          resume_nir,
-                                          &main_prog_data,
-                                          (union brw_any_prog_key *)compile_params->key,
-                                          shader_data->archiver, NULL);
+      set_debug_archive_filename(shader_data, has_resume_shaders, i);
+
+      struct jay_compile_params resume_params = jc_params;
+      resume_params.nir = resume_nir;
+      resume_params.prog_data = &main_prog_data;
+
+      resume_shader_bins[i] = jay_compile(devinfo, &resume_params);
 
       resume_prog_data[i] = main_prog_data;
       resume_grf_used[i] = resume_prog_data[i].base.grf_used;
@@ -2094,7 +2135,7 @@ anv_shader_compile_jay(const struct intel_device_info *devinfo, void *mem_ctx,
    memcpy(relocs, main_relocs, main_num_relocs * sizeof(relocs[0]));
    reloc_count = main_num_relocs;
 
-   uint32_t sbt_size = params.bs.num_resume_shaders * sizeof(uint64_t);
+   uint32_t sbt_size = params->bs.num_resume_shaders * sizeof(uint64_t);
    /* Start SBT offset table at 32 byte boundary. Will put it at the end of
     * combined shaders.
     */
@@ -2109,9 +2150,9 @@ anv_shader_compile_jay(const struct intel_device_info *devinfo, void *mem_ctx,
 
    /* Tracks BSR */
    uint64_t *resume_sbt = rzalloc_array(mem_ctx, uint64_t,
-                                        params.bs.num_resume_shaders);
+                                        params->bs.num_resume_shaders);
    /* Copy resume shaders */
-   for (unsigned i = 0; i < params.bs.num_resume_shaders; i++) {
+   for (unsigned i = 0; i < params->bs.num_resume_shaders; i++) {
       /* Start each resume shader at 64B offset */
       copy_offset = align(copy_offset, 64);
       memcpy(combined_bin + copy_offset,
@@ -2146,7 +2187,7 @@ anv_shader_compile_jay(const struct intel_device_info *devinfo, void *mem_ctx,
    memcpy(combined_bin + resume_sbt_offset, resume_sbt, sbt_size);
 
    struct brw_bs_prog_data *bs_prog_data =
-      brw_bs_prog_data(compile_params->prog_data);
+      brw_bs_prog_data(params->prog_data);
 
    bs_prog_data->resume_sbt_offset = resume_sbt_offset;
    bs_prog_data->base.relocs = relocs;
@@ -2383,17 +2424,15 @@ anv_shader_compile(struct vk_device *vk_device,
 
       shader_data->num_stats = 1;
 
-      union brw_any_compile_params params = { 0 };
-      params.base = (struct brw_compile_params) {
+      struct brw_compile_params params = {
+         .mem_ctx = mem_ctx,
          .nir = nir,
          .key = &shader_data->key.base,
          .prog_data = &shader_data->prog_data.base,
          .stats = shader_data->stats,
          .log_data = device,
-         .mem_ctx = mem_ctx,
          .archiver = shader_data->archiver,
       };
-      struct brw_compile_params *compile_params = &params.base;
 
       switch (shader_data->info->stage) {
       case MESA_SHADER_VERTEX:
@@ -2433,9 +2472,9 @@ anv_shader_compile(struct vk_device *vk_device,
 
       shader_data->prog_data.base.source_hash = shader_data->source_hash;
 
-      if (intel_use_jay(devinfo, nir->info.stage)) {
+      if (intel_use_jay(devinfo, nir)) {
          struct jay_shader_bin *bin =
-            anv_shader_compile_jay(devinfo, mem_ctx, nir, params, shader_data);
+            anv_shader_compile_jay(devinfo, mem_ctx, nir, &params, shader_data);
 
          shader_data->code = bin->kernel;
          for (unsigned i = 0; i < 3; i++)
@@ -2443,13 +2482,19 @@ anv_shader_compile(struct vk_device *vk_device,
 
          if (mesa_shader_stage_uses_workgroup(nir->info.stage)) {
             struct brw_cs_prog_data *prog_data =
-               (struct brw_cs_prog_data *)compile_params->prog_data;
+               (struct brw_cs_prog_data *)params.prog_data;
             prog_data->local_size[0] = nir->info.workgroup_size[0];
             prog_data->local_size[1] = nir->info.workgroup_size[1];
             prog_data->local_size[2] = nir->info.workgroup_size[2];
          }
       } else {
-         shader_data->code = brw_compile(compiler, compile_params);
+         const bool has_resume_shaders =
+            mesa_shader_stage_is_rt(nir->info.stage) &&
+            params.bs.num_resume_shaders > 0;
+
+         set_debug_archive_filename(shader_data, has_resume_shaders, -1);
+
+         shader_data->code = brw_compile(compiler, &params);
       }
 
       /* The compiler should not alter this. */
@@ -2478,8 +2523,8 @@ anv_shader_compile(struct vk_device *vk_device,
       }
 
       if (shader_data->code == NULL) {
-         if (compile_params->error_str)
-            result = vk_errorf(device, VK_ERROR_UNKNOWN, "%s", compile_params->error_str);
+         if (params.error_str)
+            result = vk_errorf(device, VK_ERROR_UNKNOWN, "%s", params.error_str);
          else
             result = vk_error(device, VK_ERROR_OUT_OF_HOST_MEMORY);
          goto end;

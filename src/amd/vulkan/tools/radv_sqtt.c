@@ -379,21 +379,19 @@ radv_unregister_queue(struct radv_device *device, struct radv_queue *queue)
 static void
 radv_register_queues(struct radv_device *device, struct ac_sqtt *sqtt)
 {
-   if (device->queue_count[RADV_QUEUE_GENERAL] == 1)
-      radv_register_queue(device, &device->queues[RADV_QUEUE_GENERAL][0]);
+   for (uint32_t i = 0; i < device->queue_count; i++) {
+      struct radv_queue *queue = &device->queues[i];
 
-   for (uint32_t i = 0; i < device->queue_count[RADV_QUEUE_COMPUTE]; i++)
-      radv_register_queue(device, &device->queues[RADV_QUEUE_COMPUTE][i]);
+      if (queue->state.qf == RADV_QUEUE_GENERAL || queue->state.qf == RADV_QUEUE_COMPUTE)
+         radv_register_queue(device, queue);
+   }
 }
 
 static void
 radv_unregister_queues(struct radv_device *device, struct ac_sqtt *sqtt)
 {
-   if (device->queue_count[RADV_QUEUE_GENERAL] == 1)
-      radv_unregister_queue(device, &device->queues[RADV_QUEUE_GENERAL][0]);
-
-   for (uint32_t i = 0; i < device->queue_count[RADV_QUEUE_COMPUTE]; i++)
-      radv_unregister_queue(device, &device->queues[RADV_QUEUE_COMPUTE][i]);
+   for (uint32_t i = 0; i < device->queue_count; i++)
+      radv_unregister_queue(device, &device->queues[i]);
 }
 
 bool
