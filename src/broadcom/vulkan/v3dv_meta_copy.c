@@ -494,7 +494,7 @@ copy_image_to_buffer_tlb(struct v3dv_cmd_buffer *cmd_buffer,
    const uint32_t height = DIV_ROUND_UP(region->imageExtent.height, block_h);
 
    v3dv_job_start_frame(job, width, height, num_layers, false, 1, internal_bpp,
-                        4 * v3d_internal_bpp_words(internal_bpp), false);
+                        4 * v3d_internal_bpp_words(internal_bpp), false, NULL);
 
    struct v3dv_meta_framebuffer framebuffer;
    v3d_X((&job->device->devinfo), meta_framebuffer_init)(&framebuffer, fb_format,
@@ -1432,7 +1432,7 @@ copy_image_tlb(struct v3dv_cmd_buffer *cmd_buffer,
 
    v3dv_job_start_frame(job, width, height, num_layers, false, 1,
                         internal_bpp, 4 * v3d_internal_bpp_words(internal_bpp),
-                        src->vk.samples > VK_SAMPLE_COUNT_1_BIT);
+                        src->vk.samples > VK_SAMPLE_COUNT_1_BIT, NULL);
 
    struct v3dv_meta_framebuffer framebuffer;
    v3d_X((&job->device->devinfo), meta_framebuffer_init)(&framebuffer, fb_format,
@@ -2152,7 +2152,7 @@ copy_buffer_to_image_tlb(struct v3dv_cmd_buffer *cmd_buffer,
 
    v3dv_job_start_frame(job, width, height, num_layers, false, 1,
                         internal_bpp, 4 * v3d_internal_bpp_words(internal_bpp),
-                        false);
+                        false, NULL);
 
    struct v3dv_meta_framebuffer framebuffer;
    v3d_X((&job->device->devinfo), meta_framebuffer_init)(&framebuffer, fb_format,
@@ -5015,7 +5015,7 @@ resolve_image_tlb(struct v3dv_cmd_buffer *cmd_buffer,
        &internal_type, &internal_bpp);
 
    v3dv_job_start_frame(job, width, height, num_layers, false, 1, internal_bpp,
-                        4 * v3d_internal_bpp_words(internal_bpp), true);
+                        4 * v3d_internal_bpp_words(internal_bpp), true, NULL);
 
    struct v3dv_meta_framebuffer framebuffer;
    v3d_X((&job->device->devinfo), meta_framebuffer_init)(&framebuffer, resolve_format,

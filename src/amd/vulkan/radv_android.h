@@ -1,6 +1,7 @@
 /*
  * Copyright © 2016 Red Hat.
  * Copyright © 2016 Bas Nieuwenhuizen
+ * Copyright © 2026 Advanced Micro Devices, Inc.
  *
  * based in part on anv driver which is:
  * Copyright © 2015 Intel Corporation
@@ -39,6 +40,9 @@ struct radv_device_memory;
 VkResult radv_image_from_gralloc(VkDevice device_h, const VkImageCreateInfo *base_info,
                                  const VkNativeBufferANDROID *gralloc_info, const VkAllocationCallbacks *alloc,
                                  VkImage *out_image_h);
+
+VkResult radv_android_get_wsi_memory(VkDevice device_h, const VkBindImageMemoryInfo *bind_info,
+                                     VkDeviceMemory *out_memory_h);
 
 unsigned radv_ahb_format_for_vk_format(VkFormat vk_format);
 

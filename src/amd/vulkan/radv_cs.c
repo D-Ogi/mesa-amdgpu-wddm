@@ -41,13 +41,6 @@ radv_cs_emit_cache_flush(struct radeon_winsys *ws, struct radv_cmd_stream *cs, e
                          enum ac_rgp_flush_bits *rgp_flush_bits, enum ac_pws_acquire_point pws_acquire_point,
                          uint64_t eop_bug_va)
 {
-   /* TODO: Stop setting this barrier flags. */
-   if (gfx_level >= GFX10)
-      flush_bits &= ~AC_BARRIER_SYNC_AND_INV_DB_META;
-
-   if (gfx_level >= GFX12)
-      flush_bits &= ~AC_BARRIER_INV_L2_METADATA;
-
    struct ac_barrier_state barrier = {
       .flags = flush_bits,
       .pws_acquire_point = pws_acquire_point,

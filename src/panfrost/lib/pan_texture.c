@@ -273,6 +273,8 @@ pan_clump_format(enum pipe_format format)
       case PIPE_FORMAT_G8R8_B8R8_UNORM:
       case PIPE_FORMAT_R8B8_R8G8_UNORM:
       case PIPE_FORMAT_B8R8_G8R8_UNORM:
+      case PIPE_FORMAT_G8B8_G8R8_UNORM:
+      case PIPE_FORMAT_B8G8_R8G8_UNORM:
       case PIPE_FORMAT_R8_G8B8_422_UNORM:
       case PIPE_FORMAT_R8_B8G8_422_UNORM:
       case PIPE_FORMAT_Y8_U8V8_422_UNORM:

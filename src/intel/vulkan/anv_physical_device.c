@@ -338,7 +338,7 @@ get_device_descriptor_limits(const struct anv_physical_device *device,
       ANV_SURFACE_STATE_SIZE;
    const uint32_t sampler_descriptor_size =
       device->indirect_descriptors ?
-      sizeof(struct anv_sampled_image_descriptor) :
+      sizeof(struct anv_image_descriptor) :
       ANV_SAMPLER_STATE_SIZE;
 
    limits->max_ubos = descriptor_heap_size / buffer_descriptor_size;
@@ -393,6 +393,7 @@ get_device_extensions(const struct anv_physical_device *device,
       .KHR_driver_properties                 = true,
       .KHR_dynamic_rendering                 = true,
       .KHR_dynamic_rendering_local_read      = true,
+      .KHR_extended_flags                    = true,
       .KHR_external_fence                    = true,
       .KHR_external_fence_fd                 = true,
       .KHR_external_memory                   = true,
@@ -764,7 +765,7 @@ get_features(const struct anv_physical_device *pdevice,
       .shaderBufferInt64Atomics            = true,
       .shaderSharedInt64Atomics            = false,
       .shaderFloat16                       = !pdevice->drirc.debug.no_16bit,
-      .shaderInt8                          = !pdevice->drirc.debug.no_16bit,
+      .shaderInt8                          = true,
 
       .descriptorIndexing                                 = true,
       .shaderInputAttachmentArrayDynamicIndexing          = true,
@@ -1317,6 +1318,9 @@ get_features(const struct anv_physical_device *pdevice,
       /* soft fp64 does not support fma */
       .shaderFmaFloat64 = pdevice->info.has_64bit_float &&
                           !INTEL_DEBUG(DEBUG_SOFT64),
+
+      /* VK_KHR_extended_flags */
+      .extendedFlags = true,
    };
 
    /* The new DOOM and Wolfenstein games require depthBounds without
@@ -2804,14 +2808,16 @@ anv_physical_device_free_disk_cache(struct anv_physical_device *device)
 }
 
 static void
-anv_override_engine_counts(int *gc_count, int *g_count, int *c_count, int *v_count, int *blit_count)
+anv_override_engine_counts(struct anv_physical_device *device,
+                           int *gc_count, int *g_count, int *c_count,
+                           int *v_count, int *blit_count)
 {
    int gc_override = -1;
    int g_override = -1;
    int c_override = -1;
    int v_override = -1;
    int blit_override = -1;
-   const char *env_ = os_get_option("ANV_QUEUE_OVERRIDE");
+   const char *env_ = device->drirc.perf.queue_override;
 
    /* Override queues for Android HWUI that expects min 2 queues. */
 #if DETECT_OS_ANDROID
@@ -2836,7 +2842,7 @@ anv_override_engine_counts(int *gc_count, int *g_count, int *c_count, int *v_cou
       } else if (strncmp(next, "b=", 2) == 0) {
          blit_override = strtol(next + 2, NULL, 0);
       } else {
-         mesa_logw("Ignoring unsupported ANV_QUEUE_OVERRIDE token: %s", next);
+         mesa_logw("Ignoring unsupported anv_queue_override token: %s", next);
       }
       next = strtok_r(NULL, ",", &save);
    }
@@ -2846,7 +2852,7 @@ anv_override_engine_counts(int *gc_count, int *g_count, int *c_count, int *v_cou
    if (g_override >= 0)
       *g_count = g_override;
    if (*g_count > 0 && *gc_count <= 0 && (gc_override >= 0 || g_override >= 0))
-      mesa_logw("ANV_QUEUE_OVERRIDE: gc=0 with g > 0 violates the "
+      mesa_logw("anv_queue_override: gc=0 with g > 0 violates the "
                 "Vulkan specification");
    if (c_override >= 0)
       *c_count = c_override;
@@ -2897,7 +2903,7 @@ anv_physical_device_init_queue_families(struct anv_physical_device *pdevice)
          blit_count = pdevice->info.engine_class_supported_count[INTEL_ENGINE_CLASS_COPY];
       }
 
-      anv_override_engine_counts(&gc_count, &g_count, &c_count, &v_count, &blit_count);
+      anv_override_engine_counts(pdevice, &gc_count, &g_count, &c_count, &v_count, &blit_count);
 
       enum intel_engine_class compute_class =
          pdevice->info.engine_class_supported_count[INTEL_ENGINE_CLASS_COMPUTE] &&
@@ -3140,6 +3146,7 @@ anv_physical_device_try_create(struct vk_instance *vk_instance,
          device->has_astc_ldr && !device->emu_astc_ldr;
    }
    device->brw_disable_subgroup_size_control =
+      !intel_use_jay_for_stage(&devinfo, MESA_SHADER_COMPUTE) &&
       device->drirc.debug.disable_subgroup_size_control;
 
    result = anv_physical_device_init_heaps(device, fd);

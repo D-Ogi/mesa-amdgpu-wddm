@@ -235,7 +235,7 @@ lower_mem_load(nir_builder *b, nir_intrinsic_instr *intrin,
          if (nir_intrinsic_has_range(load)) {
             assert(nir_intrinsic_has_base(load));
             const uint64_t orig_range = nir_intrinsic_range(load);
-            const uint64_t requested_bytes_read =
+            const uint32_t requested_bytes_read =
                requested.num_components * (requested.bit_size / 8);
             const uint64_t align_mask_u64 = align_mask;
 

@@ -105,7 +105,6 @@ nv30_init_screen_caps(struct nv30_screen *screen)
    caps->device_type = dev->info.type == NV_DEVICE_TYPE_DIS
       ? PIPE_DEVICE_TYPE_DISCRETE_GPU
       : PIPE_DEVICE_TYPE_INTEGRATED_GPU;
-   caps->endianness = PIPE_ENDIAN_LITTLE;
    caps->constant_buffer_offset_alignment = 16;
    caps->min_map_buffer_alignment = NOUVEAU_MIN_BUFFER_MAP_ALIGN;
    caps->max_viewports = 1;

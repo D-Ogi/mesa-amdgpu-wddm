@@ -9,6 +9,7 @@
 
 #include "radv_meta_nir.h"
 #include "nir/nir_format_convert.h"
+#include "ac_descriptors.h"
 #include "ac_nir_surface.h"
 #include "ac_surface.h"
 #include "nir_builder.h"
@@ -341,8 +342,7 @@ radv_meta_nir_build_blit2d_texel_fetch(nir_builder *b, uint32_t binding, nir_def
       tex_pos = nir_vec(b, chans, 3);
    }
 
-   return nir_txf(b, tex_pos,
-                  .texture_deref = nir_build_deref_var(b, sampler),
+   return nir_txf(b, tex_pos, .texture_deref = nir_build_deref_var(b, sampler),
                   .ms_index = is_multisampled ? nir_load_sample_id(b) : NULL);
 }
 
@@ -681,9 +681,11 @@ radv_meta_nir_build_cleari_96bit_compute_shader()
 }
 
 void
-radv_meta_nir_build_clear_color_shaders(struct nir_shader **out_vs, struct nir_shader **out_fs, uint32_t frag_output)
+radv_meta_nir_build_clear_color_shaders(struct nir_shader **out_vs, struct nir_shader **out_fs, uint32_t frag_output,
+                                        bool multiview)
 {
-   nir_builder vs_b = radv_meta_nir_init_shader(MESA_SHADER_VERTEX, "meta_clear_color_vs");
+   nir_builder vs_b = radv_meta_nir_init_shader(MESA_SHADER_VERTEX,
+                                                multiview ? "meta_clear_color_vs_multiview" : "meta_clear_color_vs");
    nir_builder fs_b = radv_meta_nir_init_shader(MESA_SHADER_FRAGMENT, "meta_clear_color_fs-%d", frag_output);
 
    const struct glsl_type *position_type = glsl_vec4_type();
@@ -702,24 +704,28 @@ radv_meta_nir_build_clear_color_shaders(struct nir_shader **out_vs, struct nir_s
    nir_def *outvec = nir_gen_rect_vertices(&vs_b, NULL, NULL);
    nir_store_var(&vs_b, vs_out_pos, outvec, 0xf);
 
-   const struct glsl_type *layer_type = glsl_int_type();
-   nir_variable *vs_out_layer = nir_variable_create(vs_b.shader, nir_var_shader_out, layer_type, "v_layer");
-   vs_out_layer->data.location = VARYING_SLOT_LAYER;
-   vs_out_layer->data.interpolation = INTERP_MODE_FLAT;
-   nir_def *inst_id = nir_load_instance_id(&vs_b);
-   nir_def *base_instance = nir_load_base_instance(&vs_b);
+   /* For multiview clears, radv_nir_export_multiview will export the view_index. */
+   if (!multiview) {
+      const struct glsl_type *layer_type = glsl_int_type();
+      nir_variable *vs_out_layer = nir_variable_create(vs_b.shader, nir_var_shader_out, layer_type, "v_layer");
+      vs_out_layer->data.location = VARYING_SLOT_LAYER;
+      vs_out_layer->data.interpolation = INTERP_MODE_FLAT;
+      nir_def *inst_id = nir_load_instance_id(&vs_b);
+      nir_def *base_instance = nir_load_base_instance(&vs_b);
 
-   nir_def *layer_id = nir_iadd(&vs_b, inst_id, base_instance);
-   nir_store_var(&vs_b, vs_out_layer, layer_id, 0x1);
+      nir_def *layer_id = nir_iadd(&vs_b, inst_id, base_instance);
+      nir_store_var(&vs_b, vs_out_layer, layer_id, 0x1);
+   }
 
    *out_vs = vs_b.shader;
    *out_fs = fs_b.shader;
 }
 
 nir_shader *
-radv_meta_nir_build_clear_depthstencil_vertex_shader()
+radv_meta_nir_build_clear_depthstencil_vertex_shader(bool multiview)
 {
-   nir_builder vs_b = radv_meta_nir_init_shader(MESA_SHADER_VERTEX, "meta_clear_depthstencil_vs");
+   nir_builder vs_b = radv_meta_nir_init_shader(
+      MESA_SHADER_VERTEX, multiview ? "meta_clear_depthstencil_vs_multiview" : "meta_clear_depthstencil_vs");
 
    const struct glsl_type *position_out_type = glsl_vec4_type();
 
@@ -731,21 +737,24 @@ radv_meta_nir_build_clear_depthstencil_vertex_shader()
    nir_def *outvec = nir_gen_rect_vertices(&vs_b, z, NULL);
    nir_store_var(&vs_b, vs_out_pos, outvec, 0xf);
 
-   const struct glsl_type *layer_type = glsl_int_type();
-   nir_variable *vs_out_layer = nir_variable_create(vs_b.shader, nir_var_shader_out, layer_type, "v_layer");
-   vs_out_layer->data.location = VARYING_SLOT_LAYER;
-   vs_out_layer->data.interpolation = INTERP_MODE_FLAT;
-   nir_def *inst_id = nir_load_instance_id(&vs_b);
-   nir_def *base_instance = nir_load_base_instance(&vs_b);
+   /* For multiview clears, radv_nir_export_multiview will export the view_index. */
+   if (!multiview) {
+      const struct glsl_type *layer_type = glsl_int_type();
+      nir_variable *vs_out_layer = nir_variable_create(vs_b.shader, nir_var_shader_out, layer_type, "v_layer");
+      vs_out_layer->data.location = VARYING_SLOT_LAYER;
+      vs_out_layer->data.interpolation = INTERP_MODE_FLAT;
+      nir_def *inst_id = nir_load_instance_id(&vs_b);
+      nir_def *base_instance = nir_load_base_instance(&vs_b);
 
-   nir_def *layer_id = nir_iadd(&vs_b, inst_id, base_instance);
-   nir_store_var(&vs_b, vs_out_layer, layer_id, 0x1);
+      nir_def *layer_id = nir_iadd(&vs_b, inst_id, base_instance);
+      nir_store_var(&vs_b, vs_out_layer, layer_id, 0x1);
+   }
 
    return vs_b.shader;
 }
 
 nir_shader *
-radv_meta_nir_build_clear_htile_mask_shader()
+radv_meta_nir_build_clear_htile_mask_shader(bool mask_zbase_conditionally, bool full_mask)
 {
    nir_builder b = radv_meta_nir_init_shader(MESA_SHADER_COMPUTE, "meta_clear_htile_mask");
    b.shader->info.workgroup_size[0] = 64;
@@ -759,11 +768,29 @@ radv_meta_nir_build_clear_htile_mask_shader()
    nir_def *va = nir_pack_64_2x32(&b, nir_channels(&b, constants, 0x3));
    va = nir_iadd(&b, va, nir_u2u64(&b, offset));
 
-   nir_def *load = nir_load_global(&b, 4, 32, va, .align_mul = 16);
+   nir_def *masked_clear_value0 = nir_channel(&b, constants, 2);
+   nir_def *masked_clear_value1 = NULL;
+   nir_def *mask = nir_channel(&b, constants, 3);
+   nir_def *select_value0 = NULL;
+
+   if (mask_zbase_conditionally) {
+      nir_def *constants2 = nir_load_push_constant(&b, 2, 32, nir_imm_int(&b, 0), .base = 16, .range = 8);
+      nir_def *value_select_cond_va = nir_pack_64_2x32(&b, nir_channels(&b, constants2, 0x3));
+      masked_clear_value1 = nir_iand_imm(&b, masked_clear_value0, ~(ac_htile_dword){.zs.zbase = ~0}.dword);
+
+      select_value0 =
+         nir_load_global(&b, 1, 32, value_select_cond_va, .access = ACCESS_NON_WRITEABLE | ACCESS_RESTRICT);
+      select_value0 = nir_ieq_imm(&b, select_value0, 0);
+   }
+
+   nir_def *load = full_mask ? NULL : nir_load_global(&b, 4, 32, va, .align_mul = 16);
+
+   if (mask_zbase_conditionally)
+      masked_clear_value0 = nir_bcsel(&b, select_value0, masked_clear_value0, masked_clear_value1);
 
    /* data = (data & ~htile_mask) | (htile_value & htile_mask) */
-   nir_def *data = nir_iand(&b, load, nir_channel(&b, constants, 3));
-   data = nir_ior(&b, data, nir_channel(&b, constants, 2));
+   nir_def *data = full_mask ? nir_imm_ivec4(&b, 0, 0, 0, 0) : nir_iand(&b, load, mask);
+   data = nir_ior(&b, data, masked_clear_value0);
 
    nir_store_global(&b, data, va, .access = ACCESS_NON_READABLE, .align_mul = 16);
 
@@ -844,8 +871,7 @@ radv_meta_nir_build_copy_vrs_htile_shader(enum amd_gfx_level gfx_level, uint32_t
    nir_def *zero = nir_imm_int(&b, 0);
    nir_def *htile_offset =
       ac_nir_htile_addr_from_coord(&b, gfx_level, gb_addr_config, &surf->u.gfx9.zs.htile_equation, htile_pitch,
-                                   htile_slice_size, nir_channel(&b, coord, 0), nir_channel(&b, coord, 1), layer,
-                                   zero);
+                                   htile_slice_size, nir_channel(&b, coord, 0), nir_channel(&b, coord, 1), layer, zero);
 
    /* Set up the input VRS image descriptor. */
    const struct glsl_type *vrs_sampler_type = glsl_sampler_type(GLSL_SAMPLER_DIM_2D, false, false, GLSL_TYPE_FLOAT);
@@ -938,9 +964,9 @@ radv_meta_nir_build_dcc_retile_compute_shader(enum amd_gfx_level gfx_level, uint
       &b, gfx_level, gb_addr_config, surf->bpe, &surf->u.gfx9.color.display_dcc_equation, dst_dcc_pitch, dst_dcc_height,
       zero, nir_channel(&b, coord, 0), nir_channel(&b, coord, 1), zero, zero, zero);
 
-   nir_def *dcc_val = nir_image_deref_load(&b, 1, 32, input_dcc_ref, nir_vec4(&b, src, src, src, src),
-                                           nir_undef(&b, 1, 32), nir_imm_int(&b, 0), .image_dim = dim,
-                                           .dest_type = nir_type_uint32);
+   nir_def *dcc_val =
+      nir_image_deref_load(&b, 1, 32, input_dcc_ref, nir_vec4(&b, src, src, src, src), nir_undef(&b, 1, 32),
+                           nir_imm_int(&b, 0), .image_dim = dim, .dest_type = nir_type_uint32);
 
    nir_image_deref_store(&b, output_dcc_ref, nir_vec4(&b, dst, dst, dst, dst), nir_undef(&b, 1, 32), dcc_val,
                          nir_imm_int(&b, 0), .image_dim = dim);
@@ -1021,9 +1047,9 @@ radv_meta_nir_build_dcc_decompress_compute_shader()
    nir_def *img_coord = nir_vec4(&b, nir_channel(&b, global_id, 0), nir_channel(&b, global_id, 1), nir_undef(&b, 1, 32),
                                  nir_undef(&b, 1, 32));
 
-   nir_def *data = nir_image_deref_load(&b, 4, 32, &nir_build_deref_var(&b, input_img)->def, img_coord,
-                                        nir_undef(&b, 1, 32), nir_imm_int(&b, 0), .image_dim = GLSL_SAMPLER_DIM_2D,
-                                        .dest_type = nir_type_uint32);
+   nir_def *data =
+      nir_image_deref_load(&b, 4, 32, &nir_build_deref_var(&b, input_img)->def, img_coord, nir_undef(&b, 1, 32),
+                           nir_imm_int(&b, 0), .image_dim = GLSL_SAMPLER_DIM_2D, .dest_type = nir_type_uint32);
 
    /* We need a SCOPE_DEVICE memory_scope because ACO will avoid
     * creating a vmcnt(0) because it expects the L1 cache to keep memory

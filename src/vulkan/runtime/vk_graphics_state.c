@@ -1828,10 +1828,12 @@ vk_graphics_pipeline_state_fill(const struct vk_device *device,
    const VkPipelineFragmentShadingRateStateCreateInfoKHR *fsr_info =
       vk_find_struct_const(info->pNext, PIPELINE_FRAGMENT_SHADING_RATE_STATE_CREATE_INFO_KHR);
 
-   const VkRenderingInputAttachmentIndexInfoKHR *ial_info =
-      !driver_rp ? vk_get_pipeline_rendering_ial_info(info)
-                 : vk_find_struct_const(
-                      info->pNext, RENDERING_INPUT_ATTACHMENT_INDEX_INFO_KHR);
+   const VkRenderingInputAttachmentIndexInfoKHR *ial_info = NULL;
+   if (needs & MESA_VK_GRAPHICS_STATE_INPUT_ATTACHMENT_MAP_BIT) {
+      ial_info = !driver_rp ? vk_get_pipeline_rendering_ial_info(info)
+                            : vk_find_struct_const(
+                                info->pNext, RENDERING_INPUT_ATTACHMENT_INDEX_INFO_KHR);
+   }
 
    const VkRenderingAttachmentLocationInfoKHR *cal_info =
       vk_find_struct_const(info->pNext, RENDERING_ATTACHMENT_LOCATION_INFO_KHR);

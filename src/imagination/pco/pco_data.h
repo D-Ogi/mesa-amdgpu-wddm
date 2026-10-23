@@ -16,6 +16,7 @@
 #include "common/pvr_limits.h"
 #include "compiler/shader_enums.h"
 #include "nir/nir_lower_blend.h"
+#include "nir/nir_xfb_info.h"
 #include "util/format/u_format.h"
 
 #include <stdbool.h>
@@ -48,6 +49,8 @@ typedef struct _pco_vs_data {
 
    unsigned clip_count;
    unsigned cull_count;
+
+   nir_xfb_info *xfb_info;
 
    unsigned f32_smooth; /** Number of F32 linear varyings. */
    unsigned f32_flat; /** Number of F32 flat varyings. */

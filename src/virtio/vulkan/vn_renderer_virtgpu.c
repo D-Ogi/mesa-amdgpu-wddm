@@ -315,7 +315,14 @@ virtgpu_sync_read(struct vn_renderer *renderer,
 {
    struct virtgpu *gpu = (struct virtgpu *)renderer;
 
-   int ret = gpu->sync->query(gpu->sync, &sync->syncobj_handle, val, 1, 0);
+   int ret;
+   if (renderer->info.has_timeline_sync) {
+      ret = gpu->sync->query(gpu->sync, &sync->syncobj_handle, val, 1, 0);
+   } else {
+      ret = gpu->sync->wait(gpu->sync, &sync->syncobj_handle, 1, 0, 0, NULL);
+      *val = !ret;
+      ret = 0;
+   }
 
    return ret ? VK_ERROR_OUT_OF_DEVICE_MEMORY : VK_SUCCESS;
 }
@@ -488,9 +495,11 @@ virtgpu_bo_destroy(struct vn_renderer *renderer, struct vn_renderer_bo *_bo)
    mtx_lock(&gpu->dma_buf_import_mutex);
 
    /* Check the refcount again after the import lock is grabbed.  Yes, we use
-    * the double-checked locking anti-pattern.
+    * the double-checked locking anti-pattern. bo->gem_handle can be zero if
+    * another thread has imported and unref to destroy the bo first before the
+    * bo_destroy wakes up on this thread.
     */
-   if (vn_refcount_is_valid(&bo->base.refcount)) {
+   if (vn_refcount_is_valid(&bo->base.refcount) || !bo->gem_handle) {
       mtx_unlock(&gpu->dma_buf_import_mutex);
       return false;
    }

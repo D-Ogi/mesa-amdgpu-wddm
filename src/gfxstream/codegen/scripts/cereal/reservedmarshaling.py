@@ -996,22 +996,33 @@ class VulkanReservedMarshaling(VulkanWrapperGenerator):
             streamNamespace = "gfxstream"
 
         if direction == "write":
+            cgen.beginIf("!%s" % (sizeVar))
             cgen.stmt("memcpy(*%s, &%s, sizeof(uint32_t));" % (self.ptrVarName, sizeVar))
             cgen.stmt("%s::Stream::toBe32((uint8_t*)*%s); *%s += sizeof(uint32_t)" % (streamNamespace, self.ptrVarName, self.ptrVarName))
+            cgen.line("// exit if this was a null extension struct (size == 0 in this branch)")
+            cgen.stmt("return")
+            cgen.endIf()
         elif not self.dynAlloc:
             cgen.stmt("memcpy(&%s, *%s, sizeof(uint32_t));" % (sizeVar, self.ptrVarName))
             cgen.stmt("%s::Stream::fromBe32((uint8_t*)&%s); *%s += sizeof(uint32_t)" % (streamNamespace, sizeVar, self.ptrVarName))
-
-        cgen.beginIf("!%s" % (sizeVar))
-        cgen.line("// exit if this was a null extension struct (size == 0 in this branch)")
-        cgen.stmt("return")
-        cgen.endIf()
+            cgen.beginIf("!%s" % (sizeVar))
+            cgen.line("// exit if this was a null extension struct (size == 0 in this branch)")
+            cgen.stmt("return")
+            cgen.endIf()
+        else:
+            cgen.beginIf("!%s" % (sizeVar))
+            cgen.line("// exit if this was a null extension struct (size == 0 in this branch)")
+            cgen.stmt("return")
+            cgen.endIf()
 
         cgen.endIf()
 
         # Now we can do stream stuff
         if direction == "write":
+            cgen.stmt("uint8_t* sizePtr = *%s" % self.ptrVarName)
+            cgen.stmt("*%s += sizeof(uint32_t)" % self.ptrVarName)
             cgen.stmt("memcpy(*%s, %s, sizeof(VkStructureType)); *%s += sizeof(VkStructureType)" % (self.ptrVarName, extParam.paramName, self.ptrVarName))
+            cgen.stmt("uint8_t* structStartPtr = *%s" % self.ptrVarName)
         elif not self.dynAlloc:
             cgen.stmt("uint64_t pNext_placeholder")
             placeholderAccess = "(&pNext_placeholder)"
@@ -1033,6 +1044,11 @@ class VulkanReservedMarshaling(VulkanWrapperGenerator):
             forEach,
             defaultEmit=fatalDefault,
             rootTypeVar=ROOT_TYPE_PARAM)
+
+        if direction == "write":
+            cgen.stmt("%s = (uint32_t)(*%s - structStartPtr)" % (sizeVar, self.ptrVarName))
+            cgen.stmt("memcpy(sizePtr, &%s, sizeof(uint32_t))" % sizeVar)
+            cgen.stmt("%s::Stream::toBe32(sizePtr)" % streamNamespace)
 
     def onEnd(self,):
         VulkanWrapperGenerator.onEnd(self)

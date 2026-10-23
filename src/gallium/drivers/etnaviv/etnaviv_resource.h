@@ -38,6 +38,8 @@
 
 #include "drm-uapi/drm_fourcc.h"
 
+#define ETNA_RESOURCE_FLAG_CPU_READ    (PIPE_RESOURCE_FLAG_DRV_PRIV << 0)
+
 struct etna_context;
 struct etna_screen;
 struct pipe_screen;
@@ -142,6 +144,15 @@ etna_resource_level_ts_mark_invalid(struct etna_resource_level *lvl)
       lvl->ts_meta->v0.valid = 0;
    else
       lvl->ts_valid = false;
+}
+
+static inline uint64_t
+etna_resource_level_clear_value(const struct etna_resource_level *lvl)
+{
+   if (unlikely(lvl->ts_meta))
+      return lvl->ts_meta->v0.clear_value;
+   else
+      return lvl->clear_value;
 }
 
 /* returns TRUE if lvl has valid, unflushed TS data */

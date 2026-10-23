@@ -74,9 +74,11 @@ enum ac_barrier_flags {
    /* Sync all shaders, CB, DB, and event-based query writes, but CB/DB caches are left alone. */
    AC_BARRIER_SYNC_BOTTOM_OF_PIPE = 1u << 16,
 
+   AC_BARRIER_SYNC_CP_DMA = 1u << 17,
+
    /* Pipeline stats events */
-   AC_BARRIER_PIPELINESTAT_START = 1u << 17,
-   AC_BARRIER_PIPELINESTAT_STOP = 1u << 18,
+   AC_BARRIER_PIPELINESTAT_START = 1u << 18,
+   AC_BARRIER_PIPELINESTAT_STOP = 1u << 19,
 };
 
 #define AC_BARRIER_ALL_COMPUTE \

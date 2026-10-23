@@ -38,6 +38,7 @@
 #include "util/u_atomic.h"
 #include "util/u_blitter.h"
 #include "util/u_dual_blend.h"
+#include "util/u_draw.h"
 #include "util/u_framebuffer.h"
 #include "util/u_helpers.h"
 #include "util/u_inlines.h"
@@ -2301,6 +2302,7 @@ d3d12_init_graphics_context_functions(struct d3d12_context *ctx)
    ctx->base.clear_render_target = d3d12_clear_render_target;
    ctx->base.clear_depth_stencil = d3d12_clear_depth_stencil;
    ctx->base.draw_vbo = d3d12_draw_vbo;
+   ctx->base.draw_vbo_buffers = util_draw_vbo_buffers;
    ctx->base.launch_grid = d3d12_launch_grid;
    ctx->base.get_timestamp = d3d12_get_timestamp;
 }

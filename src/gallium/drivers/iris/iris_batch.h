@@ -185,6 +185,16 @@ struct iris_batch {
    bool contains_fence_signal;
 
    /**
+    * Have we emitted a valid viewport to this batch?
+    *
+    * Refer to HSD 14022502615. If any valid viewport state has been emitted
+    * in this batch, we tell blorp to skip the viewport emission in the depth
+    * fast clear path. It is intended to work with flag
+    * BLORP_BATCH_NO_EMIT_DEPTH_CLEAR_VIEWPORT in blorp.
+    */
+   bool dfc_vp_sent;
+
+   /**
     * Number of times iris_batch_sync_region_start() has been called without a
     * matching iris_batch_sync_region_end() on this batch.
     */

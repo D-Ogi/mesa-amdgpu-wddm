@@ -41,6 +41,10 @@
 #include "isl/isl.h"
 #include "genxml/genX_xml.h"
 
+#if (XML_MAJOR_VERSION == 2 && XML_MINOR_VERSION >= 9) || XML_MAJOR_VERSION > 2
+#define XML_GETCURRENT_64 1
+#endif
+
 #define XML_BUFFER_SIZE 4096
 #define MAX_VALUE_ITEMS 128
 
@@ -606,7 +610,11 @@ start_element(void *data, const char *element_name, const char **atts)
    const char *name = NULL;
    const char *gen = NULL;
 
+#ifdef XML_GETCURRENT_64
+   ctx->loc.line_number = XML_GetCurrentLineNumber64(ctx->parser);
+#else
    ctx->loc.line_number = XML_GetCurrentLineNumber(ctx->parser);
+#endif
 
    for (int i = 0; atts[i]; i += 2) {
       if (strcmp(atts[i], "name") == 0)
@@ -948,12 +956,21 @@ intel_spec_load_common(int verx10, const char *dirname, const char *filename)
    data = NULL;
 
    if (XML_ParseBuffer(ctx.parser, data_len, true) == 0) {
+#ifdef XML_GETCURRENT_64
+      fprintf(stderr,
+              "Error parsing XML at line %" PRIu64 " col %" PRIu64 " byte %" PRIu64 "/%zu: %s\n",
+              XML_GetCurrentLineNumber64(ctx.parser),
+              XML_GetCurrentColumnNumber64(ctx.parser),
+              XML_GetCurrentByteIndex64(ctx.parser), data_len,
+              XML_ErrorString(XML_GetErrorCode(ctx.parser)));
+#else
       fprintf(stderr,
               "Error parsing XML at line %ld col %ld byte %ld/%zu: %s\n",
               XML_GetCurrentLineNumber(ctx.parser),
               XML_GetCurrentColumnNumber(ctx.parser),
               XML_GetCurrentByteIndex(ctx.parser), data_len,
               XML_ErrorString(XML_GetErrorCode(ctx.parser)));
+#endif
       XML_ParserFree(ctx.parser);
       return NULL;
    }

@@ -320,7 +320,7 @@ get_texture_handle_bda(struct lvp_device *device, VkDeviceAddress address, size_
    templ.u.buf.size = range;
    templ.texture = pres;
 
-   struct lp_texture_handle *handle = llvmpipe_create_texture_handle(device->pscreen, &templ, NULL);
+   struct lp_texture_handle *handle = llvmpipe_create_texture_handle(device->drv_pscreen, &templ, NULL);
 
    simple_mtx_lock(&device->bda_lock);
    util_dynarray_append(&device->bda_texture_handles, handle);
@@ -340,7 +340,7 @@ get_image_handle_bda(struct lvp_device *device, VkDeviceAddress address, size_t 
    view.format = format;
    view.u.buf.size = range;
 
-   struct lp_texture_handle *handle = llvmpipe_create_image_handle(device->pscreen, &view);
+   struct lp_texture_handle *handle = llvmpipe_create_image_handle(device->drv_pscreen, &view);
 
    simple_mtx_lock(&device->bda_lock);
    util_dynarray_append(&device->bda_image_handles, handle);

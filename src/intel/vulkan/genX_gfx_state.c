@@ -659,6 +659,12 @@ calculate_tile_dimensions(const struct anv_device *device,
 
    unsigned pixel_size = 0;
 
+   /* Keep TBIMR disabled until HSDs 14024498401, 14022484703 and 14020415808
+    * are implemented.
+    */
+   if (device->info->verx10 > 30)
+      return false;
+
    /* Perform a rough calculation of the tile cache footprint of the
     * pixel pipeline, approximating it as the sum of the amount of
     * memory used per pixel by every render target, depth, stencil and

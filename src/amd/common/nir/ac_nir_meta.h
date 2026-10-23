@@ -210,9 +210,9 @@ static_assert(sizeof(ac_cs_clear_copy_buffer_key) == 8,
 typedef struct {
    const nir_shader_compiler_options *nir_options;
    const struct radeon_info *info;
-   uint64_t prefer_cp_dma_threshold; /* prefer CP DMA below the threshold when usable, even when slower */
    bool print_key;      /* print the shader key into stderr */
-   bool fail_if_slow;   /* fail if a gfx blit is faster, set to false on compute queues */
+   bool is_compute_queue;
+   bool fail_if_slow;   /* allow failing if CP DMA is faster */
    bool addr_user_data; /* pass src/dst addresses in user data SGPRs */
 } ac_cs_clear_copy_buffer_options;
 
@@ -238,6 +238,7 @@ typedef struct {
    unsigned workgroup_size;
    unsigned num_threads;
    unsigned dispatch_interleave; /* COMPUTE_DISPATCH_INTERLEAVE.INTERLEAVE/INTERLEAVE_1D */
+   bool cpdma_supported;
 
    struct {
       uint64_t offset;

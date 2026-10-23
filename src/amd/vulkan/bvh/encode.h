@@ -112,6 +112,11 @@ bit_writer_write(inout bit_writer writer, uint32_t data, uint32_t bit_size)
 void
 bit_writer_skip_to(inout bit_writer writer, uint32_t target)
 {
+   if (target <= writer.total_count + 32) {
+      bit_writer_write(writer, 0, target - writer.total_count);
+      return;
+   }
+
    /* Flush the remaining data. */
    if (writer.count > 0) {
       REF(uint32_t) dst = REF(uint32_t)(writer.addr + writer.offset);
@@ -196,8 +201,8 @@ radv_gfx12_box_node_encoder_get_child(radv_gfx12_box_node_encoder encoder, vk_aa
    return box_child;
 }
 
-#define RADV_GFX12_UPDATABLE_PRIMITIVE_NODE_INDICES_OFFSET                                                             \
-   (align(RADV_GFX12_PRIMITIVE_NODE_HEADER_SIZE, 32) / 8 + 9 * 4)
+#define RADV_GFX12_UPDATABLE_PRIMITIVE_NODE_INDICES_MIDPOINT_OFFSET                                                    \
+   (align(RADV_GFX12_PRIMITIVE_NODE_HEADER_SIZE, 32) / 8 + 9 * 2 * 4 + 2 * 4)
 
 void
 radv_encode_triangle_gfx12(VOID_REF dst, vk_ir_triangle_node src)
@@ -215,7 +220,7 @@ radv_encode_triangle_gfx12(VOID_REF dst, vk_ir_triangle_node src)
    bit_writer_write(child_writer, 0, 1);  /* vertex_type */
    bit_writer_write(child_writer, 28, 5); /* primitive_index_base_bits */
    bit_writer_write(child_writer, 28, 5); /* primitive_index_bits */
-   bit_writer_write(child_writer, RADV_GFX12_UPDATABLE_PRIMITIVE_NODE_INDICES_OFFSET * 8 + 32, 10);
+   bit_writer_write(child_writer, RADV_GFX12_UPDATABLE_PRIMITIVE_NODE_INDICES_MIDPOINT_OFFSET * 8, 10);
 
    bit_writer_write(child_writer, floatBitsToUint(src.coords[0][0]), 32);
    bit_writer_write(child_writer, floatBitsToUint(src.coords[0][1]), 32);
@@ -227,7 +232,7 @@ radv_encode_triangle_gfx12(VOID_REF dst, vk_ir_triangle_node src)
    bit_writer_write(child_writer, floatBitsToUint(src.coords[2][1]), 32);
    bit_writer_write(child_writer, floatBitsToUint(src.coords[2][2]), 32);
 
-   bit_writer_write(child_writer, 0, 64 - RADV_GFX12_PRIMITIVE_NODE_HEADER_SIZE + 4);
+   bit_writer_skip_to(child_writer, RADV_GFX12_UPDATABLE_PRIMITIVE_NODE_INDICES_MIDPOINT_OFFSET * 8 - 28);
 
    bit_writer_write(child_writer, src.geometry_id_and_flags & 0xfffffff, 28);
    bit_writer_write(child_writer, src.triangle_id, 28);
@@ -268,7 +273,7 @@ radv_encode_triangle_gfx12(VOID_REF dst, vk_ir_triangle_node src0, vk_ir_triangl
    bit_writer_write(child_writer, 28, 5); /* primitive_index_base_bits */
    bit_writer_write(child_writer, 28, 5); /* primitive_index_bits */
    /* header + (9 floats + geometry_id) * 2 triangles */
-   bit_writer_write(child_writer, RADV_GFX12_PRIMITIVE_NODE_HEADER_SIZE + 2 * 9 * 32 + 2 * 28, 10);
+   bit_writer_write(child_writer, RADV_GFX12_UPDATABLE_PRIMITIVE_NODE_INDICES_MIDPOINT_OFFSET * 8, 10);
 
    bit_writer_write(child_writer, floatBitsToUint(src0.coords[0][0]), 32);
    bit_writer_write(child_writer, floatBitsToUint(src0.coords[0][1]), 32);
@@ -289,6 +294,8 @@ radv_encode_triangle_gfx12(VOID_REF dst, vk_ir_triangle_node src0, vk_ir_triangl
    bit_writer_write(child_writer, floatBitsToUint(src1.coords[2][0]), 32);
    bit_writer_write(child_writer, floatBitsToUint(src1.coords[2][1]), 32);
    bit_writer_write(child_writer, floatBitsToUint(src1.coords[2][2]), 32);
+
+   bit_writer_skip_to(child_writer, RADV_GFX12_UPDATABLE_PRIMITIVE_NODE_INDICES_MIDPOINT_OFFSET * 8 - 2 * 28);
 
    bit_writer_write(child_writer, src1.geometry_id_and_flags & 0xfffffff, 28);
    bit_writer_write(child_writer, src0.geometry_id_and_flags & 0xfffffff, 28);
@@ -331,7 +338,7 @@ radv_encode_aabb_gfx12(VOID_REF dst, vk_ir_aabb_node src)
    bit_writer_write(child_writer, 0, 1);  /* vertex_type */
    bit_writer_write(child_writer, 28, 5); /* primitive_index_base_bits */
    bit_writer_write(child_writer, 28, 5); /* primitive_index_bits */
-   bit_writer_write(child_writer, RADV_GFX12_UPDATABLE_PRIMITIVE_NODE_INDICES_OFFSET * 8 + 32, 10);
+   bit_writer_write(child_writer, RADV_GFX12_UPDATABLE_PRIMITIVE_NODE_INDICES_MIDPOINT_OFFSET * 8, 10);
 
    bit_writer_write(child_writer, floatBitsToUint(src.base.aabb.min.x), 32);
    bit_writer_write(child_writer, floatBitsToUint(src.base.aabb.min.y), 32);
@@ -340,7 +347,7 @@ radv_encode_aabb_gfx12(VOID_REF dst, vk_ir_aabb_node src)
    bit_writer_write(child_writer, floatBitsToUint(src.base.aabb.max.y), 32);
    bit_writer_write(child_writer, floatBitsToUint(src.base.aabb.max.z), 32);
 
-   bit_writer_skip_to(child_writer, RADV_GFX12_UPDATABLE_PRIMITIVE_NODE_INDICES_OFFSET * 8 + 4);
+   bit_writer_skip_to(child_writer, RADV_GFX12_UPDATABLE_PRIMITIVE_NODE_INDICES_MIDPOINT_OFFSET * 8 - 28);
 
    bit_writer_write(child_writer, src.geometry_id_and_flags & 0xfffffff, 28);
    bit_writer_write(child_writer, src.primitive_id, 28);

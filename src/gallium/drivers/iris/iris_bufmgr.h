@@ -73,12 +73,12 @@ enum iris_memory_zone {
 #define IRIS_SCRATCH_ZONE_SIZE (8 * 1024 * 1024)
 #define IRIS_BINDER_ZONE_SIZE ((1ull << 30) - IRIS_SCRATCH_ZONE_SIZE)
 
-#define IRIS_MEMZONE_SHADER_START     (0ull * (1ull << 32))
-#define IRIS_MEMZONE_BINDER_START     (1ull * (1ull << 32))
-#define IRIS_MEMZONE_SCRATCH_START    IRIS_MEMZONE_BINDER_START
-#define IRIS_MEMZONE_SURFACE_START    (IRIS_MEMZONE_BINDER_START + IRIS_BINDER_ZONE_SIZE)
-#define IRIS_MEMZONE_DYNAMIC_START    (2ull * (1ull << 32))
-#define IRIS_MEMZONE_OTHER_START      (3ull * (1ull << 32))
+#define IRIS_MEMZONE_SHADER_START     (0ull * (1ull << 32)) /* 0x000000000 (0 GB) */
+#define IRIS_MEMZONE_BINDER_START     (1ull * (1ull << 32)) /* 0x100000000 (4 GB) */
+#define IRIS_MEMZONE_SCRATCH_START    IRIS_MEMZONE_BINDER_START /* 0x100000000 (4 GB) */
+#define IRIS_MEMZONE_SURFACE_START    (IRIS_MEMZONE_BINDER_START + IRIS_BINDER_ZONE_SIZE) /* 0x100000000 + IRIS_BINDER_ZONE_SIZE (4 GB + 64 MB = 4.0625 GB) */
+#define IRIS_MEMZONE_DYNAMIC_START    (2ull * (1ull << 32)) /* 0x200000000 (8 GB) */
+#define IRIS_MEMZONE_OTHER_START      (3ull * (1ull << 32)) /* 0x300000000 (12 GB) */
 
 #define IRIS_BORDER_COLOR_POOL_ADDRESS IRIS_MEMZONE_DYNAMIC_START
 #define IRIS_BORDER_COLOR_POOL_SIZE (64 * 4096)
@@ -228,6 +228,12 @@ struct iris_bo_screen_deps {
    struct iris_syncobj *read_syncobjs[IRIS_BATCH_COUNT];
 };
 
+enum iris_bo_state {
+   IRIS_BO_STATE_IN_USE = 0,
+   IRIS_BO_STATE_NOT_IN_USE_BUT_ALIVE,
+   IRIS_BO_STATE_NOT_IN_USE_MAYBE_PURGED
+};
+
 struct iris_bo {
    /**
     * Size in bytes of the buffer object.
@@ -358,6 +364,15 @@ struct iris_bo {
 
          /** Boolean of whether this buffer can be scanout to display */
          bool scanout;
+
+         /** State of bo, mainly used to reduce madvise call.
+          * When bo is not needed first for 1sec we put it on bo cache but don't
+          * tell anything to KMD.
+          * Then if after that time it was not used, we tell KMD that it can be
+          * purged.
+          * Then after another second if not used we free it.
+          */
+         enum iris_bo_state bo_state;
       } real;
       struct {
          struct pb_slab_entry entry;

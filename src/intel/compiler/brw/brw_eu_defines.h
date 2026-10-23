@@ -189,6 +189,7 @@ enum ENUM_PACKED opcode {
    BRW_OPCODE_SENDS,
    BRW_OPCODE_SENDSC,
    BRW_OPCODE_SENDG, /* Gfx35+ with 64bits addressing */
+   BRW_OPCODE_SENDGC, /* Gfx35+ with 64bits addressing */
    BRW_OPCODE_MATH,
    BRW_OPCODE_ADD,
    BRW_OPCODE_MUL,
@@ -692,6 +693,8 @@ enum memory_flags {
     *  with other loads.
     */
    MEMORY_FLAG_CAN_REORDER = 1 << 5,
+   /** Whether memory access is marked non-temporal by GLSL/SPIR-V. */
+   MEMORY_FLAG_NON_TEMPORAL = 1 << 6,
 };
 
 enum rt_logical_srcs {

@@ -35,6 +35,7 @@ static_assert!(CL_QUEUED == 3);
 
 pub type EventSig =
     Box<dyn FnOnce(&Context, &mut QueueContextWithState) -> CLResult<()> + Send + Sync>;
+pub type CleanupSig = Box<dyn FnOnce(&Context) + Send + Sync>;
 
 const PROFILING_ORDERING: atomic::Ordering = atomic::Ordering::SeqCst;
 
@@ -50,6 +51,9 @@ struct EventMutState {
     status: cl_int,
     cbs: [Vec<EventCB>; 3],
     work: Option<EventSig>,
+
+    /// Cleanup callback that gets called right before the event gets put into `CL_COMPLETE` status.
+    cleanup: Option<CleanupSig>,
 }
 
 trait Profiler: Send + Sync {
@@ -113,18 +117,17 @@ impl Profiler for CPUProfiler {
         work: Option<EventSig>,
     ) -> CLResult<()> {
         self.set_time(EventTimes::Submit, ctx.dev.screen().get_timestamp());
+        let mut query_start =
+            PipeQueryGen::<{ pipe_query_type::PIPE_QUERY_TIMESTAMP }>::new(ctx.ctx)
+                .ok_or(CL_OUT_OF_HOST_MEMORY)?;
         if let Some(w) = work {
-            let mut query_start =
-                PipeQueryGen::<{ pipe_query_type::PIPE_QUERY_TIMESTAMP }>::new(ctx.ctx)
-                    .ok_or(CL_OUT_OF_HOST_MEMORY)?;
             w(cl_ctx, ctx)?;
-            let mut query_end =
-                PipeQueryGen::<{ pipe_query_type::PIPE_QUERY_TIMESTAMP }>::new(ctx.ctx)
-                    .ok_or(CL_OUT_OF_HOST_MEMORY)?;
-
-            self.set_time(EventTimes::Start, query_start.read_blocked());
-            self.set_time(EventTimes::End, query_end.read_blocked());
         }
+        let mut query_end = PipeQueryGen::<{ pipe_query_type::PIPE_QUERY_TIMESTAMP }>::new(ctx.ctx)
+            .ok_or(CL_OUT_OF_HOST_MEMORY)?;
+
+        self.set_time(EventTimes::Start, query_start.read_blocked());
+        self.set_time(EventTimes::End, query_end.read_blocked());
 
         Ok(())
     }
@@ -208,15 +211,15 @@ impl Profiler for GPUProfiler {
         self.time_submit
             .store(ctx.dev.screen().get_timestamp(), PROFILING_ORDERING);
 
+        let mut query_start = self.create_timestamp_query(ctx.ctx)?;
+        query_start.write_to_resource(&self.res, 0);
+
         if let Some(w) = work {
-            let mut query_start = self.create_timestamp_query(ctx.ctx)?;
-            query_start.write_to_resource(&self.res, 0);
-
             w(cl_ctx, ctx)?;
-
-            let mut query_end = self.create_timestamp_query(ctx.ctx)?;
-            query_end.write_to_resource(&self.res, 8);
         }
+
+        let mut query_end = self.create_timestamp_query(ctx.ctx)?;
+        query_end.write_to_resource(&self.res, 8);
 
         Ok(())
     }
@@ -268,7 +271,8 @@ impl Event {
         queue: &Arc<Queue>,
         cmd_type: cl_command_type,
         deps: Vec<Arc<Event>>,
-        work: EventSig,
+        work: Option<EventSig>,
+        cleanup: Option<CleanupSig>,
     ) -> CLResult<Arc<Event>> {
         let profiler: Box<dyn Profiler> = if queue.is_profiling_enabled() {
             if queue.device.screen().caps().query_buffer_object {
@@ -285,7 +289,8 @@ impl Event {
             context: Arc::clone(&queue.context),
             state: Mutex::new(EventMutState {
                 status: CL_QUEUED as cl_int,
-                work: Some(work),
+                work: work,
+                cleanup: cleanup,
                 ..Default::default()
             }),
             kind: EventImpl::GPUEvent(GPUEvent {
@@ -398,14 +403,24 @@ impl Event {
     }
 
     pub(super) fn signal(&self) {
-        let state = self.state();
+        let mut state = self.state();
         // we don't want to call signal on errored events, but if that still happens, handle it
         // gracefully
         debug_assert_eq!(state.status, CL_SUBMITTED as cl_int);
         if state.status < 0 {
             return;
         }
+
+        // Only take the cb when we are sure to set the state to CL_COMPLETE.
+        let cleanup = state.cleanup.take();
         self.set_status(state, CL_RUNNING as cl_int);
+
+        // Cleanup cbs are expected to be called right before putting the event into COMPLETE state.
+        // And we also want to call it while not taking the state lock.
+        if let Some(cleanup) = cleanup {
+            cleanup(&self.context);
+        }
+
         self.set_status(self.state(), CL_COMPLETE as cl_int);
     }
 

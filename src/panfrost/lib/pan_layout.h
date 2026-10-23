@@ -215,6 +215,8 @@ pan_linear_or_tiled_row_align_req(unsigned arch, enum pipe_format format,
    switch (format) {
    /* For v7+, below have a looser alignment requirement of 16 bytes */
    case PIPE_FORMAT_R8G8B8_420_UNORM_PACKED:
+   case PIPE_FORMAT_G8B8_G8R8_UNORM:
+   case PIPE_FORMAT_B8G8_R8G8_UNORM:
    case PIPE_FORMAT_R8_G8B8_420_UNORM:
    case PIPE_FORMAT_G8_B8R8_420_UNORM:
    case PIPE_FORMAT_R8_G8_B8_420_UNORM:

@@ -197,6 +197,7 @@ gen_inst_is_split_send(const intel_device_info *devinfo, const gen_inst *inst)
       return devinfo->ver >= 12;
 
    case GEN_OP_SENDG:
+   case GEN_OP_SENDGC:
    case GEN_OP_SENDS:
    case GEN_OP_SENDSC:
       return true;

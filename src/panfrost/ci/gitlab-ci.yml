@@ -220,6 +220,16 @@ panfrost-g610-vk:arm64:
 
     LAVA_TAGS: at-least-8gb
 
+panfrost-g610-traces:arm64:
+  extends:
+    - .lava-arm64-test-vk
+    - .panfrost-test
+    - .lava-rk3588-rock-5b:arm64
+    - .panfrost-traces
+    - .panfrost-panthor-gl-vk-rules
+  variables:
+    LAVA_TAGS: 4gb
+
 panfrost-g610-vk-asan:arm64:
   parallel: 5
   extends:
@@ -298,3 +308,13 @@ panfrost-g925-vk-kraid-full:arm64:
     - .panfrost-vk-manual-panthor-rules
   variables:
     DEQP_FRACTION: 1
+
+panfrost-g925-traces:arm64:
+  extends:
+    - .lava-arm64-test-vk
+    - .panfrost-test
+    - .lava-mt8196-rauru-navi-sku0:arm64
+    - .panfrost-traces
+    - .panfrost-panthor-gl-vk-manual-rules
+  variables:
+    MESA_VK_IGNORE_CONFORMANCE_WARNING: 1

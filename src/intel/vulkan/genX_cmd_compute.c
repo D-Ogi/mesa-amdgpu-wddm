@@ -604,6 +604,7 @@ emit_indirect_compute_walker(struct anv_cmd_buffer *cmd_buffer,
          .Post_sync_opn3.MOCS     = anv_mocs(device, NULL, 0),
       };
 
+      assert(comp_state->shader->bind_map.inline_dwords_count <= ARRAY_SIZE(body.InlineData));
       fill_inline_params(body.InlineData, &inline_value);
 
       cmd_buffer->state.last_indirect_dispatch =
@@ -629,6 +630,7 @@ emit_indirect_compute_walker(struct anv_cmd_buffer *cmd_buffer,
          },
       };
 
+      assert(comp_state->shader->bind_map.inline_dwords_count <= ARRAY_SIZE(body.InlineData));
       fill_inline_params(body.InlineData, &inline_value);
 
       cmd_buffer->state.last_indirect_dispatch =

@@ -1549,6 +1549,7 @@ trace_screen_create(struct pipe_screen *screen)
    /* copy all caps */
    *(struct pipe_caps *)&tr_scr->base.caps = screen->caps;
    *(struct pipe_compute_caps *)&tr_scr->base.compute_caps = screen->compute_caps;
+   *(struct pipe_video_caps *)&tr_scr->base.video_caps = screen->video_caps;
    memcpy((void *)tr_scr->base.shader_caps, screen->shader_caps, sizeof(screen->shader_caps));
    memcpy((void *)tr_scr->base.nir_options, screen->nir_options, sizeof(screen->nir_options));
 

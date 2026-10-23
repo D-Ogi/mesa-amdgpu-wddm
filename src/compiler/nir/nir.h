@@ -2616,12 +2616,18 @@ typedef enum nir_tex_src_type {
    /** Second backend-specific vec4 tex src argument, see nir_tex_src_backend1. */
    nir_tex_src_backend2,
 
+   /** Used for panfrost VAR_* texturing forms */
+   nir_tex_src_var_handle_pan,
+   nir_tex_src_var_buf_offset_pan,
+
    /** VK_QCOM_image_processing sources */
    nir_tex_src_ref_coord,
    nir_tex_src_texture_2_deref,
    nir_tex_src_sampler_2_deref,
    nir_tex_src_texture_2_handle,
    nir_tex_src_sampler_2_handle,
+   nir_tex_src_texture_2_heap_offset,
+   nir_tex_src_sampler_2_heap_offset,
    nir_tex_src_block_size,
    nir_tex_src_box_size,
 
@@ -2691,6 +2697,8 @@ typedef enum nir_texop {
    nir_texop_tex_type_nv,
    /** Maps to TXQ.SAMPLER_POS */
    nir_texop_sample_pos_nv,
+   /** Maps to TEX_DUAL */
+   nir_texop_dual_pan,
    /** Maps to TEX_GRADIENT */
    nir_texop_gradient_pan,
    /**
@@ -2713,6 +2721,11 @@ typedef enum nir_texop {
    */
    nir_texop_block_match_sad_qcom,
    nir_texop_block_match_ssd_qcom,
+   /** txs at LOD0 in .xyz
+    *
+    * This avoids undefined behavior related to min LOD clamping HW behavior.
+    */
+   nir_texop_txs_lod0_intel,
    /** txs in .xyz and query_levels in .w */
    nir_texop_resinfo_intel,
 
@@ -2840,10 +2853,30 @@ typedef struct nir_tex_instr {
     */
    bool embedded_sampler;
 
+   /** True if this texture instruction uses an embedded sampler for the
+    * second sampler.
+    *
+    * In this case, sampler_2_index is the index in embedded sampler table.
+    */
+   bool embedded_sampler_2;
+
    /** True whether this returns the same result anywhere in the shader and
     *  doesn't cause page faults.
     */
    bool can_speculate;
+
+   /** True if this instruction is fetching from an input attachment with an
+    * index. If true, texture_index is the base input attachment offset,
+    * texture_offset is the offset in the array if any, and texture_array_size
+    * is the bound for texture_offset.
+    */
+   bool input_attachment_index;
+
+   /** True if this instruction is fetching from a depth input attachment. */
+   bool input_attachment_depth;
+
+   /** True if this instruction is fetching from a stencil input attachment. */
+   bool input_attachment_stencil;
 
    /** The texture index
     *
@@ -2851,6 +2884,15 @@ typedef struct nir_tex_instr {
     * then the texture index is given by texture_index + texture_offset.
     */
    unsigned texture_index;
+
+   /** The size of the texture array.
+    *
+    * If there is a texture_offset source, this is maximum value it can have,
+    * plus one. Otherwise 0.
+    *
+    * Currently only used for input attachments.
+    */
+   unsigned texture_array_size;
 
    /** The sampler index
     *
@@ -2869,6 +2911,17 @@ typedef struct nir_tex_instr {
     */
    unsigned sampler_index;
 
+   /** The second sampler index
+    *
+    * Only used for these opcodes, currently just to give the index of the
+    * embedded sampler:
+    *
+    *    - nir_texop_sample_weighted_qcom
+    *    - nir_texop_block_match_sad_qcom
+    *    - nir_texop_block_match_ssd_qcom
+    */
+   unsigned sampler_2_index;
+
    /* Back-end specific flags, intended to be used in combination with
     * nir_tex_src_backend1/2 to provide additional hw-specific information
     * to the back-end compiler.
@@ -2885,6 +2938,12 @@ typedef struct nir_tex_instr {
  * See also :c:member:`nir_tex_instr.sampler_index`.
  */
 bool nir_tex_instr_need_sampler(const nir_tex_instr *instr);
+
+/**
+ * Returns true if the texture operation requires a texture_2/sampler_2.
+ */
+bool
+nir_tex_instr_need_texture_2(const nir_tex_instr *instr);
 
 /** Returns the number of components returned by this nir_tex_instr
  *
@@ -3325,6 +3384,23 @@ NIR_DEFINE_SRC_AS_CONST(bool, bool)
 NIR_DEFINE_SRC_AS_CONST(double, float)
 
 #undef NIR_DEFINE_SRC_AS_CONST
+
+static inline void
+nir_instr_set_speculated(nir_instr *instr)
+{
+   if (instr->type != nir_instr_type_intrinsic)
+      return;
+
+   nir_intrinsic_instr *intrin = nir_instr_as_intrinsic(instr);
+
+   if (nir_intrinsic_has_access(intrin) &&
+       (nir_intrinsic_access(intrin) & ACCESS_CAN_SPECULATE)) {
+      nir_intrinsic_set_access(intrin,
+                               (enum gl_access_qualifier)(
+                                  nir_intrinsic_access(intrin) |
+                                  ACCESS_IS_SPECULATED));
+   }
+}
 
 static inline bool
 nir_src_is_zero(nir_src src)
@@ -6412,6 +6488,7 @@ typedef struct nir_lower_tex_options {
    unsigned saturate_s;
    unsigned saturate_t;
    unsigned saturate_r;
+   unsigned saturate_lod_zero;
 
    /* Bitmask of samplers whose txl LOD <= 0.5 is replaced with 0.0, moving
     * the magnification switch-over point from a lambda of 0 to the 0.5 that
@@ -6560,6 +6637,15 @@ typedef struct nir_lower_tex_options {
    bool lower_tg4_shadow_to_16bit;
 
    /**
+    * This callback will be use if non NULL, otherwise nir_get_texture_size()
+    * will be used.
+    *
+    * This is useful for HW with undefined behavior in some cases (like min
+    * LOD clamping).
+    */
+   nir_def *(*build_txs_lod0)(nir_builder *b, nir_tex_instr *tex, void *data);
+
+   /**
     * Payload data to be sent to callback / filter functions.
     */
    void *callback_data;
@@ -6659,8 +6745,6 @@ bool nir_lower_idiv(nir_shader *shader, const nir_lower_idiv_options *options);
 typedef struct nir_input_attachment_options {
    bool use_ia_coord_intrin;
    bool use_view_id_for_layer;
-   bool gmem_depth_stencil_ir3;
-   uint32_t gmem_input_attachment_ir3;
 } nir_input_attachment_options;
 
 bool nir_lower_input_attachments(nir_shader *shader,
@@ -7030,6 +7114,8 @@ bool nir_opt_generate_bfi(nir_shader *shader);
 bool nir_opt_idiv_const(nir_shader *shader, unsigned min_bit_size);
 
 bool nir_opt_mqsad(nir_shader *shader);
+
+bool nir_opt_uadd_carry(nir_shader *shader, unsigned bit_sizes);
 
 typedef enum {
    nir_opt_if_optimize_phi_true_false = (1 << 0),

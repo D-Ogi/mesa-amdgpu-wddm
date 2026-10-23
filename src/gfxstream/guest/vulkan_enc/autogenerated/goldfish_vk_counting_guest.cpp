@@ -8385,6 +8385,20 @@ void count_VkDebugMetadataGuestThreadIdGOOGLE(uint32_t featureBits, VkStructureT
     *count += sizeof(uint64_t);
 }
 
+void count_VkGuestCapabilitiesGOOGLE(uint32_t featureBits, VkStructureType rootType,
+                                     const VkGuestCapabilitiesGOOGLE* toCount, size_t* count) {
+    (void)featureBits;
+    (void)rootType;
+    (void)toCount;
+    (void)count;
+    *count += sizeof(VkStructureType);
+    if (rootType == VK_STRUCTURE_TYPE_MAX_ENUM) {
+        rootType = toCount->sType;
+    }
+    count_extension_struct(featureBits, rootType, toCount->pNext, count);
+    *count += sizeof(VkGuestCapabilityFlagsGOOGLE);
+}
+
 void count_VkDebugMetadataGOOGLE(uint32_t featureBits, VkStructureType rootType,
                                  const VkDebugMetadataGOOGLE* toCount, size_t* count) {
     (void)featureBits;
@@ -10115,6 +10129,12 @@ void count_extension_struct(uint32_t featureBits, VkStructureType rootType,
                 featureBits, rootType,
                 reinterpret_cast<const VkDebugMetadataGuestThreadIdGOOGLE*>(structExtension),
                 count);
+            break;
+        }
+        case VK_STRUCTURE_TYPE_GUEST_CAPABILITIES_GOOGLE: {
+            count_VkGuestCapabilitiesGOOGLE(
+                featureBits, rootType,
+                reinterpret_cast<const VkGuestCapabilitiesGOOGLE*>(structExtension), count);
             break;
         }
 #endif

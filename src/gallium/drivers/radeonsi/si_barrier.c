@@ -196,13 +196,13 @@ static void si_emit_barrier(struct si_context *sctx, struct radeon_cmdbuf *cs)
       .eop_bug_va = eop_bug_va,
    };
 
-   if (unlikely(sctx->sqtt_enabled))
+   if (unlikely(si_is_sqtt_active(sctx)))
       si_sqtt_describe_barrier_start(sctx, cs);
 
    ac_emit_barrier(&cs->current, gfx_level, ip_type, &barrier,
                    &sctx->context_roll, &rgp_flush_bits);
 
-   if (unlikely(sctx->sqtt_enabled))
+   if (unlikely(si_is_sqtt_active(sctx)))
       si_sqtt_describe_barrier_end(sctx, cs, rgp_flush_bits);
 
    if (gfx_level >= GFX10_3) {

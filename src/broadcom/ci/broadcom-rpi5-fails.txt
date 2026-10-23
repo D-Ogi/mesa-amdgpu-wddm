@@ -78,11 +78,6 @@ spec@ext_packed_depth_stencil@texwrap formats offset,Fail
 spec@ext_packed_depth_stencil@texwrap formats offset@GL_DEPTH24_STENCIL8- NPOT,Fail
 spec@ext_packed_depth_stencil@texwrap formats,Fail
 spec@ext_packed_depth_stencil@texwrap formats@GL_DEPTH24_STENCIL8- NPOT,Fail
-spec@ext_texture_integer@fbo-blending,Fail
-spec@ext_texture_integer@getteximage-clamping gl_arb_texture_rg,Fail
-spec@ext_texture_integer@getteximage-clamping,Fail
-spec@ext_texture_integer@multisample-formats 2 gl_ext_texture_integer,Fail
-spec@ext_texture_integer@multisample-formats 4 gl_ext_texture_integer,Fail
 spec@ext_texture_integer@texwrap formats bordercolor,Fail
 spec@ext_texture_integer@texwrap formats bordercolor-swizzled,Fail
 spec@ext_texture_integer@texwrap formats bordercolor-swizzled@GL_ALPHA16I_EXT- swizzled- border color only,Fail
@@ -97,19 +92,10 @@ spec@ext_texture_integer@texwrap formats bordercolor@GL_ALPHA32I_EXT- border col
 spec@ext_texture_integer@texwrap formats bordercolor@GL_ALPHA32UI_EXT- border color only,Fail
 spec@ext_texture_integer@texwrap formats bordercolor@GL_ALPHA8I_EXT- border color only,Fail
 spec@ext_texture_integer@texwrap formats bordercolor@GL_ALPHA8UI_EXT- border color only,Fail
-spec@ext_texture_integer@texwrap formats offset,Fail
-spec@ext_texture_integer@texwrap formats offset@GL_ALPHA8I_EXT,Fail
-spec@ext_texture_integer@texwrap formats offset@GL_ALPHA8I_EXT- NPOT,Fail
-spec@ext_texture_integer@texwrap formats offset@GL_ALPHA8I_EXT- swizzled,Fail
-spec@ext_texture_integer@texwrap formats,Fail
-spec@ext_texture_integer@texwrap formats@GL_ALPHA8I_EXT,Fail
-spec@ext_texture_integer@texwrap formats@GL_ALPHA8I_EXT- NPOT,Fail
-spec@ext_texture_integer@texwrap formats@GL_ALPHA8I_EXT- swizzled,Fail
 spec@ext_texture_snorm@texwrap formats bordercolor,Fail
 spec@ext_texture_snorm@texwrap formats bordercolor-swizzled,Fail
 spec@ext_texture_snorm@texwrap formats bordercolor-swizzled@GL_LUMINANCE16_ALPHA16_SNORM- swizzled- border color only,Fail
 spec@ext_texture_snorm@texwrap formats bordercolor@GL_LUMINANCE16_ALPHA16_SNORM- border color only,Fail
-spec@ext_transform_feedback@tessellation triangle_fan flat_first,Fail
 spec@glsl-1.10@execution@glsl-fs-inline-explosion,Crash
 spec@glsl-1.10@execution@glsl-vs-inline-explosion,Crash
 spec@glsl-1.10@execution@loops@glsl-fs-unroll-explosion,Crash
@@ -219,12 +205,6 @@ program@execute@builtin@builtin-float-nextafter-1.0.generated@nextafter float16,
 program@execute@builtin@builtin-float-nextafter-1.0.generated@nextafter float2,Fail
 program@execute@builtin@builtin-float-nextafter-1.0.generated@nextafter float4,Fail
 program@execute@builtin@builtin-float-nextafter-1.0.generated@nextafter float8,Fail
-program@execute@builtin@builtin-float-sign-1.0.generated,Fail
-program@execute@builtin@builtin-float-sign-1.0.generated@sign float1,Fail
-program@execute@builtin@builtin-float-sign-1.0.generated@sign float16,Fail
-program@execute@builtin@builtin-float-sign-1.0.generated@sign float2,Fail
-program@execute@builtin@builtin-float-sign-1.0.generated@sign float4,Fail
-program@execute@builtin@builtin-float-sign-1.0.generated@sign float8,Fail
 program@execute@builtin@builtin-long-popcount-1.2.generated@popcount long1,Fail
 program@execute@builtin@builtin-long-popcount-1.2.generated@popcount long16,Fail
 program@execute@builtin@builtin-long-popcount-1.2.generated@popcount long2,Fail
@@ -385,11 +365,6 @@ vk_xfermodes3,Fail
 
 # Bisected to 08b5876c379 ("v3d: only expose rgba buffer-textures")
 TransferPixelsTest,Fail
-
-# VKCTS 1.4.5.3 -> 1.4.6.1 uprev
-dEQP-VK.robustness.buffer_access.through_pointers.graphics.writes.vertex.4B_in_memory_with_scalar_f32,Fail
-dEQP-VK.robustness.buffer_access.through_pointers.graphics.writes.vertex.4B_in_memory_with_scalar_s32,Fail
-dEQP-VK.robustness.buffer_access.through_pointers.graphics.writes.vertex.4B_in_memory_with_scalar_u32,Fail
 
 # OpenCL CTS tests
 API,Fail

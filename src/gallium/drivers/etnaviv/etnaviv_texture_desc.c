@@ -27,6 +27,7 @@
 
 #include "etnaviv_texture_desc.h"
 
+#include "layout/eil_format.h"
 #include "hw/common.xml.h"
 #include "hw/texdesc_3d.xml.h"
 
@@ -389,7 +390,7 @@ etna_sampler_view_desc_compose(struct etna_context *ctx,
 
    res = etna_sampler_view_resource(ctx, &sv->base, num);
 
-   const bool is_128bit = format_is_128bit(sv->base.format);
+   const bool is_128bit = eil_format_is_emulated_128bit(sv->base.format);
    const unsigned num_descs = is_128bit ? 2 : 1;
    unsigned offset;
 
@@ -561,7 +562,7 @@ etna_emit_texture_desc(struct etna_context *ctx)
       used_hw |= 1u << hw;
 
       /* Apply same configuration to the 128-bit companion sampler. */
-      if (format_is_128bit(sv->base.format)) {
+      if (eil_format_is_emulated_128bit(sv->base.format)) {
          const unsigned y = companion_slot(ctx, x);
 
          assert(!sv->ts.enable);

@@ -940,6 +940,7 @@
     <field name="Tiler" size="1" start="2" type="bool"/>
     <field name="IDVS" size="1" start="3" type="bool"/>
     <field name="RT" size="1" start="4" type="bool"/>
+    <field name="Neural" size="1" start="5" type="bool"/>
     <field name="Opcode" size="8" start="56" type="CS Opcode" default="REQ_RESOURCE"/>
   </struct>
 

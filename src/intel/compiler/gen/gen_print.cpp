@@ -500,7 +500,7 @@ private:
          }
 
          field_sep(SEND_EX_DESC_COLUMN);
-         if (inst->opcode == GEN_OP_SENDG) {
+         if (inst->opcode == GEN_OP_SENDG || inst->opcode == GEN_OP_SENDGC) {
             hex_pad0_64(inst->send.combined_desc);
          } else {
             print_send_ex_desc();
@@ -948,7 +948,7 @@ private:
    void
    print_send_lengths()
    {
-      if (inst->opcode == GEN_OP_SENDG)
+      if (inst->opcode == GEN_OP_SENDG || inst->opcode == GEN_OP_SENDGC)
          return;
 
       const gen_message_desc msg =
@@ -2031,7 +2031,7 @@ private:
       if (!translated_send_may_apply())
          return false;
 
-      if (inst->opcode == GEN_OP_SENDG)
+      if (inst->opcode == GEN_OP_SENDG || inst->opcode == GEN_OP_SENDGC)
          return print_translated_sendg();
 
       if (is_lsc_translated_sfid(inst->send.sfid))

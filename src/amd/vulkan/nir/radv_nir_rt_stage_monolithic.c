@@ -5,9 +5,9 @@
  * SPDX-License-Identifier: MIT
  */
 
+#include "nir/radv_nir_rt_stage_monolithic.h"
 #include "nir/radv_nir_rt_common.h"
 #include "nir/radv_nir_rt_stage_common.h"
-#include "nir/radv_nir_rt_stage_monolithic.h"
 
 #include "aco_nir_call_attribs.h"
 #include "nir_builder.h"

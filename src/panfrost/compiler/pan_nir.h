@@ -242,13 +242,13 @@ bool pan_nir_lower_image_64bit(nir_shader *shader);
 bool pan_nir_lower_var_special_pan(nir_shader *shader);
 bool pan_nir_lower_noperspective_vs(nir_shader *shader);
 
-bool pan_nir_lower_vs_inputs(nir_shader *shader, uint64_t gpu_id);
+bool pan_nir_lower_vs_inputs(nir_shader *shader);
 
-bool pan_nir_lower_vs_outputs(nir_shader *shader, uint64_t gpu_id,
+bool pan_nir_lower_vs_outputs(nir_shader *shader, unsigned arch,
                               const struct pan_varying_layout *varying_layout,
                               bool has_idvs, bool *needs_extended_fifo);
 
-bool pan_nir_lower_fs_inputs(nir_shader *shader, uint64_t gpu_id,
+bool pan_nir_lower_fs_inputs(nir_shader *shader, unsigned arch,
                              const struct pan_varying_layout *varying_layout,
                              struct pan_shader_info *info);
 
@@ -290,10 +290,16 @@ nir_intrinsic_pan_bi_tex_flags(const nir_intrinsic_instr *instr)
    return flags;
 }
 
+enum pan_bi_sample_loc {
+   PAN_SAMPLE_LOC_CENTER,
+   PAN_SAMPLE_LOC_CENTROID,
+   PAN_SAMPLE_LOC_SAMPLE,
+   PAN_SAMPLE_LOC_EXPLICIT,
+};
+
 PRAGMA_DIAGNOSTIC_PUSH
 PRAGMA_DIAGNOSTIC_ERROR(-Wpadded)
 struct pan_va_tex_flags {
-   bool skip : 1;
    bool wide_indices : 1;
    bool array_enable : 1;
    bool texel_offset : 1;
@@ -309,17 +315,12 @@ struct pan_va_tex_flags {
     * from the raw direction vector.
     */
    bool projection_enable : 1;
-   unsigned _pad : 19;
+   enum pan_bi_sample_loc var_sample_loc : 2;
+   bool var_buf_src_f16 : 1;
+   unsigned _pad : 17;
 };
 PRAGMA_DIAGNOSTIC_POP
 static_assert(sizeof(struct pan_va_tex_flags) == 4, "Must fit in uint32_t");
-
-enum pan_bi_sample_loc {
-   PAN_SAMPLE_LOC_CENTER,
-   PAN_SAMPLE_LOC_CENTROID,
-   PAN_SAMPLE_LOC_SAMPLE,
-   PAN_SAMPLE_LOC_EXPLICIT,
-};
 
 enum pan_bi_varying_name {
    PAN_VARYING_NAME_POINT = 0,
@@ -339,8 +340,9 @@ static_assert(sizeof(struct pan_bi_var_special_flags) == 4, "Must fit in uint32_
 
 void pan_nir_lower_mediump_io(nir_shader *nir);
 
-bool pan_nir_lower_tex(nir_shader *nir, uint64_t gpu_id);
-bool pan_nir_lower_image(nir_shader *nir, uint64_t gpu_id);
+bool pan_nir_lower_tex(nir_shader *nir, unsigned arch);
+bool pan_nir_lower_image(nir_shader *nir, unsigned arch);
+bool pan_nir_opt_var_tex(nir_shader *nir, unsigned arch);
 
 bool pan_nir_lower_mem_to_global(nir_shader *nir);
 
@@ -362,7 +364,7 @@ bool pan_nir_resize_varying_io(nir_shader *nir,
                                struct pan_varying_layout *varying_fmt,
                                const struct pan_varying_layout *varying_layout);
 
-bool pan_nir_fuse_io_cvt(nir_shader *nir, uint64_t gpu_id,
+bool pan_nir_fuse_io_cvt(nir_shader *nir,
                          const struct pan_varying_layout *layout);
 
 bool pan_nir_opt_push_ubo(nir_shader *nir,

@@ -1,10 +1,12 @@
 /*
  * Copyright © 2017, Google Inc.
+ * Copyright © 2026 Advanced Micro Devices, Inc.
  *
  * SPDX-License-Identifier: MIT
  */
 
 #include "radv_android.h"
+#include "ac_drm_fourcc.h"
 #include "radv_buffer.h"
 #include "radv_device.h"
 #include "radv_device_memory.h"
@@ -14,6 +16,9 @@
 
 #if DETECT_OS_ANDROID
 #include <vulkan/vk_android_native_buffer.h>
+
+#include <errno.h>
+#include <unistd.h>
 #endif /* DETECT_OS_ANDROID */
 
 #include "util/os_file.h"
@@ -27,16 +32,13 @@
 
 #if DETECT_OS_ANDROID
 
-VkResult
-radv_image_from_gralloc(VkDevice device_h, const VkImageCreateInfo *base_info,
-                        const VkNativeBufferANDROID *gralloc_info, const VkAllocationCallbacks *alloc,
-                        VkImage *out_image_h)
-
+static VkResult
+radv_gralloc_import_memory(VkDevice device_h, const VkNativeBufferANDROID *gralloc_info,
+                           const VkAllocationCallbacks *alloc, VkDeviceMemory *out_memory_h)
 {
    VK_FROM_HANDLE(radv_device, device, device_h);
    const struct radv_physical_device *pdev = radv_device_physical(device);
-   VkImage image_h = VK_NULL_HANDLE;
-   struct radv_image *image = NULL;
+   VkDeviceMemory memory_h = VK_NULL_HANDLE;
    VkResult result;
 
    /* 1) handle->numFds is about the number of plane(s) and metadata(optional) fd in a
@@ -51,12 +53,14 @@ radv_image_from_gralloc(VkDevice device_h, const VkImageCreateInfo *base_info,
    int dma_buf = gralloc_info->handle->data[0];
    assert(dma_buf >= 0);
 
-   VkDeviceMemory memory_h;
+   int dup_fd = os_dupfd_cloexec(dma_buf);
+   if (dup_fd < 0)
+      return (errno == EMFILE) ? VK_ERROR_TOO_MANY_OBJECTS : VK_ERROR_OUT_OF_HOST_MEMORY;
 
    const VkImportMemoryFdInfoKHR import_info = {
       .sType = VK_STRUCTURE_TYPE_IMPORT_MEMORY_FD_INFO_KHR,
       .handleType = VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_FD_BIT,
-      .fd = os_dupfd_cloexec(dma_buf),
+      .fd = dup_fd,
    };
 
    /* Find the first VRAM memory type, or GART for PRIME images. */
@@ -83,6 +87,29 @@ radv_image_from_gralloc(VkDevice device_h, const VkImageCreateInfo *base_info,
                                    .memoryTypeIndex = memory_type_index,
                                 },
                                 alloc, &memory_h);
+   if (result != VK_SUCCESS) {
+      close(dup_fd);
+      return result;
+   }
+
+   *out_memory_h = memory_h;
+
+   return VK_SUCCESS;
+}
+
+VkResult
+radv_image_from_gralloc(VkDevice device_h, const VkImageCreateInfo *base_info,
+                        const VkNativeBufferANDROID *gralloc_info, const VkAllocationCallbacks *alloc,
+                        VkImage *out_image_h)
+{
+   VK_FROM_HANDLE(radv_device, device, device_h);
+   const struct radv_physical_device *pdev = radv_device_physical(device);
+   VkImage image_h = VK_NULL_HANDLE;
+   VkDeviceMemory memory_h = VK_NULL_HANDLE;
+   struct radv_image *image = NULL;
+   VkResult result;
+
+   result = radv_gralloc_import_memory(device_h, gralloc_info, alloc, &memory_h);
    if (result != VK_SUCCESS)
       return result;
 
@@ -122,22 +149,92 @@ radv_image_from_gralloc(VkDevice device_h, const VkImageCreateInfo *base_info,
 
    image = radv_image_from_handle(image_h);
 
-   radv_image_override_offset_stride(device, image, 0, gralloc_info->stride);
+   if (!ac_surface_override_offset_stride(&pdev->info, &image->planes[0].surface, image->vk.array_layers,
+                                          image->vk.mip_levels, 0, gralloc_info->stride)) {
+      result = VK_ERROR_INVALID_EXTERNAL_HANDLE;
+      goto fail_override;
+   }
 
    VkBindImageMemoryInfo bind_info = {.sType = VK_STRUCTURE_TYPE_BIND_IMAGE_MEMORY_INFO,
                                       .image = image_h,
                                       .memory = memory_h,
                                       .memoryOffset = 0};
-   radv_BindImageMemory2(device_h, 1, &bind_info);
+   result = radv_BindImageMemory2(device_h, 1, &bind_info);
 
-   image->owned_memory = memory_h;
+   if (result != VK_SUCCESS)
+      goto fail_override;
+
+   image->vk.anb_memory = memory_h;
    /* Don't clobber the out-parameter until success is certain. */
    *out_image_h = image_h;
 
    return VK_SUCCESS;
 
+fail_override:
+   radv_DestroyImage(device_h, image_h, alloc);
 fail_create_image:
    radv_FreeMemory(device_h, memory_h, alloc);
+   return result;
+}
+
+VkResult
+radv_android_get_wsi_memory(VkDevice device_h, const VkBindImageMemoryInfo *bind_info, VkDeviceMemory *out_memory_h)
+{
+   VK_FROM_HANDLE(radv_device, device, device_h);
+   VK_FROM_HANDLE(radv_image, image, bind_info->image);
+   VkImageCreateInfo *create_info = image->vk.android_deferred_create_info;
+   VkResult result;
+
+   if (!vk_image_is_android_native_buffer_alias(&image->vk) || !create_info)
+      return VK_ERROR_INVALID_EXTERNAL_HANDLE;
+
+   if (image->vk.anb_memory != VK_NULL_HANDLE) {
+      *out_memory_h = image->vk.anb_memory;
+      return VK_SUCCESS;
+   }
+
+   VkImageDrmFormatModifierExplicitCreateInfoEXT mod_info;
+   VkSubresourceLayout layouts[RADV_ANDROID_MAX_PLANES];
+   const VkNativeBufferANDROID *anb = vk_find_struct_const(bind_info->pNext, NATIVE_BUFFER_ANDROID);
+   if (!anb)
+      return VK_ERROR_INVALID_EXTERNAL_HANDLE;
+
+   /* Inject ANB into the deferred pNext chain so the common Android helper
+    * can derive the real modifier and plane layout.
+    */
+   VkNativeBufferANDROID local_anb = *anb;
+   local_anb.pNext = create_info->pNext;
+   create_info->pNext = &local_anb;
+
+   result = vk_android_get_anb_layout(create_info, &mod_info, layouts, RADV_ANDROID_MAX_PLANES);
+   if (result != VK_SUCCESS)
+      goto restore_create_info;
+
+   VkDeviceMemory memory_h = VK_NULL_HANDLE;
+   result = radv_gralloc_import_memory(device_h, anb, &device->vk.alloc, &memory_h);
+   if (result != VK_SUCCESS)
+      goto restore_create_info;
+
+   struct radeon_bo_metadata md;
+   device->ws->buffer_get_metadata(device->ws, radv_device_memory_from_handle(memory_h)->bo, &md);
+
+   result = radv_image_init_layout(device,
+                                   (struct radv_image_create_info){
+                                      .vk_info = create_info,
+                                      .no_metadata_planes = true,
+                                      .bo_metadata = &md,
+                                   },
+                                   mod_info.drmFormatModifier, &mod_info, NULL, image);
+   if (result != VK_SUCCESS) {
+      radv_FreeMemory(device_h, memory_h, &device->vk.alloc);
+      goto restore_create_info;
+   }
+
+   image->vk.anb_memory = memory_h;
+   *out_memory_h = memory_h;
+
+restore_create_info:
+   create_info->pNext = local_anb.pNext;
    return result;
 }
 
@@ -237,7 +334,8 @@ get_ahb_buffer_format_properties(VkDevice device_h, const struct AHardwareBuffer
    p->samplerYcbcrConversionComponents.a = VK_COMPONENT_SWIZZLE_IDENTITY;
 
    const bool is_yuv = vk_format_get_ycbcr_info(p->format) != NULL;
-   p->suggestedYcbcrModel = is_yuv ? VK_SAMPLER_YCBCR_MODEL_CONVERSION_YCBCR_601 : VK_SAMPLER_YCBCR_MODEL_CONVERSION_RGB_IDENTITY;
+   p->suggestedYcbcrModel =
+      is_yuv ? VK_SAMPLER_YCBCR_MODEL_CONVERSION_YCBCR_601 : VK_SAMPLER_YCBCR_MODEL_CONVERSION_RGB_IDENTITY;
    p->suggestedYcbcrRange = is_yuv ? VK_SAMPLER_YCBCR_RANGE_ITU_NARROW : VK_SAMPLER_YCBCR_RANGE_ITU_FULL;
 
    p->suggestedXChromaOffset = VK_CHROMA_LOCATION_MIDPOINT;
@@ -311,7 +409,8 @@ get_ahb_buffer_format_properties2(VkDevice device_h, const struct AHardwareBuffe
    p->samplerYcbcrConversionComponents.a = VK_COMPONENT_SWIZZLE_IDENTITY;
 
    const bool is_yuv = vk_format_get_ycbcr_info(p->format) != NULL;
-   p->suggestedYcbcrModel = is_yuv ? VK_SAMPLER_YCBCR_MODEL_CONVERSION_YCBCR_601 : VK_SAMPLER_YCBCR_MODEL_CONVERSION_RGB_IDENTITY;
+   p->suggestedYcbcrModel =
+      is_yuv ? VK_SAMPLER_YCBCR_MODEL_CONVERSION_YCBCR_601 : VK_SAMPLER_YCBCR_MODEL_CONVERSION_RGB_IDENTITY;
    p->suggestedYcbcrRange = is_yuv ? VK_SAMPLER_YCBCR_RANGE_ITU_NARROW : VK_SAMPLER_YCBCR_RANGE_ITU_FULL;
 
    p->suggestedXChromaOffset = VK_CHROMA_LOCATION_MIDPOINT;
@@ -423,19 +522,22 @@ radv_import_ahb_memory(struct radv_device *device, struct radv_device_memory *me
       struct radeon_bo_metadata metadata;
       device->ws->buffer_get_metadata(device->ws, mem->bo, &metadata);
 
-      struct radv_image_create_info create_info = {.no_metadata_planes = true, .bo_metadata = &metadata};
+      assert(mem->image->vk.android_deferred_create_info);
+      struct radv_image_create_info create_info = {
+         .vk_info = mem->image->vk.android_deferred_create_info,
+         .no_metadata_planes = true,
+         .bo_metadata = &metadata,
+      };
 
       VkImageDrmFormatModifierExplicitCreateInfoEXT *mod_info_p = NULL;
       VkImageDrmFormatModifierExplicitCreateInfoEXT mod_info;
       VkSubresourceLayout layouts[RADV_ANDROID_MAX_PLANES];
       result = vk_android_get_ahb_layout(buffer, &mod_info, layouts, RADV_ANDROID_MAX_PLANES);
-      if (result == VK_SUCCESS) {
-         for (unsigned plane = 0; plane < mem->image->plane_count; ++plane)
-            mem->image->planes[plane].surface.modifier = mod_info.drmFormatModifier;
+      if (result == VK_SUCCESS)
          mod_info_p = &mod_info;
-      }
 
-      result = radv_image_create_layout(device, create_info, mod_info_p, NULL, mem->image);
+      const uint64_t modifier = mod_info_p ? mod_info.drmFormatModifier : DRM_FORMAT_MOD_INVALID;
+      result = radv_image_init_layout(device, create_info, modifier, mod_info_p, NULL, mem->image);
       if (result != VK_SUCCESS) {
          radv_bo_destroy(device, NULL, mem->bo);
          mem->bo = NULL;

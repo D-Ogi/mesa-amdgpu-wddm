@@ -163,7 +163,6 @@ emit_indirect_generate_draw(struct iris_batch *batch,
                             unsigned ring_count)
 {
    struct iris_screen *screen = batch->screen;
-   struct iris_bufmgr *bufmgr = screen->bufmgr;
    struct iris_context *ice = batch->ice;
    struct isl_device *isl_dev = &screen->isl_dev;
    const struct intel_device_info *devinfo = screen->devinfo;
@@ -381,17 +380,24 @@ emit_indirect_generate_draw(struct iris_batch *batch,
       ccv.MinimumDepth = 0.0f;
       ccv.MaximumDepth = 1.0f;
    }
-   if (GFX_VERx10 >= 350 && iris_bufmgr_is_eff_64bit_enabled(bufmgr)) {
+
 #if GFX_VERx10 >= 350
+   struct iris_bufmgr *bufmgr = screen->bufmgr;
+   if (iris_bufmgr_is_eff_64bit_enabled(bufmgr)) {
       iris_emit_cmd(batch, GENX(3DSTATE_VIEWPORT_STATE_POINTERS_CC_2), cc) {
          cc.CCViewportPointer = ro_bo(NULL, cc_vp_address);
       }
-#endif
    } else {
       iris_emit_cmd(batch, GENX(3DSTATE_VIEWPORT_STATE_POINTERS_CC), cc) {
          cc.CCViewportPointer = cc_vp_address;
       }
    }
+   batch->dfc_vp_sent = true;
+#else
+   iris_emit_cmd(batch, GENX(3DSTATE_VIEWPORT_STATE_POINTERS_CC), cc) {
+      cc.CCViewportPointer = cc_vp_address;
+   }
+#endif
 
 #if GFX_VER >= 12
    /* Disable Primitive Replication. */

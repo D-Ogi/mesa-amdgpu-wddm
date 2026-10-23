@@ -57,8 +57,7 @@ vk_primitive_topology_to_mtl_primitive_type(enum VkPrimitiveTopology topology)
    case VK_PRIMITIVE_TOPOLOGY_TRIANGLE_STRIP:
       return MTL_PRIMITIVE_TYPE_TRIANGLE_STRIP;
    default:
-      assert(0 && "Primitive topology not supported!");
-      return 0;
+      UNREACHABLE("Primitive topology not supported!");
    }
 }
 
@@ -74,13 +73,14 @@ vk_primitive_topology_to_mtl_primitive_topology_class(
       return MTL_PRIMITIVE_TOPOLOGY_CLASS_LINE;
    case VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST:
    case VK_PRIMITIVE_TOPOLOGY_TRIANGLE_STRIP:
+   case VK_PRIMITIVE_TOPOLOGY_TRIANGLE_FAN:
 #pragma GCC diagnostic push
 #pragma GCC diagnostic ignored "-Wswitch"
    case VK_PRIMITIVE_TOPOLOGY_META_RECT_LIST_MESA:
 #pragma GCC diagnostic pop
       return MTL_PRIMITIVE_TOPOLOGY_CLASS_TRIANGLE;
    default:
-      return MTL_PRIMITIVE_TOPOLOGY_CLASS_UNSPECIFIED;
+      UNREACHABLE("Primitive topology not supported!");
    }
 }
 

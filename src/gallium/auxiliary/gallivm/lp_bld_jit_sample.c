@@ -84,12 +84,8 @@ load_texture_functions_ptr(struct gallivm_state *gallivm, LLVMValueRef descripto
    LLVMValueRef texture_base_offset = lp_build_const_int64(gallivm, offset1);
    LLVMValueRef texture_base_ptr = LLVMBuildAdd(builder, descriptor, texture_base_offset, "");
 
-   LLVMTypeRef texture_base_type = LLVMInt64TypeInContext(gallivm->context);
-   LLVMTypeRef texture_base_ptr_type = LLVMPointerType(texture_base_type, 0);
-
-   texture_base_ptr = LLVMBuildIntToPtr(builder, texture_base_ptr, texture_base_ptr_type, "");
    /* struct lp_texture_functions * */
-   LLVMValueRef texture_base = LLVMBuildLoad2(builder, texture_base_type, texture_base_ptr, "");
+   LLVMValueRef texture_base = lp_build_load_pointer_as_int64(gallivm, texture_base_ptr);
 
    LLVMValueRef functions_offset = lp_build_const_int64(gallivm, offset2);
    return LLVMBuildAdd(builder, texture_base, functions_offset, "");

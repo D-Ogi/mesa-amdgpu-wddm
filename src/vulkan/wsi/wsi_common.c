@@ -378,6 +378,13 @@ wsi_DestroySurfaceKHR(VkInstance _instance,
       return;
    }
 #endif
+#ifdef VK_USE_PLATFORM_XCB_KHR
+   if (surface->platform == VK_ICD_WSI_PLATFORM_XCB ||
+       surface->platform == VK_ICD_WSI_PLATFORM_XLIB) {
+      wsi_x11_surface_destroy(surface, _instance, pAllocator);
+      return;
+   }
+#endif
 #ifdef VK_USE_PLATFORM_WIN32_KHR
    if (surface->platform == VK_ICD_WSI_PLATFORM_WIN32) {
       wsi_win32_surface_destroy(surface, _instance, pAllocator);

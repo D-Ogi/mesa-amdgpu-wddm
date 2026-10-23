@@ -37,7 +37,7 @@ struct loop_info {
 };
 
 struct exec_info {
-   Operand op; /* Either a temporary, exec or const -1. */
+   Operand op;   /* Either a temporary, exec or const -1. */
    uint8_t type; /* enum mask_type */
    exec_info() = default;
    exec_info(const Operand& op_, const uint8_t& type_) : op(op_), type(type_) {}
@@ -482,7 +482,8 @@ process_instructions(exec_ctx& ctx, Block* block, std::vector<aco_ptr<Instructio
                bld.sop1(Builder::s_wqm, Definition(exec, bld.lm), bld.def(s1, scc),
                         info.exec[0].op);
             } else {
-               /* Conditionally set exec=0. Note, that exec might already be zero, so don't use s_branch_execz. */
+               /* Conditionally set exec=0. Note, that exec might already be zero, so don't use
+                * s_branch_execz. */
                bld.sop2(Builder::s_cselect, Definition(exec, bld.lm), Operand(exec, bld.lm),
                         Operand::zero(bld.lm.bytes()), bld.scc(cond));
                exit_cond = Operand(cond, scc);
@@ -528,8 +529,9 @@ process_instructions(exec_ctx& ctx, Block* block, std::vector<aco_ptr<Instructio
 
             if (info.exec.size() > 2) {
                if (!ctx.local_exact_mask.id()) {
-                  ctx.local_exact_mask = bld.sop2(Builder::s_and, bld.def(bld.lm), bld.def(s1, scc),
-                                                  ctx.info[block->index].exec[0].op, Operand(exec, bld.lm));
+                  ctx.local_exact_mask =
+                     bld.sop2(Builder::s_and, bld.def(bld.lm), bld.def(s1, scc),
+                              ctx.info[block->index].exec[0].op, Operand(exec, bld.lm));
                }
                instr_exact_mask(instr.get()) = Operand(ctx.local_exact_mask);
             } else {

@@ -77,7 +77,7 @@ nvkmd_nouveau_create_exec_ctx(struct nvkmd_dev *_dev,
    if (err < 0) {
       nouveau_ws_context_destroy(ctx->ws_ctx);
       FREE(ctx);
-      return vk_error(dev, VK_ERROR_OUT_OF_HOST_MEMORY);
+      return vk_error(log_obj, VK_ERROR_OUT_OF_HOST_MEMORY);
    }
 
    ctx->max_push = dev->ws_dev->max_push;
@@ -168,6 +168,9 @@ nvkmd_nouveau_exec_ctx_exec(struct nvkmd_ctx *_ctx,
                             uint32_t exec_count,
                             const struct nvkmd_ctx_exec *execs)
 {
+   if (exec_count == 0)
+      return VK_SUCCESS;
+
    struct nvkmd_nouveau_exec_ctx *ctx = nvkmd_nouveau_exec_ctx(_ctx);
    const uint32_t size_needed = MIN2(
       ctx->req_push.size + exec_count * sizeof(struct drm_nouveau_exec_push),

@@ -2390,7 +2390,7 @@ remove_dead_varyings(struct linkage_info *linkage,
                            assert(elem == 0);
 
                            b->cursor = nir_before_instr(&load->instr);
-                           *offset_src = nir_src_for_ssa(nir_imm_int(b, 0));
+                           nir_src_rewrite(offset_src, nir_imm_int(b, 0));
 
                            /* Reduce the number of slots to 1. */
                            nir_io_semantics sem =
@@ -2491,7 +2491,7 @@ remove_dead_varyings(struct linkage_info *linkage,
                         nir_if *if_eq =
                            nir_push_if(b, nir_ieq_imm(b, offset.def,
                                                       direct_index));
-                        *offset_src = nir_src_for_ssa(nir_imm_int(b, 0));
+                        nir_src_rewrite(offset_src, nir_imm_int(b, 0));
                         nir_instr_move(b->cursor, &store->instr);
                         b->cursor = nir_after_instr(&store->instr);
                         nir_pop_if(b, if_eq);

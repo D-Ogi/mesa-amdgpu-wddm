@@ -177,6 +177,13 @@ enum blorp_batch_flags {
    /** Source buffer is unpadded and needs careful accesses
     */
    BLORP_BATCH_SRC_UNPADDED          = BITFIELD_BIT(7),
+
+   /**
+    * This flag indicates blorp not to emit the view port for depth fast
+    * clear. On GFX35+ platforms, this is possible in some cases, thanks to a
+    * hardware change (HSD 14022502615).
+    */
+   BLORP_BATCH_NO_HIZ_EMIT_DEPTH_CLEAR_VIEWPORT = BITFIELD_BIT(8),
 };
 
 struct blorp_batch {

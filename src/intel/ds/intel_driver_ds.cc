@@ -758,6 +758,10 @@ intel_ds_end_barrier(struct intel_ds_device *device,
 uint64_t
 intel_ds_begin_submit(struct intel_ds_queue *queue)
 {
+   /* Shared by all queues and devices of the process (e.g. app + HWUI). */
+   static uint64_t next_submission_id = 0;
+
+   queue->submission_id = p_atomic_inc_return(&next_submission_id);
    return perfetto::base::GetBootTimeNs().count();
 }
 
@@ -769,7 +773,7 @@ intel_ds_end_submit(struct intel_ds_queue *queue,
       return;
 
    uint64_t end_ts = perfetto::base::GetBootTimeNs().count();
-   uint32_t submission_id = queue->submission_id++;
+   uint64_t submission_id = queue->submission_id;
 
    IntelRenderpassDataSource::Trace([=](IntelRenderpassDataSource::TraceContext tctx) {
       auto packet = tctx.NewTracePacket();

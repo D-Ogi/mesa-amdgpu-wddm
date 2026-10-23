@@ -44,38 +44,49 @@ dump_tensor_float(const std::vector<float> &data,
 /* Output comparison                                                   */
 /* ------------------------------------------------------------------ */
 
+/* 5 quantization steps should be enough for individual operations */
+static constexpr int step_budget = 5;
+
+/* For whole models, drift can accumulate and be amplified, so go with 8 for now */
+static constexpr int model_step_budget = 8;
+
 static void
 compare_tensors(const std::vector<float> &actual,
                 const std::vector<float> &expected,
-                float tolerance,
+                float scale, int budget,
                 const std::string &test_name)
 {
    ASSERT_EQ(actual.size(), expected.size())
       << test_name << ": output size mismatch";
 
-   int mismatches = 0;
-   float max_diff = 0;
+   int over_budget = 0;
+   long worst = 0;
 
    for (size_t i = 0; i < actual.size(); i++) {
-      float diff = std::abs(actual[i] - expected[i]);
-      if (diff > tolerance) {
-         if (mismatches < 24) {
+      long qa = std::lround((double)actual[i] / scale);
+      long qe = std::lround((double)expected[i] / scale);
+      long dev = std::labs(qa - qe);
+      if (dev > budget) {
+         if (over_budget < 24) {
             ADD_FAILURE()
                << test_name << "[" << i << "]: "
                << "expected " << expected[i]
                << " got " << actual[i]
-               << " (diff=" << diff << ")";
+               << " (" << dev << " steps)";
          }
-         mismatches++;
+         over_budget++;
       }
-      max_diff = std::max(max_diff, diff);
+      worst = std::max(worst, dev);
    }
 
-   EXPECT_EQ(mismatches, 0)
-      << test_name << ": " << mismatches << "/"
-      << actual.size() << " elements differ"
-      << " (max_diff=" << max_diff
-      << ", tolerance=" << tolerance << ")";
+   printf("%s: worst deviation %ld steps (budget %d steps)\n",
+          test_name.c_str(), worst, budget);
+
+   EXPECT_EQ(over_budget, 0)
+      << test_name << ": " << over_budget << "/"
+      << actual.size() << " elements over budget"
+      << " (worst=" << worst << " steps"
+      << ", budget=" << budget << " steps)";
 }
 
 /* ------------------------------------------------------------------ */
@@ -86,9 +97,11 @@ class TorxTest : public testing::Test {
  public:
    std::string test_name_;   /* e.g. "mobilenet_v2/000" or "mobilenet_v2" */
    std::string device_id_;   /* e.g. "ethosu-65-256-98304" */
+   int budget_;              /* comparison budget, in output-scale steps */
 
-   TorxTest(const std::string &test_name, const std::string &device_id)
-      : test_name_(test_name), device_id_(device_id) {}
+   TorxTest(const std::string &test_name, const std::string &device_id,
+            int budget)
+      : test_name_(test_name), device_id_(device_id), budget_(budget) {}
 
    void TestBody() override
    {
@@ -111,7 +124,7 @@ class TorxTest : public testing::Test {
       ASSERT_EQ(rc, 0)
          << "NPU inference failed for " << test_name_;
 
-      /* 3. Compare each output against float CPU reference. */
+      /* 3. Compare each output against the quantised CPU reference. */
       for (size_t i = 0; ; i++) {
          auto ref_path = work_dir / ("output-" + std::to_string(i) + ".data");
          if (!std::filesystem::exists(ref_path))
@@ -130,8 +143,8 @@ class TorxTest : public testing::Test {
           dump_tensor_float(expected, dump_name + "-expected.bin");
           dump_tensor_float(npu_float,  dump_name + "-actual.bin");
 
-         float tolerance = meta.max_quant_errors[i] + meta.output_scales[i];
-         compare_tensors(npu_float, expected, tolerance, test_name_);
+         compare_tensors(npu_float, expected, meta.output_scales[i],
+                         budget_, test_name_);
       }
    }
 };
@@ -162,7 +175,7 @@ register_model_tests()
          nullptr, nullptr,
          __FILE__, __LINE__,
          [test, device_id]() -> TorxTest * {
-            return new TorxTest(test, device_id);
+            return new TorxTest(test, device_id, step_budget);
          });
    }
 
@@ -174,7 +187,7 @@ register_model_tests()
          nullptr, nullptr,
          __FILE__, __LINE__,
          [model, device_id]() -> TorxTest * {
-            return new TorxTest(model, device_id);
+            return new TorxTest(model, device_id, model_step_budget);
          });
    }
 }

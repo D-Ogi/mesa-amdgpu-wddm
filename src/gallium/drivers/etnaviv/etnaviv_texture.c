@@ -34,6 +34,7 @@
 #include "etnaviv_texture_state.h"
 #include "etnaviv_translate.h"
 #include "etnaviv_yuv.h"
+#include "layout/eil_format.h"
 #include "util/bitscan.h"
 #include "util/u_inlines.h"
 #include "util/u_memory.h"
@@ -95,8 +96,10 @@ etna_configure_sampler_ts(struct etna_sampler_ts *sts, struct pipe_sampler_view 
    struct etna_resource *rsc = etna_resource(pview->texture);
    struct etna_resource_level *lev = &rsc->levels[0];
 
-   if ((lev->clear_value & 0xffffffff) != sts->TS_SAMPLER_CLEAR_VALUE ||
-       (lev->clear_value >> 32) != sts->TS_SAMPLER_CLEAR_VALUE2)
+   const uint64_t clear_value = etna_resource_level_clear_value(lev);
+
+   if ((clear_value & 0xffffffff) != sts->TS_SAMPLER_CLEAR_VALUE ||
+       (clear_value >> 32) != sts->TS_SAMPLER_CLEAR_VALUE2)
       dirty = true;
 
    assert(rsc->ts_bo && etna_resource_level_ts_valid(lev));
@@ -108,8 +111,8 @@ etna_configure_sampler_ts(struct etna_sampler_ts *sts, struct pipe_sampler_view 
       COND(lev->ts_compress_fmt >= 0, VIVS_TS_SAMPLER_CONFIG_COMPRESSION) |
       VIVS_TS_SAMPLER_CONFIG_COMPRESSION_FORMAT(lev->ts_compress_fmt) |
       COND(util_format_get_blocksizebits(pview->format) == 64, VIVS_TS_SAMPLER_CONFIG_64BPP_FORMAT);
-   sts->TS_SAMPLER_CLEAR_VALUE = lev->clear_value;
-   sts->TS_SAMPLER_CLEAR_VALUE2 = lev->clear_value >> 32;
+   sts->TS_SAMPLER_CLEAR_VALUE = clear_value;
+   sts->TS_SAMPLER_CLEAR_VALUE2 = clear_value >> 32;
    sts->TS_SAMPLER_STATUS_BASE.bo = rsc->ts_bo;
    sts->TS_SAMPLER_STATUS_BASE.offset = lev->ts_offset;
    sts->TS_SAMPLER_STATUS_BASE.flags = ETNA_RELOC_READ;
@@ -148,7 +151,8 @@ etna_can_use_sampler_ts(struct pipe_sampler_view *view, int num)
       return false;
 
    /* Does not use compression or the hardware supports V4 compression. */
-   if (rsc->levels[0].ts_compress_fmt >= 0 && !screen->specs.v4_compression)
+   if (rsc->levels[0].ts_compress_fmt >= 0 &&
+       !VIV_FEATURE(screen, ETNA_FEATURE_V4_COMPRESSION))
       return false;
 
    /* The sampler will have one LOD, and it happens to be level 0.
@@ -368,7 +372,7 @@ etna_pack_unified_companions(struct etna_context *ctx, mesa_shader_stage stage,
    unsigned comp = nr;
 
    for (unsigned i = 0; i < PIPE_MAX_SAMPLERS / 2; i++) {
-      if (i < nr && views[i] && format_is_128bit(views[i]->format)) {
+      if (i < nr && views[i] && eil_format_is_emulated_128bit(views[i]->format)) {
          mask |= 1u << i;
          ctx->sampler_companion[stage][i] = comp++;
       } else {
@@ -397,7 +401,7 @@ etna_fragtex_set_sampler_views(struct etna_context *ctx, unsigned nr,
 
    uint16_t mask = 0;
    for (unsigned i = 0; i < nr; i++) {
-      if (views[i] && format_is_128bit(views[i]->format)) {
+      if (views[i] && eil_format_is_emulated_128bit(views[i]->format)) {
          assert(nr + i < screen->specs.fragment_sampler_count);
          mask |= 1u << i;
       }
@@ -430,7 +434,7 @@ etna_vertex_set_sampler_views(struct etna_context *ctx, unsigned nr,
 
    uint16_t mask = 0;
    for (unsigned k = 0; k < nr; k++)
-      if (views[k] && format_is_128bit(views[k]->format))
+      if (views[k] && eil_format_is_emulated_128bit(views[k]->format))
          mask |= 1u << k;
 
    ctx->tex_is_128bit[MESA_SHADER_VERTEX] = mask;

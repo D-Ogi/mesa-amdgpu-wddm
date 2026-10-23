@@ -650,6 +650,8 @@ static bool do_winsys_init(struct radeon_drm_winsys *ws)
    ws->info.max_alignment = 1024*1024;
    ws->info.has_graphics = true;
    ws->info.cpdma_prefetch_writes_memory = true;
+   ws->info.has_cp_dma_unaligned_copy_perf_issue = ws->info.family <= CHIP_CARRIZO ||
+                                                   ws->info.family == CHIP_STONEY;
    ws->info.has_image_opcodes = true;
    ws->info.spi_cu_en_has_effect = false;
    ws->info.spi_cu_en = 0xffff;

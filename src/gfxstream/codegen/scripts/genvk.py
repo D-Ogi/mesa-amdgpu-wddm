@@ -231,6 +231,9 @@ if __name__ == '__main__':
                     for child in entry:
                         originalEntry.append(child)
 
+        for entry in treeGfxstreamRoot.findall('enums'):
+            treeRoot.append(entry)
+
     # Load the XML tree into the registry object
     reg.loadElementTree(tree)
     reg.apiGen()

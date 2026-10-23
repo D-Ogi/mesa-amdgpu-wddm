@@ -1459,6 +1459,8 @@ optimizations.extend([
     )
    ),
 
+   (('bcsel', ('ine', ('iand@32', a, '#b(is_pos_power_of_two)'), 0), b, 0), ('iand', a, b)),
+
    (('b2i32', ('ine', ('iand', 'a@32', '#b(is_pos_power_of_two)'), 0)),
     ('ushr', ('iand', a, b), ('find_lsb', b)), '!options->lower_bitops'),
 
@@ -2223,7 +2225,14 @@ optimizations.extend([
    (('ior', ('ishl', ('u2u32', 'a@8'), 24), ('ior', ('ishl', ('u2u32', 'b@8'), 16), ('ior', ('ishl', ('u2u32', 'c@8'), 8), ('u2u32', 'd@8')))),
     ('pack_32_4x8', ('vec4', d, c, b, a)), 'options->has_pack_32_4x8'),
 
+   # Open-coded packing
    (('ior', ('ishl', a, 16), ('u2u32', 'b@16')), ('pack_32_2x16_split', b, ('u2u16', a)), '!options->lower_pack_32_2x16_split && !options->lower_pack_split'),
+   (('ior', ('ishl', a, 32), ('u2u64', 'b@32')), ('pack_64_2x32_split', b, ('u2u32', a)), '!options->lower_pack_64_2x32_split'),
+   (('ishl', ('u2u32', 'a@16'), 16), ('pack_32_2x16_split', 0, a), '!options->lower_pack_32_2x16_split && !options->lower_pack_split'),
+   (('ishl', ('u2u64', 'a@32'), 32), ('pack_64_2x32_split', 0, a), '!options->lower_pack_64_2x32_split'),
+
+   (('ior', ('pack_32_2x16_split', a, 0), ('pack_32_2x16_split', 0, b)), ('pack_32_2x16_split', a, b)),
+   (('ior', ('pack_64_2x32_split', a, 0), ('pack_64_2x32_split', 0, b)), ('pack_64_2x32_split', a, b)),
 
    # Mixed 16-bit/8-bit loads vectorized to 8-bit vector load and then lowered to 32-bit
    (('ior', ('u2u16', ('unpack_32_4x8', a)), ('ishl', ('u2u16', ('unpack_32_4x8.y', a)), 8)),
@@ -2296,6 +2305,8 @@ optimizations.extend([
 
    (('iadd', ('pack_half_2x16_rtz_split', a, 0), ('pack_half_2x16_rtz_split', 0, b)), ('pack_half_2x16_rtz_split', a, b)),
    (('ior',  ('pack_half_2x16_rtz_split', a, 0), ('pack_half_2x16_rtz_split', 0, b)), ('pack_half_2x16_rtz_split', a, b)),
+   (('ior', ('pack_32_2x16_split', a, 0), ('pack_half_2x16_rtz_split', 0, b)), ('pack_32_2x16_split', a, ('f2f16_rtz', b))),
+   (('ior',  ('pack_half_2x16_rtz_split', a, 0), ('pack_32_2x16_split', 0, b)), ('pack_32_2x16_split', ('f2f16_rtz', a), b)),
 
    (('pack_uint_2x16', ('vec2', ('pack_half_2x16_rtz_split', a, 0), ('pack_half_2x16_rtz_split', b, 0))), ('pack_half_2x16_rtz_split', a, b)),
 
@@ -2506,11 +2517,9 @@ optimizations.extend([
    # Misc. lowering
    (('fmod', a, b), ('fsub', a, ('fmul', b, ('ffloor', ('fdiv', a, b)))), 'options->lower_fmod'),
    (('frem', a, b), ('fsub', a, ('fmul', b, ('ftrunc', ('fdiv', a, b)))), 'options->lower_fmod'),
-   (('uadd_carry', a, b), ('b2i', ('ult', ('iadd', a, b), a)), 'options->lower_uadd_carry'),
-   (('usub_borrow', a, b), ('b2i', ('ult', a, b)), 'options->lower_usub_borrow'),
 
    # hand-rolled iadd64
-   (('vec2', ('iadd@32', a, c), ('iadd', ('iadd', b, d), ('uadd_carry', a, c))),
+   (('vec2', ('iadd@32', a, c), ('iadd', ('iadd', b, d), ('b2i', ('ult', ('iadd', a, c), a)))),
      ('unpack_64_2x32', ('iadd', ('pack_64_2x32_split', a, b), ('pack_64_2x32_split', c, d))), '!(options->lower_int64_options & nir_lower_iadd64)'),
 
    (('ihadd', a, b), ('iadd', ('iand', a, b), ('ishr', ('ixor', a, b), 1)), 'options->lower_hadd'),
@@ -2898,8 +2907,6 @@ for bit_size in [8, 16, 32, 64]:
    optimizations += [
       (('bcsel', ('ult', ('iadd', a, b), a), -1, (add, a, b)), ('uadd_sat', a, b), cond),
       (('bcsel', ('uge', ('iadd', a, b), a), (add, a, b), -1), ('uadd_sat', a, b), cond),
-      (('bcsel', ('ieq', ('uadd_carry', a, b), 0), (add, a, b), -1), ('uadd_sat', a, b), cond),
-      (('bcsel', ('ine', ('uadd_carry', a, b), 0), -1, (add, a, b)), ('uadd_sat', a, b), cond),
    ]
 
 optimizations += [
@@ -2972,8 +2979,6 @@ for bit_size in [8, 16, 32, 64]:
    optimizations += [
       (('bcsel', ('ult', a, b), 0, (add, a, ('ineg', b))), ('usub_sat', a, b), cond),
       (('bcsel', ('uge', a, b), (add, a, ('ineg', b)), 0), ('usub_sat', a, b), cond),
-      (('bcsel', ('ieq', ('usub_borrow', a, b), 0), (add, a, ('ineg', b)), 0), ('usub_sat', a, b), cond),
-      (('bcsel', ('ine', ('usub_borrow', a, b), 0), 0, (add, a, ('ineg', b))), ('usub_sat', a, b), cond),
    ]
 
 # bit_size dependent lowerings
@@ -3028,15 +3033,28 @@ for t in ['int', 'uint', 'float', 'bool']:
 # upcasts where the type differs from the other cast
 for N, M in itertools.product(type_sizes('uint'), type_sizes('uint')):
    if N < M:
-      # The outer cast is a down-cast.  It doesn't matter what the size of the
-      # argument of the inner cast is because we'll never been in the upcast
-      # of downcast case.  Regardless of types, we'll always end up with y2yN
-      # in the end.
-      for x, y in itertools.product(['i', 'u'], ['i', 'u']):
-         x2xN = '{0}2{0}{1}'.format(x, N)
-         y2yM = '{0}2{0}{1}'.format(y, M)
-         y2yN = '{0}2{0}{1}'.format(y, N)
-         optimizations.append(((x2xN, (y2yM, a)), (y2yN, a)))
+      # Down-casts are always in the u2uN form
+      u2uN = 'u2u{0}'.format(N)
+
+      if N == 1:
+         for y in ['i', 'u']:
+            y2yM = '{0}2{0}{1}'.format(y, M)
+            optimizations.append(((u2uN, (y2yM, a)), (u2uN, a)))
+         continue
+
+      u2uM = 'u2u{0}'.format(M)
+      optimizations.append(((u2uN, (u2uM, a)), (u2uN, a)))
+
+      for P in type_sizes('uint'):
+         if P > M:
+            continue
+
+         # Keep the sign extension for down-casts of signed up-casts.
+         res = u2uN if P >= N else 'i2i{0}'.format(N)
+
+         i2iM = 'i2i{0}'.format(M)
+         aP = 'a@{0}'.format(P)
+         optimizations.append(((u2uN, (i2iM, aP)), (res, a)))
    elif N > M:
       # If the outer cast is an up-cast, we have to be more careful about the
       # size of the argument of the inner cast and with types.  In this case,
@@ -3222,6 +3240,17 @@ for N in [16, 32]:
                     ((op_M_bits, (x2xN, (u2uM, aN)), b), (op, a, b)),
                     ((op_M_bits, (extract_xM, aN, 0), b), (op, a, b)),
                 ]
+
+# Match some manual extract_u8's seen in llama.cpp
+for shift in [0, 8, 16, 24]:
+    mask = ('iand', 'a@32', 0x0f0f0f0f)
+    src = mask if shift == 0 else ('ushr', mask, shift)
+    optimizations += [
+        # Remove unnecessary sign extension.
+        (('i2i32', ('u2u8', src)), ('ubitfield_extract', a, shift, 4)),
+        (('u2u32', ('u2u8', src)), ('ubitfield_extract', a, shift, 4)),
+        (('u2u8', src), ('u2u8', ('ubitfield_extract', a, shift, 4))),
+    ]
 
 def fexp2i(exp, bits):
    # Generate an expression which constructs value 2.0^exp or 0.0.
@@ -3740,8 +3769,12 @@ late_optimizations = [
    # Since b2i(inot(a)) == 1 - b2i(a), 1 - b2i(inot(a)) == b2i(a).
    (('iadd3', a,          ('b2i', ('inot', b)),  -1), ('iadd', a, ('ineg', ('b2i', b)))),
    (('iadd3', a, ('ineg', ('b2i', ('inot', b))),  1), ('iadd', a,          ('b2i', b) )),
-   (('iadd', a, ('ineg', ('b2i', ('inot', b)))), ('iadd3', a,          ('b2i', b) , -1), 'options->has_iadd3'),
-   (('iadd', a,          ('b2i', ('inot', b)) ), ('iadd3', a, ('ineg', ('b2i', b)),  1), 'options->has_iadd3'),
+   (('iadd@16', a, ('ineg', ('b2i', ('inot', b)))), ('iadd3', a,          ('b2i', b) , -1), 'options->has_iadd3'),
+   (('iadd@16', a,          ('b2i', ('inot', b)) ), ('iadd3', a, ('ineg', ('b2i', b)),  1), 'options->has_iadd3'),
+   (('iadd@32', a, ('ineg', ('b2i', ('inot', b)))), ('iadd3', a,          ('b2i', b) , -1), 'options->has_iadd3'),
+   (('iadd@32', a,          ('b2i', ('inot', b)) ), ('iadd3', a, ('ineg', ('b2i', b)),  1), 'options->has_iadd3'),
+   (('iadd@64', a, ('ineg', ('b2i', ('inot', b)))), ('iadd3', a,          ('b2i', b) , -1), 'options->has_iadd3 && !(options->lower_int64_options & nir_lower_iadd3_64)'),
+   (('iadd@64', a,          ('b2i', ('inot', b)) ), ('iadd3', a, ('ineg', ('b2i', b)),  1), 'options->has_iadd3 && !(options->lower_int64_options & nir_lower_iadd3_64)'),
 ]
 
 for int_sz in (8, 16, 32):

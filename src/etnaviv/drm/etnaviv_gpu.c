@@ -279,6 +279,9 @@ struct etna_gpu *etna_gpu_new(struct etna_device *dev, unsigned int core)
 			gpu->info.gpu.max_instructions = 512;
 	}
 
+	if (etna_core_has_feature(&gpu->info, ETNA_FEATURE_NO_ASTC))
+		etna_core_disable_feature(&gpu->info, ETNA_FEATURE_TEXTURE_ASTC);
+
 	determine_halti(gpu);
 
 	return gpu;

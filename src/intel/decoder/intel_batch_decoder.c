@@ -471,11 +471,67 @@ handle_media_interface_descriptor_load(struct intel_batch_decode_ctx *ctx,
    }
 }
 
+static bool
+decode_compute_walker(struct intel_group *inst,
+                      const uint32_t *p,
+                      struct intel_compute_walker *walker)
+{
+   memset(walker, 0, sizeof(*walker));
+
+   struct intel_field_iterator iter;
+   intel_field_iterator_init(&iter, inst, p, 0, false);
+   while (intel_field_iterator_next(&iter)) {
+      if (strcmp(iter.name, "body") != 0 || !iter.struct_desc)
+         continue;
+
+      struct intel_field_iterator body_iter;
+      intel_field_iterator_init(&body_iter, iter.struct_desc,
+                                &iter.p[iter.start_bit / 32], 0, false);
+
+      while (intel_field_iterator_next(&body_iter)) {
+         if (strcmp(body_iter.name, "Emit Inline Parameter") == 0) {
+            walker->emit_inline_parameter = body_iter.raw_value;
+         } else if (strcmp(body_iter.name, "Interface Descriptor") == 0 &&
+                    body_iter.struct_desc) {
+            struct intel_field_iterator desc_iter;
+            intel_field_iterator_init(&desc_iter, body_iter.struct_desc,
+                                      &body_iter.p[body_iter.start_bit / 32],
+                                      0, false);
+
+            while (intel_field_iterator_next(&desc_iter)) {
+               if (strcmp(desc_iter.name, "BTD Mode") == 0)
+                  walker->btd_mode = desc_iter.raw_value;
+            }
+         } else {
+            unsigned index;
+            if (sscanf(body_iter.name, "Inline Data[%u]", &index) == 1 &&
+                index < ARRAY_SIZE(walker->inline_data)) {
+               walker->inline_data[index] = body_iter.raw_value;
+               walker->inline_data_count =
+                  MAX2(walker->inline_data_count, index + 1);
+            }
+         }
+      }
+
+      return true;
+   }
+
+   return false;
+}
+
 static void
 handle_compute_walker(struct intel_batch_decode_ctx *ctx,
                       const uint32_t *p)
 {
    struct intel_group *inst = intel_ctx_find_instruction(ctx, p);
+
+   if (ctx->compute_walker &&
+       strcmp(inst->name, "COMPUTE_WALKER") == 0) {
+      struct intel_compute_walker walker;
+
+      if (decode_compute_walker(inst, p, &walker))
+         ctx->compute_walker(ctx->user_data, &walker);
+   }
 
    struct intel_field_iterator iter;
    intel_field_iterator_init(&iter, inst, p, 0, false);

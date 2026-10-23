@@ -319,11 +319,33 @@ enum pipe_map_flags
    PIPE_MAP_ONCE = 1 << 13,
 
    /**
+    * Mapping will support transfer_clientptr_range
+    */
+   PIPE_MAP_CLIENT_POINTER = 1 << 14,
+
+   /**
+    * Short lived internal mapping used for data upload/download.
+    *
+    * buffer_unmap must be called in finite time, as the driver may lock
+    * PIPE_MAP_CLIENT_POINTER maps until buffer_unmap is called, enabling
+    * the driver to remap the buffer into the client address range.
+    *
+    * Note for threaded context implementations: when set, buffer_map and
+    * buffer_unmap are called from the same thread.
+    */
+   PIPE_MAP_SHORT_LIVED = 1 << 15,
+
+   /**
     * This and higher bits are reserved for private use by drivers. Drivers
     * should use this as (PIPE_MAP_DRV_PRV << i).
     */
-   PIPE_MAP_DRV_PRV = 1 << 14,
+   PIPE_MAP_DRV_PRV = 1 << 16,
 };
+
+/*
+ * Return value for buffer_map
+ */
+#define PIPE_TRANSFER_CLIENT_POINTER (void *) -1
 
 /**
  * Flags for the flush function.
@@ -337,6 +359,8 @@ enum pipe_flush_flags
    PIPE_FLUSH_HINT_FINISH = (1 << 4),
    PIPE_FLUSH_TOP_OF_PIPE = (1 << 5),
    PIPE_FLUSH_BOTTOM_OF_PIPE = (1 << 6),
+   /* this is triggered internally and does not signal the end of commands */
+   PIPE_FLUSH_INTERMEDIATE = (1 << 7),
 };
 
 /**
@@ -518,7 +542,8 @@ enum pipe_flush_flags
 #define PIPE_RESOURCE_FLAG_FIXED_ADDRESS         (1 << 9) /* virtual memory address never changes */
 #define PIPE_RESOURCE_FLAG_FRONTEND_VM           (1 << 10) /* the frontend assigns addresses */
 #define PIPE_RESOURCE_FLAG_MAP_UNSYNCHRONIZED    (1 << 11) /* the texture can be mapped UNSYNCHRONIZED */
-#define PIPE_RESOURCE_FLAG_DRV_PRIV              (1 << 12) /* driver/winsys private */
+#define PIPE_RESOURCE_FLAG_MAP_CLIENT_POINTER    (1 << 12) /* the resource can be mapped to a client pointer range */
+#define PIPE_RESOURCE_FLAG_DRV_PRIV              (1 << 13) /* driver/winsys private */
 #define PIPE_RESOURCE_FLAG_FRONTEND_PRIV         (1 << 24) /* gallium frontend private */
 
 /**
@@ -1177,6 +1202,7 @@ struct pipe_caps {
    unsigned multiview;
    unsigned max_label_length;
    uint64_t max_timeline_semaphore_difference;
+   unsigned map_client_pointer;
 
    /** for CL SVM */
    uint64_t min_vma;

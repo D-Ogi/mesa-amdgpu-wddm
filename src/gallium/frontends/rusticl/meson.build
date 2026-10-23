@@ -308,6 +308,8 @@ rusticl_mesa_bindings = rust.bindgen(
     '--allowlist-function',     'nir_.*',
     '--allowlist-var',          'nir_debug',
     '--allowlist-var',          'NIR_DEBUG_.*',
+    '--bitfield-enum',          'nir_float_muladd_support',
+    '--bitfield-enum',          'nir_lower_doubles_options',
     '--bitfield-enum',          'nir_lower_int64_options',
     '--bitfield-enum',          'nir_opt_if_options',
     '--bitfield-enum',          'nir_variable_mode',

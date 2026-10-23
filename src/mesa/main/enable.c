@@ -924,7 +924,8 @@ _mesa_set_enable(struct gl_context *ctx, GLenum cap, GLboolean state)
           * disable or vice versa.
           */
          st_prepare_stipple_input_prim(ctx->st, MESA_PRIM_COUNT);
-         st_update_draw_functions(ctx);
+         if (ctx->RenderMode == GL_RENDER)
+            st_update_draw_functions(ctx);
          break;
       case GL_POLYGON_OFFSET_POINT:
          if (!_mesa_is_desktop_gl(ctx))

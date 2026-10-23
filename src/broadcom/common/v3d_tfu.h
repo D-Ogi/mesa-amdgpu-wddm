@@ -77,4 +77,14 @@
 #define V3D71_TFU_ICFG_FORMAT_UIF_NO_XOR         6
 #define V3D71_TFU_ICFG_FORMAT_UIF_XOR            7
 
+#define V3D71_TFU_ICFG_SVSWIZ_SHIFT             28
+#define V3D71_TFU_ICFG_SVSWIZ_NONE              15
+
+#define V3D71_TFU_ICFG_SVTWID_SHIFT             26
+#define V3D71_TFU_ICFG_SVTWID_128                0
+
+#define V3D71_TFU_ICFG_ICFMT_SHIFT               8
+#define V3D71_TFU_ICFG_ICFMT_8BIT                1
+#define V3D71_TFU_ICFG_ICFMT_101010_2            3
+
 #endif

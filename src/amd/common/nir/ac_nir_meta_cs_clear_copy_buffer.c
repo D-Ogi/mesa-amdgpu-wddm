@@ -434,10 +434,13 @@ ac_clear_copy_should_use_compute(const ac_cs_clear_copy_buffer_options *options,
    if (!can_use_cp_dma)
       return true;
 
-   if (info->size < options->prefer_cp_dma_threshold)
-      return false;
-
    if (!options->fail_if_slow)
+      return true;
+
+   /* CP DMA doesn't execute asynchronously on compute queues, meaning that every CP DMA packet
+    * implicitly waits for CP DMA to finish, which slows down command buffer execution.
+    */
+   if (options->is_compute_queue)
       return true;
 
    switch (options->info->gfx_level) {
@@ -513,9 +516,6 @@ ac_clear_copy_calc_dwords_per_thread(const ac_cs_clear_copy_buffer_options *opti
                                      const ac_cs_clear_copy_buffer_info *info,
                                      const int clear_value_size)
 {
-   if (info->dwords_per_thread)
-      return info->dwords_per_thread;
-
    const bool is_copy = clear_value_size == 0;
 
    /* Determine optimal dwords_per_thread for performance.
@@ -600,31 +600,39 @@ ac_clear_copy_calc_dwords_per_thread(const ac_cs_clear_copy_buffer_options *opti
    if (!is_copy)
       dwords_per_thread = MAX2(dwords_per_thread, clear_value_size / 4);
 
-   if (info->dst_is_sparse) {
-      /* If dst is sparse, stores mustn't straddle a page boundary, which means the store size must
-       * be 2^n. It can only be a non-power-of-two and 3 with GL buffer clears because VK doesn't
-       * have 12-byte clear values.
-       */
-      if (dwords_per_thread == 3)
-         dwords_per_thread = 4;
+   /* If dst is sparse, stores mustn't straddle a page boundary, which means the store size must
+    * be 2^n. It can only be a non-power-of-two and 3 with GL buffer clears because VK doesn't
+    * have 12-byte clear values.
+    */
+   if (info->dst_is_sparse && dwords_per_thread == 3)
+      dwords_per_thread = 4;
 
-      assert(util_is_power_of_two_nonzero(dwords_per_thread));
-   }
+   /* Override dwords per thread before validating the value. */
+   if (info->dwords_per_thread)
+      dwords_per_thread = info->dwords_per_thread;
 
    /* Validate dwords_per_thread. */
+   if (info->dst_is_sparse && !util_is_power_of_two_nonzero(dwords_per_thread)) {
+      fprintf(stderr, "ac_nir_meta_cs_clear_copy_buffer: dwords_per_thread must be a power of two "
+                      "for a sparse destination\n");
+      exit(1);
+   }
+
    if (dwords_per_thread > 4) {
-      assert(!"dwords_per_thread must be <= 4");
-      return 0; /* invalid value */
+      fprintf(stderr, "ac_nir_meta_cs_clear_copy_buffer: dwords_per_thread must be <= 4\n");
+      exit(1);
    }
 
    if (clear_value_size > dwords_per_thread * 4) {
-      assert(!"clear_value_size must be <= dwords_per_thread");
-      return 0; /* invalid value */
+      fprintf(stderr, "ac_nir_meta_cs_clear_copy_buffer: clear_value_size must be <= "
+                      "dwords_per_thread\n");
+      exit(1);
    }
 
    if (clear_value_size == 12 && info->dst_offset % 4) {
-      assert(!"if clear_value_size == 12, dst_offset must be aligned to 4");
-      return 0; /* invalid value */
+      fprintf(stderr, "ac_nir_meta_cs_clear_copy_buffer: if clear_value_size == 12, dst_offset "
+                      "must be aligned to 4\n");
+      exit(1);
    }
 
    return dwords_per_thread;
@@ -669,6 +677,7 @@ ac_prepare_clear_value_user_data(const int clear_value_size,
    return num_clear_user_data_terms;
 }
 
+/* This returns false if CP DMA should be used. */
 bool
 ac_prepare_cs_clear_copy_buffer(const ac_cs_clear_copy_buffer_options *options,
                                 const ac_cs_clear_copy_buffer_info *info,
@@ -677,6 +686,7 @@ ac_prepare_cs_clear_copy_buffer(const ac_cs_clear_copy_buffer_options *options,
    bool is_copy = info->clear_value_size == 0;
 
    memset(out, 0, sizeof(*out));
+   out->cpdma_supported = ac_clear_copy_can_use_cp_dma(options, info);
 
    /* Expand 1-byte and 2-byte clear values to a dword. */
    int clear_value_size = info->clear_value_size;
@@ -731,7 +741,7 @@ ac_prepare_cs_clear_copy_buffer(const ac_cs_clear_copy_buffer_options *options,
       /* Each invocation must increment the offset by 2^n. */
       (!util_is_power_of_two_nonzero(dwords_per_thread) ||
        /* The buffer range bounds must be divisible by the copy size per invocation. */
-       ((info->src_offset - src_align_offset) % (dwords_per_thread * 4) != 0 ||
+       ((info->src_offset - dst_align_offset) % (dwords_per_thread * 4) != 0 ||
         (info->src_offset + info->size) % (dwords_per_thread * 4) != 0));
    out->shader_key.src_align_offset = src_align_offset;
    out->shader_key.dst_align_offset = dst_align_offset;

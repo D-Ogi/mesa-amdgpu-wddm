@@ -560,8 +560,8 @@ radv_nir_init_cps_function(nir_function *function, bool uses_descriptor_heap)
 
    radv_nir_param_from_type(function->params + CPS_ARG_PRIMITIVE_ADDR, glsl_uint64_t_type(), false, 0);
 
-   function->driver_attributes =
-      (uint32_t)ACO_NIR_CALL_ABI_RT_RECURSIVE | ACO_NIR_FUNCTION_ATTRIB_DIVERGENT_CALL | ACO_NIR_FUNCTION_ATTRIB_NORETURN;
+   function->driver_attributes = (uint32_t)ACO_NIR_CALL_ABI_RT_RECURSIVE | ACO_NIR_FUNCTION_ATTRIB_DIVERGENT_CALL |
+                                 ACO_NIR_FUNCTION_ATTRIB_NORETURN;
 
    /* Entrypoints can't have parameters. Consider RT stages as callable functions */
    function->is_exported = true;

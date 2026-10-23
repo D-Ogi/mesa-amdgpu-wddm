@@ -701,6 +701,7 @@ void
 vc4_draw_init(struct pipe_context *pctx)
 {
         pctx->draw_vbo = vc4_draw_vbo;
+        pctx->draw_vbo_buffers = util_draw_vbo_buffers;
         pctx->clear = vc4_clear;
         pctx->clear_render_target = vc4_clear_render_target;
         pctx->clear_depth_stencil = vc4_clear_depth_stencil;

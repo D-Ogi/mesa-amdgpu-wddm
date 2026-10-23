@@ -53,9 +53,6 @@ VkResult genX(init_device_state)(struct anv_device *device);
 
 void genX(init_cps_device_state)(struct anv_device *device);
 
-uint32_t genX(call_internal_shader)(nir_builder *b,
-                                    enum anv_internal_kernel_name shader_name);
-
 void genX(cmd_buffer_disable_hiz_planes)(struct anv_cmd_buffer *cmd_buffer);
 
 void

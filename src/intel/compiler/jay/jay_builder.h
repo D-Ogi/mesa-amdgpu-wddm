@@ -457,6 +457,7 @@ struct jayb_send_params {
    enum jay_type src_type[2];
    unsigned nr_srcs;
    uint32_t ex_desc_imm;
+   unsigned simd_width;
    int split; /**< explicit split point */
    bool eot;
    bool uniform;
@@ -485,6 +486,14 @@ _jay_SEND(jay_builder *b, const struct jayb_send_params p)
    info->type_0 = p.src_type[0] ? p.src_type[0] : I->type;
    info->type_1 = p.src_type[1] ? p.src_type[1] : info->type_0;
 
+   /* We don't do true SIMD32 on Xe1, so clamp */
+   unsigned simd = p.simd_width ? p.simd_width : b->shader->dispatch_width;
+   unsigned native_simd = devinfo->ver < 20 ? 8 : 16;
+   simd = MIN2(simd, native_simd * 2);
+
+   I->simd_split =
+      I->uniform ? 0 : util_logbase2(b->shader->dispatch_width / simd);
+
    if (has_header) {
       assert(p.nr_srcs == 1 || info->type_0 == info->type_1);
 
@@ -497,7 +506,7 @@ _jay_SEND(jay_builder *b, const struct jayb_send_params p)
       info->type_0 = JAY_TYPE_U32 /* header type */;
    } else if (jay_type_size_bits(info->type_0) == 16 &&
               !p.uniform &&
-              b->shader->dispatch_width == 32) {
+              simd == (native_simd * 2)) {
       /* Pack 16-bit vectors to match the hardware with the data model.
        *
        * XXX: This is a hack. Move to NIR for better
@@ -546,10 +555,8 @@ _jay_SEND(jay_builder *b, const struct jayb_send_params p)
       I->src[3] = jay_collect_vectors(b, &p.srcs[split], p.nr_srcs - split);
    }
 
-   if (jay_type_size_bits(p.type) == 16 &&
-       !p.uniform &&
-       b->shader->dispatch_width == 32) {
-      unsigned stride = b->shader->dispatch_width / 2;
+   if (jay_type_size_bits(p.type) == 16 && !p.uniform && simd == 32) {
+      unsigned stride = simd / 2;
       I->dst = jay_alloc_def(b, UGPR, stride * jay_num_values(I->dst));
    }
 
@@ -577,7 +584,7 @@ _jay_SEND(jay_builder *b, const struct jayb_send_params p)
       if (x.file == UGPR) {
          lens[i] = DIV_ROUND_UP(lens[i], jay_ugpr_per_grf(b->shader));
       } else {
-         lens[i] *= jay_grf_per_gpr(b->shader);
+         lens[i] *= jay_grf_per_gpr_at_width(b->shader, simd);
       }
 
       lens[i] *= reg_unit(devinfo);
@@ -622,7 +629,7 @@ _jay_SEND(jay_builder *b, const struct jayb_send_params p)
       }
    }
 
-   if (p.uniform && b->shader->helpers_tracked) {
+   if (p.uniform && b->shader->helpers_tracked && p.skip_helpers) {
       I->cond_flag = jay_alloc_def(b, FLAG, 1);
    }
 
@@ -633,7 +640,7 @@ _jay_SEND(jay_builder *b, const struct jayb_send_params p)
        *
        * XXX: This is a hack.
        */
-      unsigned stride = b->shader->dispatch_width / 2;
+      unsigned stride = simd / 2;
       assert(stride % jay_ugpr_per_grf(b->shader) == 0);
       for (unsigned i = 0; i < jay_num_values(p.dst); ++i) {
          jay_def src = jay_extract_range(I->dst, i * stride, stride);

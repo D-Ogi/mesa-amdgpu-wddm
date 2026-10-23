@@ -866,7 +866,7 @@ static void si_draw_mesh_tasks(struct pipe_context *ctx,
    if (sctx->bo_list_add_all_mesh_resources)
       si_mesh_resources_add_all_to_bo_list(sctx);
 
-   if (unlikely(sctx->sqtt_enabled)) {
+   if (unlikely(si_is_sqtt_active(sctx))) {
       enum rgp_sqtt_marker_event_type event;
       if (info->indirect) {
          if (info->indirect_draw_count) {
@@ -889,7 +889,7 @@ static void si_draw_mesh_tasks(struct pipe_context *ctx,
       si_emit_draw_mesh_shader_only_packets(sctx, info);
    }
 
-   if (unlikely(sctx->sqtt_enabled)) {
+   if (unlikely(si_is_sqtt_active(sctx))) {
       radeon_begin(&sctx->gfx_cs);
       radeon_event_write(V_028A90_THREAD_TRACE_MARKER);
       radeon_end();

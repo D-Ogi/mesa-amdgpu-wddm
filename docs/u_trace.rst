@@ -50,7 +50,25 @@ u_trace is controlled by environment variables:
 
 .. envvar:: MESA_GPU_TRACEFILE
 
-   specifies a file where to write the output instead of ``stdout``
+   specifies a file where to write the output instead of ``stdout``.
+   The output identifies the trace context (e.g. the Vulkan device) that
+   wrote it: a final ``ctx=`` field on each CSV row, a ``ctx`` field on
+   each JSON frame and a ``(ctx N)`` suffix on the text end-of-frame
+   marker.
+
+   If the value contains ``%i``, each context writes to its own file,
+   with ``%i`` replaced by its ID; otherwise all contexts share a single
+   file. ``print_json`` needs ``%i`` to produce valid JSON with more than
+   one context.
+
+   ``%p`` is replaced by the process ID, in every mode. Context IDs are
+   only unique within a process, so a variable set for a whole session
+   needs this to keep one process from truncating another's trace.
+
+   If the file name ends in ``.gz`` the output is gzip-compressed (needs
+   a zlib-enabled build). It is flushed every batch, so a trace stays
+   readable up to the last processed submit even if the application
+   crashes before exiting.
 
 .. envvar:: *_GPU_TRACEPOINT
 

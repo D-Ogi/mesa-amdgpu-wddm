@@ -340,18 +340,17 @@ vn_device_memory_emit_report(struct vn_device *dev,
    struct vk_device *dev_vk = &dev->base.vk;
 
    const struct vk_device_memory *mem_vk = &mem->base.vk;
-   const uint64_t mem_obj_id =
-      (mem_vk->import_handle_type | mem_vk->export_handle_types)
-         ? mem->base_bo->res_id
-         : mem->base.id;
+   const bool is_import = mem_vk->import_handle_type;
+   const bool is_external = is_import || mem_vk->export_handle_types;
+   const uint64_t mem_obj_id = unlikely(result != VK_SUCCESS) ? 0
+                               : is_external ? mem->base_bo->res_id
+                                             : mem->base.id;
    const VkMemoryType *mem_type = &dev->physical_device->memory_properties
                                       .memoryTypes[mem_vk->memory_type_index];
 
-   vk_device_memory_report_emit(dev_vk, result, is_alloc,
-                                mem_vk->import_handle_type != 0,
-                                mem_obj_id, mem_vk->size,
-                                VK_OBJECT_TYPE_DEVICE_MEMORY,
-                                (uintptr_t)mem, mem_type->heapIndex);
+   vk_device_memory_report_emit(
+      dev_vk, result, is_alloc, is_import, mem_obj_id, mem_vk->size,
+      VK_OBJECT_TYPE_DEVICE_MEMORY, (uintptr_t)mem, mem_type->heapIndex);
 }
 
 VKAPI_ATTR VkResult VKAPI_CALL

@@ -120,11 +120,36 @@ lp_chan_lane(const struct util_format_description *format_desc,
              const struct util_format_channel_description *chan,
              unsigned width)
 {
-#if UTIL_ARCH_BIG_ENDIAN
-   return (format_desc->block.bits - (chan->shift + chan->size)) / width;
-#else
-   return chan->shift / width;
-#endif
+   /* The lanes of a byte-swapped format are swapped after fetching, so its
+    * channels are in the lanes a little-endian host has them in.
+    */
+   if (UTIL_ARCH_BIG_ENDIAN && !format_desc->is_byte_swapped)
+      return (format_desc->block.bits - (chan->shift + chan->size)) / width;
+   else
+      return chan->shift / width;
+}
+
+
+/**
+ * Byte-swap the low 'bits' of each element of 'packed'.
+ */
+LLVMValueRef
+lp_build_bswap_packed(struct gallivm_state *gallivm,
+                      struct lp_type type,
+                      unsigned bits,
+                      LLVMValueRef packed)
+{
+   LLVMTypeRef vec_type = lp_build_vec_type(gallivm, type);
+   char intr_str[256];
+
+   lp_format_intrinsic(intr_str, sizeof(intr_str), "llvm.bswap", vec_type);
+   packed = lp_build_intrinsic_unary(gallivm->builder, intr_str, vec_type,
+                                     packed);
+   if (bits < type.width)
+      packed = LLVMBuildLShr(gallivm->builder, packed,
+                             lp_build_const_int_vec(gallivm, type,
+                                                    type.width - bits), "");
+   return packed;
 }
 
 
@@ -486,6 +511,9 @@ lp_build_fetch_rgba_soa(struct gallivm_state *gallivm,
                                fetch_type,
                                aligned,
                                base_ptr, offset, false);
+      if (format_desc->is_byte_swapped)
+         packed = lp_build_bswap_packed(gallivm, lp_uint_type(type),
+                                        format_desc->block.bits, packed);
 
       /*
        * convert texels to float rgba
@@ -676,6 +704,9 @@ lp_build_fetch_rgba_soa(struct gallivm_state *gallivm,
       if (!fp64) {
          for (i = 0; i < num_gather; i++) {
             dst[i] = LLVMBuildBitCast(builder, dst[i], bld.int_vec_type, "");
+            if (format_desc->is_byte_swapped)
+               dst[i] = lp_build_bswap_packed(gallivm, lp_int_type(type),
+                                              type.width, dst[i]);
          }
          for (i = 0; i < format_desc->nr_channels; i++) {
             struct util_format_channel_description chan_desc = format_desc->channel[i];

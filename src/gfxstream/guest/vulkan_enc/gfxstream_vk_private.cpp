@@ -86,8 +86,7 @@ extern "C" {
      * runtime vk_*_init() (e.g. vk_device_init) after VkEncoder returns.                     \
      */                                                                                       \
     vk_type create_##gfxstream_type(uint64_t underlying) {                                    \
-        struct gfxstream_type* res =                                                          \
-            static_cast<gfxstream_type*>(calloc(1, sizeof(gfxstream_type)));                  \
+        struct gfxstream_type* res = new gfxstream_type();                                    \
         vk_object_base_init(nullptr, reinterpret_cast<struct vk_object_base*>(res),           \
                             vk_object_type);                                                  \
         res->common.underlying = underlying;                                                  \
@@ -97,7 +96,7 @@ extern "C" {
         if (!toDelete) return;                                                                \
         auto* obj = reinterpret_cast<gfxstream_type*>(toDelete);                              \
         finish_func(&obj->finish_member);                                                     \
-        free(obj);                                                                            \
+        delete obj;                                                                           \
     }                                                                                         \
     uint64_t gfxstream_type##_to_host_u64(const vk_type obj) {                                \
         if (!obj) return 0;                                                                   \

@@ -238,7 +238,7 @@ void si_cp_dma_copy_buffer(struct si_context *sctx, struct pipe_resource *dst,
    unsigned realign_size = 0;
 
    /* The workarounds aren't needed on Fiji and beyond. */
-   if (sctx->family <= CHIP_CARRIZO || sctx->family == CHIP_STONEY) {
+   if (sctx->screen->info.has_cp_dma_unaligned_copy_perf_issue) {
       /* If the size is not aligned, we must add a dummy copy at the end
        * just to align the internal counter. Otherwise, the DMA engine
        * would slow down by an order of magnitude for following copies.

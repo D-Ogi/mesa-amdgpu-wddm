@@ -855,13 +855,13 @@ etna_emit_state(struct etna_context *ctx)
          etna_stall(stream, SYNC_RECIPIENT_RA, SYNC_RECIPIENT_PE);
       }
    } else {
-      if (dirty & (ETNA_DIRTY_CONSTBUF | ctx->shader.vs->uniforms_dirty_bits)) {
+      if (dirty & (ETNA_DIRTY_CONSTBUF_VS | ctx->shader.vs->uniforms_dirty_bits)) {
          if (need_steering)
             etna_set_state(stream, VIVS_SH_CONTROL, 0x0);
          etna_uniforms_write(ctx, ctx->shader.vs, ctx->constant_buffer[MESA_SHADER_VERTEX].cb);
       }
 
-      if (dirty & (ETNA_DIRTY_CONSTBUF | ctx->shader.fs->uniforms_dirty_bits)) {
+      if (dirty & (ETNA_DIRTY_CONSTBUF_FS | ctx->shader.fs->uniforms_dirty_bits)) {
          if (need_steering)
             etna_set_state(stream, VIVS_SH_CONTROL, VIVS_SH_CONTROL_PS_UNIFORM);
          etna_uniforms_write(ctx, ctx->shader.fs, ctx->constant_buffer[MESA_SHADER_FRAGMENT].cb);

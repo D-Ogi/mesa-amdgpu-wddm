@@ -380,6 +380,7 @@ struct v3d_fs_key {
         bool sample_alpha_to_one;
         bool can_earlyz_with_discard;
         bool software_blend;
+        bool force_dual_color_blend;
         bool ignore_sample_mask;
         /* Mask of which color render targets are present. */
         uint8_t cbufs;
@@ -716,6 +717,8 @@ struct v3d_compile {
          */
         bool disable_general_tmu_sched;
         bool has_general_tmu_load;
+
+        bool robust_access_lowered;
 
         /* Minimum number of threads we are willing to use to register allocate
          * a shader with the current compilation strategy. This only prevents

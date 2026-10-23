@@ -25,6 +25,7 @@
 
 #include "util/perf/cpu_trace.h"
 #include "util/u_debug.h"
+#include "util/u_thread.h"
 #include <inttypes.h>
 
 #include "vk_alloc.h"
@@ -737,6 +738,8 @@ vk_queue_submit_thread_func(void *_data)
 {
    struct vk_queue *queue = _data;
    VkResult result;
+
+   util_set_current_thread_initial_affinity();
 
    mtx_lock(&queue->submit.mutex);
 

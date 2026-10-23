@@ -10,9 +10,9 @@
 #include "common/amdgfxregs.h"
 
 #include <map>
+#include <optional>
 #include <stack>
 #include <vector>
-#include <optional>
 
 namespace aco {
 
@@ -73,9 +73,9 @@ enum counter_type : uint8_t {
 
 struct wait_entry {
    wait_imm imm;
-   uint32_t events;  /* use wait_event notion */
+   uint32_t events;         /* use wait_event notion */
    uint32_t logical_events; /* use wait_event notion */
-   uint8_t counters; /* use counter_type notion */
+   uint8_t counters;        /* use counter_type notion */
    bool wait_on_read : 1;
    uint8_t vmem_types : 4; /* use vmem_type notion. for counter_vm. */
    uint8_t vm_mask : 2;    /* which halves of the VGPR event_vmem uses */
@@ -191,7 +191,7 @@ struct barrier_info {
    /* Whether vm_vsrc(0) should be emitted when a full waitcnt is not necessary. If this is false, a
     * vm_vsrc(0) wait might not be a no-op, it just wouldn't do anything useful for this barrier. */
    bool vm_vsrc[storage_count] = {};
-   uint32_t events[storage_count] = {}; /* use wait_event notion */
+   uint32_t events[storage_count] = {};    /* use wait_event notion */
    uint8_t vmem_types[storage_count] = {}; /* use vmem_type notion. for counter_vm. */
    sync_scope scope[storage_count] = {};
    uint8_t storage = 0;

@@ -1,6 +1,8 @@
 # Copyright © 2026 Tomeu Vizoso <tomeu@tomeuvizoso.net>
 # SPDX-License-Identifier: MIT
 
+import operator
+
 import torch
 
 from executorch.exir.backend.backend_details import ExportedProgram
@@ -15,28 +17,27 @@ from torch.fx.passes.operator_support import OperatorSupportBase
 
 from .backend import TorxBackend
 from .debug import dump_graph_support, node_tensor_dtype
+from .dim_order_pass import AnnotateDimOrderPass, is_identity_clone, layout_run
 from .exir_to_gallium import (
     FUSABLE_ACTIVATION_OPS,
     fused_activation,
     get_ml_device,
-    is_identity_clone,
     is_torx_convertible,
     is_torx_supported,
+    max_pool_values,
 )
+from .fold_qdq_with_annotated_qparams_pass import is_dequantize, is_quantize
 
 
 def _is_partitioned(node: torch.fx.Node, tag: str) -> bool:
     return node.meta.get("delegation_tag") == tag
 
 
-QUANTIZE_OPS = (
-    exir_ops.edge.quantized_decomposed.quantize_per_tensor.default,
-    torch.ops.quantized_decomposed.quantize_per_tensor.default,
-)
-
-DEQUANTIZE_OPS = (
-    exir_ops.edge.quantized_decomposed.dequantize_per_tensor.default,
-    torch.ops.quantized_decomposed.dequantize_per_tensor.default,
+PER_CHANNEL_QDQ_OPS = (
+    exir_ops.edge.quantized_decomposed.quantize_per_channel.default,
+    torch.ops.quantized_decomposed.quantize_per_channel.default,
+    exir_ops.edge.quantized_decomposed.dequantize_per_channel.default,
+    torch.ops.quantized_decomposed.dequantize_per_channel.default,
 )
 
 class TorxSupportedOperators(OperatorSupportBase):
@@ -48,7 +49,7 @@ class TorxSupportedOperators(OperatorSupportBase):
     @staticmethod
     def _is_input_quantization(node: torch.fx.Node) -> bool:
         """A quantize_per_tensor that converts a graph input from float32 to int8."""
-        if node.target not in QUANTIZE_OPS:
+        if not is_quantize(node):
             return False
         return (
             len(node.args) > 0
@@ -59,7 +60,7 @@ class TorxSupportedOperators(OperatorSupportBase):
     @staticmethod
     def _is_output_dequantization(node: torch.fx.Node) -> bool:
         """A dequantize_per_tensor that converts int8 back to float32 for the graph output."""
-        if node.target not in DEQUANTIZE_OPS:
+        if not is_dequantize(node):
             return False
         users = list(node.users.keys())
         return len(users) == 1 and users[0].op == "output"
@@ -89,8 +90,13 @@ class TorxSupportedOperators(OperatorSupportBase):
 
         # Internal Q/DQ nodes (for weights, biases, inter-op) belong in the
         # delegate so FoldAndAnnotateQParamsPass can fold them in preprocess().
-        if node.target in QUANTIZE_OPS or node.target in DEQUANTIZE_OPS:
+        if is_quantize(node) or is_dequantize(node):
             return True
+
+        # Same for per-channel Q/DQ nodes, which are only used for weights and biases.
+        if node.target in PER_CHANNEL_QDQ_OPS:
+            return all(self.is_node_supported(submodules, user)
+                       for user in node.users)
 
         # An activation is only delegated when its producer's operation
         # absorbs it; a standalone activation has no lowering.
@@ -98,6 +104,13 @@ class TorxSupportedOperators(OperatorSupportBase):
             producer = node.args[0]
             return (isinstance(producer, torch.fx.Node) and
                     fused_activation(producer) is node)
+
+        # Max pooling's values getitem carries the operation's output tensor,
+        # so it is delegated together with the pooling that produces it.
+        if node.target is operator.getitem:
+            producer = node.args[0]
+            return (isinstance(producer, torch.fx.Node) and
+                    max_pool_values(producer) is node)
 
         # A clone fed directly by a graph input could end up passing that
         # input straight to the partition output once removed, leaving the
@@ -124,8 +137,8 @@ class TorxPartitioner(Partitioner):
             if not _is_partitioned(node, tag):
                 continue
 
-            is_q_node = node.target in QUANTIZE_OPS
-            is_dq_node = node.target in DEQUANTIZE_OPS
+            is_q_node = is_quantize(node)
+            is_dq_node = is_dequantize(node)
 
             is_boundary_q_node = (
                 is_q_node
@@ -140,18 +153,17 @@ class TorxPartitioner(Partitioner):
                 node.meta.pop("delegation_tag", None)
                 continue
 
-            # For non Q/DQ nodes, if any input comes from outside the partition
-            # as float, this cannot be a pure int delegate boundary.
             if not is_q_node and not is_dq_node:
                 for input_node in node.all_input_nodes:
                     if _is_partitioned(input_node, tag):
                         continue
                     dtype = node_tensor_dtype(input_node)
-                    if dtype is not None and dtype.is_floating_point:
+                    if dtype is not None and dtype != torch.int8:
                         node.meta.pop("delegation_tag", None)
                         break
 
     def partition(self, edge_exported_program: ExportedProgram) -> PartitionResult:
+        AnnotateDimOrderPass()(edge_exported_program.graph_module)
         dump_graph_support(edge_exported_program.graph_module, self.op_support)
 
         partition_tags = {}
@@ -180,6 +192,20 @@ class TorxPartitioner(Partitioner):
                 continue
 
             partition_tags[delegation_tag] = self.delegation_spec
+
+        graph_module = edge_exported_program.graph_module
+        name_to_node = {n.name: n for n in graph_module.graph.nodes}
+        for node in graph_module.graph.nodes:
+            run = layout_run(node)
+            if run is None:
+                continue
+            tags = {name_to_node[name].meta.get("delegation_tag")
+                    for name in run if name in name_to_node}
+            if len(tags) > 1:
+                raise RuntimeError(
+                    f"Torx: the data layout run {sorted(run)} was split "
+                    f"across partitions; it must be delegated whole or not "
+                    f"at all")
 
         return PartitionResult(
             tagged_exported_program=edge_exported_program,

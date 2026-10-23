@@ -53,18 +53,21 @@
 #define DRI_CONF_ENUM(_value,text) { .value = _value, .desc = text },
 
 #define DRI_CONF_RANGE_I(min, max)              \
+      .has_range = true,                        \
       .range = {                                \
          .start = { ._int = min },              \
          .end = { ._int = max },                \
       }                                         \
 
 #define DRI_CONF_RANGE_U64(min, max)            \
+      .has_range = true,                        \
       .range = {                                \
          .start = { ._uint64 = min },           \
          .end = { ._uint64 = max },             \
       }
 
 #define DRI_CONF_RANGE_F(min, max)              \
+      .has_range = true,                        \
       .range = {                                \
          .start = { ._float = min },            \
          .end = { ._float = max },              \
@@ -395,6 +398,9 @@
 
 #define DRI_CONF_INTEL_ENABLE_EFFICIENT_64BIT(def) \
    DRI_CONF_OPT_B(intel_enable_efficient_64bit, def, "Enable efficient 64bit")
+
+#define DRI_CONF_INTEL_FORCE_PROBE \
+   DRI_CONF_OPT_S_NODEF(intel_force_probe, "Default value of INTEL_FORCE_PROBE.")
 
 /**
  * \brief Image quality-related options

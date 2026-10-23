@@ -753,7 +753,10 @@ intrinsic("execute_callable", src_comp=[1, -1])
 #   5. Ray Tmin
 #   6. Ray Direction
 #   7. Ray Tmax
-intrinsic("rq_initialize", src_comp=[-1, -1, 1, 1, 3, 1, 3, 1])
+#
+# The access applies to all subsequent accesses of the acceleration structure
+# using this ray query.
+intrinsic("rq_initialize", src_comp=[-1, -1, 1, 1, 3, 1, 3, 1], indices=[ACCESS])
 # src[] = { query }
 intrinsic("rq_terminate", src_comp=[-1])
 # src[] = { query }
@@ -855,6 +858,11 @@ def image(name, src_comp=[], extra_indices=[], **kwargs):
               indices=[IMAGE_DIM, IMAGE_ARRAY, FORMAT, ACCESS] + extra_indices, **kwargs)
 
 image("load", src_comp=[4, 1, 1], extra_indices=[DEST_TYPE], dest_comp=0, flags=[CAN_ELIMINATE])
+# The fourth source is in the input attachment index. The BASE is implicitly
+# added, and the RANGE indicates how many input attachments can be accessed.
+image("input_attachment_load", src_comp=[2, 1, 1], extra_indices=[DEST_TYPE, BASE, RANGE], dest_comp=0, flags=[CAN_REORDER, CAN_ELIMINATE])
+image("depth_input_attachment_load", src_comp=[2, 1], extra_indices=[DEST_TYPE], dest_comp=0, flags=[CAN_REORDER, CAN_ELIMINATE])
+image("stencil_input_attachment_load", src_comp=[2, 1], extra_indices=[DEST_TYPE], dest_comp=0, flags=[CAN_REORDER, CAN_ELIMINATE])
 image("sparse_load", src_comp=[4, 1, 1], extra_indices=[DEST_TYPE], dest_comp=0, flags=[CAN_ELIMINATE])
 image("store", src_comp=[4, 1, 0, 1], extra_indices=[SRC_TYPE])
 image("atomic",  src_comp=[4, 1, 0], dest_comp=0, extra_indices=[ATOMIC_OP])
@@ -1020,6 +1028,7 @@ system_value("base_vertex", 1)
 system_value("instance_id", 1)
 system_value("base_instance", 1)
 system_value("draw_id", 1)
+system_value("draw_id_offset_ir3", 1)
 system_value("sample_id", 1)
 system_value("sample_pos", 2)
 # sample_pos_or_center is like sample_pos but does not imply per-sample
@@ -1255,7 +1264,13 @@ intrinsic("load_sample_pos_from_id", src_comp=[1], dest_comp=2,
 # Takes an input attachment index and returns an ivec with the position in
 # input attachment space in .xy and the input attachment array index in .z.
 intrinsic("load_input_attachment_coord", src_comp=[1], dest_comp=3,
-          bit_sizes=[32], flags=[CAN_ELIMINATE, CAN_REORDER])
+          bit_sizes=[32], indices=[BASE], flags=[CAN_ELIMINATE, CAN_REORDER])
+
+intrinsic("load_depth_input_attachment_coord", dest_comp=3, bit_sizes=[32],
+          flags=[CAN_ELIMINATE, CAN_REORDER])
+
+intrinsic("load_stencil_input_attachment_coord", dest_comp=3, bit_sizes=[32],
+          flags=[CAN_ELIMINATE, CAN_REORDER])
 
 # Demote a subset of samples given by a specified sample mask. This acts like a
 # per-sample demote, or an inverted accumulating gl_SampleMask write.
@@ -1643,8 +1658,6 @@ system_value("subgroup_id_shift_ir3", 1)
 
 # System values for freedreno fragment shaders.
 intrinsic("load_frag_coord_unscaled_ir3", dest_comp=4,
-          flags=[CAN_ELIMINATE, CAN_REORDER], bit_sizes=[32])
-intrinsic("load_frag_coord_gmem_ir3", dest_comp=4,
           flags=[CAN_ELIMINATE, CAN_REORDER], bit_sizes=[32])
 system_value("alpha_to_coverage_enable_ir3", 1)
 
@@ -2982,7 +2995,7 @@ intrinsic("btd_retire_intel")
 
 # Intel-specific ray-tracing intrinsic
 # src[] = { globals, payload } SYNCHRONOUS=synchronous
-intrinsic("trace_ray_intel", src_comp=[1, 1], indices=[SYNCHRONOUS])
+intrinsic("trace_ray_intel", src_comp=[1, 1], dest_comp=1, bit_sizes=[32,16], indices=[SYNCHRONOUS])
 
 # System values used for ray-tracing on Intel
 system_value("ray_base_mem_addr_intel", 1, bit_sizes=[64])

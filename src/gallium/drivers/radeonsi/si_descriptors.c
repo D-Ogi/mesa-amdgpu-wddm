@@ -1856,8 +1856,11 @@ static void si_upload_bindless_descriptors(struct si_context *sctx)
       (*img_handle)->desc_dirty = false;
    }
 
-   assert(sctx->dirty_atoms & si_get_atom_bit(sctx, &sctx->atoms.s.barrier));
-   /* Invalidate scalar L0 because the cache doesn't know that L2 changed. */
+   /* Invalidate scalar L0 because the cache doesn't know that L2 changed.
+    * We don't need to dirty the barrier atom because if we reach this point
+    * it means the barrier emit function will be entered thanks to
+    * si_mark_bindless_descriptors_dirty.
+    */
    sctx->barrier_flags |= AC_BARRIER_INV_SMEM;
 
    /* TODO: Range-invalidate GL2 */

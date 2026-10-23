@@ -24,7 +24,7 @@
 /* creating clauses decreases def-use distances, so make it less aggressive the lower num_waves is */
 #define VMEM_CLAUSE_MAX_GRAB_DIST       (ctx.occupancy_factor * 2)
 #define VMEM_STORE_CLAUSE_MAX_GRAB_DIST (ctx.occupancy_factor * 4)
-#define POS_EXP_MAX_MOVES         512
+#define POS_EXP_MAX_MOVES               512
 
 namespace aco {
 
