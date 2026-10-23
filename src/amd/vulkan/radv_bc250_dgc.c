@@ -54,8 +54,7 @@ bc250_dgc_shape(const struct radv_indirect_command_layout *layout, const void *n
    const VkGeneratedCommandsPipelineInfoEXT *pi = vk_find_struct_const(next, GENERATED_COMMANDS_PIPELINE_INFO_EXT);
    const VkGeneratedCommandsShaderInfoEXT *si = vk_find_struct_const(next, GENERATED_COMMANDS_SHADER_INFO_EXT);
    if (!pi || si || !pi->pipeline || !layout->bc250_pc_stages_valid || sequences > 1048576 ||
-       (layout->vk.dgc_info & ~(BITFIELD_BIT(MESA_VK_DGC_DRAW_MESH) |
-          BITFIELD_BIT(MESA_VK_DGC_PC) | BITFIELD_BIT(MESA_VK_DGC_SI))))
+       (layout->vk.dgc_info & ~RADV_BC250_DGC_LAYOUT_INFO))
       return false;
    VK_FROM_HANDLE(radv_pipeline, base, pi->pipeline);
    if (base->type != RADV_PIPELINE_GRAPHICS)
@@ -220,6 +219,71 @@ radv_bc250_dgc_shader(struct radv_device *device, const struct radv_indirect_com
       blob_finish(&blob);
    }
    return b.shader;
+}
+
+/* BD-121, the device-creation self-check.
+ *
+ * The lab round that found BD-121 could only see the consequence (a command signature refused at
+ * d3d12_pso.c:4238) and had to read the consumer's own INFO line to learn the cause. This states the
+ * cause up front, once per device, on any BC-250 with the native mesh route: the stage mask as it is
+ * REPORTED (read back out of pdev->vk.properties, not recomputed, so the line cannot name a mask the
+ * driver does not hand out), the dgc_info token kinds the mesh route accepts (the same
+ * RADV_BC250_DGC_LAYOUT_INFO the layout refusal uses), and the verdict a D3D12 runtime reaches on that
+ * mask, computed with the consumer's own rule from radv_bc250_dgc_stages.h, which also spells the mask
+ * out in names. A line that says "d3d12=ExecuteIndirect-unavailable-for-every-signature" is the whole
+ * of BD-121, visible before a test runs. */
+void
+radv_bc250_dgc_report(const struct radv_device *device)
+{
+   const struct radv_physical_device *pdev = radv_device_physical(device);
+
+   if (!pdev->bc250_native_mesh)
+      return;
+
+   const VkShaderStageFlags stages = pdev->vk.properties.supportedIndirectCommandsShaderStages;
+   const bool mesh_feature = pdev->vk.supported_features.meshShader;
+   const bool task_feature = pdev->vk.supported_features.taskShader;
+   /* The verdict needs the extension itself, not only the mask: RADV_BC250_TASK_STRICT_EXT hides
+    * VK_EXT_device_generated_commands (radv_physical_device.c, .EXT_device_generated_commands), and a
+    * line that said "available" there would send an operator after the engine instead of the switch. */
+   const bool ext_dgc = pdev->vk.supported_extensions.EXT_device_generated_commands;
+   const bool mesh_stages = (stages & RADV_BC250_DGC_MESH_STAGES) == RADV_BC250_DGC_MESH_STAGES;
+   const bool keeps = ext_dgc && radv_bc250_dgc_consumer_keeps_dgc(stages, mesh_feature);
+   char names[320];
+
+   radv_bc250_dgc_stage_names(stages, names, sizeof(names));
+
+   const char *verdict;
+   if (!ext_dgc)
+      verdict = "ExecuteIndirect-unavailable-extension-not-exposed (VK_EXT_device_generated_commands is "
+                "hidden on this device, so the mask is moot)";
+   else if (!keeps)
+      verdict = "ExecuteIndirect-unavailable-for-every-signature (the runtime needs MESH and TASK once "
+                "meshShader is exposed)";
+   else
+      verdict = "ExecuteIndirect-available";
+
+   /* task_latched is the live state of the process-global hybrid-task latch (radv_bc250.c), which
+    * taskShader above cannot follow: that feature was decided once, at physical-device creation. The
+    * mask is deliberately independent of both, so the two are printed rather than folded in. */
+   fprintf(stderr,
+           "BC250 DGC: stages=0x%08x(%s) tokens=%s route=%s meshShader=%d taskShader=%d ext_dgc=%d "
+           "expose_dgc=%d native_task=%d hybrid_task=%d task_latched=%d why=\"%s\" d3d12=%s\n",
+           stages, names,
+           mesh_stages ? "DRAW_MESH_TASKS(+COUNT,+NV)|PUSH_CONSTANT|SEQUENCE_INDEX" : "no-mesh-token",
+           pdev->bc250_expose_dgc ? "radv_bc250_dgc" : "none", mesh_feature, task_feature, ext_dgc,
+           pdev->bc250_expose_dgc, pdev->bc250_native_task, pdev->bc250_hybrid_task,
+           radv_bc250_task_latched_off(),
+           mesh_stages ? "a mesh draw token executes through radv_bc250_dgc, so MESH is reported; TASK is "
+                         "reported with it because a D3D12 runtime names MESH|TASK|FRAGMENT in every "
+                         "DISPATCH_MESH command signature and drops the extension for the whole device "
+                         "without both bits, and no task stage can be bound while taskShader is false. The "
+                         "route's accepted state is narrower than the direct DispatchMesh path's (BD-119, "
+                         "bc250_dgc_state_valid): multiview, streamout, VRS, an active query and a few more "
+                         "refuse the execute"
+                       : "the mesh DGC route is off (RADV_BC250_EXPOSE_DGC=0 or the native-task compile), so no "
+                         "mesh draw token can execute and no mesh stage is reported",
+           verdict);
 }
 
 static bool

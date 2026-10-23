@@ -3456,9 +3456,7 @@ radv_CreateIndirectCommandsLayoutEXT(VkDevice _device, const VkIndirectCommandsL
     * vkEndCommandBuffer. VK_ERROR_OUT_OF_DEVICE_MEMORY is the one failure this entry point may
     * report; a client sees a defined error at creation and can fall back. */
    if (radv_bc250_dgc_layout(device, layout) &&
-       (!layout->bc250_pc_stages_valid ||
-        (layout->vk.dgc_info & ~(BITFIELD_BIT(MESA_VK_DGC_DRAW_MESH) | BITFIELD_BIT(MESA_VK_DGC_PC) |
-                                 BITFIELD_BIT(MESA_VK_DGC_SI))))) {
+       (!layout->bc250_pc_stages_valid || (layout->vk.dgc_info & ~RADV_BC250_DGC_LAYOUT_INFO))) {
       radv_destroy_indirect_commands_layout(device, pAllocator, layout);
       return vk_error(device, VK_ERROR_OUT_OF_DEVICE_MEMORY);
    }

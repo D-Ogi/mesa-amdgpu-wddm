@@ -31,6 +31,7 @@
 #include "radv_instance.h"
 #include "radv_physical_device.h"
 #include "radv_bc250.h"
+#include "radv_bc250_dgc_stages.h"
 #include "radv_pipeline_rt.h"
 #include "radv_video.h"
 #include "radv_wsi.h"
@@ -1894,11 +1895,15 @@ radv_get_physical_device_properties(struct radv_physical_device *pdev)
       (radv_taskmesh_enabled(pdev) ? VK_SHADER_STAGE_TASK_BIT_EXT : 0);
    /* VK_EXT_device_generated_commands: on a BC-250 a mesh draw token is only executable through
     * radv_bc250_dgc, because the generic DGC prepare shader emits no mesh draw. With the route off
-    * (RADV_BC250_EXPOSE_DGC=0) the layout must be refused at the capability level, so neither stage is
-    * a supported DGC shader stage there. Every other device keeps taskmesh_stages as upstream. */
-   VkShaderStageFlags dgc_taskmesh_stages = taskmesh_stages;
-   if (pdev->bc250_native_mesh && !pdev->bc250_expose_dgc)
-      dgc_taskmesh_stages &= ~(VK_SHADER_STAGE_MESH_BIT_EXT | VK_SHADER_STAGE_TASK_BIT_EXT);
+    * (RADV_BC250_EXPOSE_DGC=0, or the experimental native-task compile) the layout must be refused at
+    * the capability level, so neither stage is a supported DGC shader stage there; with the route on,
+    * BOTH mesh stages are reported, because a D3D12 runtime requires them together the moment
+    * meshShader is exposed and otherwise turns the extension off for the whole device (BD-121: that
+    * cost the lab every command signature, mesh or not). Every other device keeps taskmesh_stages as
+    * upstream. The rule, the quoted consumer check and the argument that each reported bit is a true
+    * statement are in radv_bc250_dgc_stages.h. */
+   const VkShaderStageFlags dgc_taskmesh_stages =
+      radv_bc250_dgc_taskmesh_stages(pdev->bc250_native_mesh, pdev->bc250_expose_dgc, taskmesh_stages);
    VkShaderStageFlags rt_stages = radv_enable_rt(pdev) ? RADV_RT_STAGE_BITS : 0;
 
    bool accel_dot = pdev->info.compiler_info.has_accelerated_dot_product;
@@ -2470,9 +2475,12 @@ radv_get_physical_device_properties(struct radv_physical_device *pdev)
       .maxIndirectCommandsIndirectStride = 2048,
       .supportedIndirectCommandsInputModes = VK_INDIRECT_COMMANDS_INPUT_MODE_VULKAN_INDEX_BUFFER_EXT |
                                              VK_INDIRECT_COMMANDS_INPUT_MODE_DXGI_INDEX_BUFFER_EXT,
+      /* BD-121: dgc_taskmesh_stages already carries both mesh stages whenever the BC-250 mesh DGC
+       * route can execute a mesh draw token. The term that used to add TASK only with hybrid task on
+       * is gone: it made the mask depend on a switch that has nothing to do with what a layout may
+       * name, and with hybrid task off it left the device without EXT_dgc altogether. */
       .supportedIndirectCommandsShaderStages =
-         VK_SHADER_STAGE_ALL_GRAPHICS | VK_SHADER_STAGE_COMPUTE_BIT | dgc_taskmesh_stages | rt_stages |
-         (pdev->bc250_expose_dgc && pdev->bc250_hybrid_task ? VK_SHADER_STAGE_TASK_BIT_EXT : 0),
+         VK_SHADER_STAGE_ALL_GRAPHICS | VK_SHADER_STAGE_COMPUTE_BIT | dgc_taskmesh_stages | rt_stages,
       .supportedIndirectCommandsShaderStagesPipelineBinding = VK_SHADER_STAGE_COMPUTE_BIT,
       .supportedIndirectCommandsShaderStagesShaderBinding = VK_SHADER_STAGE_COMPUTE_BIT,
       .deviceGeneratedCommandsTransformFeedback = true,

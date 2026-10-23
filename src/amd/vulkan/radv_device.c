@@ -28,6 +28,7 @@
 #include "tools/radv_sqtt.h"
 #include "util/u_debug.h"
 #include "radv_bc250.h"
+#include "radv_bc250_dgc.h"
 #include "radv_bc250_pipeline_plan.h"
 #include "radv_cs.h"
 #include "radv_device.h"
@@ -2235,6 +2236,7 @@ radv_CreateDevice(VkPhysicalDevice physicalDevice, const VkDeviceCreateInfo *pCr
                                     debug_get_bool_option("RADV_BC250_SPLIT_BATCH_PREP", false);
    device->bc250_mesh_dealloc_dist = radv_bc250_parse_mesh_dealloc_dist(pdev);
    device->bc250_mesh_vert_grp = radv_bc250_parse_mesh_vert_grp(pdev);
+   radv_bc250_dgc_report(device); /* BD-121: one line, what this ICD reports for EXT_dgc and why */
 
    *pDevice = radv_device_to_handle(device);
    return VK_SUCCESS;
