@@ -2979,10 +2979,20 @@ radv_physical_device_try_create(struct radv_instance *instance, drmDevicePtr drm
       (debug_get_bool_option("BC250_NATIVE_TASK_COMPILE", false) ||
        debug_get_bool_option("RADV_BC250_NATIVE_TASK", false));
    /* RADV_DIRECTMESH=1: DXVK (D3D9-11, no Mesh shaders) keeps GPL, shader objects and pipeline binaries
-    * instead of the preset's hybrid Task. An explicit RADV_BC250_HYBRID_TASK still applies. */
+    * instead of the preset's hybrid Task. An explicit RADV_BC250_HYBRID_TASK still applies.
+    *
+    * Hybrid Task is on by default with native mesh. It is the only task stage GFX10.1 has, and a D3D12
+    * runtime reports MeshShaderTier 1 only when taskShader is true as well as meshShader
+    * (vkd3d-proton d3d12_device_determine_mesh_shader_tier), so without it no D3D12 application can
+    * use mesh shaders at all. Its one hardware need that WDDM cannot meet, the GDS partition of the
+    * TASK-invocation counter (BD-119), is gone where the winsys has no GDS (radeon_winsys::supports_gds).
+    * What remains is a compute dispatch on the graphics ring, a cache flush and an indirect mesh draw,
+    * the sequence that the internal mesh-only amplification producer runs as well. The progress
+    * witness still latches the path off, and takes taskShader away, if a submission does not retire.
+    * RADV_BC250_HYBRID_TASK=0 turns it off. */
    const bool bc250_dxvk = instance->vk.app_info.engine_name && !strcmp(instance->vk.app_info.engine_name, "DXVK");
    pdev->bc250_hybrid_task = pdev->bc250_native_mesh &&
-      debug_get_bool_option("RADV_BC250_HYBRID_TASK", false) && !(bc250_dxvk && radv_bc250_directmesh_hybrid);
+      debug_get_bool_option("RADV_BC250_HYBRID_TASK", true) && !(bc250_dxvk && radv_bc250_directmesh_hybrid);
    if (pdev->bc250_native_mesh && bc250_dxvk && radv_bc250_directmesh_hybrid && getenv("BC250_TRACE_COMPILE"))
       fprintf(stderr, "radv/bc250: DXVK: hybrid Task off, GPL/shader objects/pipeline binaries kept\n");
    /* On by default with native mesh: VK_EXT_device_generated_commands stays exposed as upstream, and
