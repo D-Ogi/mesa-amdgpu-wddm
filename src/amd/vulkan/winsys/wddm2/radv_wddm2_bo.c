@@ -878,7 +878,9 @@ error_va_alloc:
        * any remaining allocation until its teardown, not an OOM retry. */
       amdgpu_wddm_log("DestroyAllocation2 after failed create: device removed\n");
       result = radv_wddm2_allocation_error(ws, status);
-   } else {
+   } else if (!NT_SUCCESS(status)) {
+      /* BD-226: counted, so that no fallback allocation follows a create whose cleanup was refused. */
+      p_atomic_inc(&ws->create_cleanup_failures);
       assert(NT_SUCCESS(status));
    }
 
@@ -3218,6 +3220,64 @@ radv_wddm2_bo_from_hosted(struct radeon_winsys *rws, void *identity, uint32_t al
    return VK_SUCCESS;
 }
 
+/* BD-226: a command stream or command buffer upload BO that radv_wddm2_cs_domain put in VRAM. It is the
+ * driver's own CPU-written BO (RADV_BO_PRIORITY_CS or _UPLOAD_BUFFER, never an application priority) that
+ * GTT served before; RADEON_FLAG_GTT_WC is how all its callers ask for it. */
+static bool
+radv_wddm2_cs_vram_bo(enum radeon_bo_domain domain, enum radeon_bo_flag flags, unsigned priority)
+{
+   return domain == RADEON_DOMAIN_VRAM && (flags & RADEON_FLAG_CPU_ACCESS) && (flags & RADEON_FLAG_GTT_WC) &&
+          !(flags & (RADEON_FLAG_VIRTUAL | RADEON_FLAG_NO_CPU_ACCESS)) &&
+          (priority == RADV_BO_PRIORITY_CS || priority == RADV_BO_PRIORITY_UPLOAD_BUFFER);
+}
+
+/* The cleanup failures that can leave state behind after a failed create: a refused DestroyAllocation2 of
+ * the create's own error path, and the refusals of the release path (radv_wddm2_bo_keep_refused,
+ * radv_wddm2_bo_keep_va_refused). */
+static uint64_t
+radv_wddm2_cleanup_failures(struct radv_wddm2_winsys *ws)
+{
+   simple_mtx_lock(&ws->deferred.lock);
+   const uint64_t refused = ws->deferred.refused_total + ws->deferred.va_refused_total;
+   simple_mtx_unlock(&ws->deferred.lock);
+   return refused + p_atomic_read(&ws->create_cleanup_failures);
+}
+
+/* BD-226: the buffer_create of the winsys. A command stream or upload BO in VRAM is CPU-mapped here, because
+ * every caller maps it at once, so that a refused VRAM allocation, residency or CPU lock all end inside this
+ * call. Such a failure is asked once more as the GTT BO of before, and only when the failed attempt left
+ * nothing behind: the device is not lost and no cleanup was refused since the attempt began. Every other
+ * BO, and every other answer, is returned as radv_wddm2_bo_create gives it. */
+static VkResult
+radv_wddm2_bo_create_placed(struct radeon_winsys *_ws, uint64_t size, unsigned alignment,
+                            enum radeon_bo_domain initial_domain, enum radeon_bo_flag flags, unsigned priority,
+                            uint64_t address, struct radv_image *image, struct radeon_winsys_bo **out_bo)
+{
+   struct radv_wddm2_winsys *ws = radv_wddm2_winsys(_ws);
+   if (!radv_wddm2_cs_vram_bo(initial_domain, flags, priority))
+      return radv_wddm2_bo_create(_ws, size, alignment, initial_domain, flags, priority, address, image, out_bo);
+
+   const uint64_t cleanups = radv_wddm2_cleanup_failures(ws);
+   VkResult result = radv_wddm2_bo_create(_ws, size, alignment, initial_domain, flags, priority, address, image,
+                                          out_bo);
+   const char *stage = "allocation";
+   if (result == VK_SUCCESS && !radv_wddm2_bo_map(_ws, *out_bo, false, NULL)) {
+      /* No work and no other thread has seen this BO: it is released now, never held. */
+      radv_wddm2_bo_destroy_now(ws, radv_wddm2_bo(*out_bo));
+      *out_bo = NULL;
+      result = VK_ERROR_OUT_OF_DEVICE_MEMORY;
+      stage = "CPU lock";
+   }
+   if (result != VK_ERROR_OUT_OF_DEVICE_MEMORY || radv_wddm2_device_is_lost(_ws) ||
+       radv_wddm2_cleanup_failures(ws) != cleanups)
+      return result;
+   p_atomic_inc(&ws->cs_vram_fallbacks);
+   result = radv_wddm2_bo_create(_ws, size, alignment, RADEON_DOMAIN_GTT, flags, priority, address, image, out_bo);
+   amdgpu_wddm_log("BD-226: a %" PRIu64 "-byte command buffer BO failed in VRAM (%s); in GTT it %s\n", size, stage,
+                   result == VK_SUCCESS ? "succeeded" : "failed too");
+   return result;
+}
+
 void
 radv_wddm2_bo_init_functions(struct radv_wddm2_winsys *ws)
 {
@@ -3396,7 +3456,7 @@ radv_wddm2_bo_init_functions(struct radv_wddm2_winsys *ws)
 #endif
    }
    ws->base.buffer_from_hosted=radv_wddm2_bo_from_hosted;
-   ws->base.buffer_create = radv_wddm2_bo_create;
+   ws->base.buffer_create = radv_wddm2_bo_create_placed;
    ws->base.device_is_lost = radv_wddm2_device_is_lost;
    ws->base.buffer_destroy = radv_wddm2_bo_destroy;
    ws->base.buffer_map = radv_wddm2_bo_map;

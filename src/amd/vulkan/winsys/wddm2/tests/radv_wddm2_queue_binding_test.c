@@ -71,6 +71,24 @@ print_hex_data(FILE *fp, const void *data, uint32_t size)
    abort();
 }
 
+/* BD-226: the local budget query of radv_wddm2_winsys.c, which these tests do not link. It answers what
+ * local_query holds and counts its calls; by default it fails, so radv_wddm2_cs_domain answers GTT. */
+static struct {
+   bool ok;
+   uint64_t budget, usage;
+   unsigned calls;
+} local_query;
+
+bool
+radv_wddm2_query_local(struct radeon_winsys *ws, uint64_t *budget, uint64_t *usage)
+{
+   (void)ws;
+   local_query.calls++;
+   *budget = local_query.budget;
+   *usage = local_query.usage;
+   return local_query.ok;
+}
+
 /* The application fences of the tests carry this type. */
 const struct vk_sync_type vk_wddm2_monitored_fence_type = {0};
 const struct vk_sync_type vk_wddm2_monitored_fence_hosted_type = {0};
@@ -134,6 +152,7 @@ static struct {
    unsigned fail_nth, fail_seen, fail_more;
    int32_t fail_status; /* zero keeps HOST_FAIL for the existing cases */
    bool remove_on_destroy; /* a second failure while cleaning up a failed create */
+   unsigned refuse_destroy; /* the next refuse_destroy DestroyAllocation2 calls fail with HOST_FAIL (BD-226) */
    /* FreeGpuVirtualAddress refuses the next fail_va_left[i] frees of the range at fail_va[i], with
     * fail_va_status[i] (zero: HOST_FAIL). The range stays reserved then. */
    uint64_t fail_va[2];
@@ -390,6 +409,11 @@ fake_dispatch(void *userdata, uint32_t op, void *arg)
    if (h.remove_on_destroy && op == BC250_HOST_DestroyAllocation2) {
       record(op, 0, 0, 0, NULL);
       return STATUS_DEVICE_REMOVED;
+   }
+   if (h.refuse_destroy && op == BC250_HOST_DestroyAllocation2) {
+      h.refuse_destroy--;
+      record(op, 0, 0, 0, NULL);
+      return HOST_FAIL;
    }
    if (h.fail_op == op && ++h.fail_seen >= h.fail_nth && h.fail_seen <= h.fail_nth + h.fail_more) {
       record(op, 0, 0, 0, NULL);
@@ -2082,6 +2106,7 @@ no_failures(void)
    h.fail_more = 0;
    h.fail_status = 0;
    h.remove_on_destroy = false;
+   h.refuse_destroy = 0;
    memset(h.fail_va_left, 0, sizeof(h.fail_va_left));
 }
 
@@ -2849,6 +2874,151 @@ test_allocation_cleanup_removed(void)
    free(ws);
    /* The failed KMT destroy left that host allocation to device teardown.
     * A following make_ws resets the fake device; do not invent a release. */
+}
+
+/* BD-226: a command stream or upload BO that VRAM refuses (allocation, residency, CPU lock) is asked once more
+ * as the GTT BO of before, after the failed attempt released what it held. An application BO, a refused cleanup
+ * and a removed device get no second attempt. */
+static void
+test_cs_vram_fallback(void)
+{
+   clear_deferred_env();
+   struct radv_wddm2_winsys *ws = make_ws();
+   struct radeon_winsys_bo *bo = NULL;
+   unsigned mark;
+   VkResult result;
+
+   /* The allocation refused. */
+   fail_calls(BC250_HOST_CreateAllocation2, 1);
+   mark = h.n_ev;
+   result = ws->base.buffer_create(&ws->base, 1 << 20, 4096, RADEON_DOMAIN_VRAM, CMD_FLAGS, RADV_BO_PRIORITY_CS, 0,
+                                   NULL, &bo);
+   no_failures();
+   check(result == VK_SUCCESS && bo && bo->initial_domain == RADEON_DOMAIN_GTT &&
+            count_op(mark, BC250_HOST_CreateAllocation2) == 2 && ws->cs_vram_fallbacks == 1,
+         "a refused VRAM command stream BO is created in GTT (%d)", result);
+   ws->base.buffer_destroy(&ws->base, bo);
+
+   /* Residency refused: the VRAM allocation is destroyed before the GTT one is made. */
+   fail_calls(BC250_HOST_MakeResident, 1);
+   mark = h.n_ev;
+   bo = NULL;
+   result = ws->base.buffer_create(&ws->base, 65536, 4096, RADEON_DOMAIN_VRAM, UPLOAD_FLAGS,
+                                   RADV_BO_PRIORITY_UPLOAD_BUFFER, 0, NULL, &bo);
+   no_failures();
+   const int c1 = find_op(mark, BC250_HOST_CreateAllocation2, 0);
+   const int d1 = find_op(mark, BC250_HOST_DestroyAllocation2, 0);
+   const int c2 = c1 >= 0 ? find_op(c1 + 1, BC250_HOST_CreateAllocation2, 0) : -1;
+   check(result == VK_SUCCESS && bo && bo->initial_domain == RADEON_DOMAIN_GTT && d1 > c1 && c2 > d1 &&
+            ws->cs_vram_fallbacks == 2,
+         "refused residency: destroy, then the GTT upload BO (%d %d %d)", c1, d1, c2);
+   ws->base.buffer_destroy(&ws->base, bo);
+
+   /* The CPU lock refused: the VRAM BO is released at once and the GTT BO comes back mapped. */
+   fail_calls(BC250_HOST_Lock2, 1);
+   mark = h.n_ev;
+   bo = NULL;
+   result = ws->base.buffer_create(&ws->base, 65536, 4096, RADEON_DOMAIN_VRAM, CMD_FLAGS, RADV_BO_PRIORITY_CS, 0,
+                                   NULL, &bo);
+   no_failures();
+   check(result == VK_SUCCESS && bo && bo->initial_domain == RADEON_DOMAIN_GTT &&
+            count_op(mark, BC250_HOST_DestroyAllocation2) == 1 && ws->cs_vram_fallbacks == 3 &&
+            ws->base.buffer_map(&ws->base, bo, false, NULL),
+         "a refused CPU lock: released, then a mapped GTT BO");
+   ws->base.buffer_destroy(&ws->base, bo);
+
+   /* A VRAM BO that succeeds stays in VRAM and is mapped already. */
+   mark = h.n_ev;
+   bo = NULL;
+   result = ws->base.buffer_create(&ws->base, 65536, 4096, RADEON_DOMAIN_VRAM, CMD_FLAGS, RADV_BO_PRIORITY_CS, 0,
+                                   NULL, &bo);
+   check(result == VK_SUCCESS && bo && bo->initial_domain == RADEON_DOMAIN_VRAM &&
+            count_op(mark, BC250_HOST_Lock2) == 1 && ws->cs_vram_fallbacks == 3,
+         "a VRAM command stream BO that succeeds stays in VRAM, locked once");
+   ws->base.buffer_destroy(&ws->base, bo);
+
+   /* An application BO is not moved by the driver. */
+   fail_calls(BC250_HOST_CreateAllocation2, 1);
+   mark = h.n_ev;
+   bo = NULL;
+   result = ws->base.buffer_create(&ws->base, 65536, 4096, RADEON_DOMAIN_VRAM, PLAIN_FLAGS | RADEON_FLAG_GTT_WC, 0, 0,
+                                   NULL, &bo);
+   no_failures();
+   check(result == VK_ERROR_OUT_OF_DEVICE_MEMORY && !bo && count_op(mark, BC250_HOST_CreateAllocation2) == 1 &&
+            ws->cs_vram_fallbacks == 3,
+         "an application VRAM BO gets no second attempt");
+
+   /* A refused cleanup: the VA map fails and the destroy of the failed create is refused. */
+   fail_calls(BC250_HOST_MapGpuVirtualAddress, 1);
+   h.refuse_destroy = 1;
+   mark = h.n_ev;
+   bo = NULL;
+   result = ws->base.buffer_create(&ws->base, 65536, 4096, RADEON_DOMAIN_VRAM, CMD_FLAGS, RADV_BO_PRIORITY_CS, 0,
+                                   NULL, &bo);
+   no_failures();
+   check(result == VK_ERROR_OUT_OF_DEVICE_MEMORY && !bo && count_op(mark, BC250_HOST_CreateAllocation2) == 1 &&
+            ws->create_cleanup_failures == 1 && ws->cs_vram_fallbacks == 3,
+         "a refused cleanup stops the GTT attempt");
+   contract();
+   radv_wddm2_deferred_finish(ws);
+   radv_wddm2_bo_pool_finish(ws);
+   free(ws);
+
+   /* A removed device: the cleanup reports the removal, and nothing is asked again. */
+   clear_deferred_env();
+   ws = make_ws();
+   fail_calls(BC250_HOST_MapGpuVirtualAddress, 1);
+   h.remove_on_destroy = true;
+   mark = h.n_ev;
+   bo = NULL;
+   result = ws->base.buffer_create(&ws->base, 65536, 4096, RADEON_DOMAIN_VRAM, CMD_FLAGS, RADV_BO_PRIORITY_CS, 0,
+                                   NULL, &bo);
+   no_failures();
+   check(result == VK_ERROR_UNKNOWN && !bo && count_op(mark, BC250_HOST_CreateAllocation2) == 1 &&
+            !ws->cs_vram_fallbacks && ws->base.device_is_lost(&ws->base),
+         "a removed device gets no GTT attempt");
+   contract();
+   radv_wddm2_deferred_finish(ws);
+   radv_wddm2_bo_pool_finish(ws);
+   free(ws);
+}
+
+/* BD-226: radv_wddm2_cs_domain asks the local budget only when all VRAM is CPU-visible, keeps its answer for
+ * RADV_WDDM2_CS_DOMAIN_RECHECK_NS, and answers GTT when the query fails or the reserve is not left. */
+static void
+test_cs_domain(void)
+{
+   clear_deferred_env();
+   struct radv_wddm2_winsys *ws = make_ws();
+   memset(&local_query, 0, sizeof(local_query));
+
+   ws->gpu_info.all_vram_visible = false;
+   local_query.ok = true;
+   local_query.budget = 8ull << 30;
+   local_query.usage = 1ull << 30;
+   check(ws->base.cs_domain(&ws->base) == RADEON_DOMAIN_GTT && !local_query.calls,
+         "part of the VRAM invisible to the CPU: GTT, no budget query");
+
+   ws->gpu_info.all_vram_visible = true;
+   check(ws->base.cs_domain(&ws->base) == RADEON_DOMAIN_VRAM && local_query.calls == 1,
+         "room below the budget: VRAM");
+   local_query.usage = 8ull << 30;
+   check(ws->base.cs_domain(&ws->base) == RADEON_DOMAIN_VRAM && local_query.calls == 1,
+         "the answer is kept inside the recheck interval");
+
+   p_atomic_set(&ws->cs_domain_checked_ns, 0);
+   check(ws->base.cs_domain(&ws->base) == RADEON_DOMAIN_GTT && local_query.calls == 2,
+         "the reserve not left: GTT");
+   p_atomic_set(&ws->cs_domain_checked_ns, 0);
+   local_query.ok = false;
+   local_query.usage = 0;
+   check(ws->base.cs_domain(&ws->base) == RADEON_DOMAIN_GTT && local_query.calls == 3, "a failed query: GTT");
+
+   memset(&local_query, 0, sizeof(local_query));
+   contract();
+   radv_wddm2_deferred_finish(ws);
+   radv_wddm2_bo_pool_finish(ws);
+   free(ws);
 }
 
 static void
@@ -5583,6 +5753,8 @@ static const struct {
    {"va_refused", test_va_refused},
    {"allocation_status", test_allocation_status},
    {"allocation_cleanup_removed", test_allocation_cleanup_removed},
+   {"cs_vram_fallback", test_cs_vram_fallback},
+   {"cs_domain", test_cs_domain},
    {"deferred_removed", test_deferred_removed},
    {"deferred_teardown", test_deferred_teardown},
    {"deferred_witness", test_deferred_witness},

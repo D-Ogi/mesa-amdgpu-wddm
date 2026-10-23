@@ -30,6 +30,8 @@
 #include "radv_wddm2_bc250.h"
 #include "util/amdgpu_wddm_stdio.h"
 #include "radv_wddm2_bo.h"
+#include "radv_wddm2_cs_placement.h"
+#include "radv_wddm2_winsys_public.h"
 #include "radv_winsys_cs.h"
 #include "vk_async_event.h"
 #include "vk_util.h"
@@ -985,10 +987,27 @@ radv_wddm2_cs_recent_slot(const struct radv_wddm2_bo *bo)
    return (unsigned)(p ^ (p >> 8)) & (RADV_WDDM2_CS_RECENT_BOS - 1);
 }
 
+/* BD-226: the command buffers, the command buffer upload BO and the small BOs radv_cmd_buffer.c asks for with
+ * this domain go to the local segment while the process's local budget has room (radv_wddm2_cs_placement.h),
+ * and to GTT otherwise, as before. The answer is kept for RADV_WDDM2_CS_DOMAIN_RECHECK_NS. */
 static enum radeon_bo_domain
 radv_wddm2_cs_domain(const struct radeon_winsys *_ws)
 {
-   return RADEON_DOMAIN_GTT;
+   struct radv_wddm2_winsys *ws = radv_wddm2_winsys((struct radeon_winsys *)_ws);
+
+   if (!ws->gpu_info.all_vram_visible)
+      return RADEON_DOMAIN_GTT;
+   const uint64_t now = os_time_get_nano();
+   const uint64_t checked = p_atomic_read(&ws->cs_domain_checked_ns);
+   if (checked && now - checked < RADV_WDDM2_CS_DOMAIN_RECHECK_NS)
+      return p_atomic_read(&ws->cs_domain_vram) ? RADEON_DOMAIN_VRAM : RADEON_DOMAIN_GTT;
+
+   uint64_t budget, usage;
+   const bool queried = radv_wddm2_query_local(&ws->base, &budget, &usage);
+   const bool vram = radv_wddm2_cs_vram_fits(true, queried, budget, usage);
+   p_atomic_set(&ws->cs_domain_vram, vram ? 1u : 0u);
+   p_atomic_set(&ws->cs_domain_checked_ns, now);
+   return vram ? RADEON_DOMAIN_VRAM : RADEON_DOMAIN_GTT;
 }
 
 static struct ac_cmdbuf *

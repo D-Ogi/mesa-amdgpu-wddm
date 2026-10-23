@@ -742,6 +742,24 @@ radv_wddm2_query_budget(struct radeon_winsys *base, uint64_t *budget)
    return *budget != 0;
 }
 
+/* BD-226: the budget and the current usage of this process in the local segment group, for the placement of
+ * the command buffers (radv_wddm2_cs_domain). False when the query fails. */
+bool
+radv_wddm2_query_local(struct radeon_winsys *base, uint64_t *budget, uint64_t *usage)
+{
+   struct radv_wddm2_winsys *ws = radv_wddm2_winsys(base);
+   D3DKMT_QUERYVIDEOMEMORYINFO mem_info = {
+      .hAdapter = ws->adapter_h,
+      .MemorySegmentGroup = D3DKMT_MEMORY_SEGMENT_GROUP_LOCAL,
+   };
+   *budget = *usage = 0;
+   if (!NT_SUCCESS(WDDM2_DISPATCH(QueryVideoMemoryInfo(&mem_info))))
+      return false;
+   *budget = mem_info.Budget;
+   *usage = mem_info.CurrentUsage;
+   return true;
+}
+
 static void
 radv_wddm2_winsys_destroy(struct radeon_winsys *_ws)
 {

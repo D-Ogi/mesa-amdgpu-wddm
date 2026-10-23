@@ -49,4 +49,7 @@ void radv_wddm2_query_allocated(struct radeon_winsys *ws, uint64_t *vram,
 /* BD-096: the process's video memory budget, local plus non-local (QueryVideoMemoryInfo). */
 bool radv_wddm2_query_budget(struct radeon_winsys *ws, uint64_t *budget);
 
+/* BD-226: the process's local budget and current local usage (QueryVideoMemoryInfo, LOCAL group). */
+bool radv_wddm2_query_local(struct radeon_winsys *ws, uint64_t *budget, uint64_t *usage);
+
 #endif /* RADV_WDDM2_WINSYS_PUBLIC_H */
