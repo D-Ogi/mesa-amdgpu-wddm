@@ -78,7 +78,10 @@ get_alu_src(struct isel_context* ctx, nir_alu_src src, unsigned size = 1)
    unsigned elem_size = src.src.ssa->bit_size / 8u;
 
    /* Combine continuous and aligned subdword components. */
-   while (size % 2 == 0 && elem_size < 4) {
+   /* A rotated f16vec3 is six bytes. Combining its xy pair into a dword
+    * would make extract_elt split a six-byte vector into four-byte elements. */
+   while (size % 2 == 0 && elem_size < 4 &&
+          (!ctx->options->bc250_bary_io16 || vec.bytes() % (2 * elem_size) == 0)) {
       bool continuous = true;
       for (unsigned i = 0; continuous && i < size; i += 2) {
          if (src.swizzle[i] % 2 != 0 || src.swizzle[i + 1] != (src.swizzle[i] + 1))

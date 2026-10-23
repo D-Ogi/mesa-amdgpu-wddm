@@ -774,9 +774,16 @@ setup_isel_context(Program* program, unsigned shader_count, struct nir_shader* c
    program->workgroup_size = program->info.workgroup_size;
    assert(program->workgroup_size);
 
-   /* Mesh shading only works on GFX10.3+. */
+   /* GFX10 normally rejects mesh shading.  RADV's narrowly scoped BC-250
+    * experiment may select the existing legacy NGG mesh ABI while retaining
+    * the real GFX10 ISA, hazard, scheduling, and register policy.
+    */
    ASSERTED bool mesh_shading = ctx.stage.has(SWStage::TS) || ctx.stage.has(SWStage::MS);
-   assert(!mesh_shading || ctx.program->gfx_level >= GFX10_3);
+   assert(!mesh_shading || ctx.program->gfx_level >= GFX10_3 ||
+          (ctx.stage.has(SWStage::MS) && !ctx.stage.has(SWStage::TS) &&
+           ctx.options->allow_gfx10_mesh_shader && ctx.program->gfx_level == GFX10) ||
+          (ctx.stage.has(SWStage::TS) && ctx.options->allow_gfx10_task_shader &&
+           ctx.program->gfx_level == GFX10));
 
    setup_tcs_info(&ctx);
 

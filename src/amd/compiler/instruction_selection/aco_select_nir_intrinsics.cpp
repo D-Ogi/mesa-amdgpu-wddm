@@ -4783,6 +4783,16 @@ visit_intrinsic(isel_context* ctx, nir_intrinsic_instr* instr)
    case nir_intrinsic_sendmsg_amd: {
       unsigned imm = nir_intrinsic_base(instr);
       Temp m0_content = bld.as_uniform(get_ssa_temp(ctx, instr->src[0].ssa));
+      if (ctx->program->info.gs_alloc_req_barrier && ctx->program->gfx_level == GFX10 &&
+          (imm & sendmsg_id_mask) == sendmsg_gs_alloc_req) {
+         /* BC250: a real s_barrier directly before GS_ALLOC_REQ (AMD LLPC
+          * waNggPassthroughMessageHazard placement). Built without emit_barrier
+          * so it is not narrowed for single-wave workgroups; its workgroup
+          * acquire/release on LDS and outputs keeps the output writes before it. */
+         bld.barrier(aco_opcode::p_barrier,
+                     memory_sync_info(storage_shared | storage_vmem_output, semantic_acqrel, scope_workgroup),
+                     scope_workgroup);
+      }
       bld.sopp(aco_opcode::s_sendmsg, bld.m0(m0_content), imm);
       break;
    }

@@ -771,6 +771,17 @@ perform_hazard_query(hazard_query* query, Instruction* instr, bool upwards)
    if (instr->opcode == aco_opcode::s_sendmsg && query->contains_sendmsg)
       return hazard_fail_reorder_sendmsg;
 
+   /* BC250 (aco_shader_info::gs_alloc_req_barrier): GS_ALLOC_REQ stays after the
+    * s_barrier and the LDS output writes that precede it in program order. */
+   if (query->program->info.gs_alloc_req_barrier) {
+      if (instr->opcode == aco_opcode::s_sendmsg &&
+          (query->mem_events.bar_classes || query->mem_events.has_control_barrier ||
+           (query->aliasing_storage & storage_shared)))
+         return hazard_fail_reorder_sendmsg;
+      if (query->contains_sendmsg && (instr->isBarrier() || instr->accessesLDS()))
+         return hazard_fail_reorder_sendmsg;
+   }
+
    if (instr->opcode == aco_opcode::p_barrier_signal && query->contains_wait)
       return hazard_fail_barrier;
 

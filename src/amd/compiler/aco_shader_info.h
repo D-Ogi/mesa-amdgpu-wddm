@@ -116,6 +116,10 @@ struct aco_shader_info {
    enum ac_hw_stage hw_stage;
    uint8_t wave_size;
    bool schedule_ngg_pos_exports; /* Whether we should schedule position exports up or not. */
+   /* BC250 (GFX10.1): put a workgroup s_barrier directly before GS_ALLOC_REQ, as AMD
+    * LLPC's waNggPassthroughMessageHazard does ("HW VMID reset bug"), even when the
+    * workgroup fits in one wave. */
+   bool gs_alloc_req_barrier;
    bool image_2d_view_of_3d;
    unsigned workgroup_size;
    unsigned lds_size;
@@ -159,6 +163,10 @@ struct aco_compiler_options {
    uint8_t enable_mrt_output_nan_fixup;
    bool wgp_mode;
    bool is_opengl;
+   /* Allow the legacy NGG mesh ABI without changing the physical ISA level. */
+   bool allow_gfx10_mesh_shader;
+   bool allow_gfx10_task_shader;
+   bool bc250_bary_io16;
    enum radeon_family family;
    enum amd_gfx_level gfx_level;
    uint32_t address32_hi;
