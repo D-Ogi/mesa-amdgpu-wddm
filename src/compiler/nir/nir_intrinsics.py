@@ -970,6 +970,9 @@ intrinsic("load_vulkan_descriptor", src_comp=[-1], dest_comp=0,
 # PCO global variants use a vec3 for the memory address and data, where component X
 # has the low 32 address bits, component Y has the high 32 address bits, and component Z
 # has the data parameter.
+
+# BC-250 SAFE_FAST diagnostic output address, supplied only for opt-in builds.
+intrinsic("load_ngg_safe_stats_buf_va_amd", dest_comp=1, bit_sizes=[64], flags=[CAN_ELIMINATE])
 #
 # Note on vector atomics:
 # These work per component, not on the whole vector at once. Each component

@@ -457,6 +457,7 @@ if with_tests and not with_nir_headers_only
           'tests/opt_if_tests.cpp',
           'tests/opt_large_constants_tests.cpp',
           'tests/opt_licm_tests.cpp',
+          'tests/opt_uub_tests.cpp',
           'tests/opt_loop_tests.cpp',
           'tests/opt_peephole_select.cpp',
           'tests/opt_shrink_vectors_tests.cpp',
