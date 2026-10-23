@@ -245,9 +245,120 @@ typedef struct {
    bool export_primitive_id_per_prim;
    uint32_t instance_rate_inputs;
 
-   /* MS */
+   /* MS: effective device compiler policy, included in the caller cache key. */
+   bool bc250_cull_compact;
+   bool bc250_pack_triangle_vertices;
+   /* RADV_BC250_MESH_AUTOCULL: cull triangles in the Mesh epilogue (backface, frustum, small
+    * primitive, driven by the runtime NGG culling settings) and compact the survivors into
+    * private-vertex triangles (ac_nir_lower_ngg_mesh.c, ms_autocull_compact). */
+   bool bc250_autocull;
+   /* RADV_BC250_MESH_CULLDIST_CULL (with bc250_autocull): when autocull applies and the shader
+    * exports cull distances, cull with them in the shader (ms_autocull_accept) on every draw
+    * (no runtime switch-off branch) and do not export them, as VS NGG culling does
+    * (ac_nir_export_position dont_export_cull_distances). Clip distances stay exported. */
+   bool bc250_autocull_culldist;
+   /* Output (may be NULL): set to whether the cull distances are culled in the shader and not
+    * exported (the caller then leaves them out of SPI_SHADER_POS_FORMAT / PA_CL_VS_OUT_CNTL). */
+   bool *bc250_culldist_culled;
+   /* RADV_BC250_MESH_COMPACT_LDS: per-vertex outputs kept in LDS use only the
+    * dwords the shader accesses (packed records) instead of one vec4 slot per
+    * location (ac_nir_lower_ngg_mesh.c, ms_packed_vertex_components). */
+   bool bc250_compact_lds;
+   /* RADV_BC250_MESH_DIRECT_READ: the expanded Mesh shader's per-vertex outputs
+    * whose only stores are the expansion loop's copies of immutable LDS staging
+    * are exported by recomputing that copy for the exported vertex instead of
+    * storing and reloading an expanded LDS record (ac_nir_lower_ngg_mesh.c,
+    * ms_direct_read_analyze). GFX10 without attribute ring, no multiview. */
+   bool bc250_direct_read;
+   /* RADV_BC250_MESH_IMPLICIT_TRIS: the shader is a base-driver expanded Mesh shader
+    * whose primitive p uses the private vertices N p .. N p + N - 1 (N vertices per
+    * primitive): derive the connectivity instead of storing it to LDS and reloading
+    * it (ac_nir_lower_ngg_mesh.c, ms_implicit_index). */
+   bool bc250_implicit_tris;
+   /* BC250 barycentrics: generic slots that carry a copy of the vertex position
+    * (radv_nir_bc250_export_bary_ref). Their stores are dropped and the position
+    * loaded for the exported vertex is exported to them, so they take no LDS. */
+   uint64_t bc250_bary_ref_mask;
+   /* RADV_BC250_MESH_COMPACT: the expanded Mesh shader exports shared vertices
+    * renumbered GE-like in its epilogue (ac_nir_lower_ngg_mesh.c,
+    * ms_compact_vertices): every exported vertex is referenced by an exported
+    * primitive and no corner references a vertex more than
+    * AC_NIR_BC250_COMPACT_W below the running maximum index, for any index
+    * data. The launch shape (3P lanes) is unchanged. */
+   bool bc250_compact;
+   /* Proven-capacity plain Mesh: latest-copy, triangle-wide W31 closure. */
+   bool bc250_safe_direct;
+   bool bc250_safe_fast;
+   bool bc250_safe_local;
+   /* RADV_BC250_MESH_PP_DIRECT (bit 0) and the provoking corner (bits 1-2): per-primitive generic outputs on the
+    * local route. Every provoking corner owns a fresh slot; slot k exports the per-primitive outputs of the
+    * triangle that created it as flat per-vertex parameters. */
+   uint8_t bc250_pp_direct;
+   /* RADV_BC250_MESH_LDS_PLAN: the local slot planner (ms_safe_local_vertices) finds each corner's first
+    * occurrence in its interval with an LDS table (atomic min of corner keys) instead of bit-plane ballots.
+    * Same plan. */
+   bool bc250_lds_plan;
+   /* RADV_BC250_MESH_LDS_COVER: on the local route, the coverage words are OR-ed in LDS instead of
+    * wave reductions, and hole removal ranks vertices from scalar word prefix sums and an LDS rank table
+    * instead of per-corner popcounts of every word. Same counts, map and connectivity. */
+   bool bc250_lds_cover;
+   /* RADV_BC250_MESH_MERGED_CHECK: with the adaptive and renumbered exports, the survivor check runs once on the
+    * ranks. When the survivors reference every vertex, each rank is the index itself, so the ranked check is the
+    * shared check; otherwise the shared check fails and the ranked check is the renumbered check. */
+   bool bc250_merged_check;
+   bool bc250_safe_check;
+   bool bc250_safe_corners;
+   /* RADV_BC250_MESH_SAFE_ADAPTIVE (with bc250_safe_corners, no owned per-primitive data): a
+    * workgroup whose API connectivity references every vertex with backjump <= 31 exports its shared vertices and
+    * every primitive without shader culling; any other workgroup exports the private corners. */
+   bool bc250_safe_adaptive;
+   /* RADV_BC250_MESH_SAFE_COMPACT (with bc250_safe_adaptive): before the shared-plus-all and corner
+    * cases, a workgroup whose survivors keep backjump <= 31 once the vertices they do not reference
+    * are deleted exports only the referenced vertices, renumbered in increasing order. */
+   bool bc250_safe_compact;
+   /* RADV_BC250_MESH_PP_SHARE (owned private corners): share vertices inside 10-triangle windows by the
+    * application's logical index (bc250_compact_index_staging); the provoking corner
+    * (bc250_compact_owned_corners 0x1 or 0x4) always gets its own copy. */
+   bool bc250_pp_share;
+   /* RADV_BC250_MESH_LEAN_CHECK: skip adaptive checks whose result is already known. */
+   bool bc250_lean_check;
+   bool bc250_safe_bary;
+   bool bc250_safe_stats;
+   bool bc250_safe_parallel;
+   bool bc250_safe_autocull;
+   unsigned bc250_safe_direct_bound;
+   /* Optional dump metadata for the CPU export oracle (offset, stride, bytes, V). */
+   uint32_t *bc250_safe_direct_index_staging;
+   /* Corners that own a private vertex carrying the primitive's flat
+    * (per-primitive) payload: bit 0 = corner 0 (provoking first), bit 2 =
+    * corner 2 (provoking last); both when the provoking mode is dynamic. */
+   uint8_t bc250_compact_owned_corners;
+   /* The application's staged primitive indices in LDS (offset, array stride,
+    * component bytes, declared logical vertices), radv_bc250_expand_primitive_attributes. */
+   uint32_t bc250_compact_index_staging[4];
+   /* Output (may be NULL): set to whether the compaction was applied. */
+   bool *bc250_compact_applied;
+   /* RADV_BC250_MESH_REFERENCE (raw-route Mesh): the reference driver's epilogue: the output
+    * counts of multi-wave workgroups always go through LDS (no workgroup-uniform shortcut), and
+    * the GFX10 fully-culled dummy exports POS0 only. */
+   bool bc250_reference;
+   /* GFX1013: waves without API invocations follow the API barriers by an exact published barrier total
+    * instead of the "API waves in flight reached zero" check, which can end one barrier early. */
+   bool bc250_wave_sync;
    bool multiview;
+   /* RADV_BC250_MESH_MULTIVIEW_VTX: the inserted multiview layer is a per-vertex output (GFX10.1 has no
+    * layer field in the primitive export). */
+   bool multiview_layer_per_vertex;
 } ac_nir_lower_ngg_options;
+
+/* RADV_BC250_MESH_COMPACT: the hardware-proven backjump window (MESH_PERF/rawroot:
+ * every raw shape with all vertices referenced and backjump <= 8 passed on GFX1013).
+ * Only raise it after the backjump ladder gates pass on hardware. */
+#define AC_NIR_BC250_COMPACT_W 8
+/* RADV_BC250_MESH_COMPACT: anchor levels of the renumbering (ms_compact_vertices). One
+ * level references only the first use of a vertex; two reach the stream quality of a
+ * sequential allocator on meshlet-like data (MESH_PERF/compact/layout_variants.py). */
+#define AC_NIR_BC250_COMPACT_LEVELS 2
 
 bool
 ac_nir_lower_ngg_nogs(nir_shader *shader, const ac_nir_lower_ngg_options *options,

@@ -209,6 +209,15 @@ ac_nir_ngg_alloc_vertices_and_primitives(nir_builder *b,
                                          nir_def *num_prim,
                                          bool fully_culled_workaround);
 
+/* Same, and the GFX10 fully-culled workaround's dummy vertex exports num_pos_exports position
+ * vectors (every one SPI_SHADER_POS_FORMAT declares; 1: exactly the code above). */
+void
+ac_nir_ngg_alloc_vertices_and_primitives_pos(nir_builder *b,
+                                             nir_def *num_vtx,
+                                             nir_def *num_prim,
+                                             bool fully_culled_workaround,
+                                             unsigned num_pos_exports);
+
 void
 ac_nir_create_output_phis(nir_builder *b,
                           const uint64_t outputs_written,

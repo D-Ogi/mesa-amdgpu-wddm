@@ -813,7 +813,8 @@ ac_nir_clamp_vertex_color_outputs(nir_builder *b, ac_nir_prerast_out *out)
 static void
 ac_nir_ngg_alloc_vertices_fully_culled_workaround(nir_builder *b,
                                                   nir_def *num_vtx,
-                                                  nir_def *num_prim)
+                                                  nir_def *num_prim,
+                                                  unsigned num_pos_exports)
 {
    /* HW workaround for a GPU hang with 100% culling on GFX10.
     * We always have to export at least 1 primitive.
@@ -840,10 +841,27 @@ ac_nir_ngg_alloc_vertices_fully_culled_workaround(nir_builder *b,
          /* The HW culls primitives with NaN. -1 is also NaN and can save
           * a dword in binary code by inlining constant.
           */
-         nir_export_amd(b, nir_imm_ivec4(b, -1, -1, -1, -1),
-                        .target = V_008DFC_SQ_EXP_POS,
-                        .flags = AC_EXP_FLAG_DONE,
-                        .enabled_channels = 0xf);
+         if (num_pos_exports <= 1) {
+            nir_export_amd(b, nir_imm_ivec4(b, -1, -1, -1, -1),
+                           .target = V_008DFC_SQ_EXP_POS,
+                           .flags = AC_EXP_FLAG_DONE,
+                           .enabled_channels = 0xf);
+         } else {
+            /* Every position vector SPI_SHADER_POS_FORMAT declares (the misc vector, clip/cull
+             * distances), as a real vertex exports them: POS0 (NaN; VALID_MASK as
+             * ac_nir_export_position sets it on GFX10 for a POS0 without DONE), then zero
+             * vectors, DONE on the last one. */
+            nir_export_amd(b, nir_imm_ivec4(b, -1, -1, -1, -1),
+                           .target = V_008DFC_SQ_EXP_POS,
+                           .flags = AC_EXP_FLAG_VALID_MASK,
+                           .enabled_channels = 0xf);
+            for (unsigned i = 1; i < num_pos_exports; i++) {
+               nir_export_amd(b, nir_imm_zero(b, 4, 32),
+                              .target = V_008DFC_SQ_EXP_POS + i,
+                              .flags = i == num_pos_exports - 1 ? AC_EXP_FLAG_DONE : 0,
+                              .enabled_channels = 0xf);
+            }
+         }
       }
       nir_pop_if(b, if_thread_0);
    }
@@ -865,8 +883,18 @@ ac_nir_ngg_alloc_vertices_and_primitives(nir_builder *b,
                                          nir_def *num_prim,
                                          bool fully_culled_workaround)
 {
+   ac_nir_ngg_alloc_vertices_and_primitives_pos(b, num_vtx, num_prim, fully_culled_workaround, 1);
+}
+
+void
+ac_nir_ngg_alloc_vertices_and_primitives_pos(nir_builder *b,
+                                             nir_def *num_vtx,
+                                             nir_def *num_prim,
+                                             bool fully_culled_workaround,
+                                             unsigned num_pos_exports)
+{
    if (fully_culled_workaround) {
-      ac_nir_ngg_alloc_vertices_fully_culled_workaround(b, num_vtx, num_prim);
+      ac_nir_ngg_alloc_vertices_fully_culled_workaround(b, num_vtx, num_prim, num_pos_exports);
       return;
    }
 

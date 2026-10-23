@@ -965,6 +965,7 @@ ac_set_tracked_regs_to_clear_state(struct ac_tracked_regs *tracked_regs,
    tracked_regs->reg_value[AC_TRACKED_VGT_GSVS_RING_ITEMSIZE] = 0;
    tracked_regs->reg_value[AC_TRACKED_VGT_GS_MODE] = 0;
    tracked_regs->reg_value[AC_TRACKED_VGT_VERTEX_REUSE_BLOCK_CNTL] = 0x1e;
+   tracked_regs->reg_value[AC_TRACKED_VGT_OUT_DEALLOC_CNTL] = 0x20; /* DEALLOC_DIST 32 (GFX9-10.3 tables) */
    tracked_regs->reg_value[AC_TRACKED_VGT_GS_OUT_PRIM_TYPE] = 0;
 
    tracked_regs->reg_value[AC_TRACKED_VGT_GSVS_RING_OFFSET_1] = 0;
@@ -991,6 +992,10 @@ ac_set_tracked_regs_to_clear_state(struct ac_tracked_regs *tracked_regs,
 
    /* Set all cleared context registers to saved. */
    BITSET_SET_COUNT(tracked_regs->reg_saved_mask, 0, AC_NUM_TRACKED_CONTEXT_REGS);
+
+   /* The GFX7-8 CLEAR_STATE value of VGT_OUT_DEALLOC_CNTL is not known here. */
+   if (info->gfx_level <= GFX8)
+      BITSET_CLEAR(tracked_regs->reg_saved_mask, AC_TRACKED_VGT_OUT_DEALLOC_CNTL);
 }
 
 void

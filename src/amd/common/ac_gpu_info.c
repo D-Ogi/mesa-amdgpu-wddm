@@ -15,6 +15,7 @@
 #include "amd_family.h"
 #include "amdgfxregs.h"
 #include "util/macros.h"
+#include "util/u_debug.h"
 #include "util/u_math.h"
 #include "util/os_misc.h"
 #include "util/format/u_format.h"
@@ -488,6 +489,20 @@ static const uint32_t ac_ip_type_dw_padding_minus_1[AMD_NUM_IP_TYPES] = {
     [AMD_IP_VPE]      = 0xf,
 };
 
+/* RADV_BC250_ACE_QUEUES: expose the GFX1013 COMPUTE IP (the ACE rings). Off by
+ * default; the native Task arm (RADV_BC250_NATIVE_TASK, BC250_NATIVE_TASK_COMPILE)
+ * needs a compute queue and therefore turns it on as well. */
+DEBUG_GET_ONCE_BOOL_OPTION(bc250_ace_queues, "RADV_BC250_ACE_QUEUES", false)
+DEBUG_GET_ONCE_BOOL_OPTION(bc250_native_task, "RADV_BC250_NATIVE_TASK", false)
+DEBUG_GET_ONCE_BOOL_OPTION(bc250_native_task_compile, "BC250_NATIVE_TASK_COMPILE", false)
+
+static bool
+ac_bc250_ace_queues_enabled(void)
+{
+   return debug_get_option_bc250_ace_queues() || debug_get_option_bc250_native_task() ||
+          debug_get_option_bc250_native_task_compile();
+}
+
 bool
 ac_fill_hw_ip_info(struct radeon_info *info, const struct drm_amdgpu_info_device *device_info,
                    unsigned ip_type, const struct drm_amdgpu_info_hw_ip *ip_info)
@@ -498,9 +513,18 @@ ac_fill_hw_ip_info(struct radeon_info *info, const struct drm_amdgpu_info_device
        */
       info->ip[ip_type].num_queues = 1;
    } else if (ip_info->available_rings) {
-      /* GFX1013 is known to have broken compute queue */
+      /* GFX1013 is known to have broken compute queues, so upstream drops the
+       * COMPUTE IP on this chip and every submission goes to the gfx ring.
+       * The DirectMesh reference removes this refusal, because its native Task
+       * route submits on an ACE queue and it runs on a patched Linux kernel
+       * (PASID TLB invalidation and compute GFXOFF fixes). Neither applies by
+       * default here: no BC-250 submission has ever gone to an ACE ring, and
+       * exposing a compute queue family changes the queue topology for every
+       * client (vkd3d-proton routes D3D12 compute and copy there, DXVK takes
+       * an async-compute queue). Keep the refusal and make it opt-in, so the
+       * native-task arm can measure ACE submission through bc250kmd. */
       if (ip_type == AMD_IP_COMPUTE && device_info->family == FAMILY_NV &&
-          ASICREV_IS(device_info->external_rev, GFX1013))
+          ASICREV_IS(device_info->external_rev, GFX1013) && !ac_bc250_ace_queues_enabled())
          return false;
 
       info->ip[ip_type].num_queues = util_bitcount(ip_info->available_rings);
@@ -1046,7 +1070,8 @@ void ac_fill_bug_info(struct radeon_info *info)
     * dimension mode.
     */
    info->has_async_compute_threadgroup_bug = info->family == CHIP_ICELAND ||
-                                             info->family == CHIP_TONGA;
+                                             info->family == CHIP_TONGA ||
+                                             info->family == CHIP_GFX1013;
 
    /* GFX7 CP requires 32 bytes alignment for the indirect buffer arguments on
     * the compute queue.
@@ -1066,6 +1091,12 @@ void ac_fill_bug_info(struct radeon_info *info)
          info->has_taskmesh_indirect0_bug = info->mec_fw_version < 100;
       }
    }
+
+   /* GFX1013 never runs the ACE task/mesh packets: the BC250 mesh path draws on the graphics
+    * queue. The flag keeps radv_taskmesh_enabled() off for this family independently of the
+    * GFX10_3 gate. */
+   if (info->family == CHIP_GFX1013)
+      info->has_taskmesh_indirect0_bug = true;
 
    info->has_export_conflict_bug = info->gfx_level == GFX11;
 

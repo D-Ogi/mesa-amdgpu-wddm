@@ -156,6 +156,7 @@ enum ac_tracked_reg
    AC_TRACKED_VGT_GSVS_RING_ITEMSIZE,        /* GFX6-10 (GFX11+ can reuse this slot) */
    AC_TRACKED_VGT_GS_MODE,                   /* GFX6-10 (GFX11+ can reuse this slot) */
    AC_TRACKED_VGT_VERTEX_REUSE_BLOCK_CNTL,   /* GFX6-10 (GFX11+ can reuse this slot) */
+   AC_TRACKED_VGT_OUT_DEALLOC_CNTL,          /* GFX6-10 (RADV: only RADV_BC250_MESH_DEALLOC_DIST) */
    AC_TRACKED_VGT_GS_OUT_PRIM_TYPE,          /* GFX6-10 (GFX11+ can reuse this slot) */
 
    /* 3 consecutive registers */
