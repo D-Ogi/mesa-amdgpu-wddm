@@ -109,7 +109,8 @@ rra_CreateAccelerationStructureKHR(VkDevice _device, const VkAccelerationStructu
    VkResult result = device->layer_dispatch.rra.CreateAccelerationStructureKHR(_device, pCreateInfo, pAllocator,
                                                                                pAccelerationStructure);
 
-   if (result != VK_SUCCESS)
+   /* RRA traces no micromaps: the hooks below skip every structure that is not in the table. */
+   if (result != VK_SUCCESS || pCreateInfo->type == VK_ACCELERATION_STRUCTURE_TYPE_OPACITY_MICROMAP_KHR)
       return result;
 
    VK_FROM_HANDLE(vk_acceleration_structure, structure, *pAccelerationStructure);
@@ -252,6 +253,10 @@ rra_CmdBuildAccelerationStructuresKHR(VkCommandBuffer commandBuffer, uint32_t in
    simple_mtx_lock(&device->rra_trace.data_mtx);
 
    for (uint32_t i = 0; i < infoCount; ++i) {
+      /* A micromap build has no build range infos, and RRA traces no micromaps. */
+      if (pInfos[i].type == VK_ACCELERATION_STRUCTURE_TYPE_OPACITY_MICROMAP_KHR)
+         continue;
+
       uint32_t *primitive_counts = alloca(pInfos[i].geometryCount * sizeof(uint32_t));
       for (uint32_t geometry_index = 0; geometry_index < pInfos[i].geometryCount; geometry_index++)
          primitive_counts[geometry_index] = ppBuildRangeInfos[i][geometry_index].primitiveCount;
@@ -284,9 +289,11 @@ rra_CmdCopyAccelerationStructureKHR(VkCommandBuffer commandBuffer, const VkCopyA
    VK_FROM_HANDLE(vk_acceleration_structure, src, pInfo->src);
 
    struct hash_entry *entry = _mesa_hash_table_search(device->rra_trace.accel_structs, src);
-   struct radv_rra_accel_struct_data *data = entry->data;
+   if (entry) {
+      struct radv_rra_accel_struct_data *data = entry->data;
 
-   handle_accel_struct_write(commandBuffer, pInfo->dst, data->size, data->can_be_tlas);
+      handle_accel_struct_write(commandBuffer, pInfo->dst, data->size, data->can_be_tlas);
+   }
 
    simple_mtx_unlock(&device->rra_trace.data_mtx);
 }
@@ -303,7 +310,8 @@ rra_CmdCopyMemoryToAccelerationStructureKHR(VkCommandBuffer commandBuffer,
    simple_mtx_lock(&device->rra_trace.data_mtx);
 
    VK_FROM_HANDLE(vk_acceleration_structure, dst, pInfo->dst);
-   handle_accel_struct_write(commandBuffer, pInfo->dst, dst->size, true);
+   if (_mesa_hash_table_search(device->rra_trace.accel_structs, dst))
+      handle_accel_struct_write(commandBuffer, pInfo->dst, dst->size, true);
 
    simple_mtx_unlock(&device->rra_trace.data_mtx);
 }
@@ -322,13 +330,14 @@ rra_DestroyAccelerationStructureKHR(VkDevice _device, VkAccelerationStructureKHR
 
    struct hash_entry *entry = _mesa_hash_table_search(device->rra_trace.accel_structs, structure);
 
-   assert(entry);
-   struct radv_rra_accel_struct_data *data = entry->data;
+   if (entry) {
+      struct radv_rra_accel_struct_data *data = entry->data;
 
-   if (device->rra_trace.copy_after_build)
-      data->is_dead = true;
-   else
-      _mesa_hash_table_remove(device->rra_trace.accel_structs, entry);
+      if (device->rra_trace.copy_after_build)
+         data->is_dead = true;
+      else
+         _mesa_hash_table_remove(device->rra_trace.accel_structs, entry);
+   }
 
    simple_mtx_unlock(&device->rra_trace.data_mtx);
 
