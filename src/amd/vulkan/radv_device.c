@@ -1260,6 +1260,9 @@ radv_device_init_compiler_info(struct radv_device *device)
    bool mesh_shader_queries = device->vk.enabled_features.meshShaderQueries &&
                               (pdev->emulate_mesh_shader_queries || pdev->bc250_native_mesh);
    bool primitives_generated_query = radv_uses_primitives_generated_query(device);
+   const bool emulate_point_rounding = pdev->drirc.debug.emulate_point_rounding &&
+                                       (pdev->info.gfx_level == GFX10 || pdev->info.gfx_level == GFX10_3) &&
+                                       !pdev->use_llvm;
    struct vk_pipeline_robustness_state robustness_state = device->vk.robustness_state;
 
    /* The Vulkan spec says:
@@ -1530,7 +1533,9 @@ radv_device_init_compiler_info(struct radv_device *device)
             .disable_aniso_single_level = pdev->drirc.debug.disable_aniso_single_level,
             .disable_shrink_image_store = pdev->drirc.debug.disable_shrink_image_store,
             .disable_sinking_load_input_fs = pdev->drirc.debug.disable_sinking_load_input_fs,
-            .disable_trunc_coord = pdev->drirc.debug.disable_trunc_coord,
+            .disable_trunc_coord = pdev->drirc.debug.disable_trunc_coord &&
+                                   !emulate_point_rounding,
+            .emulate_point_rounding = emulate_point_rounding,
             .enable_mrt_output_nan_fixup = pdev->drirc.debug.enable_mrt_output_nan_fixup,
             .emulate_rt = radv_emulate_rt(pdev),
             .split_fma = pdev->drirc.debug.split_fma,

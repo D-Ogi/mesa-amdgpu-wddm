@@ -697,6 +697,7 @@ struct radv_compiler_info {
       uint32_t disable_shrink_image_store : 1;
       uint32_t disable_sinking_load_input_fs : 1;
       uint32_t disable_trunc_coord : 1;
+      uint32_t emulate_point_rounding : 1;
       uint32_t enable_mrt_output_nan_fixup : 1;
       uint32_t emulate_rt : 1;
       uint32_t split_fma : 1;
@@ -733,7 +734,7 @@ struct radv_compiler_info {
       uint32_t bc250_mesh_compact_lds : 1; /* RADV_BC250_MESH_COMPACT_LDS: smaller LDS layout for expanded Mesh. */
       uint32_t bc250_split_prep_free : 1; /* RADV_BC250_SPLIT_PREP_FREE: direct split shaders carry the piece select. */
       uint32_t bc250_mesh_implicit_tris : 1; /* RADV_BC250_MESH_IMPLICIT_TRIS: derived expanded Mesh connectivity. */
-      uint32_t padding : 2;
+      uint32_t padding : 1;
 
       int32_t force_aniso;
 

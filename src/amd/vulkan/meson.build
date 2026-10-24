@@ -103,6 +103,7 @@ libradv_files = files(
   'nir/radv_nir_lower_call_abi.c',
   'nir/radv_nir_lower_cooperative_matrix.c',
   'nir/radv_nir_lower_descriptors.c',
+  'nir/radv_nir_lower_point_rounding.c',
   'nir/radv_nir_lower_fs_barycentric.c',
   'nir/radv_nir_lower_fs_intrinsics.c',
   'nir/radv_nir_lower_hit_attrib_derefs.c',
@@ -395,6 +396,18 @@ _dev_icd = custom_target(
 devenv.append('VK_DRIVER_FILES', _dev_icd.full_path())
 
 if with_radv_tests
+  test(
+    'radv_point_rounding_test',
+    executable(
+      'radv_point_rounding_test',
+      files('nir/radv_nir_lower_point_rounding.c', 'tests/radv_nir_point_rounding_test.c'),
+      include_directories : [inc_include, inc_src, inc_amd, inc_amd_common,
+                             inc_compiler, include_directories('nir')],
+      link_with : [libamd_common],
+      dependencies : [dep_thread, idep_nir, idep_mesautil],
+    ),
+    suite : ['compiler', 'nir'],
+  )
   test(
     'radv_tests',
     executable(

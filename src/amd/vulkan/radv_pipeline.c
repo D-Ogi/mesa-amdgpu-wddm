@@ -352,7 +352,11 @@ radv_postprocess_nir(const struct radv_compiler_info *compiler_info, const struc
                .gfx_level = gfx_level,
                .lower_array_layer_round_even = !compiler_info->ac->conformant_trunc_coord,
                .fix_derivs_in_divergent_cf = stage->stage == MESA_SHADER_FRAGMENT && !use_llvm,
-               .max_wqm_vgprs = 64, // TODO: improve spiller and RA support for linear VGPRs
+               /* Reserve up to one extra coordinate allocation per sample for
+                * the prefix-free QueryLod variant. Its size never exceeds the
+                * original allocation. Keep the existing total budget of 64.
+                */
+               .max_wqm_vgprs = compiler_info->key.emulate_point_rounding ? 32 : 64,
             });
 
    NIR_PASS(_, stage->nir, ac_nir_lower_image_tex,
@@ -397,6 +401,12 @@ radv_postprocess_nir(const struct radv_compiler_info *compiler_info, const struc
       }
    }
 
+
+   /* Sampler variants depend only on the descriptor, never on per-lane LOD.
+    * This pass must not introduce divergent sampler handles after waterfalls.
+    */
+   if (compiler_info->key.emulate_point_rounding)
+      NIR_PASS(_, stage->nir, radv_nir_lower_point_rounding, gfx_level);
 
    NIR_PASS(_, stage->nir, nir_lower_alu_width, ac_nir_opt_vectorize_cb, &gfx_level);
 
