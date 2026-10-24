@@ -1160,6 +1160,7 @@ radv_build_micromaps(VkCommandBuffer commandBuffer, uint32_t build_count,
    STACK_ARRAY(struct micromap_layout, layouts, build_count);
 
    bool has_micromap = false;
+   uint32_t fill_flush_bits = 0;
    for (uint32_t i = 0; i < build_count; i++) {
       if (build_infos[i].type != VK_ACCELERATION_STRUCTURE_TYPE_OPACITY_MICROMAP_KHR)
          continue;
@@ -1170,16 +1171,26 @@ radv_build_micromaps(VkCommandBuffer commandBuffer, uint32_t build_count,
 
       uint64_t scratch_addr = build_infos[i].scratchData.deviceAddress;
 
-      radv_fill_memory(cmd_buffer, scratch_addr + layouts[i].prefix_sum_partitions_offset,
-                       layouts[i].prefix_sum_partition_count * sizeof(struct radv_micromap_prefix_sum_partition), 0,
-                       VK_ADDRESS_COPY_DEVICE_LOCAL_BIT_KHR, false);
+      fill_flush_bits |=
+         radv_fill_memory(cmd_buffer, scratch_addr + layouts[i].prefix_sum_partitions_offset,
+                          layouts[i].prefix_sum_partition_count * sizeof(struct radv_micromap_prefix_sum_partition), 0,
+                          VK_ADDRESS_COPY_DEVICE_LOCAL_BIT_KHR, false);
+
+      /* The transcode pass accumulates the opacity states of each micromap in its header. */
+      if (layouts[i].triangle_count) {
+         VK_FROM_HANDLE(vk_acceleration_structure, micromap, build_infos[i].dstAccelerationStructure);
+         fill_flush_bits |= radv_fill_memory(
+            cmd_buffer, vk_acceleration_structure_get_va(micromap) + sizeof(struct radv_accel_struct_header),
+            layouts[i].triangle_count * sizeof(struct radv_micromap_triangle_header), 0,
+            VK_ADDRESS_COPY_DEVICE_LOCAL_BIT_KHR, false);
+      }
    }
 
    if (!has_micromap)
       return;
 
    /* Wait for update scratch initialization to finish. */
-   cmd_buffer->state.flush_bits |= AC_BARRIER_SYNC_CS |
+   cmd_buffer->state.flush_bits |= fill_flush_bits | AC_BARRIER_SYNC_CS |
                                    radv_src_access_flush(cmd_buffer, VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
                                                          VK_ACCESS_2_SHADER_WRITE_BIT, 0, NULL, NULL) |
                                    radv_dst_access_flush(cmd_buffer, VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,

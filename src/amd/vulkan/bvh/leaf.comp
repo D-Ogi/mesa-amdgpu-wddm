@@ -83,5 +83,6 @@ calculate_fine_instance_node_bounds(VOID_REF bvh, mat3x4 transform)
 }
 
 #define CALCULATE_FINE_INSTANCE_NODE_BOUNDS calculate_fine_instance_node_bounds
+#define RESOLVE_MICROMAP_INDEX              radv_resolve_micromap_index
 
 #include "leaf.h"

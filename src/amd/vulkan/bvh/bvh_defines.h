@@ -294,6 +294,12 @@ struct radv_micromap_prefix_sum_partition {
    uint32_t local_sum;
 };
 
+/* level: bits 0-3 hold the subdivision level, bits 8-11 the set of opacity states (bit n for state n) that the
+ * micromap contains.
+ */
+#define RADV_MICROMAP_LEVEL_MASK   0xf
+#define RADV_MICROMAP_STATES_SHIFT 8
+
 struct radv_micromap_triangle_header {
    uint32_t offset;
    uint32_t level;
