@@ -142,6 +142,54 @@ vk_bvh_build_barrier_compute_to_host(VkCommandBuffer commandBuffer)
    disp->CmdPipelineBarrier2(commandBuffer, &dep);
 }
 
+/* The micromap linked to a triangle geometry, from VK_KHR_opacity_micromap or VK_EXT_opacity_micromap. */
+struct vk_triangles_micromap {
+   VkIndexType index_type;
+   VkDeviceAddress index_buffer;
+   VkDeviceSize index_stride;
+   uint32_t base_triangle;
+   VkDeviceAddress micromap_va;
+};
+
+static bool
+vk_get_triangles_micromap(const VkAccelerationStructureGeometryTrianglesDataKHR *triangles,
+                          struct vk_triangles_micromap *out)
+{
+   const VkAccelerationStructureTrianglesOpacityMicromapKHR *khr =
+      vk_find_struct_const(triangles->pNext, ACCELERATION_STRUCTURE_TRIANGLES_OPACITY_MICROMAP_KHR);
+   if (khr) {
+      *out = (struct vk_triangles_micromap){
+         .index_type = khr->indexType,
+         .index_buffer = khr->indexBuffer,
+         .index_stride = khr->indexStride,
+         .base_triangle = khr->baseTriangle,
+      };
+      if (khr->micromap) {
+         VK_FROM_HANDLE(vk_acceleration_structure, micromap, khr->micromap);
+         out->micromap_va = vk_acceleration_structure_get_va(micromap);
+      }
+      return true;
+   }
+
+   const VkAccelerationStructureTrianglesOpacityMicromapEXT *ext =
+      vk_find_struct_const(triangles->pNext, ACCELERATION_STRUCTURE_TRIANGLES_OPACITY_MICROMAP_EXT);
+   if (ext) {
+      *out = (struct vk_triangles_micromap){
+         .index_type = ext->indexType,
+         .index_buffer = ext->indexBuffer.deviceAddress,
+         .index_stride = ext->indexStride,
+         .base_triangle = ext->baseTriangle,
+      };
+      if (ext->micromap) {
+         VK_FROM_HANDLE(vk_micromap, micromap, ext->micromap);
+         out->micromap_va = vk_micromap_get_va(micromap);
+      }
+      return true;
+   }
+
+   return false;
+}
+
 VKAPI_ATTR VkResult VKAPI_CALL
 vk_common_CreateAccelerationStructureKHR(VkDevice _device,
                                          const VkAccelerationStructureCreateInfoKHR *pCreateInfo,
@@ -246,9 +294,8 @@ vk_acceleration_structure_build_state_init(struct vk_acceleration_structure_buil
    for (uint32_t j = 0; j < build_info->geometryCount; ++j) {
       const VkAccelerationStructureGeometryKHR *geometry =
          build_info->pGeometries ? &build_info->pGeometries[j] : build_info->ppGeometries[j];
-      const VkAccelerationStructureTrianglesOpacityMicromapKHR *micromap_info = vk_find_struct_const(
-         geometry->geometry.triangles.pNext, ACCELERATION_STRUCTURE_TRIANGLES_OPACITY_MICROMAP_KHR);
-      state->has_micromap |= !!micromap_info;
+      struct vk_triangles_micromap micromap_info;
+      state->has_micromap |= vk_get_triangles_micromap(&geometry->geometry.triangles, &micromap_info);
    }
 
    if (device->as_build_ops->get_build_config)
@@ -541,22 +588,14 @@ vk_fill_geometry_data(VkAccelerationStructureTypeKHR type, uint32_t first_id, ui
       data.vertex_format = geometry->geometry.triangles.vertexFormat;
       data.index_format = geometry->geometry.triangles.indexType;
 
-      const VkAccelerationStructureTrianglesOpacityMicromapKHR *micromap_info =
-         vk_find_struct_const(geometry->geometry.triangles.pNext,
-                              ACCELERATION_STRUCTURE_TRIANGLES_OPACITY_MICROMAP_KHR);
-
-      if (micromap_info) {
-         data.micromap_indices = micromap_info->indexBuffer;
-         data.micromap_index_type = micromap_info->indexType;
-         data.micromap_index_stride = (int32_t)micromap_info->indexStride;
-         data.micromap_base_index = micromap_info->baseTriangle;
+      struct vk_triangles_micromap micromap_info;
+      if (vk_get_triangles_micromap(&geometry->geometry.triangles, &micromap_info)) {
+         data.micromap_indices = micromap_info.index_buffer;
+         data.micromap_index_type = micromap_info.index_type;
+         data.micromap_index_stride = (int32_t)micromap_info.index_stride;
+         data.micromap_base_index = micromap_info.base_triangle;
          data.micromap_flags = VK_BVH_GEOMETRY_MICROMAP_LINKED;
-
-         data.micromap_addr = 0;      
-         if (micromap_info->micromap) {
-            VK_FROM_HANDLE(vk_acceleration_structure, micromap, micromap_info->micromap);
-            data.micromap_addr = vk_acceleration_structure_get_va(micromap);
-         }
+         data.micromap_addr = micromap_info.micromap_va;
       } else {
          data.micromap_indices = 0;
       }

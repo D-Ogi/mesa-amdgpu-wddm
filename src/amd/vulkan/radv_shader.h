@@ -734,8 +734,10 @@ struct radv_compiler_info {
       uint32_t bc250_mesh_compact_lds : 1; /* RADV_BC250_MESH_COMPACT_LDS: smaller LDS layout for expanded Mesh. */
       uint32_t bc250_split_prep_free : 1; /* RADV_BC250_SPLIT_PREP_FREE: direct split shaders carry the piece select. */
       uint32_t bc250_mesh_implicit_tris : 1; /* RADV_BC250_MESH_IMPLICIT_TRIS: derived expanded Mesh connectivity. */
+      /* VK_EXT_opacity_micromap is enabled: ray queries use opacity micromaps without an execution mode. */
+      uint32_t ray_query_opacity_micromap : 1;
       /* Fill the third word: every byte is hashed and serialized. */
-      uint32_t padding : 28;
+      uint32_t padding : 27;
 
       int32_t force_aniso;
 
