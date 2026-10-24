@@ -1058,7 +1058,8 @@ ac_init_gfx9_ds_surface(const struct radeon_info *info, const struct ac_ds_state
                                     S_028ABC_PIPE_ALIGNED(1);
 
       if (state->vrs_enabled) {
-         assert(info->gfx_level == GFX10_3);
+         /* GFX1013: only the lab diagnostic RADV_BC250_VRS_PROBE_HTILE asks for this. */
+         assert(info->gfx_level == GFX10_3 || info->family == CHIP_GFX1013);
          ds->u.gfx6.db_htile_surface |= S_028ABC_VRS_HTILE_ENCODING(V_028ABC_VRS_HTILE_4BIT_ENCODING);
       } else if (info->gfx_level == GFX9) {
          ds->u.gfx6.db_htile_surface |= S_028ABC_RB_ALIGNED(1);

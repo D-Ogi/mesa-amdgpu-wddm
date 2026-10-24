@@ -10,6 +10,7 @@
 
 #include "radv_cmd_buffer.h"
 #include "radv_bc250.h"
+#include "util/u_atomic.h"
 #include "meta/radv_meta.h"
 #include "tools/radv_debug_hang.h"
 #include "tools/radv_rmv.h"
@@ -49,6 +50,8 @@
 #include "util/compiler.h"
 #include "util/fast_idiv_by_const.h"
 #include "util/perf/u_trace.h"
+
+static void radv_bc250_vrs_probe_log(const struct radv_physical_device *pdev, const char *reg, uint32_t value);
 
 enum {
    RADV_PREFETCH_VS = (1 << 0),
@@ -3478,6 +3481,7 @@ radv_emit_hw_vs(struct radv_cmd_buffer *cmd_buffer, const struct radv_shader *sh
    radeon_opt_set_context_reg(R_0286C4_SPI_VS_OUT_CONFIG, AC_TRACKED_SPI_VS_OUT_CONFIG, shader->regs.spi_vs_out_config);
    radeon_opt_set_context_reg(R_02870C_SPI_SHADER_POS_FORMAT, AC_TRACKED_SPI_SHADER_POS_FORMAT,
                               shader->regs.spi_shader_pos_format);
+   radv_bc250_vrs_probe_log(pdev, "PA_CL_VS_OUT_CNTL", shader->regs.pa_cl_vs_out_cntl);
    radeon_opt_set_context_reg(R_02881C_PA_CL_VS_OUT_CNTL, AC_TRACKED_PA_CL_VS_OUT_CNTL, shader->regs.pa_cl_vs_out_cntl);
 
    if (pdev->info.gfx_level <= GFX8)
@@ -3626,6 +3630,7 @@ radv_emit_hw_ngg(struct radv_cmd_buffer *cmd_buffer, const struct radv_shader *e
       gfx11_end_packed_context_regs();
       radeon_end();
    } else {
+      radv_bc250_vrs_probe_log(pdev, "PA_CL_VS_OUT_CNTL", shader->regs.pa_cl_vs_out_cntl);
       radeon_begin(cs);
       radeon_opt_set_context_reg(R_02881C_PA_CL_VS_OUT_CNTL, AC_TRACKED_PA_CL_VS_OUT_CNTL,
                                  shader->regs.pa_cl_vs_out_cntl);
@@ -4337,6 +4342,33 @@ radv_emit_vgt_shader_config(struct radv_cmd_buffer *cmd_buffer, const struct rad
    }
 }
 
+/* GFX10.3 VRS register state: on GFX10.3 and later, and on GFX1013 while the lab diagnostic
+ * RADV_BC250_VRS_PROBE is set (radv_physical_device::bc250_vrs_probe). */
+static inline bool
+radv_has_gfx103_vrs_state(const struct radv_physical_device *pdev)
+{
+   return pdev->info.gfx_level >= GFX10_3 || pdev->bc250_vrs_probe;
+}
+
+/* RADV_BC250_VRS_PROBE: one stderr line for each VRS register value that RADV programs, for the
+ * first 64 values of the process, so that a lab arm records what it asked the GPU to do. A value
+ * equal to the tracked value is not emitted again by radeon_opt_set_*, but it is logged here. */
+static void
+radv_bc250_vrs_probe_log(const struct radv_physical_device *pdev, const char *reg, uint32_t value)
+{
+#ifdef AMDGPU_WDDM_LAB_FLAVOUR
+   static uint32_t lines;
+   if (!pdev->bc250_vrs_probe || p_atomic_inc_return(&lines) > 64)
+      return;
+   fprintf(stderr, "BC250 VRS PROBE: %s=0x%08x\n", reg, value);
+   fflush(stderr);
+#else
+   (void)pdev;
+   (void)reg;
+   (void)value;
+#endif
+}
+
 static void
 gfx103_emit_vgt_draw_payload_cntl(struct radv_cmd_buffer *cmd_buffer)
 {
@@ -4360,7 +4392,9 @@ gfx103_emit_vgt_draw_payload_cntl(struct radv_cmd_buffer *cmd_buffer)
     * GE_VRS_RATE=0 doesn't cause context rolls while setting this register does.
     */
    const uint32_t vgt_draw_payload_cntl =
-      S_028A98_EN_VRS_RATE(pdev->info.gfx_level >= GFX10_3) | S_028A98_EN_PRIM_PAYLOAD(enable_prim_payload);
+      S_028A98_EN_VRS_RATE(pdev->info.gfx_level >= GFX10_3 || radv_bc250_vrs_probe(pdev, RADV_BC250_VRS_PROBE_DRAW)) |
+      S_028A98_EN_PRIM_PAYLOAD(enable_prim_payload);
+   radv_bc250_vrs_probe_log(pdev, "VGT_DRAW_PAYLOAD_CNTL", vgt_draw_payload_cntl);
 
    radeon_begin(cs);
 
@@ -4381,7 +4415,8 @@ radv_emit_override_vrs_state(struct radv_cmd_buffer *cmd_buffer)
    const struct radv_device *device = radv_cmd_buffer_device(cmd_buffer);
    const struct radv_physical_device *pdev = radv_device_physical(device);
 
-   if (pdev->info.gfx_level < GFX10_3)
+   if (pdev->info.gfx_level < GFX10_3 && !radv_bc250_vrs_probe(pdev, RADV_BC250_VRS_PROBE_OVR) &&
+       !radv_bc250_vrs_probe(pdev, RADV_BC250_VRS_PROBE_OVR_2X2))
       return;
 
    const struct radv_dynamic_state *d = &cmd_buffer->state.dynamic;
@@ -4405,6 +4440,12 @@ radv_emit_override_vrs_state(struct radv_cmd_buffer *cmd_buffer)
       mode = V_028064_SC_VRS_COMB_MODE_OVERRIDE;
       rate_x = rate_y = 1;
       vrs_surface_enable = false;
+   }
+
+   /* RADV_BC250_VRS_PROBE_OVR_2X2: the override combiner alone asks for 2x2, whatever the API rate. */
+   if (radv_bc250_vrs_probe(pdev, RADV_BC250_VRS_PROBE_OVR_2X2)) {
+      mode = V_028064_SC_VRS_COMB_MODE_OVERRIDE;
+      rate_x = rate_y = 1;
    }
 
    if (pdev->info.gfx_level >= GFX11) {
@@ -4431,10 +4472,13 @@ radv_emit_override_vrs_state(struct radv_cmd_buffer *cmd_buffer)
       }
       radeon_end();
    } else {
+      const uint32_t db_vrs_override_cntl = S_028064_VRS_OVERRIDE_RATE_COMBINER_MODE(mode) |
+                                            S_028064_VRS_OVERRIDE_RATE_X(rate_x) |
+                                            S_028064_VRS_OVERRIDE_RATE_Y(rate_y);
+      radv_bc250_vrs_probe_log(pdev, "DB_VRS_OVERRIDE_CNTL", db_vrs_override_cntl);
       radeon_begin(cs);
       radeon_opt_set_context_reg(R_028064_DB_VRS_OVERRIDE_CNTL, AC_TRACKED_DB_PA_SC_VRS_OVERRIDE_CNTL,
-                                 S_028064_VRS_OVERRIDE_RATE_COMBINER_MODE(mode) | S_028064_VRS_OVERRIDE_RATE_X(rate_x) |
-                                    S_028064_VRS_OVERRIDE_RATE_Y(rate_y));
+                                 db_vrs_override_cntl);
       radeon_end();
    }
 }
@@ -4533,7 +4577,7 @@ radv_emit_graphics_shaders(struct radv_cmd_buffer *cmd_buffer)
    radv_bc250_emit_mesh_dealloc_dist(cmd_buffer, &vgt_shader_cfg_key);
    radv_emit_vgt_shader_config(cmd_buffer, &vgt_shader_cfg_key);
 
-   if (pdev->info.gfx_level >= GFX10_3) {
+   if (pdev->info.gfx_level >= GFX10_3 || radv_bc250_vrs_probe(pdev, RADV_BC250_VRS_PROBE_DRAW)) {
       gfx103_emit_vgt_draw_payload_cntl(cmd_buffer);
    }
 }
@@ -4910,8 +4954,10 @@ radv_emit_fsr_state(struct radv_cmd_buffer *cmd_buffer)
    uint32_t htile_comb_mode = d->vk.fsr.combiner_ops[1];
    uint32_t pa_cl_vrs_cntl = 0;
 
-   /* GFX10.1 (RADV_BC250_VRS_NOOP) has neither GE_VRS_RATE nor PA_CL_VRS_CNTL. */
-   if (pdev->info.gfx_level < GFX10_3)
+   /* GFX10.1 (RADV_BC250_VRS_NOOP) has neither GE_VRS_RATE nor PA_CL_VRS_CNTL in its headers;
+    * RADV_BC250_VRS_PROBE_DRAW and _COMB write them on GFX1013 for the lab diagnostic. */
+   if (pdev->info.gfx_level < GFX10_3 && !radv_bc250_vrs_probe(pdev, RADV_BC250_VRS_PROBE_DRAW) &&
+       !radv_bc250_vrs_probe(pdev, RADV_BC250_VRS_PROBE_COMB))
       return;
 
    if (!render->vrs_att.iview) {
@@ -4979,13 +5025,22 @@ radv_emit_fsr_state(struct radv_cmd_buffer *cmd_buffer)
     */
    pa_cl_vrs_cntl |= S_028848_HTILE_RATE_COMBINER_MODE(htile_comb_mode);
 
+   const bool emit_draw_rate = pdev->info.gfx_level >= GFX10_3 || radv_bc250_vrs_probe(pdev, RADV_BC250_VRS_PROBE_DRAW);
+   const bool emit_combiners = pdev->info.gfx_level >= GFX10_3 || radv_bc250_vrs_probe(pdev, RADV_BC250_VRS_PROBE_COMB);
+
    radeon_begin(cs);
 
    /* Emit per-draw VRS rate which is the first combiner. */
-   radeon_opt_set_uconfig_reg(R_03098C_GE_VRS_RATE, AC_TRACKED_GE_VRS_RATE,
-                              S_03098C_RATE_X(rate_x) | S_03098C_RATE_Y(rate_y));
+   if (emit_draw_rate) {
+      radv_bc250_vrs_probe_log(pdev, "GE_VRS_RATE", S_03098C_RATE_X(rate_x) | S_03098C_RATE_Y(rate_y));
+      radeon_opt_set_uconfig_reg(R_03098C_GE_VRS_RATE, AC_TRACKED_GE_VRS_RATE,
+                                 S_03098C_RATE_X(rate_x) | S_03098C_RATE_Y(rate_y));
+   }
 
-   radeon_opt_set_context_reg(R_028848_PA_CL_VRS_CNTL, AC_TRACKED_PA_CL_VRS_CNTL, pa_cl_vrs_cntl);
+   if (emit_combiners) {
+      radv_bc250_vrs_probe_log(pdev, "PA_CL_VRS_CNTL", pa_cl_vrs_cntl);
+      radeon_opt_set_context_reg(R_028848_PA_CL_VRS_CNTL, AC_TRACKED_PA_CL_VRS_CNTL, pa_cl_vrs_cntl);
+   }
 
    radeon_end();
 }
@@ -5411,7 +5466,7 @@ radv_gfx6_emit_fb_ds_state(struct radv_cmd_buffer *cmd_buffer, const struct radv
    if (!stencil_compressed)
       db_render_control |= S_028000_STENCIL_COMPRESS_DISABLE(1);
 
-   if (pdev->info.gfx_level == GFX10_3) {
+   if (pdev->info.gfx_level == GFX10_3 || radv_bc250_vrs_probe(pdev, RADV_BC250_VRS_PROBE_HTILE)) {
       if (!cmd_buffer->state.render.vrs_att.iview) {
          db_htile_surface &= C_028ABC_VRS_HTILE_ENCODING;
       } else {
@@ -6219,7 +6274,8 @@ radv_emit_framebuffer_state(struct radv_cmd_buffer *cmd_buffer)
           */
          radv_load_ds_clear_metadata(cmd_buffer, iview);
       }
-   } else if (pdev->info.gfx_level == GFX10_3 && render->vrs_att.iview && radv_cmd_buffer_get_vrs_image(cmd_buffer)) {
+   } else if ((pdev->info.gfx_level == GFX10_3 || radv_bc250_vrs_probe(pdev, RADV_BC250_VRS_PROBE_HTILE)) &&
+              render->vrs_att.iview && radv_cmd_buffer_get_vrs_image(cmd_buffer)) {
       /* When a subpass uses a VRS attachment without binding a depth/stencil attachment, we have to
        * bind our internal depth buffer that contains the VRS data as part of HTILE.
        */
@@ -8608,7 +8664,8 @@ radv_dst_access_flush(struct radv_cmd_buffer *cmd_buffer, VkPipelineStageFlags2 
       flush_bits |= AC_BARRIER_INV_VMEM | AC_BARRIER_INV_SMEM;
    }
 
-   if (pdev->info.gfx_level == GFX10_3 && (dst_flags & VK_ACCESS_2_FRAGMENT_SHADING_RATE_ATTACHMENT_READ_BIT_KHR)) {
+   if ((pdev->info.gfx_level == GFX10_3 || radv_bc250_vrs_probe(pdev, RADV_BC250_VRS_PROBE_HTILE)) &&
+       (dst_flags & VK_ACCESS_2_FRAGMENT_SHADING_RATE_ATTACHMENT_READ_BIT_KHR)) {
       /* When VRS rates are copies from the VRS image to HTILE using VMEM. */
       flush_bits |= AC_BARRIER_INV_VMEM;
    }
@@ -10572,7 +10629,7 @@ radv_bind_multisample_state(struct radv_cmd_buffer *cmd_buffer, const struct rad
    if (cmd_buffer->state.ms.sample_shading_enable != ms->sample_shading_enable) {
       cmd_buffer->state.ms.sample_shading_enable = ms->sample_shading_enable;
       cmd_buffer->state.dirty |= RADV_CMD_DIRTY_RAST_SAMPLES_STATE | RADV_CMD_DIRTY_MSAA_STATE;
-      if (pdev->info.gfx_level >= GFX10_3)
+      if (radv_has_gfx103_vrs_state(pdev))
          cmd_buffer->state.dirty |= RADV_CMD_DIRTY_FSR_STATE;
       if (pdev->info.gfx_level == GFX9)
          cmd_buffer->state.dirty |= RADV_CMD_DIRTY_BINNING_STATE;
@@ -10780,7 +10837,7 @@ radv_bind_pre_rast_shader(struct radv_cmd_buffer *cmd_buffer, const struct radv_
       /* Re-emit VRS state because the combiner is different (vertex vs primitive). Re-emit
        * primitive topology because the mesh shading pipeline clobbered it.
        */
-      if (pdev->info.gfx_level >= GFX10_3)
+      if (radv_has_gfx103_vrs_state(pdev))
          cmd_buffer->state.dirty |= RADV_CMD_DIRTY_FSR_STATE;
       cmd_buffer->state.dirty |= RADV_CMD_DIRTY_VGT_PRIM_STATE;
    }
@@ -10933,7 +10990,7 @@ radv_bind_fragment_shader(struct radv_cmd_buffer *cmd_buffer, const struct radv_
 
    if (!previous_ps || previous_ps->info.ps.uses_sample_shading != ps->info.ps.uses_sample_shading) {
       cmd_buffer->state.dirty |= RADV_CMD_DIRTY_RAST_SAMPLES_STATE | RADV_CMD_DIRTY_MSAA_STATE;
-      if (gfx_level >= GFX10_3)
+      if (radv_has_gfx103_vrs_state(pdev))
          cmd_buffer->state.dirty |= RADV_CMD_DIRTY_FSR_STATE;
       if (gfx_level == GFX9)
          cmd_buffer->state.dirty |= RADV_CMD_DIRTY_BINNING_STATE;
@@ -11041,7 +11098,7 @@ radv_bind_shader(struct radv_cmd_buffer *cmd_buffer, struct radv_shader *shader,
       case MESA_SHADER_FRAGMENT:
          cmd_buffer->state.dirty |=
             RADV_CMD_DIRTY_DB_SHADER_CONTROL | RADV_CMD_DIRTY_MSAA_STATE | RADV_CMD_DIRTY_RAST_SAMPLES_STATE;
-         if (pdev->info.gfx_level >= GFX10_3)
+         if (radv_has_gfx103_vrs_state(pdev))
             cmd_buffer->state.dirty |= RADV_CMD_DIRTY_FSR_STATE;
          if (pdev->info.gfx_level == GFX9)
             cmd_buffer->state.dirty |= RADV_CMD_DIRTY_BINNING_STATE;
@@ -12853,7 +12910,7 @@ radv_cmd_buffer_begin_rendering(struct radv_cmd_buffer *cmd_buffer, const VkRend
    }
 
    if (!(pRenderingInfo->flags & VK_RENDERING_RESUMING_BIT)) {
-      if (vrs_att.iview && pdev->info.gfx_level == GFX10_3) {
+      if (vrs_att.iview && (pdev->info.gfx_level == GFX10_3 || radv_bc250_vrs_probe(pdev, RADV_BC250_VRS_PROBE_HTILE))) {
          VkRect2D render_area = pRenderingInfo->renderArea;
          if (ds_att.iview && radv_htile_enabled(ds_att.iview->image, ds_att.iview->vk.base_mip_level)) {
             /* When we have a VRS attachment and a depth/stencil attachment, we just need to copy the
@@ -12948,7 +13005,7 @@ radv_cmd_buffer_begin_rendering(struct radv_cmd_buffer *cmd_buffer, const VkRend
 
    if (pdev->info.rbplus_allowed)
       cmd_buffer->state.dirty |= RADV_CMD_DIRTY_RBPLUS;
-   if (pdev->info.gfx_level >= GFX10_3)
+   if (radv_has_gfx103_vrs_state(pdev))
       cmd_buffer->state.dirty |= RADV_CMD_DIRTY_FSR_STATE;
    if (pdev->info.gfx_level >= GFX12)
       cmd_buffer->state.dirty |= RADV_CMD_DIRTY_GFX12_HIZ_WA_STATE | RADV_CMD_DIRTY_RAST_SAMPLES_STATE;
@@ -14474,7 +14531,7 @@ radv_emit_ps_state(struct radv_cmd_buffer *cmd_buffer)
    unsigned raster_prim = 0;
 
    if ((ps->info.ps.selects_frag_coord_xy_dynamically || ps->info.ps.selects_quad_pos_dynamically) &&
-       pdev->info.gfx_level >= GFX10_3) {
+       radv_has_gfx103_vrs_state(pdev)) {
       /* Whether VRS can be other than 1x1 (never before GFX10.3: RADV_BC250_VRS_NOOP shades at 1x1). */
       vrs_enabled = cmd_buffer->state.dynamic.vk.fsr.fragment_size.width != 1 ||
                     cmd_buffer->state.dynamic.vk.fsr.fragment_size.height != 1 ||
@@ -15717,7 +15774,7 @@ radv_validate_dynamic_states(struct radv_cmd_buffer *cmd_buffer, uint64_t dynami
 
    if (dynamic_states & RADV_DYNAMIC_RASTERIZATION_SAMPLES) {
       cmd_buffer->state.dirty |= RADV_CMD_DIRTY_NGGC_VIEWPORT;
-      if (pdev->info.gfx_level >= GFX10_3 && pdev->info.gfx_level < GFX12)
+      if (radv_has_gfx103_vrs_state(pdev) && pdev->info.gfx_level < GFX12)
          cmd_buffer->state.dirty |= RADV_CMD_DIRTY_OVERRIDE_VRS_STATE;
    }
 

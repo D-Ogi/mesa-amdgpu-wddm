@@ -1986,6 +1986,19 @@ radv_bc250_mesh_pos_export_refusal(const struct radv_compiler_info *compiler_inf
    return NULL;
 }
 
+/* PA_CL_VS_OUT_CNTL.USE_VTX_VRS_RATE (GFX10.3+). On GFX1013 the field is set only by the lab
+ * diagnostic RADV_BC250_VRS_PROBE_VTX; with the probe on and that bit clear, the rate is still in the
+ * position export, but the rasterizer is not told to read it (the control for the bit). */
+static bool
+radv_shader_use_vtx_vrs_rate(const struct radv_physical_device *pdev, const struct radv_shader_info *info)
+{
+   if (!info->outinfo.writes_primitive_shading_rate)
+      return false;
+   if (pdev->bc250_vrs_probe)
+      return radv_bc250_vrs_probe(pdev, RADV_BC250_VRS_PROBE_VTX);
+   return true;
+}
+
 static void
 radv_precompute_registers_hw_vs(struct radv_device *device, struct radv_shader *shader)
 {
@@ -2016,7 +2029,7 @@ radv_precompute_registers_hw_vs(struct radv_device *device, struct radv_shader *
       S_02881C_USE_VTX_POINT_SIZE(info->outinfo.writes_pointsize) |
       S_02881C_USE_VTX_RENDER_TARGET_INDX(info->outinfo.writes_layer) |
       S_02881C_USE_VTX_VIEWPORT_INDX(info->outinfo.writes_viewport_index) |
-      S_02881C_USE_VTX_VRS_RATE(info->outinfo.writes_primitive_shading_rate) |
+      S_02881C_USE_VTX_VRS_RATE(radv_shader_use_vtx_vrs_rate(pdev, info)) |
       S_02881C_VS_OUT_MISC_VEC_ENA(misc_vec_ena) |
       S_02881C_VS_OUT_MISC_SIDE_BUS_ENA(misc_vec_ena || (pdev->info.gfx_level >= GFX10_3 && num_pos_exports > 1)) |
       S_02881C_VS_OUT_CCDIST0_VEC_ENA((total_mask & 0x0f) != 0) |
@@ -2211,7 +2224,7 @@ radv_precompute_registers_hw_ngg(struct radv_device *device, struct radv_shader 
       S_02881C_USE_VTX_POINT_SIZE(info->outinfo.writes_pointsize) |
       S_02881C_USE_VTX_RENDER_TARGET_INDX(info->outinfo.writes_layer) |
       S_02881C_USE_VTX_VIEWPORT_INDX(info->outinfo.writes_viewport_index) |
-      S_02881C_USE_VTX_VRS_RATE(info->outinfo.writes_primitive_shading_rate) |
+      S_02881C_USE_VTX_VRS_RATE(radv_shader_use_vtx_vrs_rate(pdev, info)) |
       S_02881C_VS_OUT_MISC_VEC_ENA(misc_vec_ena) |
       S_02881C_VS_OUT_MISC_SIDE_BUS_ENA(misc_vec_ena || (pdev->info.gfx_level >= GFX10_3 && num_pos_exports > 1)) |
       S_02881C_VS_OUT_CCDIST0_VEC_ENA((total_mask & 0x0f) != 0) |

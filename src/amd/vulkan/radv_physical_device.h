@@ -132,6 +132,12 @@ struct radv_physical_device {
     * GFX10.1 has no VRS hardware: no VRS register or HTILE VRS field is ever written, shading
     * rate outputs are stripped and shading rate reads return 0 (radv_nir_bc250_vrs_noop). */
    bool bc250_vrs_noop;
+   /* RADV_BC250_VRS_PROBE (lab flavour, GFX1013 only, 0 = off): a lab diagnostic that asks
+    * whether the GFX1013 silicon has the GFX10.3 VRS hardware which the GFX10.1 headers do not
+    * name. A mask of RADV_BC250_VRS_PROBE_* bits: ON exposes VK_KHR_fragment_shading_rate and
+    * compiles rate shaders as on GFX10.3; each other bit lets RADV write one GFX10.3 VRS
+    * register group. bc250_vrs_noop is off while this is set. Never set in the release flavour. */
+   uint32_t bc250_vrs_probe;
    /* RADV_BC250_EXPOSE_FAST_BINDING (opt-in): VK_EXT_descriptor_buffer stays exposed
     * with hybrid Task, and the BC250 Mesh/Task pipeline paths accept descriptor
     * buffer pipelines (radv_bc250_prepare_task). */
@@ -256,6 +262,25 @@ static inline struct radv_instance *
 radv_physical_device_instance(const struct radv_physical_device *pdev)
 {
    return (struct radv_instance *)pdev->vk.instance;
+}
+
+/* RADV_BC250_VRS_PROBE bits (radv_physical_device::bc250_vrs_probe). The names in brackets are
+ * GFX10.3 registers and fields; the GFX10.1 headers that describe GFX1013 do not name them. */
+#define RADV_BC250_VRS_PROBE_ON      0x01 /* VK_KHR_fragment_shading_rate, GFX10.3 rate shaders */
+#define RADV_BC250_VRS_PROBE_DRAW    0x02 /* [GE_VRS_RATE], [VGT_DRAW_PAYLOAD_CNTL.EN_VRS_RATE] */
+#define RADV_BC250_VRS_PROBE_COMB    0x04 /* [PA_CL_VRS_CNTL] */
+#define RADV_BC250_VRS_PROBE_VTX     0x08 /* [PA_CL_VS_OUT_CNTL.USE_VTX_VRS_RATE] */
+#define RADV_BC250_VRS_PROBE_OVR     0x10 /* [DB_VRS_OVERRIDE_CNTL] as RADV programs it */
+#define RADV_BC250_VRS_PROBE_OVR_2X2 0x20 /* [DB_VRS_OVERRIDE_CNTL] = OVERRIDE 2x2 on every draw */
+#define RADV_BC250_VRS_PROBE_HTILE   0x40 /* attachment rate: [DB_HTILE_SURFACE.VRS_HTILE_ENCODING], rate copy */
+#define RADV_BC250_VRS_PROBE_ALL     0x7f
+
+/* True when the probe is on and every bit of 'bits' is set. */
+static inline bool
+radv_bc250_vrs_probe(const struct radv_physical_device *pdev, uint32_t bits)
+{
+   const uint32_t want = RADV_BC250_VRS_PROBE_ON | bits;
+   return (pdev->bc250_vrs_probe & want) == want;
 }
 
 static inline bool

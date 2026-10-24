@@ -184,8 +184,9 @@ radv_image_has_vrs_htile(const struct radv_device *device, const struct radv_ima
    const struct radv_physical_device *pdev = radv_device_physical(device);
    const enum amd_gfx_level gfx_level = pdev->info.gfx_level;
 
-   /* Any depth buffer can potentially use VRS on GFX10.3. */
-   return gfx_level == GFX10_3 && device->vk.enabled_features.attachmentFragmentShadingRate &&
+   /* Any depth buffer can potentially use VRS on GFX10.3 (and on GFX1013 under RADV_BC250_VRS_PROBE_HTILE). */
+   return (gfx_level == GFX10_3 || radv_bc250_vrs_probe(pdev, RADV_BC250_VRS_PROBE_HTILE)) &&
+          device->vk.enabled_features.attachmentFragmentShadingRate &&
           radv_image_has_htile(image) && (image->vk.usage & VK_IMAGE_USAGE_2_DEPTH_STENCIL_ATTACHMENT_BIT_KHR);
 }
 

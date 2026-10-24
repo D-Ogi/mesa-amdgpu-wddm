@@ -802,7 +802,7 @@ radv_physical_device_get_supported_extensions(const struct radv_physical_device 
 #endif
       .KHR_format_feature_flags2 = true,
       .KHR_fragment_shader_barycentric = pdev->info.gfx_level >= GFX10_3 || pdev->bc250_barycentrics,
-      .KHR_fragment_shading_rate = pdev->info.gfx_level >= GFX10_3 || pdev->bc250_vrs_noop,
+      .KHR_fragment_shading_rate = pdev->info.gfx_level >= GFX10_3 || pdev->bc250_vrs_noop || pdev->bc250_vrs_probe,
       .KHR_get_memory_requirements2 = true,
       .KHR_global_priority = true,
       .KHR_image_format_list = true,
@@ -3014,6 +3014,25 @@ radv_physical_device_try_create(struct radv_instance *instance, drmDevicePtr drm
     * RADV_BC250_VRS_NOOP=1 turns it on, for measurement. */
    pdev->bc250_vrs_noop = pdev->info.family == CHIP_GFX1013 &&
       debug_get_bool_option("RADV_BC250_VRS_NOOP", false);
+#ifdef AMDGPU_WDDM_LAB_FLAVOUR
+   /* RADV_BC250_VRS_PROBE=<mask> (lab diagnostic, radv_physical_device.h): any non-zero mask
+    * implies RADV_BC250_VRS_PROBE_ON and turns the no-op VRS off. */
+   if (pdev->info.family == CHIP_GFX1013) {
+      const uint32_t probe = (uint32_t)debug_get_num_option("RADV_BC250_VRS_PROBE", 0) & RADV_BC250_VRS_PROBE_ALL;
+      if (probe) {
+         pdev->bc250_vrs_probe = probe | RADV_BC250_VRS_PROBE_ON;
+         pdev->bc250_vrs_noop = false;
+         fprintf(stderr, "BC250 VRS PROBE: mask=0x%02x draw=%u comb=%u vtx=%u ovr=%u ovr2x2=%u htile=%u\n",
+                 pdev->bc250_vrs_probe, radv_bc250_vrs_probe(pdev, RADV_BC250_VRS_PROBE_DRAW),
+                 radv_bc250_vrs_probe(pdev, RADV_BC250_VRS_PROBE_COMB),
+                 radv_bc250_vrs_probe(pdev, RADV_BC250_VRS_PROBE_VTX),
+                 radv_bc250_vrs_probe(pdev, RADV_BC250_VRS_PROBE_OVR),
+                 radv_bc250_vrs_probe(pdev, RADV_BC250_VRS_PROBE_OVR_2X2),
+                 radv_bc250_vrs_probe(pdev, RADV_BC250_VRS_PROBE_HTILE));
+         fflush(stderr);
+      }
+   }
+#endif
    if (pdev->bc250_native_mesh) {
       assert(pdev->info.family == CHIP_GFX1013);
       assert(pdev->info.gfx_level == GFX10);
@@ -3107,7 +3126,10 @@ radv_physical_device_try_create(struct radv_instance *instance, drmDevicePtr drm
     */
    char buf[VK_UUID_SIZE * 2 + 1];
    mesa_bytes_to_hex(buf, pdev->cache_uuid, VK_UUID_SIZE);
-   pdev->vk.disk_cache = disk_cache_create("RADV", buf, 0);
+   /* RADV_BC250_VRS_PROBE: the mask changes the register state that shaders carry, and each probe
+    * arm must compile its own shaders, so there is no disk cache while it is set. */
+   if (!pdev->bc250_vrs_probe)
+      pdev->vk.disk_cache = disk_cache_create("RADV", buf, 0);
 
    pdev->disk_cache_meta =
       disk_cache_create_custom("RADV", buf, 0, "radv_builtin_shaders", 1024 * 1024 * 32 /* 32MiB */);
