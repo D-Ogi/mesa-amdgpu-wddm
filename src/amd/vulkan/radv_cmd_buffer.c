@@ -10,6 +10,7 @@
 
 #include "radv_cmd_buffer.h"
 #include "radv_bc250.h"
+#include "radv_s16f8_probe.h"
 #include "meta/radv_meta.h"
 #include "tools/radv_debug_hang.h"
 #include "tools/radv_rmv.h"
@@ -5016,6 +5017,24 @@ radv_emit_ls_hs_config(struct radv_cmd_buffer *cmd_buffer)
    radeon_end();
 }
 
+/* Source: PAL palMsaaState.h coverage16/PS8 and RadeonSI si_state.c S16F8.
+ * Only the isolated client uses an8-sample no-attachment pipeline. Logical pipeline state
+ * stays8 so no unrelated compiler/ring-buffer16 path is enabled by this diagnostic.
+ */
+static bool
+radv_s16f8_probe_active(struct radv_cmd_buffer *cmd_buffer)
+{
+   const struct radv_device *device = radv_cmd_buffer_device(cmd_buffer);
+   const struct radv_physical_device *pdev = radv_device_physical(device);
+   return radv_s16f8_probe_mode() >= 2 &&
+          (pdev->info.gfx_level == GFX10 || pdev->info.gfx_level == GFX10_3) &&
+          cmd_buffer->state.num_rast_samples == 8 &&
+          !cmd_buffer->state.dynamic.vk.ms.sample_locations_enable &&
+          cmd_buffer->state.dynamic.vk.rs.conservative_mode == VK_CONSERVATIVE_RASTERIZATION_MODE_DISABLED_EXT &&
+          cmd_buffer->state.render.color_att_count == 0 &&
+          cmd_buffer->state.render.ds_att.format == VK_FORMAT_UNDEFINED;
+}
+
 static void
 radv_emit_rast_samples_state(struct radv_cmd_buffer *cmd_buffer)
 {
@@ -5048,7 +5067,8 @@ radv_emit_rast_samples_state(struct radv_cmd_buffer *cmd_buffer)
                        S_028A4C_FORCE_EOV_REZ_ENABLE(1) | S_028A4C_WALK_ALIGN8_PRIM_FITS_ST(walk_align8);
 
    if (!d->sample_location.count || !d->vk.ms.sample_locations_enable)
-      radv_emit_default_sample_locations(pdev, cmd_buffer->cs, rasterization_samples);
+      radv_emit_default_sample_locations(pdev, cmd_buffer->cs,
+                                         radv_s16f8_probe_active(cmd_buffer) ? 16 : rasterization_samples);
 
    if (ps_iter_samples > 1) {
       spi_baryc_cntl |= S_0286E0_POS_FLOAT_LOCATION(2);
@@ -15433,7 +15453,8 @@ radv_emit_msaa_state(struct radv_cmd_buffer *cmd_buffer)
    const struct radv_physical_device *pdev = radv_device_physical(device);
    const struct radv_instance *instance = radv_physical_device_instance(pdev);
    const struct radv_shader *ps = cmd_buffer->state.shaders[MESA_SHADER_FRAGMENT];
-   const unsigned rasterization_samples = cmd_buffer->state.num_rast_samples;
+   const bool s16f8_probe = radv_s16f8_probe_active(cmd_buffer);
+   const unsigned rasterization_samples = s16f8_probe ? 16 : cmd_buffer->state.num_rast_samples;
    const struct radv_rendering_state *render = &cmd_buffer->state.render;
    const struct radv_dynamic_state *d = &cmd_buffer->state.dynamic;
    const uint32_t sample_mask = d->vk.ms.sample_mask | ((uint32_t)d->vk.ms.sample_mask << 16);
@@ -15511,7 +15532,7 @@ radv_emit_msaa_state(struct radv_cmd_buffer *cmd_buffer)
    }
 
    if (msaa_enable) {
-      unsigned z_samples = MAX2(render->ds_samples, rasterization_samples);
+      unsigned z_samples = s16f8_probe ? 8 : MAX2(render->ds_samples, rasterization_samples);
       unsigned ps_iter_samples = radv_get_ps_iter_samples(cmd_buffer);
       unsigned log_z_samples = util_logbase2(z_samples);
       unsigned log_ps_iter_samples = util_logbase2(ps_iter_samples);
@@ -15519,7 +15540,7 @@ radv_emit_msaa_state(struct radv_cmd_buffer *cmd_buffer)
 
       pa_sc_aa_config |=
          S_028BE0_MSAA_NUM_SAMPLES(uses_underestimate ? 0 : log_samples + overestimate_inner_coverage) |
-         S_028BE0_MSAA_EXPOSED_SAMPLES(log_samples);
+         S_028BE0_MSAA_EXPOSED_SAMPLES(s16f8_probe && radv_s16f8_probe_mode() == 2 ? 3 : log_samples);
 
       if (pdev->info.gfx_level >= GFX12) {
          pa_sc_aa_config |= S_028BE0_PS_ITER_SAMPLES(log_ps_iter_samples);
@@ -15530,7 +15551,8 @@ radv_emit_msaa_state(struct radv_cmd_buffer *cmd_buffer)
                             S_028BE0_COVERED_CENTROID_IS_CENTER(pdev->info.gfx_level >= GFX10_3);
 
          db_eqaa |= S_028804_MAX_ANCHOR_SAMPLES(log_z_samples) | S_028804_PS_ITER_SAMPLES(log_ps_iter_samples) |
-                    S_028804_MASK_EXPORT_NUM_SAMPLES(log_samples) | S_028804_ALPHA_TO_MASK_NUM_SAMPLES(log_samples);
+                    S_028804_MASK_EXPORT_NUM_SAMPLES(s16f8_probe ? 3 : log_samples) |
+                    S_028804_ALPHA_TO_MASK_NUM_SAMPLES(log_samples);
       }
 
       if (line_rast_mode == VK_LINE_RASTERIZATION_MODE_RECTANGULAR_SMOOTH)
@@ -15539,6 +15561,11 @@ radv_emit_msaa_state(struct radv_cmd_buffer *cmd_buffer)
       /* Single sample: the underestimate result still needs its own sample. */
       pa_sc_aa_config |= S_028BE0_MSAA_NUM_SAMPLES(1);
    }
+
+   if (radv_s16f8_probe_mode())
+      fprintf(stderr, "RADV_S16F8_PROBE mode=%u active=%u coverage=%u ps=%u mask=%04x PA_SC_AA_CONFIG=%08x DB_EQAA=%08x raw_coverage=1\n",
+              radv_s16f8_probe_mode(), s16f8_probe, rasterization_samples,
+              radv_get_ps_iter_samples(cmd_buffer), d->vk.ms.sample_mask, pa_sc_aa_config, db_eqaa);
 
    if (RADV_DEBUG(instance, NO_ATOC_DITHERING)) {
       db_alpha_to_mask = S_028B70_ALPHA_TO_MASK_OFFSET0(2) | S_028B70_ALPHA_TO_MASK_OFFSET1(2) |

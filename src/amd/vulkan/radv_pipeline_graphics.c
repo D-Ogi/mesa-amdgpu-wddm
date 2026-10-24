@@ -8,6 +8,7 @@
  * SPDX-License-Identifier: MIT
  */
 
+#include "radv_s16f8_probe.h"
 #include "util/u_compile_stack.h"
 #include "meta/radv_meta.h"
 #include "nir/nir.h"
@@ -3324,7 +3325,12 @@ radv_graphics_shaders_compile(const struct radv_compiler_info *compiler_info, st
          lower_sample_mask_in_options.behavior = ac_nir_lower_samplemask_unknown_states_no_sample_shading;
       }
 
-      NIR_PASS(_, stages[MESA_SHADER_FRAGMENT].nir, ac_nir_lower_sample_mask_in, &lower_sample_mask_in_options);
+      /* Diagnostic raw hardware coverage, including the8-sample positive control.
+       * Default-off; disables the API-visible per-invocation mask adjustment only here.
+       * Run with RADV_DEBUG=nocache and a fresh engine shader cache.
+       */
+      if (!radv_s16f8_probe_mode())
+         NIR_PASS(_, stages[MESA_SHADER_FRAGMENT].nir, ac_nir_lower_sample_mask_in, &lower_sample_mask_in_options);
    }
 
    radv_foreach_stage (i, active_nir_stages) {
