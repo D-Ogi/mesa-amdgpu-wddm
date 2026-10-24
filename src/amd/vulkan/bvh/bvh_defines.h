@@ -27,7 +27,10 @@
 #define RADV_GFX12_INSTANCE_DISABLE_MICROMAPS       (1ul << 52)
 #define RADV_GFX12_INSTANCE_FORCE_2_STATE_MICROMAPS (1ul << 53)
 
-/* [ special_index:2, subdivision_level:4, special_index_enable:1, addr:57 ] */
+/* [ special_index:2, subdivision_level:4, special_index_enable:1, addr:57 ]
+ * C code uses the shifts only: unsigned long has 32 bits on Windows.
+ */
+#define RADV_MICROMAP_ADDR_SPECIAL_INDEX_ENABLE_SHIFT 57
 #define RADV_MICROMAP_ADDR_SPECIAL_INDEX_ENABLE    (0x1ul << 57)
 #define RADV_MICROMAP_ADDR_SUBDIVISION_LEVEL_SHIFT 58
 #define RADV_MICROMAP_ADDR_SPECIAL_INDEX_SHIFT     62

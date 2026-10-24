@@ -638,7 +638,8 @@ get_opacity(nir_builder *b, const struct radv_compiler_info *compiler_info, cons
             nir_def *addr, nir_def *barycentrics, nir_def *force_2_state, nir_def *disable)
 {
    nir_def *addr_hi = nir_channel(b, addr, 1);
-   nir_def *use_special_index = nir_test_mask(b, addr_hi, RADV_MICROMAP_ADDR_SPECIAL_INDEX_ENABLE >> 32);
+   nir_def *use_special_index =
+      nir_test_mask(b, addr_hi, BITFIELD_BIT(RADV_MICROMAP_ADDR_SPECIAL_INDEX_ENABLE_SHIFT - 32));
 
    nir_def *ignored, *non_ignored, *special_index, *loaded;
    nir_push_if(b, disable);
@@ -655,8 +656,11 @@ get_opacity(nir_builder *b, const struct radv_compiler_info *compiler_info, cons
       {
          nir_def *level = nir_ubitfield_extract_imm(b, addr_hi, RADV_MICROMAP_ADDR_SUBDIVISION_LEVEL_SHIFT - 32, 4);
 
+         /* Sign-extend from bit 47 as build_node_to_addr() does: the WDDM winsys uses the bottom half of the
+          * address space.
+          */
          if (compiler_info->ac->gfx_level >= GFX9)
-            addr_hi = nir_ior_imm(b, addr_hi, 0xffff0000);
+            addr_hi = nir_ishr_imm(b, nir_ishl_imm(b, addr_hi, 16), 16);
          else
             addr_hi = nir_iand_imm(b, addr_hi, 0xffff);
 
