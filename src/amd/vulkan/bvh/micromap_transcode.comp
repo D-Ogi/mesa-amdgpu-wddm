@@ -16,6 +16,9 @@
 #extension GL_EXT_scalar_block_layout : require
 #extension GL_EXT_buffer_reference : require
 #extension GL_EXT_buffer_reference2 : require
+#extension GL_KHR_shader_subgroup_arithmetic : require
+#extension GL_KHR_shader_subgroup_ballot : require
+#extension GL_KHR_shader_subgroup_basic : require
 
 layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
 
@@ -97,6 +100,7 @@ main(void)
       src_bits = 1;
 
    uint32_t dst = 0;
+   uint32_t states = 0;
 
    /* Reorder the triangles to optimize the index calculation during traversal. */
    for (uint32_t j = 0; j < 16; j++) {
@@ -140,16 +144,34 @@ main(void)
       src = (src >> ((src_index * src_bits) & 0x1f)) & ((1 << src_bits) - 1);
 
       dst = dst | (src << (j * 2));
+
+      /* Levels 0 and 1 fill only part of the dword. */
+      if (dst_index < data_count)
+         states |= 1u << src;
    }
 
    uint32_t dst_offset = args.data_offset + global_id * SIZEOF(uint32_t);
    DEREF(REF(uint32_t)(args.dst + dst_offset)) = dst;
 
+   uint32_t header_offset = SIZEOF(radv_accel_struct_header) + search_index * SIZEOF(radv_micromap_triangle_header);
+   REF(radv_micromap_triangle_header) header = REF(radv_micromap_triangle_header)(args.dst + header_offset);
+
+   uint32_t level_bits = states << RADV_MICROMAP_STATES_SHIFT;
    if (dword_index == 0) {
-      uint32_t header_offset = SIZEOF(radv_accel_struct_header) + search_index * SIZEOF(radv_micromap_triangle_header);
-      radv_micromap_triangle_header header;
-      header.offset = dst_offset;
-      header.level = triangle.subdivisionLevel;
-      DEREF(REF(radv_micromap_triangle_header)(args.dst + header_offset)) = header;
+      DEREF(header).offset = dst_offset;
+      level_bits |= uint32_t(triangle.subdivisionLevel);
+   }
+
+   /* The build clears the headers before this pass, and all dwords of a triangle add their states. A subgroup
+    * merges the bits of each of its triangles first, so that a large micromap does not need one atomic per dword.
+    */
+   while (true) {
+      uint32_t first_triangle = subgroupBroadcastFirst(search_index);
+      if (search_index == first_triangle) {
+         uint32_t merged_bits = subgroupOr(level_bits);
+         if (subgroupElect())
+            atomicOr(DEREF(header).level, merged_bits);
+         break;
+      }
    }
 }
