@@ -1085,6 +1085,7 @@ visit_intrinsic(nir_intrinsic_instr *instr, struct divergence_state *state)
    case nir_intrinsic_report_ray_intersection:
    case nir_intrinsic_rq_proceed:
    case nir_intrinsic_rq_load:
+   case nir_intrinsic_load_hit_object:
    case nir_intrinsic_load_ray_triangle_vertex_positions:
    case nir_intrinsic_cmat_extract:
    case nir_intrinsic_cmat_muladd_amd:

@@ -3029,7 +3029,12 @@ nir_get_shader_call_payload_src(nir_intrinsic_instr *call)
       return &call->src[10];
    case nir_intrinsic_execute_callable:
    case nir_intrinsic_rt_execute_callable:
+   case nir_intrinsic_hit_object_execute_shader:
       return &call->src[1];
+   case nir_intrinsic_hit_object_trace_ray:
+      return &call->src[11];
+   case nir_intrinsic_execute_hit_object_amd:
+      return &call->src[12];
    default:
       UNREACHABLE("Not a call intrinsic");
       return NULL;
