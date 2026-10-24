@@ -734,7 +734,8 @@ struct radv_compiler_info {
       uint32_t bc250_mesh_compact_lds : 1; /* RADV_BC250_MESH_COMPACT_LDS: smaller LDS layout for expanded Mesh. */
       uint32_t bc250_split_prep_free : 1; /* RADV_BC250_SPLIT_PREP_FREE: direct split shaders carry the piece select. */
       uint32_t bc250_mesh_implicit_tris : 1; /* RADV_BC250_MESH_IMPLICIT_TRIS: derived expanded Mesh connectivity. */
-      uint32_t padding : 1;
+      /* Fill the third word: every byte is hashed and serialized. */
+      uint32_t padding : 28;
 
       int32_t force_aniso;
 
