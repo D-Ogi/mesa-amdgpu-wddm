@@ -2564,6 +2564,8 @@ radv_get_physical_device_properties(struct radv_physical_device *pdev)
       .maxOpacity2StateSubdivisionLevel = 12,
       .maxOpacity4StateSubdivisionLevel = 12,
       .maxOpacityLossy4StateSubdivisionLevel = 12,
+      /* The required minimum. The micromap layout uses 32-bit offsets. */
+      .maxMicromapTriangles = 1ull << 27,
    };
 
    struct vk_properties *p = &pdev->vk.properties;
