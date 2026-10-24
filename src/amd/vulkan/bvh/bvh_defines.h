@@ -379,6 +379,7 @@ struct header_args {
    uint32_t internal_nodes_offset;
    uint32_t primitive_count;
    uint32_t type;
+   uint32_t has_micromaps;
 };
 
 #define RADV_UPDATE_BUILD_FLAGS                                                                                        \
