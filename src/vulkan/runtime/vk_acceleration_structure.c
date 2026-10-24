@@ -602,6 +602,7 @@ vk_fill_geometry_data(VkAccelerationStructureTypeKHR type, uint32_t first_id, ui
          data.micromap_index_type = micromap_info->indexType;
          data.micromap_index_stride = (int32_t)micromap_info->indexStride;
          data.micromap_base_index = micromap_info->baseTriangle;
+         data.micromap_flags = VK_BVH_GEOMETRY_MICROMAP_LINKED;
 
          data.micromap_addr = 0;      
          if (micromap_info->micromap) {
