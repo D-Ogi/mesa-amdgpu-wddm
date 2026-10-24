@@ -105,8 +105,9 @@ main(void)
 
          uint64_t micromap_addr64 = radv_micromap_addr_get_addr(micromap_addr);
          if (args.mode == RADV_COPY_MODE_SERIALIZE) {
+            /* Sign-extend from bit 47: the WDDM winsys uses the bottom half of the address space. */
             DEREF(INDEX(uint64_t, serialized_addrs, i)) =
-               (micromap_addr64 | 0xffff000000000000ul) - micromap_addr.offset;
+               uint64_t(int64_t(micromap_addr64 << 16) >> 16) - micromap_addr.offset;
          } else {
             uint64_t loaded_addr = DEREF(INDEX(uint64_t, serialized_addrs, i));
             micromap_addr64 = (micromap_addr64 & (~RADV_MICROMAP_ADDR_ADDR_MASK)) |
