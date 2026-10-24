@@ -1020,6 +1020,7 @@ radv_physical_device_get_supported_extensions(const struct radv_physical_device 
       .EXT_shader_demote_to_helper_invocation = true,
       .EXT_shader_float8 = pdev->info.gfx_level >= GFX11_7 && !pdev->use_llvm,
       .EXT_shader_image_atomic_int64 = true,
+      .EXT_shader_long_vector = true,
       .EXT_shader_module_identifier = true,
       .EXT_shader_object = !radv_bc250_task_strict_ext(pdev) && !pdev->use_llvm && !(RADV_DEBUG(instance, NO_ESO)),
       .EXT_shader_replicated_composites = true,
@@ -1488,6 +1489,9 @@ radv_physical_device_get_features(const struct radv_physical_device *pdev, struc
       /* VK_EXT_border_color_swizzle */
       .borderColorSwizzle = true,
       .borderColorSwizzleFromImage = true,
+
+      /* VK_EXT_shader_long_vector */
+      .longVector = true,
 
       /* VK_EXT_shader_module_identifier */
       .shaderModuleIdentifier = true,
@@ -2638,6 +2642,9 @@ radv_get_physical_device_properties(struct radv_physical_device *pdev)
       p->drmHasRender = false;
    }
 #endif
+
+   /* VK_EXT_shader_long_vector */
+   p->maxVectorComponents = RADV_MAX_VECTOR_COMPONENTS;
 
    /* VK_EXT_shader_module_identifier */
    STATIC_ASSERT(sizeof(vk_shaderModuleIdentifierAlgorithmUUID) == sizeof(p->shaderModuleIdentifierAlgorithmUUID));
