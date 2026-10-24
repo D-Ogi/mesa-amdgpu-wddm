@@ -35,6 +35,11 @@
 #define RADV_MICROMAP_ADDR_SUBDIVISION_LEVEL_SHIFT 58
 #define RADV_MICROMAP_ADDR_SPECIAL_INDEX_SHIFT     62
 #define RADV_MICROMAP_ADDR_ADDR_MASK               (~(0x7ful << 57))
+/* A special index with a nonzero subdivision level: the triangle has no micromap and the geometry flags give
+ * its opacity.
+ */
+#define RADV_MICROMAP_ADDR_GEOMETRY_FLAGS                                                                              \
+   (RADV_MICROMAP_ADDR_SPECIAL_INDEX_ENABLE | (0x1ul << RADV_MICROMAP_ADDR_SUBDIVISION_LEVEL_SHIFT))
 
 #define RADV_BLAS_POINTER_FORCE_OPAQUE     (1ul << 54)
 #define RADV_BLAS_POINTER_FORCE_NON_OPAQUE (1ul << 55)

@@ -238,8 +238,14 @@ uint32_t fetch_child_flags(VOID_REF bvh, uint32_t node_ptr)
 int32_t
 vk_load_micromap_index(vk_bvh_geometry_data geom_data, uint32_t global_id)
 {
+   if ((geom_data.micromap_flags & VK_BVH_GEOMETRY_MICROMAP_LINKED) == 0)
+      return VK_MICROMAP_INDEX_GEOMETRY_FLAGS;
+
    int32_t opacity_index = 0;
-   if (geom_data.micromap_indices != 0) {
+   if (geom_data.micromap_index_type == VK_INDEX_TYPE_NONE_KHR) {
+      /* Without an index buffer, triangle i uses micromap baseTriangle + i. The index buffer address is 0 then. */
+      opacity_index = int32_t(global_id);
+   } else if (geom_data.micromap_indices != 0) {
       uint64_t index_addr = geom_data.micromap_indices + global_id * geom_data.micromap_index_stride;
       switch (geom_data.micromap_index_type) {
       case VK_INDEX_TYPE_UINT16: {
@@ -248,10 +254,6 @@ vk_load_micromap_index(vk_bvh_geometry_data geom_data, uint32_t global_id)
       }
       case VK_INDEX_TYPE_UINT32: {
          opacity_index = DEREF(REF(int32_t)(index_addr));
-         break;
-      }
-      case VK_INDEX_TYPE_NONE_KHR: {
-         opacity_index = int32_t(global_id);
          break;
       }
       case VK_INDEX_TYPE_UINT8_EXT: {
