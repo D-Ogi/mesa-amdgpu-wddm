@@ -99,10 +99,30 @@ build_triangle(inout vk_aabb bounds, VOID_REF dst_ptr, vk_bvh_geometry_data geom
    }
 
    if (VK_TEST_BUILD_FLAG_HAS_MICROMAPS) {
+      int32_t opacity_index = vk_load_micromap_index(geom_data, global_id);
+#ifdef RESOLVE_MICROMAP_INDEX
+      /* The driver replaces the index of a micromap with only one state by the special index of that state. */
+      opacity_index = RESOLVE_MICROMAP_INDEX(geom_data.micromap_addr, opacity_index);
+#endif
+
+      if ((geom_data.micromap_flags & VK_BVH_GEOMETRY_MICROMAP_RESOLVE) != 0) {
+         if (opacity_index == VK_OPACITY_MICROMAP_SPECIAL_INDEX_FULLY_OPAQUE_KHR) {
+            /* Fully opaque under all ray and instance flags: an opaque triangle without a micromap. */
+            DEREF(node).geometry_id_and_flags |= VK_GEOMETRY_OPAQUE;
+            opacity_index = VK_MICROMAP_INDEX_GEOMETRY_FLAGS;
+         } else if (opacity_index == VK_OPACITY_MICROMAP_SPECIAL_INDEX_FULLY_TRANSPARENT_KHR &&
+                    !VK_TEST_BUILD_FLAG_ALWAYS_ACTIVE) {
+            /* No ray or instance flag makes a transparent triangle a hit. Leave it out of the BVH, so that the
+             * hardware does not test it.
+             */
+            is_valid = false;
+         }
+      }
+
       REF(vk_ir_triangle_node_micromap) micromap = vk_ir_triangle_node_get_micromap_ref(node);
       DEREF(micromap).opacity_addr_lo = unpackUint2x32(geom_data.micromap_addr).x;
       DEREF(micromap).opacity_addr_hi = unpackUint2x32(geom_data.micromap_addr).y;
-      DEREF(micromap).opacity_index = vk_load_micromap_index(geom_data, global_id);
+      DEREF(micromap).opacity_index = opacity_index;
    }
 
    return is_valid;
