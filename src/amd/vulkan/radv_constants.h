@@ -82,6 +82,35 @@
 #define RADV_MAX_HIT_ATTRIB_SIZE   32
 #define RADV_MAX_HIT_ATTRIB_DWORDS (RADV_MAX_HIT_ATTRIB_SIZE / 4)
 
+/* A hit object trace (VK_EXT_ray_tracing_invocation_reorder) sets this internal ray flag. The traversal shader then
+ * writes the hit or the miss to the hit attribute storage and does not call a closest-hit or miss shader. The API
+ * ray flags use bits 0-10 and the cull mask uses bits 24-31.
+ */
+#define RADV_RAY_FLAG_HIT_OBJECT_RECORD (1u << 23)
+#define RADV_RAY_FLAGS_API_MASK         0x7fffffu
+
+/* Kinds of a hit object. */
+#define RADV_HIT_OBJECT_KIND_EMPTY 0
+#define RADV_HIT_OBJECT_KIND_HIT   1
+#define RADV_HIT_OBJECT_KIND_MISS  2
+
+/* Hit attribute storage dwords that a hit object trace returns, after the attribute dwords. Only the kind is valid
+ * for a miss.
+ */
+enum radv_hit_object_record_dword {
+   RADV_HIT_OBJECT_RECORD_KIND = RADV_MAX_HIT_ATTRIB_DWORDS,
+   RADV_HIT_OBJECT_RECORD_SBT_INDEX,
+   RADV_HIT_OBJECT_RECORD_TMAX,
+   RADV_HIT_OBJECT_RECORD_PRIMITIVE_ADDR_LO,
+   RADV_HIT_OBJECT_RECORD_PRIMITIVE_ADDR_HI,
+   RADV_HIT_OBJECT_RECORD_PRIMITIVE_ID,
+   RADV_HIT_OBJECT_RECORD_INSTANCE_ADDR_LO,
+   RADV_HIT_OBJECT_RECORD_INSTANCE_ADDR_HI,
+   RADV_HIT_OBJECT_RECORD_GEOMETRY_ID_AND_FLAGS,
+   RADV_HIT_OBJECT_RECORD_HIT_KIND,
+   RADV_HIT_OBJECT_RECORD_END,
+};
+
 #define RADV_SHADER_ALLOC_ALIGNMENT      256
 #define RADV_SHADER_ALLOC_MIN_ARENA_SIZE (256 * 1024)
 /* 256 KiB << 5 = 8 MiB */

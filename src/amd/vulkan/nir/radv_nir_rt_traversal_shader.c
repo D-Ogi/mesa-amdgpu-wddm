@@ -263,7 +263,8 @@ lower_ahit_isec_intrinsics(nir_builder *b, nir_intrinsic_instr *intr, void *_par
       ret = nir_load_var(b, params->candidate->hit_kind);
       break;
    case nir_intrinsic_load_ray_flags:
-      ret = nir_iand_imm(b, nir_load_var(b, params->anyhit_vars->cull_mask_and_flags), 0xFFFFFF);
+      /* Also removes RADV_RAY_FLAG_HIT_OBJECT_RECORD. */
+      ret = nir_iand_imm(b, nir_load_var(b, params->anyhit_vars->cull_mask_and_flags), RADV_RAY_FLAGS_API_MASK);
       break;
    case nir_intrinsic_load_cull_mask:
       ret = nir_ushr_imm(b, nir_load_var(b, params->anyhit_vars->cull_mask_and_flags), 24);
@@ -1431,6 +1432,45 @@ radv_build_traversal_shader(const struct radv_compiler_info *compiler_info, stru
 
    radv_nir_lower_rt_storage(b.shader, hit_attrib_derefs, NULL, NULL, compiler_info->key.rt_wave_size);
 
+   /* A hit object trace gets the hit or the miss back in the hit attribute storage, and no closest-hit or miss
+    * shader runs. The traversal stack in LDS is not used any more at this point.
+    */
+   if (info->uses_hit_objects) {
+      nir_def *hit = nir_load_var(&b, result.hit);
+      nir_push_if(&b, nir_test_mask(&b, params.cull_mask_and_flags, RADV_RAY_FLAG_HIT_OBJECT_RECORD));
+      {
+         nir_store_hit_attrib_amd(&b,
+                                  nir_bcsel(&b, hit, nir_imm_int(&b, RADV_HIT_OBJECT_KIND_HIT),
+                                            nir_imm_int(&b, RADV_HIT_OBJECT_KIND_MISS)),
+                                  .base = RADV_HIT_OBJECT_RECORD_KIND);
+         nir_push_if(&b, hit);
+         {
+            for (int i = 0; i < ARRAY_SIZE(hit_attrib_derefs); ++i)
+               nir_store_hit_attrib_amd(&b, nir_load_deref(&b, hit_attrib_derefs[i]), .base = i);
+
+            nir_def *primitive_addr = nir_load_var(&b, result.primitive_addr);
+            nir_def *instance_addr = nir_load_var(&b, result.instance_addr);
+            nir_store_hit_attrib_amd(&b, nir_load_var(&b, result.sbt_index), .base = RADV_HIT_OBJECT_RECORD_SBT_INDEX);
+            nir_store_hit_attrib_amd(&b, nir_load_var(&b, result.tmax), .base = RADV_HIT_OBJECT_RECORD_TMAX);
+            nir_store_hit_attrib_amd(&b, nir_unpack_64_2x32_split_x(&b, primitive_addr),
+                                     .base = RADV_HIT_OBJECT_RECORD_PRIMITIVE_ADDR_LO);
+            nir_store_hit_attrib_amd(&b, nir_unpack_64_2x32_split_y(&b, primitive_addr),
+                                     .base = RADV_HIT_OBJECT_RECORD_PRIMITIVE_ADDR_HI);
+            nir_store_hit_attrib_amd(&b, nir_load_var(&b, result.primitive_id),
+                                     .base = RADV_HIT_OBJECT_RECORD_PRIMITIVE_ID);
+            nir_store_hit_attrib_amd(&b, nir_unpack_64_2x32_split_x(&b, instance_addr),
+                                     .base = RADV_HIT_OBJECT_RECORD_INSTANCE_ADDR_LO);
+            nir_store_hit_attrib_amd(&b, nir_unpack_64_2x32_split_y(&b, instance_addr),
+                                     .base = RADV_HIT_OBJECT_RECORD_INSTANCE_ADDR_HI);
+            nir_store_hit_attrib_amd(&b, nir_load_var(&b, result.geometry_id_and_flags),
+                                     .base = RADV_HIT_OBJECT_RECORD_GEOMETRY_ID_AND_FLAGS);
+            nir_store_hit_attrib_amd(&b, nir_load_var(&b, result.hit_kind), .base = RADV_HIT_OBJECT_RECORD_HIT_KIND);
+         }
+         nir_pop_if(&b, NULL);
+      }
+      nir_push_else(&b, NULL);
+   }
+
    nir_push_if(&b, nir_load_var(&b, result.hit));
    {
       for (int i = 0; i < ARRAY_SIZE(hit_attrib_derefs); ++i)
@@ -1451,6 +1491,9 @@ radv_build_traversal_shader(const struct radv_compiler_info *compiler_info, stru
       nir_execute_miss_amd(&b, params.tmax);
    }
    nir_pop_if(&b, NULL);
+
+   if (info->uses_hit_objects)
+      nir_pop_if(&b, NULL);
 
    nir_index_ssa_defs(nir_shader_get_entrypoint(b.shader));
    nir_progress(true, nir_shader_get_entrypoint(b.shader), nir_metadata_none);

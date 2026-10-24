@@ -76,6 +76,8 @@ struct radv_rt_const_arg_info {
 struct radv_ray_tracing_stage_info {
    bool can_inline;
    bool has_position_fetch;
+   /* The stage traces or executes hit objects (VK_EXT_ray_tracing_invocation_reorder). */
+   bool uses_hit_objects;
 
    BITSET_DECLARE(unused_args, CPS_ARG_COUNT);
 

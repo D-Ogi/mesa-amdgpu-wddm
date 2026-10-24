@@ -164,6 +164,8 @@ radv_nir_lower_rt_storage(nir_shader *shader, nir_deref_instr **hit_attribs, nir
 {
    bool progress = false;
    nir_function_impl *impl = radv_get_rt_shader_entrypoint(shader);
+   /* Hit object traces also use the dwords after the attributes (enum radv_hit_object_record_dword). */
+   unsigned num_dwords = RADV_MAX_HIT_ATTRIB_DWORDS;
 
    nir_foreach_variable_with_modes (attrib, shader, nir_var_ray_hit_attrib) {
       attrib->data.mode = nir_var_shader_temp;
@@ -191,6 +193,10 @@ radv_nir_lower_rt_storage(nir_shader *shader, nir_deref_instr **hit_attribs, nir
 
          if (intrin->intrinsic == nir_intrinsic_load_hit_attrib_amd ||
              intrin->intrinsic == nir_intrinsic_store_hit_attrib_amd) {
+            num_dwords = MAX2(num_dwords, nir_intrinsic_base(intrin) + 1);
+            /* Register storage only holds the attributes. */
+            assert(!hit_attribs || nir_intrinsic_base(intrin) < RADV_MAX_HIT_ATTRIB_DWORDS);
+
             nir_def *offset;
             if (!hit_attribs)
                offset = nir_imul_imm(
@@ -231,7 +237,7 @@ radv_nir_lower_rt_storage(nir_shader *shader, nir_deref_instr **hit_attribs, nir
    }
 
    if (!hit_attribs)
-      shader->info.shared_size = MAX2(shader->info.shared_size, workgroup_size * RADV_MAX_HIT_ATTRIB_SIZE);
+      shader->info.shared_size = MAX2(shader->info.shared_size, workgroup_size * num_dwords * 4);
 
    return nir_progress(progress, impl, nir_metadata_control_flow);
 }

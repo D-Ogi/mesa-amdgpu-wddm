@@ -106,6 +106,7 @@ libradv_files = files(
   'nir/radv_nir_lower_fs_barycentric.c',
   'nir/radv_nir_lower_fs_intrinsics.c',
   'nir/radv_nir_lower_hit_attrib_derefs.c',
+  'nir/radv_nir_lower_hit_objects.c',
   'nir/radv_nir_lower_immediate_samplers.c',
   'nir/radv_nir_lower_intrinsics_early.c',
   'nir/radv_nir_lower_io.c',
