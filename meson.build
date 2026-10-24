@@ -159,6 +159,8 @@ pre_args += '-DHAVE_OPENGL_ES_2=@0@'.format(with_gles2.to_int())
 # the release flavour, which leaves them out of the binary.
 if get_option('amdgpu-wddm-lab-flavour')
   pre_args += '-DAMDGPU_WDDM_LAB_FLAVOUR=1'
+  # Isolated diagnostic build activation; absent from the control and production.
+  pre_args += '-DRADV_S16F8_PROBE=1'
 endif
 
 with_any_opengl = with_opengl or with_gles1 or with_gles2
