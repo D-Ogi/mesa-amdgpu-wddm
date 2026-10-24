@@ -7316,7 +7316,7 @@ bc250_draw_task(struct radv_cmd_buffer *cmd_buffer, uint32_t x, uint32_t y, uint
     * buffer. The private producer still executes on the graphics PM4 stream;
     * gang existence does not change radv_get_pm4_cs for a graphics queue.
     */
-   assert(!radv_cmd_buffer_uses_mec(cmd_buffer));
+   assert(!cmd_buffer->is_mec);
    /* The producer increments the GDS task-invocation counter only where this winsys gives the
     * submission a GDS partition (BD-119, radv_bc250_prepare_task). The queue needs the shader-query
     * GDS region exactly then; asking for it without GDS allocated a buffer that is not GDS and left
