@@ -773,6 +773,7 @@ build_leaves(VkCommandBuffer commandBuffer, struct vk_device *device,
          const VkBuildAccelerationStructureFlagsKHR keep_micromap_flags =
             VK_BUILD_ACCELERATION_STRUCTURE_ALLOW_UPDATE_BIT_KHR |
             VK_BUILD_ACCELERATION_STRUCTURE_ALLOW_OPACITY_MICROMAP_UPDATE_BIT_KHR |
+            VK_BUILD_ACCELERATION_STRUCTURE_ALLOW_OPACITY_MICROMAP_DATA_UPDATE_BIT_EXT |
             VK_BUILD_ACCELERATION_STRUCTURE_ALLOW_DISABLE_OPACITY_MICROMAPS_BIT_KHR;
          if ((leaf_consts.geom_data.micromap_flags & VK_BVH_GEOMETRY_MICROMAP_LINKED) &&
              !(build_info->flags & keep_micromap_flags))
