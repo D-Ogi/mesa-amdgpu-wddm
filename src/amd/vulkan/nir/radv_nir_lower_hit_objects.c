@@ -253,17 +253,22 @@ lower_record_from_query(nir_builder *b, nir_intrinsic_instr *intr, nir_deref_ins
    for (unsigned i = 0; i < RADV_MAX_HIT_ATTRIB_DWORDS; i++)
       triangle_attribs[i] = i < 2 ? nir_channel(b, barycentrics, i) : nir_imm_int(b, 0);
 
-   /* Without a committed intersection the hit object is empty, as in D3D12 HitObject::FromRayQuery. */
+   /* Without a committed intersection the hit object is empty, as in D3D12 HitObject::FromRayQuery. An empty hit
+    * object has a zero ray, as store_empty writes it.
+    */
+   nir_def *is_empty = nir_ieq_imm(b, type, 0);
    ho_store(b, ho, kind,
-            nir_bcsel(b, nir_ieq_imm(b, type, 0), nir_imm_int(b, RADV_HIT_OBJECT_KIND_EMPTY),
-                      nir_imm_int(b, RADV_HIT_OBJECT_KIND_HIT)));
+            nir_bcsel(b, is_empty, nir_imm_int(b, RADV_HIT_OBJECT_KIND_EMPTY), nir_imm_int(b, RADV_HIT_OBJECT_KIND_HIT)));
    ho_store(b, ho, sbt_index, intr->src[2].ssa);
-   ho_store(b, ho, flags, rq_value(b, rq, 1, 32, nir_ray_query_value_flags, false));
-   ho_store(b, ho, cull_mask, rq_value(b, rq, 1, 32, nir_ray_query_value_cull_mask, false));
-   ho_store(b, ho, origin, rq_value(b, rq, 3, 32, nir_ray_query_value_world_ray_origin, false));
-   ho_store(b, ho, tmin, rq_value(b, rq, 1, 32, nir_ray_query_value_tmin, false));
-   ho_store(b, ho, direction, rq_value(b, rq, 3, 32, nir_ray_query_value_world_ray_direction, false));
-   ho_store(b, ho, tmax, rq_value(b, rq, 1, 32, nir_ray_query_value_intersection_t, true));
+#define RAY_VALUE(n, value, committed)                                                                                 \
+   nir_bcsel(b, is_empty, nir_imm_zero(b, n, 32), rq_value(b, rq, n, 32, value, committed))
+   ho_store(b, ho, flags, RAY_VALUE(1, nir_ray_query_value_flags, false));
+   ho_store(b, ho, cull_mask, RAY_VALUE(1, nir_ray_query_value_cull_mask, false));
+   ho_store(b, ho, origin, RAY_VALUE(3, nir_ray_query_value_world_ray_origin, false));
+   ho_store(b, ho, tmin, RAY_VALUE(1, nir_ray_query_value_tmin, false));
+   ho_store(b, ho, direction, RAY_VALUE(3, nir_ray_query_value_world_ray_direction, false));
+   ho_store(b, ho, tmax, RAY_VALUE(1, nir_ray_query_value_intersection_t, true));
+#undef RAY_VALUE
    ho_store(b, ho, primitive_addr, rq_value(b, rq, 1, 64, nir_ray_query_value_intersection_primitive_addr_amd, true));
    ho_store(b, ho, primitive_id, rq_value(b, rq, 1, 32, nir_ray_query_value_intersection_primitive_index, true));
    ho_store(b, ho, instance_addr, rq_value(b, rq, 1, 64, nir_ray_query_value_intersection_instance_addr_amd, true));
@@ -282,8 +287,30 @@ lower_set_sbt_record_index(nir_builder *b, nir_intrinsic_instr *intr, nir_deref_
    ho_store(b, ho, sbt_index, nir_bcsel(b, is_empty, nir_imm_int(b, 0), intr->src[1].ssa));
 }
 
-/* Values that only a hit has. They are 0 for a miss and for an empty hit object. The memory loads that they need
- * run only for a hit, because a miss has no instance or primitive address.
+/* The value of a miss or an empty hit object, as D3D12 HitObject defines it: the object-space ray is the world ray
+ * (zero for an empty hit object, which stores a zero ray), the transforms are the identity, and the other values
+ * are 0.
+ */
+static nir_def *
+load_no_hit_value(nir_builder *b, nir_intrinsic_instr *intr, nir_deref_instr *ho)
+{
+   const unsigned column = nir_intrinsic_column(intr);
+
+   switch (nir_intrinsic_hit_object_value(intr)) {
+   case nir_hit_object_value_object_ray_origin:
+      return ho_load(b, ho, origin);
+   case nir_hit_object_value_object_ray_direction:
+      return ho_load(b, ho, direction);
+   case nir_hit_object_value_object_to_world:
+   case nir_hit_object_value_world_to_object:
+      return nir_vec3(b, nir_imm_float(b, column == 0), nir_imm_float(b, column == 1), nir_imm_float(b, column == 2));
+   default:
+      return nir_imm_zero(b, intr->def.num_components, intr->def.bit_size);
+   }
+}
+
+/* Values that only a hit has. A miss and an empty hit object get load_no_hit_value. The memory loads that a hit
+ * needs run only for a hit, because a miss has no instance or primitive address.
  */
 static nir_def *
 load_hit_value(nir_builder *b, const struct radv_compiler_info *compiler_info, nir_intrinsic_instr *intr,
@@ -294,7 +321,7 @@ load_hit_value(nir_builder *b, const struct radv_compiler_info *compiler_info, n
    const unsigned column = nir_intrinsic_column(intr);
    nir_def *is_hit = nir_ieq_imm(b, ho_load(b, ho, kind), RADV_HIT_OBJECT_KIND_HIT);
    /* The else value of the phi is defined before the if: after nir_pop_if it would land between the if and the phi. */
-   nir_def *zero = nir_imm_zero(b, num_components, bit_size);
+   nir_def *no_hit = load_no_hit_value(b, intr, ho);
 
    nir_def *value;
    nir_push_if(b, is_hit);
@@ -356,7 +383,7 @@ load_hit_value(nir_builder *b, const struct radv_compiler_info *compiler_info, n
    nir_pop_if(b, NULL);
 
    assert(value->num_components == num_components && value->bit_size == bit_size);
-   return nir_if_phi(b, value, zero);
+   return nir_if_phi(b, value, no_hit);
 }
 
 static nir_def *
