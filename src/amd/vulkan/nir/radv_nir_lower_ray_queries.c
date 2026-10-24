@@ -424,6 +424,12 @@ lower_rq_load(const struct radv_compiler_info *compiler_info, nir_builder *b, ni
       nir_def *primitive_addr = isec_load(b, intersection, primitive_addr);
       return radv_load_vertex_position(compiler_info, b, primitive_addr, nir_intrinsic_column(instr));
    }
+   case nir_ray_query_value_cull_mask:
+      return nir_ushr_imm(b, rq_load(b, rq, cull_mask), 24);
+   case nir_ray_query_value_intersection_instance_addr_amd:
+      return isec_load(b, intersection, instance_addr);
+   case nir_ray_query_value_intersection_primitive_addr_amd:
+      return isec_load(b, intersection, primitive_addr);
    default:
       UNREACHABLE("Invalid nir_ray_query_value!");
    }

@@ -718,6 +718,9 @@ radv_shader_spirv_to_nir(const struct radv_compiler_info *compiler_info, struct 
    /* Vulkan uses the separate-shader linking model */
    nir->info.separate_shader = true;
 
+   /* Before the ray queries are lowered: a hit object built from a ray query reads the query. */
+   NIR_PASS(_, nir, radv_nir_lower_hit_objects, compiler_info);
+
    nir_shader_gather_info(nir, nir_shader_get_entrypoint(nir));
 
    if (nir->info.ray_queries > 0) {

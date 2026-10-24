@@ -41,6 +41,8 @@ bool radv_nir_lower_ray_payload_derefs(nir_shader *shader, uint32_t offset);
 
 bool radv_nir_lower_ray_queries(nir_shader *shader, const struct radv_compiler_info *compiler_info);
 
+bool radv_nir_lower_hit_objects(nir_shader *shader, const struct radv_compiler_info *compiler_info);
+
 bool radv_nir_lower_vs_inputs(nir_shader *shader, const struct radv_compiler_info *compiler_info,
                               const struct radv_shader_stage *vs_stage,
                               const struct radv_graphics_state_key *gfx_state);

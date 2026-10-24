@@ -346,6 +346,17 @@ radv_enable_rt(const struct radv_physical_device *pdev)
    return true;
 }
 
+/* Hit objects need the function-call lowering of ray tracing stages. The CPS
+ * lowering (RADV_PERFTEST=rtcps) does not support them.
+ */
+static bool
+radv_enable_rt_invocation_reorder(const struct radv_physical_device *pdev)
+{
+   const struct radv_instance *instance = radv_physical_device_instance(pdev);
+
+   return radv_enable_rt(pdev) && !(instance->perftest_flags & RADV_PERFTEST_RT_CPS);
+}
+
 bool
 radv_emulate_rt(const struct radv_physical_device *pdev)
 {
@@ -998,6 +1009,7 @@ radv_physical_device_get_supported_extensions(const struct radv_physical_device 
       .EXT_private_data = true,
       .EXT_provoking_vertex = true,
       .EXT_queue_family_foreign = true,
+      .EXT_ray_tracing_invocation_reorder = radv_enable_rt_invocation_reorder(pdev),
       .EXT_robustness2 = true,
       .EXT_sample_locations = true,
       .EXT_sampler_filter_minmax = radv_filter_minmax_enabled(pdev),
@@ -1422,6 +1434,9 @@ radv_physical_device_get_features(const struct radv_physical_device *pdev, struc
 
       /* VK_KHR_ray_tracing_position_fetch */
       .rayTracingPositionFetch = true,
+
+      /* VK_EXT_ray_tracing_invocation_reorder */
+      .rayTracingInvocationReorder = radv_enable_rt_invocation_reorder(pdev),
 
       /* VK_EXT_vertex_input_dynamic_state */
       .vertexInputDynamicState = true,
@@ -2341,6 +2356,12 @@ radv_get_physical_device_properties(struct radv_physical_device *pdev)
       .maxRayDispatchInvocationCount = 1 << 30, /* Required limit. */
       .shaderGroupHandleAlignment = 16,
       .maxRayHitAttributeSize = RADV_MAX_HIT_ATTRIB_SIZE,
+
+      /* VK_EXT_ray_tracing_invocation_reorder: the reorder instructions are
+       * no-ops, so the order of invocations does not change.
+       */
+      .rayTracingInvocationReorderReorderingHint = VK_RAY_TRACING_INVOCATION_REORDER_MODE_NONE_EXT,
+      .maxShaderBindingTableRecordIndex = (1u << 28) - 1, /* Required limit. */
 
       /* VK_KHR_performance_query */
       .allowCommandBufferQueryCopies = false,
