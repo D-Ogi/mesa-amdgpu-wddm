@@ -249,8 +249,42 @@ typedef enum {
    nir_ray_query_value_flags,
    nir_ray_query_value_world_ray_direction,
    nir_ray_query_value_world_ray_origin,
-   nir_ray_query_value_intersection_triangle_vertex_positions
+   nir_ray_query_value_intersection_triangle_vertex_positions,
+   /* The values below are not reachable from SPIR-V ray query instructions. Drivers use them to build a hit
+    * object from a ray query (OpHitObjectRecordFromQueryEXT).
+    */
+   nir_ray_query_value_cull_mask,
+   nir_ray_query_value_intersection_instance_addr_amd,
+   nir_ray_query_value_intersection_primitive_addr_amd,
 } nir_ray_query_value;
+
+/**
+ * Values that can be read from a hit object (SPV_EXT_shader_invocation_reorder).
+ */
+typedef enum {
+   nir_hit_object_value_is_empty,
+   nir_hit_object_value_is_hit,
+   nir_hit_object_value_is_miss,
+   nir_hit_object_value_ray_flags,
+   nir_hit_object_value_ray_t_min,
+   nir_hit_object_value_ray_t_max,
+   nir_hit_object_value_world_ray_origin,
+   nir_hit_object_value_world_ray_direction,
+   nir_hit_object_value_object_ray_origin,
+   nir_hit_object_value_object_ray_direction,
+   nir_hit_object_value_object_to_world,
+   nir_hit_object_value_world_to_object,
+   nir_hit_object_value_instance_id,
+   nir_hit_object_value_instance_custom_index,
+   nir_hit_object_value_geometry_index,
+   nir_hit_object_value_primitive_index,
+   nir_hit_object_value_hit_kind,
+   nir_hit_object_value_sbt_record_index,
+   nir_hit_object_value_shader_record_buffer_handle,
+   nir_hit_object_value_triangle_vertex_positions,
+   /* The hit attributes as 8 dwords in natural layout. */
+   nir_hit_object_value_attributes,
+} nir_hit_object_value;
 
 /**
  * Intel resource flags
@@ -2293,7 +2327,8 @@ typedef struct nir_ps_input_info_amd {
 unsigned
 nir_instr_xfb_write_mask(nir_intrinsic_instr *instr);
 
-#define NIR_INTRINSIC_MAX_INPUTS 11
+/* nir_intrinsics.py asserts this limit (execute_hit_object_amd has 13 sources). */
+#define NIR_INTRINSIC_MAX_INPUTS 13
 
 typedef struct nir_intrinsic_info {
    const char *name;
@@ -2445,6 +2480,25 @@ nir_intrinsic_is_ray_query(nir_intrinsic_op intrinsic)
    case nir_intrinsic_rq_load:
    case nir_intrinsic_rq_proceed:
    case nir_intrinsic_rq_terminate:
+      return true;
+   default:
+      return false;
+   }
+}
+
+/* Hit object intrinsics. src[0] of each one is the hit object deref. */
+static inline bool
+nir_intrinsic_is_hit_object(nir_intrinsic_op intrinsic)
+{
+   switch (intrinsic) {
+   case nir_intrinsic_hit_object_trace_ray:
+   case nir_intrinsic_hit_object_execute_shader:
+   case nir_intrinsic_hit_object_record_empty:
+   case nir_intrinsic_hit_object_record_miss:
+   case nir_intrinsic_hit_object_record_from_query:
+   case nir_intrinsic_hit_object_set_sbt_record_index:
+   case nir_intrinsic_hit_object_reorder_thread:
+   case nir_intrinsic_load_hit_object:
       return true;
    default:
       return false;

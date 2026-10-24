@@ -176,6 +176,8 @@ gather_intrinsic(struct access_state *state, nir_intrinsic_instr *instr)
    /* These are what SPIR-V to NIR generates, but they might be lowered later. */
    case nir_intrinsic_trace_ray:
    case nir_intrinsic_execute_callable:
+   case nir_intrinsic_hit_object_trace_ray:
+   case nir_intrinsic_hit_object_execute_shader:
       state->has_calls = true;
       break;
 

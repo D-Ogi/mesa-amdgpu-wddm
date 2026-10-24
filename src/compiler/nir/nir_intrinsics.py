@@ -131,6 +131,8 @@ def index(c_data_type, name, size = 1):
 def intrinsic(name, src_comp=[], dest_comp=-1, indices=[],
               flags=[], sysval=False, bit_sizes=[]):
     assert name not in INTR_OPCODES
+    # NIR_INTRINSIC_MAX_INPUTS in nir.h: a longer src_comp list overflows nir_intrinsic_info::src_components.
+    assert len(src_comp) <= 13, name
     INTR_OPCODES[name] = Intrinsic(name, src_comp, dest_comp,
                                    indices, flags, sysval, bit_sizes)
 
@@ -316,6 +318,9 @@ index("nir_ray_query_value", "ray_query_value")
 
 # Select between committed and candidate ray queriy intersections
 index("bool", "committed")
+
+# Hit object values accessible from the HitObjectEXT object
+index("nir_hit_object_value", "hit_object_value")
 
 # Rounding mode for conversions
 index("nir_rounding_mode", "rounding_mode")
@@ -767,6 +772,34 @@ intrinsic("rq_generate_intersection", src_comp=[-1, 1])
 intrinsic("rq_confirm_intersection", src_comp=[-1])
 # src[] = { query }
 intrinsic("rq_load", src_comp=[-1], dest_comp=0, indices=[RAY_QUERY_VALUE,COMMITTED,COLUMN])
+
+# Hit objects (SPV_EXT_shader_invocation_reorder). src[0] is the hit object deref.
+#
+# Trace a ray and record the hit or the miss in the hit object. Closest-hit and miss shaders are not called.
+#   0. Hit object
+#   1-10. Same as trace_ray sources 0-9
+#   11. Payload
+intrinsic("hit_object_trace_ray", src_comp=[-1, -1, 1, 1, 1, 1, 1, 3, 1, 3, 1, -1])
+# Call the closest-hit or the miss shader of the hit object.
+# src[] = { hit_object, payload }
+intrinsic("hit_object_execute_shader", src_comp=[-1, -1])
+# src[] = { hit_object }
+intrinsic("hit_object_record_empty", src_comp=[-1])
+# src[] = { hit_object, ray_flags, miss_index, origin, tmin, direction, tmax }
+intrinsic("hit_object_record_miss", src_comp=[-1, 1, 1, 3, 1, 3, 1])
+# Record the committed intersection of a ray query. The attributes are 8 dwords in natural layout. They and the hit
+# kind apply only to a committed AABB intersection.
+# src[] = { hit_object, ray_query, sbt_record_index, attributes, hit_kind }
+intrinsic("hit_object_record_from_query", src_comp=[-1, -1, 1, 8, 1])
+# src[] = { hit_object, sbt_record_index }
+intrinsic("hit_object_set_sbt_record_index", src_comp=[-1, 1])
+# src[] = { hit_object }
+intrinsic("load_hit_object", src_comp=[-1], dest_comp=0, indices=[HIT_OBJECT_VALUE, COLUMN])
+# Reorder hints. An implementation can ignore them.
+# src[] = { hint, bits }
+intrinsic("reorder_thread", src_comp=[1, 1])
+# src[] = { hit_object, hint, bits }
+intrinsic("hit_object_reorder_thread", src_comp=[-1, 1, 1])
 
 # Driver independent raytracing helpers
 
@@ -2253,6 +2286,22 @@ intrinsic("execute_closest_hit_amd", src_comp=[1, 1, 1, 1, 1, 1, 1])
 
 #   0. Ray Tmax
 intrinsic("execute_miss_amd", src_comp=[1])
+
+# Call the closest-hit or the miss shader that a hit object records.
+#   0. Kind (0 empty, 1 hit, 2 miss)
+#   1. SBT record index
+#   2. Cull mask and flags
+#   3. Ray Origin
+#   4. Ray Tmin
+#   5. Ray Direction
+#   6. Ray Tmax
+#   7. Primitive Addr
+#   8. Primitive Id
+#   9. Instance Addr
+#   10. Geometry Id and Flags
+#   11. Hit Kind
+#   12. Payload
+intrinsic("execute_hit_object_amd", src_comp=[1, 1, 1, 3, 1, 3, 1, 1, 1, 1, 1, 1, -1])
 
 # Used for saving and restoring hit attribute variables.
 # BASE=dword index
