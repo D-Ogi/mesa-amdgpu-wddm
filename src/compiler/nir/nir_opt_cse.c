@@ -146,6 +146,11 @@ may_change_active_invocations(nir_instr *instr)
    case nir_intrinsic_trace_ray:
    case nir_intrinsic_execute_callable:
    case nir_intrinsic_report_ray_intersection:
+   case nir_intrinsic_hit_object_trace_ray:
+   case nir_intrinsic_hit_object_execute_shader:
+   case nir_intrinsic_execute_hit_object_amd:
+   case nir_intrinsic_reorder_thread:
+   case nir_intrinsic_hit_object_reorder_thread:
       /* These are allowed to completely change the set of active invocations. */
       return true;
    default:

@@ -228,6 +228,15 @@ remove_dead_write_vars_local(nir_shader *shader, nir_block *block,
          break;
       }
 
+      case nir_intrinsic_hit_object_trace_ray:
+      case nir_intrinsic_hit_object_execute_shader:
+      case nir_intrinsic_execute_hit_object_amd: {
+         /* Mark payload as it can be used by the callees */
+         nir_deref_instr *src = nir_src_as_deref(*nir_get_shader_call_payload_src(intrin));
+         clear_unused_for_read(unused_writes, src);
+         break;
+      }
+
       case nir_intrinsic_deref_atomic:
       case nir_intrinsic_deref_atomic_swap:
       case nir_intrinsic_load_deref: {
