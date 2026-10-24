@@ -2983,6 +2983,202 @@ test_cs_vram_fallback(void)
    free(ws);
 }
 
+#ifndef STATUS_GRAPHICS_GPU_EXCEPTION_ON_DEVICE
+#define STATUS_GRAPHICS_GPU_EXCEPTION_ON_DEVICE ((int32_t)0xC01E0200)
+#endif
+
+/* BD-226: a status that ends the device stays terminal on the VRAM command buffer path. A removal
+ * that the CPU lock or its cleanup reports is latched and returned as the allocation contract admits
+ * (VK_ERROR_UNKNOWN). The error state of the device, and a device that the host reports lost, keep the
+ * allocation result. None of them gets a GTT attempt; a recoverable status still does. */
+static void
+test_cs_vram_terminal(void)
+{
+   struct radv_wddm2_winsys *ws;
+   struct radeon_winsys_bo *bo;
+   unsigned mark;
+   VkResult result;
+
+   /* The CPU lock reports a removed device. */
+   clear_deferred_env();
+   ws = make_ws();
+   fail_calls(BC250_HOST_Lock2, 1);
+   h.fail_status = STATUS_DEVICE_REMOVED;
+   mark = h.n_ev;
+   bo = NULL;
+   result = ws->base.buffer_create(&ws->base, 65536, 4096, RADEON_DOMAIN_VRAM, CMD_FLAGS, RADV_BO_PRIORITY_CS, 0,
+                                   NULL, &bo);
+   no_failures();
+   check(result == VK_ERROR_UNKNOWN && !bo && ws->base.device_is_lost(&ws->base) &&
+            count_op(mark, BC250_HOST_CreateAllocation2) == 1 && !ws->cs_vram_fallbacks,
+         "a removal from Lock2 is latched, with no GTT attempt (result %d, %u creates, %llu fallbacks, lost %d)",
+         result, count_op(mark, BC250_HOST_CreateAllocation2), (unsigned long long)ws->cs_vram_fallbacks,
+         (int)ws->base.device_is_lost(&ws->base));
+   check(count_op(mark, BC250_HOST_DestroyAllocation2) == 1 && !live(h.allocs, h.n_allocs, false) &&
+            !ws->deferred.refused_count,
+         "the VRAM allocation is destroyed once");
+   mark = h.n_ev;
+   bo = NULL;
+   result = ws->base.buffer_create(&ws->base, 4096, 4096, RADEON_DOMAIN_GTT, PLAIN_FLAGS, 0, 0, NULL, &bo);
+   check(result == VK_ERROR_UNKNOWN && !bo && h.n_ev == mark, "the loss stays: the next create calls no host function");
+   contract();
+   radv_wddm2_deferred_finish(ws);
+   radv_wddm2_bo_pool_finish(ws);
+   free(ws);
+
+   /* The CPU lock fails with a recoverable status, and its cleanup reports a removed device. */
+   clear_deferred_env();
+   ws = make_ws();
+   fail_calls(BC250_HOST_Lock2, 1);
+   h.remove_on_destroy = true;
+   mark = h.n_ev;
+   bo = NULL;
+   result = ws->base.buffer_create(&ws->base, 65536, 4096, RADEON_DOMAIN_VRAM, CMD_FLAGS, RADV_BO_PRIORITY_CS, 0,
+                                   NULL, &bo);
+   no_failures();
+   check(result == VK_ERROR_UNKNOWN && !bo && ws->base.device_is_lost(&ws->base) &&
+            count_op(mark, BC250_HOST_CreateAllocation2) == 1 && !ws->cs_vram_fallbacks,
+         "a removal from the cleanup of a failed lock is latched, with no GTT attempt (result %d, %u creates, "
+         "%llu fallbacks, lost %d)",
+         result, count_op(mark, BC250_HOST_CreateAllocation2), (unsigned long long)ws->cs_vram_fallbacks,
+         (int)ws->base.device_is_lost(&ws->base));
+   check(ws->deferred.refused_count == 1 && live(h.allocs, h.n_allocs, false) == 1,
+         "the allocation that the cleanup could not destroy stays with the ICD (%u kept)", ws->deferred.refused_count);
+   contract();
+   radv_wddm2_deferred_finish(ws);
+   radv_wddm2_bo_pool_finish(ws);
+   free(ws);
+
+   /* The device in its error state, as the CPU lock and as the residency report it. */
+   clear_deferred_env();
+   ws = make_ws();
+   const uint32_t ops[] = {BC250_HOST_Lock2, BC250_HOST_MakeResident};
+   for (unsigned i = 0; i < ARRAY_SIZE(ops); i++) {
+      fail_calls(ops[i], 1);
+      h.fail_status = STATUS_GRAPHICS_GPU_EXCEPTION_ON_DEVICE;
+      mark = h.n_ev;
+      bo = NULL;
+      result = ws->base.buffer_create(&ws->base, 65536, 4096, RADEON_DOMAIN_VRAM, CMD_FLAGS, RADV_BO_PRIORITY_CS, 0,
+                                      NULL, &bo);
+      no_failures();
+      check(result == VK_ERROR_OUT_OF_DEVICE_MEMORY && !bo && !ws->base.device_is_lost(&ws->base) &&
+               count_op(mark, BC250_HOST_CreateAllocation2) == 1 && !ws->cs_vram_fallbacks &&
+               !live(h.allocs, h.n_allocs, false),
+            "op %u: the error state keeps the allocation result, with no GTT attempt (result %d, %u creates, "
+            "%llu fallbacks)",
+            ops[i], result, count_op(mark, BC250_HOST_CreateAllocation2), (unsigned long long)ws->cs_vram_fallbacks);
+   }
+
+   /* The host reports the device lost, and the allocation is refused with a recoverable status. */
+   h.status = -1;
+   fail_calls(BC250_HOST_CreateAllocation2, 1);
+   mark = h.n_ev;
+   bo = NULL;
+   result = ws->base.buffer_create(&ws->base, 65536, 4096, RADEON_DOMAIN_VRAM, CMD_FLAGS, RADV_BO_PRIORITY_CS, 0,
+                                   NULL, &bo);
+   no_failures();
+   h.status = 0;
+   check(result == VK_ERROR_OUT_OF_DEVICE_MEMORY && !bo && count_op(mark, BC250_HOST_CreateAllocation2) == 1 &&
+            count_op(mark, BC250_HOST_CHECK_STATUS) == 1 && !ws->cs_vram_fallbacks,
+         "a device the host reports lost gets no GTT attempt (result %d, %u creates, %llu fallbacks)", result,
+         count_op(mark, BC250_HOST_CreateAllocation2), (unsigned long long)ws->cs_vram_fallbacks);
+
+   /* The control: a recoverable Lock2 status still gets its GTT attempt. */
+   fail_calls(BC250_HOST_Lock2, 1);
+   h.fail_status = STATUS_NO_MEMORY;
+   mark = h.n_ev;
+   bo = NULL;
+   result = ws->base.buffer_create(&ws->base, 65536, 4096, RADEON_DOMAIN_VRAM, CMD_FLAGS, RADV_BO_PRIORITY_CS, 0,
+                                   NULL, &bo);
+   no_failures();
+   check(result == VK_SUCCESS && bo && bo->initial_domain == RADEON_DOMAIN_GTT &&
+            count_op(mark, BC250_HOST_CreateAllocation2) == 2 && ws->cs_vram_fallbacks == 1 &&
+            !ws->base.device_is_lost(&ws->base),
+         "a recoverable Lock2 status still gets the GTT BO (result %d)", result);
+   if (bo)
+      ws->base.buffer_destroy(&ws->base, bo);
+   check(!live(h.allocs, h.n_allocs, false), "no allocation left");
+   contract();
+   radv_wddm2_deferred_finish(ws);
+   radv_wddm2_bo_pool_finish(ws);
+   free(ws);
+}
+
+/* BD-226: a failed VRAM create whose cleanup is refused, while deferred destruction holds a BO
+ * whose work has not retired. The request is not asked again in either domain: no CPU wait for the held BO
+ * and no second allocation. The refused allocation stays with the ICD, charged, on the refused list. When the
+ * held BO's work retires and the retry interval passes, the drain releases both, the refused allocation with
+ * one successful DestroyAllocation2. */
+static void
+test_cs_vram_cleanup_held(void)
+{
+   void *const cookie = (void *)(uintptr_t)0xA0;
+   clear_deferred_env();
+   struct radv_wddm2_winsys *ws = make_ws();
+   struct radeon_winsys_ctx *a = new_ctx(ws);
+   bind(ws, a, cookie);
+   const uint32_t a_progress = gfx(a)->bc250_progress.handle;
+   struct radeon_winsys_bo *b0 = sized_bo(ws, 65536, HELD_FLAGS, 0);
+   const uint32_t b0_h = b0->handle;
+   submit_one(ws, a); /* A's 1 */
+   ws->base.buffer_destroy(&ws->base, b0);
+   check(ws->deferred.count == 1 && alloc_live(b0_h), "a BO is held behind A's 1");
+
+   const uint64_t vram = ws->allocated_vram + ws->allocated_vram_vis;
+   fail_calls(BC250_HOST_MakeResident, 1);
+   h.refuse_destroy = 1;
+   unsigned mark = h.n_ev;
+   struct radeon_winsys_bo *bo = NULL;
+   VkResult result = ws->base.buffer_create(&ws->base, 65536, 4096, RADEON_DOMAIN_VRAM, CMD_FLAGS,
+                                            RADV_BO_PRIORITY_CS, 0, NULL, &bo);
+   no_failures();
+   const int c1 = find_op(mark, BC250_HOST_CreateAllocation2, 0);
+   const uint32_t failed_h = c1 >= 0 ? (uint32_t)h.ev[c1].value : 0;
+   check(result == VK_ERROR_OUT_OF_DEVICE_MEMORY && !bo && count_op(mark, BC250_HOST_CreateAllocation2) == 1 &&
+            !ws->cs_vram_fallbacks,
+         "refused residency and a refused cleanup: one allocation, none again in either domain (result %d, "
+         "%u creates, %llu fallbacks)",
+         result, count_op(mark, BC250_HOST_CreateAllocation2), (unsigned long long)ws->cs_vram_fallbacks);
+   check(!count_op(mark, BC250_HOST_WaitForSynchronizationObjectFromCpu) && alloc_live(b0_h) &&
+            ws->deferred.count == 1 && !ws->deferred.oom_waits,
+         "no CPU wait for the held BO, which stays held (%u waits, %u held)",
+         count_op(mark, BC250_HOST_WaitForSynchronizationObjectFromCpu), ws->deferred.count);
+   check(failed_h && alloc_live(failed_h) && ws->deferred.refused_count == 1 && ws->deferred.refused_bytes == 65536 &&
+            ws->allocated_vram + ws->allocated_vram_vis == vram + 65536 && ws->create_cleanup_failures == 1,
+         "the refused allocation stays with the ICD, kept and charged (%u kept, %llu bytes)",
+         ws->deferred.refused_count, (unsigned long long)ws->deferred.refused_bytes);
+
+   retire(a_progress, 1);
+   mark = h.n_ev;
+   radv_wddm2_deferred_drain(ws);
+   check(!alloc_live(b0_h) && !ws->deferred.count && alloc_live(failed_h) && find_destroy(mark, failed_h) < 0,
+         "A's 1 retires: the held BO goes, and the refused one waits for its retry interval");
+   ws->deferred.refused_next_ns = 0;
+   mark = h.n_ev;
+   radv_wddm2_deferred_drain(ws);
+   check(!alloc_live(failed_h) && count_op(mark, BC250_HOST_DestroyAllocation2) == 1 &&
+            find_destroy(mark, failed_h) >= 0 && !ws->deferred.refused_count && !ws->deferred.refused_bytes &&
+            ws->deferred.refused_retries == 1 && ws->allocated_vram + ws->allocated_vram_vis == vram,
+         "the retry destroys the refused allocation once, and its bytes leave the accounting");
+
+   mark = h.n_ev;
+   bo = NULL;
+   result = ws->base.buffer_create(&ws->base, 65536, 4096, RADEON_DOMAIN_VRAM, CMD_FLAGS, RADV_BO_PRIORITY_CS, 0,
+                                   NULL, &bo);
+   check(result == VK_SUCCESS && bo && bo->initial_domain == RADEON_DOMAIN_VRAM &&
+            count_op(mark, BC250_HOST_CreateAllocation2) == 1,
+         "the next command stream BO is created in VRAM");
+   if (bo)
+      ws->base.buffer_destroy(&ws->base, bo);
+   check(unbind(ws, a, cookie) == VK_SUCCESS, "the queue unbinds");
+   ws->base.ctx_destroy(a);
+   check(!live(h.allocs, h.n_allocs, false), "no allocation left");
+   contract();
+   radv_wddm2_deferred_finish(ws);
+   radv_wddm2_bo_pool_finish(ws);
+   free(ws);
+}
+
 /* BD-226: radv_wddm2_cs_domain asks the local budget only when all VRAM is CPU-visible, keeps its answer for
  * RADV_WDDM2_CS_DOMAIN_RECHECK_NS, and answers GTT when the query fails or the reserve is not left. */
 static void
@@ -5754,6 +5950,8 @@ static const struct {
    {"allocation_status", test_allocation_status},
    {"allocation_cleanup_removed", test_allocation_cleanup_removed},
    {"cs_vram_fallback", test_cs_vram_fallback},
+   {"cs_vram_terminal", test_cs_vram_terminal},
+   {"cs_vram_cleanup_held", test_cs_vram_cleanup_held},
    {"cs_domain", test_cs_domain},
    {"deferred_removed", test_deferred_removed},
    {"deferred_teardown", test_deferred_teardown},

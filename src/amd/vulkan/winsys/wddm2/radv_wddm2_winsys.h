@@ -54,12 +54,14 @@ struct radv_wddm2_winsys {
    uint64_t allocated_vram_vis;
    uint64_t allocated_gtt;
 
-   /* BD-226: the last placement answer of radv_wddm2_cs_domain and when it was taken (os_time_get_nano),
-    * so that the local budget is queried at most once per RADV_WDDM2_CS_DOMAIN_RECHECK_NS. Atomic. */
+   /* BD-226: the last placement answer of radv_wddm2_cs_domain and when it was taken (os_time_get_nano).
+    * Inside RADV_WDDM2_CS_DOMAIN_RECHECK_NS the answer is reused; after it, every caller that finds the
+    * answer old queries the local budget, so threads that do so at the same time each query once. Atomic. */
    uint64_t cs_domain_checked_ns;
    uint32_t cs_domain_vram;
    /* BD-226: command buffer BOs that VRAM refused and GTT was asked for (radv_wddm2_bo_create_placed), and the
-    * refused DestroyAllocation2 calls of a failed create, which stop that second attempt. Atomic. */
+    * refused DestroyAllocation2 calls of a failed create, whose allocations stay on the refused list. Counts
+    * only: the create that saw the refusal stops its own retries (struct radv_wddm2_create_outcome). Atomic. */
    uint64_t cs_vram_fallbacks;
    uint32_t create_cleanup_failures;
 

@@ -78,6 +78,29 @@ radv_wddm2_allocation_error(struct radv_wddm2_winsys *ws, NTSTATUS status)
    return VK_ERROR_OUT_OF_DEVICE_MEMORY;
 }
 
+#ifndef STATUS_GRAPHICS_GPU_EXCEPTION_ON_DEVICE
+#define STATUS_GRAPHICS_GPU_EXCEPTION_ON_DEVICE ((NTSTATUS)0xC01E0200L)
+#endif
+
+/* BD-226: what a failed create attempt leaves for a caller that could ask again. status is the status of
+ * the KMT call that refused the attempt, STATUS_SUCCESS when no KMT call did. cleanup_refused is set when
+ * the attempt could not destroy its own allocation, which then stays with the ICD on the refused list; it
+ * stays set over the attempts of one request. */
+struct radv_wddm2_create_outcome {
+   NTSTATUS status;
+   bool cleanup_refused;
+};
+
+/* BD-226: a status after which no allocation is asked again: the device is removed, or it is in the error
+ * state in which "it cannot perform any more operations and must be destroyed and re-created"
+ * (ref\ddi-display\d3dkmthk.md:5978). Only the removal also latches the loss (radv_wddm2_allocation_error);
+ * the error state keeps its existing allocation result, and the next submission reports it. */
+static bool
+radv_wddm2_status_ends_device(NTSTATUS status)
+{
+   return status == STATUS_DEVICE_REMOVED || status == STATUS_GRAPHICS_GPU_EXCEPTION_ON_DEVICE;
+}
+
 /* Every operation on a device paging queue gets a unique value of the queue's
  * monitored fence, signaled when the operation completes, and zero when it
  * completed immediately ("Device paging queues" in the WDDM docs). A monitored
@@ -659,11 +682,14 @@ radv_wddm2_bo_account(struct radv_wddm2_winsys *ws, struct radv_wddm2_bo *bo, bo
       p_atomic_add(&ws->allocated_gtt, delta);
 }
 
+static void radv_wddm2_bo_keep_refused(struct radv_wddm2_winsys *ws, struct radv_wddm2_bo *bo, NTSTATUS status);
+
+/* outcome (may be NULL): what a failure left (struct radv_wddm2_create_outcome). */
 static VkResult
 radv_wddm2_bo_create_internal(struct radeon_winsys *_ws, uint64_t size, unsigned alignment,
                               enum radeon_bo_domain initial_domain, enum radeon_bo_flag flags,
                               unsigned priority, uint64_t address, void *cpu_ptr,
-                              struct radeon_winsys_bo **out_bo)
+                              struct radeon_winsys_bo **out_bo, struct radv_wddm2_create_outcome *outcome)
 {
    struct radv_wddm2_winsys *ws = radv_wddm2_winsys(_ws);
    struct radv_wddm2_bo *bo;
@@ -672,6 +698,8 @@ radv_wddm2_bo_create_internal(struct radeon_winsys *_ws, uint64_t size, unsigned
 
    /* Courtesy for users using NULL to check if they need to destroy the BO. */
    *out_bo = NULL;
+   if (outcome)
+      outcome->status = STATUS_SUCCESS;
 
    /* The contract has no userptr allocation. A normal BO would be the wrong object. */
    if (radv_wddm2_device_is_lost(_ws))
@@ -782,6 +810,8 @@ radv_wddm2_bo_create_internal(struct radeon_winsys *_ws, uint64_t size, unsigned
    if (!NT_SUCCESS(status)) {
       amdgpu_wddm_log("CreateAllocation2 failed 0x%X\n", status);
       result = radv_wddm2_allocation_error(ws, status);
+      if (outcome)
+         outcome->status = status;
       goto error_ptr_alloc;
    }
 
@@ -871,6 +901,9 @@ radv_wddm2_bo_create_internal(struct radeon_winsys *_ws, uint64_t size, unsigned
    return VK_SUCCESS;
 
 error_va_alloc:
+   /* status is the refused call's: every jump here follows one. */
+   if (outcome)
+      outcome->status = status;
    amdgpu_wddm_log("destroy allocation\n");
    status = BC250_WDDM_CALL(&ws->host, DestroyAllocation2, &destroy);
    if (status == STATUS_DEVICE_REMOVED) {
@@ -878,10 +911,24 @@ error_va_alloc:
        * any remaining allocation until its teardown, not an OOM retry. */
       amdgpu_wddm_log("DestroyAllocation2 after failed create: device removed\n");
       result = radv_wddm2_allocation_error(ws, status);
+      if (outcome)
+         outcome->status = status;
    } else if (!NT_SUCCESS(status)) {
-      /* BD-226: counted, so that no fallback allocation follows a create whose cleanup was refused. */
+      /* BD-226: the allocation is still this driver's (R7). It is kept, with its byte charge, on the refused
+       * list, which the drain points and teardown retry, as a refused release is. Its GPU address, if one was
+       * mapped, is the API-allocated one that goes with the allocation. The caller is told, and asks neither
+       * domain again for this request while the failed attempt holds the allocation. */
       p_atomic_inc(&ws->create_cleanup_failures);
-      assert(NT_SUCCESS(status));
+      if (outcome)
+         outcome->cleanup_refused = true;
+      bo->va_gone = true;
+      radv_wddm2_bo_account(ws, bo, true);
+      if (ws->debug_all_bos)
+         radv_winsys_bo_list_add(&ws->global_bo_list, &bo->base);
+      if (ws->debug_log_bos)
+         radv_winsys_log_bo(&ws->bo_log, &bo->base, false);
+      radv_wddm2_bo_keep_refused(ws, bo, status);
+      return result;
    }
 
 error_ptr_alloc:
@@ -893,35 +940,45 @@ error_ptr_alloc:
 static VkResult
 radv_wddm2_bo_create_once(struct radeon_winsys *_ws, uint64_t size, unsigned alignment,
                           enum radeon_bo_domain initial_domain, enum radeon_bo_flag flags,
-                          unsigned priority, uint64_t address, struct radeon_winsys_bo **out_bo)
+                          unsigned priority, uint64_t address, struct radeon_winsys_bo **out_bo,
+                          struct radv_wddm2_create_outcome *outcome)
 {
    if (flags & RADEON_FLAG_VIRTUAL)
       return radv_wddm2_virtual_bo_create(_ws, size, alignment, initial_domain, flags,
                                           priority, address, out_bo);
-   return radv_wddm2_bo_create_internal(_ws, size, alignment, initial_domain, flags, priority, address, NULL, out_bo);
+   return radv_wddm2_bo_create_internal(_ws, size, alignment, initial_domain, flags, priority, address, NULL, out_bo,
+                                        outcome);
 }
 
 static bool radv_wddm2_deferred_wait_oldest(struct radv_wddm2_winsys *ws, uint64_t *waited_ns);
 static void radv_wddm2_deferred_line(const char *format, ...);
 
+/* The create with the R7 retries. outcome (may be NULL): as radv_wddm2_bo_create_internal, for the last
+ * attempt. A refused cleanup or a status that ends the device also ends the retries (BD-226): the request is
+ * not asked again while a failed attempt holds an allocation, or on a device that cannot serve it. */
 static VkResult
-radv_wddm2_bo_create(struct radeon_winsys *_ws, uint64_t size, unsigned alignment,
-                     enum radeon_bo_domain initial_domain, enum radeon_bo_flag flags,
-                     unsigned priority, uint64_t address, struct radv_image *image,
-                     struct radeon_winsys_bo **out_bo)
+radv_wddm2_bo_create_checked(struct radeon_winsys *_ws, uint64_t size, unsigned alignment,
+                             enum radeon_bo_domain initial_domain, enum radeon_bo_flag flags,
+                             unsigned priority, uint64_t address, struct radv_image *image,
+                             struct radeon_winsys_bo **out_bo, struct radv_wddm2_create_outcome *outcome)
 {
    struct radv_wddm2_winsys *ws = radv_wddm2_winsys(_ws);
+   struct radv_wddm2_create_outcome own = {STATUS_SUCCESS, false};
+   if (!outcome)
+      outcome = &own;
    /* Held BOs whose work retired go first: their memory and VA are free before this allocation. */
    if (radv_wddm2_device_is_lost(_ws)) {
       *out_bo = NULL;
       return VK_ERROR_UNKNOWN;
    }
    radv_wddm2_deferred_drain(ws);
-   VkResult result = radv_wddm2_bo_create_once(_ws, size, alignment, initial_domain, flags, priority, address, out_bo);
+   VkResult result =
+      radv_wddm2_bo_create_once(_ws, size, alignment, initial_domain, flags, priority, address, out_bo, outcome);
    /* R7: the sweep runs after a failed allocation and after a failed VA reservation alike. Both report
     * VK_ERROR_OUT_OF_DEVICE_MEMORY here (radv_wddm2_allocation_error, radv_wddm2_virtual_bo_create), and
     * what the held BOs keep is address space, which a reservation needs as much as an allocation does. */
-   if (result != VK_ERROR_OUT_OF_DEVICE_MEMORY || !p_atomic_read(&ws->deferred.count))
+   if (result != VK_ERROR_OUT_OF_DEVICE_MEMORY || outcome->cleanup_refused ||
+       radv_wddm2_status_ends_device(outcome->status) || !p_atomic_read(&ws->deferred.count))
       return result;
    /* A held BO keeps a range a destroy has already given back to the application: before the create
     * fails, CPU-wait for the oldest held range, release what is proved and try again, until it succeeds
@@ -939,7 +996,10 @@ radv_wddm2_bo_create(struct radeon_winsys *_ws, uint64_t size, unsigned alignmen
       if (!released)
          break;
       waits++;
-      result = radv_wddm2_bo_create_once(_ws, size, alignment, initial_domain, flags, priority, address, out_bo);
+      result =
+         radv_wddm2_bo_create_once(_ws, size, alignment, initial_domain, flags, priority, address, out_bo, outcome);
+      if (outcome->cleanup_refused || radv_wddm2_status_ends_device(outcome->status))
+         break;
    }
    simple_mtx_lock(&ws->deferred.lock);
    ws->deferred.retries++;
@@ -949,9 +1009,22 @@ radv_wddm2_bo_create(struct radeon_winsys *_ws, uint64_t size, unsigned alignmen
                             " CPU waits for the oldest, %" PRIu64 " ms; %u still held (%" PRIu64
                             " KiB); the retry %s",
                             size, held, held_va >> 10, waits, waited / 1000000u, ws->deferred.count,
-                            ws->deferred.held_va_bytes >> 10, result == VK_SUCCESS ? "succeeded" : "failed too");
+                            ws->deferred.held_va_bytes >> 10,
+                            result == VK_SUCCESS          ? "succeeded"
+                            : outcome->cleanup_refused   ? "stopped: its cleanup was refused"
+                                                         : "failed too");
    simple_mtx_unlock(&ws->deferred.lock);
    return result;
+}
+
+static VkResult
+radv_wddm2_bo_create(struct radeon_winsys *_ws, uint64_t size, unsigned alignment,
+                     enum radeon_bo_domain initial_domain, enum radeon_bo_flag flags,
+                     unsigned priority, uint64_t address, struct radv_image *image,
+                     struct radeon_winsys_bo **out_bo)
+{
+   return radv_wddm2_bo_create_checked(_ws, size, alignment, initial_domain, flags, priority, address, image, out_bo,
+                                       NULL);
 }
 
 static VkResult
@@ -963,7 +1036,8 @@ radv_wddm2_bo_from_ptr(struct radeon_winsys *_ws, void *pointer, uint64_t size, 
    enum radeon_bo_flag flags = RADEON_FLAG_NO_INTERPROCESS_SHARING | RADEON_FLAG_CPU_ACCESS;
    unsigned alignment = ws->gpu_info.gart_page_size;
 
-   return radv_wddm2_bo_create_internal(_ws, size, alignment, initial_domain, flags, priority, 0, pointer, out_bo);
+   return radv_wddm2_bo_create_internal(_ws, size, alignment, initial_domain, flags, priority, 0, pointer, out_bo,
+                                        NULL);
 }
 
 static bool
@@ -1189,13 +1263,14 @@ radv_wddm2_bo_get_metadata(struct radeon_winsys *_ws, struct radeon_winsys_bo *_
    memcpy(md, &bo->md, sizeof(*md));
 }
 
+/* The CPU mapping of bo. On a NULL result *lock_status is the refused Lock2's status, or STATUS_SUCCESS when no
+ * Lock2 was asked (a BO that cannot be mapped). */
 static void *
-radv_wddm2_bo_map(struct radeon_winsys *_ws, struct radeon_winsys_bo *_bo,
-                  bool use_fixed_addr, void *fixed_addr)
+radv_wddm2_bo_lock(struct radv_wddm2_bo *bo, void *fixed_addr, NTSTATUS *lock_status)
 {
-   struct radv_wddm2_bo *bo = radv_wddm2_bo(_bo);
-   ASSERTED NTSTATUS status;
+   NTSTATUS status;
 
+   *lock_status = STATUS_SUCCESS;
    /* A borrowed allocation is mapped only when its import asked for it. */
    if (bo->borrowed && !bo->host_mappable) return NULL;
 
@@ -1212,12 +1287,22 @@ radv_wddm2_bo_map(struct radeon_winsys *_ws, struct radeon_winsys_bo *_bo,
       .hAllocation = bo->base.handle,
    };
    status = BC250_WDDM_CALL(&bo->ws->host, Lock2, &lock);
-   if (!NT_SUCCESS(status))
+   if (!NT_SUCCESS(status)) {
+      *lock_status = status;
       return NULL;
+   }
 
    bo->map = lock.pData;
 
    return lock.pData;
+}
+
+static void *
+radv_wddm2_bo_map(struct radeon_winsys *_ws, struct radeon_winsys_bo *_bo,
+                  bool use_fixed_addr, void *fixed_addr)
+{
+   NTSTATUS status;
+   return radv_wddm2_bo_lock(radv_wddm2_bo(_bo), fixed_addr, &status);
 }
 
 /* Releases the BO's CPU lock. False if Unlock2 failed: the lock and the mapping are then still valid, and
@@ -1441,17 +1526,23 @@ radv_wddm2_bo_owns_va(const struct radv_wddm2_bo *bo)
  * (radv_wddm2_bo_keep_va_refused) and a refused DestroyAllocation2 keeps the allocation
  * (radv_wddm2_bo_keep_refused); both are retried by calling this function again, which skips what is
  * already done. The first failing call of the sequence is the one logged: a later success does not hide
- * it. */
-static void
-radv_wddm2_bo_destroy_now(struct radv_wddm2_winsys *ws, struct radv_wddm2_bo *bo)
+ * it.
+ *
+ * True when the BO is released and its struct freed; false when it is kept (locked, a refused range free, a
+ * refused DestroyAllocation2). destroy_status (may be NULL) is the refused DestroyAllocation2's status, else
+ * STATUS_SUCCESS. */
+static bool
+radv_wddm2_bo_destroy_now_status(struct radv_wddm2_winsys *ws, struct radv_wddm2_bo *bo, NTSTATUS *destroy_status)
 {
    NTSTATUS status, failed = STATUS_SUCCESS;
    const char *failed_call = NULL;
 
+   if (destroy_status)
+      *destroy_status = STATUS_SUCCESS;
    if (!radv_wddm2_bo_unlock(bo)) {
       if (!bo->borrowed) {
          radv_wddm2_bo_keep_locked(ws, bo);
-         return;
+         return false;
       }
       /* A host import: the allocation and its lock are the host's, which releases both with the
        * allocation. The ICD only forgets its pointer. */
@@ -1461,7 +1552,7 @@ radv_wddm2_bo_destroy_now(struct radv_wddm2_winsys *ws, struct radv_wddm2_bo *bo
    if (bo->borrowed) {
       radv_wddm2_bo_account(ws, bo, false);
       radv_wddm2_bo_struct_free(ws, bo);
-      return;
+      return true;
    }
 
    if (radv_wddm2_bo_owns_va(bo) && !bo->va_gone) {
@@ -1495,7 +1586,7 @@ radv_wddm2_bo_destroy_now(struct radv_wddm2_winsys *ws, struct radv_wddm2_bo *bo
       }
       if (failed_call) {
          radv_wddm2_bo_keep_va_refused(ws, bo, failed_call, failed);
-         return;
+         return false;
       }
       bo->va_gone = true;
    }
@@ -1514,8 +1605,10 @@ radv_wddm2_bo_destroy_now(struct radv_wddm2_winsys *ws, struct radv_wddm2_bo *bo
       } else {
          /* R7: the allocation is still this driver's. It keeps its byte charge and goes on the kept
           * list, which the drain points and teardown retry; it is never written down as released. */
+         if (destroy_status)
+            *destroy_status = status;
          radv_wddm2_bo_keep_refused(ws, bo, status);
-         return;
+         return false;
       }
 
       if (ws->debug_all_bos)
@@ -1525,6 +1618,13 @@ radv_wddm2_bo_destroy_now(struct radv_wddm2_winsys *ws, struct radv_wddm2_bo *bo
    }
 
    radv_wddm2_bo_struct_free(ws, bo);
+   return true;
+}
+
+static void
+radv_wddm2_bo_destroy_now(struct radv_wddm2_winsys *ws, struct radv_wddm2_bo *bo)
+{
+   radv_wddm2_bo_destroy_now_status(ws, bo, NULL);
 }
 
 /* Deferred destruction (amdgpu-wddm), R v2 (BD-201, DESIGN.md 6).
@@ -3231,23 +3331,15 @@ radv_wddm2_cs_vram_bo(enum radeon_bo_domain domain, enum radeon_bo_flag flags, u
           (priority == RADV_BO_PRIORITY_CS || priority == RADV_BO_PRIORITY_UPLOAD_BUFFER);
 }
 
-/* The cleanup failures that can leave state behind after a failed create: a refused DestroyAllocation2 of
- * the create's own error path, and the refusals of the release path (radv_wddm2_bo_keep_refused,
- * radv_wddm2_bo_keep_va_refused). */
-static uint64_t
-radv_wddm2_cleanup_failures(struct radv_wddm2_winsys *ws)
-{
-   simple_mtx_lock(&ws->deferred.lock);
-   const uint64_t refused = ws->deferred.refused_total + ws->deferred.va_refused_total;
-   simple_mtx_unlock(&ws->deferred.lock);
-   return refused + p_atomic_read(&ws->create_cleanup_failures);
-}
-
 /* BD-226: the buffer_create of the winsys. A command stream or upload BO in VRAM is CPU-mapped here, because
  * every caller maps it at once, so that a refused VRAM allocation, residency or CPU lock all end inside this
- * call. Such a failure is asked once more as the GTT BO of before, and only when the failed attempt left
- * nothing behind: the device is not lost and no cleanup was refused since the attempt began. Every other
- * BO, and every other answer, is returned as radv_wddm2_bo_create gives it. */
+ * call. Only a recoverable refusal, one that radv_wddm2_allocation_error answers with
+ * VK_ERROR_OUT_OF_DEVICE_MEMORY, is asked once more as the GTT BO of before, and only when the failed attempt
+ * left nothing behind: neither its own cleanup nor the release of the BO whose lock failed was refused. A
+ * status that ends the device (radv_wddm2_status_ends_device), from the allocation, the lock or the cleanup,
+ * and a device that the loss flag or the host reports lost, get no second attempt; a removal is latched
+ * through radv_wddm2_allocation_error before that decision. Every other BO, and every other answer, is
+ * returned as radv_wddm2_bo_create gives it. */
 static VkResult
 radv_wddm2_bo_create_placed(struct radeon_winsys *_ws, uint64_t size, unsigned alignment,
                             enum radeon_bo_domain initial_domain, enum radeon_bo_flag flags, unsigned priority,
@@ -3257,20 +3349,34 @@ radv_wddm2_bo_create_placed(struct radeon_winsys *_ws, uint64_t size, unsigned a
    if (!radv_wddm2_cs_vram_bo(initial_domain, flags, priority))
       return radv_wddm2_bo_create(_ws, size, alignment, initial_domain, flags, priority, address, image, out_bo);
 
-   const uint64_t cleanups = radv_wddm2_cleanup_failures(ws);
-   VkResult result = radv_wddm2_bo_create(_ws, size, alignment, initial_domain, flags, priority, address, image,
-                                          out_bo);
+   struct radv_wddm2_create_outcome outcome = {STATUS_SUCCESS, false};
+   VkResult result = radv_wddm2_bo_create_checked(_ws, size, alignment, initial_domain, flags, priority, address,
+                                                  image, out_bo, &outcome);
    const char *stage = "allocation";
-   if (result == VK_SUCCESS && !radv_wddm2_bo_map(_ws, *out_bo, false, NULL)) {
-      /* No work and no other thread has seen this BO: it is released now, never held. */
-      radv_wddm2_bo_destroy_now(ws, radv_wddm2_bo(*out_bo));
+   if (result == VK_SUCCESS && !radv_wddm2_bo_lock(radv_wddm2_bo(*out_bo), NULL, &outcome.status)) {
+      /* No work and no other thread has seen this BO: it is released now, never held. The lock's status is
+       * mapped as an allocation status is (STATUS_SUCCESS when no Lock2 was asked), and a removal that the
+       * cleanup reports is latched too. */
+      result = radv_wddm2_allocation_error(ws, outcome.status);
+      NTSTATUS destroy_status;
+      if (!radv_wddm2_bo_destroy_now_status(ws, radv_wddm2_bo(*out_bo), &destroy_status)) {
+         outcome.cleanup_refused = true;
+         if (destroy_status == STATUS_DEVICE_REMOVED)
+            result = radv_wddm2_allocation_error(ws, destroy_status);
+      }
       *out_bo = NULL;
-      result = VK_ERROR_OUT_OF_DEVICE_MEMORY;
       stage = "CPU lock";
    }
-   if (result != VK_ERROR_OUT_OF_DEVICE_MEMORY || radv_wddm2_device_is_lost(_ws) ||
-       radv_wddm2_cleanup_failures(ws) != cleanups)
+   if (result != VK_ERROR_OUT_OF_DEVICE_MEMORY || outcome.cleanup_refused ||
+       radv_wddm2_status_ends_device(outcome.status) || radv_wddm2_device_is_lost(_ws) ||
+       bc250_host_check_status(&ws->host) < 0) {
+      if (result == VK_ERROR_OUT_OF_DEVICE_MEMORY)
+         amdgpu_wddm_log("BD-226: a %" PRIu64 "-byte command buffer BO failed in VRAM (%s, 0x%08x)%s; no GTT "
+                         "attempt\n",
+                         size, stage, (unsigned)outcome.status,
+                         outcome.cleanup_refused ? ", its cleanup was refused" : ", the device is lost");
       return result;
+   }
    p_atomic_inc(&ws->cs_vram_fallbacks);
    result = radv_wddm2_bo_create(_ws, size, alignment, RADEON_DOMAIN_GTT, flags, priority, address, image, out_bo);
    amdgpu_wddm_log("BD-226: a %" PRIu64 "-byte command buffer BO failed in VRAM (%s); in GTT it %s\n", size, stage,

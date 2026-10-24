@@ -988,8 +988,9 @@ radv_wddm2_cs_recent_slot(const struct radv_wddm2_bo *bo)
 }
 
 /* BD-226: the command buffers, the command buffer upload BO and the small BOs radv_cmd_buffer.c asks for with
- * this domain go to the local segment while the process's local budget has room (radv_wddm2_cs_placement.h),
- * and to GTT otherwise, as before. The answer is kept for RADV_WDDM2_CS_DOMAIN_RECHECK_NS. */
+ * this domain are preferred in the local segment while the last budget query saw the heuristic headroom
+ * (radv_wddm2_cs_placement.h: a soft preference, nothing is reserved), and go to GTT otherwise, as before. The
+ * answer is kept for RADV_WDDM2_CS_DOMAIN_RECHECK_NS. */
 static enum radeon_bo_domain
 radv_wddm2_cs_domain(const struct radeon_winsys *_ws)
 {
