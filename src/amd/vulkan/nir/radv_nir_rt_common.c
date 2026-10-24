@@ -682,8 +682,20 @@ insert_traversal_triangle_case(const struct radv_compiler_info *compiler_info, n
          not_cull = nir_bcsel(b, intersection.base.opaque, ray_flags->no_cull_opaque, ray_flags->no_cull_no_opaque);
          nir_push_if(b, not_cull);
          {
+            /* fdiv becomes a multiplication by v_rcp_f32, which can be 1 ULP off. One correction step with the
+             * residual gives the correctly rounded quotient, as D3D12 drivers return for barycentrics such as
+             * 0.5 * (1 - 5/256). Exact, so that the residual is not optimized away.
+             */
             nir_def *divs[2] = {div, div};
-            intersection.barycentrics = nir_fdiv(b, nir_channels(b, result, 0xc), nir_vec(b, divs, 2));
+            nir_def *num = nir_channels(b, result, 0xc);
+            nir_def *den = nir_vec(b, divs, 2);
+            const unsigned old_math_ctrl = b->fp_math_ctrl;
+            b->fp_math_ctrl |= nir_fp_exact;
+            nir_def *rcp = nir_frcp(b, den);
+            nir_def *quot = nir_fmul(b, num, rcp);
+            nir_def *residual = nir_ffma(b, nir_fneg(b, den), quot, num);
+            intersection.barycentrics = nir_ffma(b, residual, rcp, quot);
+            b->fp_math_ctrl = old_math_ctrl;
 
             args->triangle_cb(b, &intersection, args, ray_flags);
          }
