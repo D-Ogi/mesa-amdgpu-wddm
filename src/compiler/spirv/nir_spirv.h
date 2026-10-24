@@ -47,8 +47,9 @@ struct spirv_to_nir_options {
    /* Create a nir library. */
    bool create_library;
 
-   /* Initial value of shader_info::ray_query_has_opacity_micromap. With VK_EXT_opacity_micromap, every ray
-    * query uses opacity micromaps; an OpacityMicromapIdKHR execution mode replaces the value.
+   /* VK_EXT_opacity_micromap is enabled: every ray query uses opacity micromaps (sets
+    * shader_info::ray_query_has_opacity_micromap). An OpacityMicromapIdKHR execution mode with a false value does not
+    * turn them off.
     */
    bool ray_query_opacity_micromap;
 
