@@ -46,49 +46,42 @@ main(void)
 {
    uint32_t global_id = gl_GlobalInvocationID.x;
 
-   uint32_t search_index = DIV_ROUND_UP(args.triangle_count, 64) / 2;
-   uint32_t search_step = search_index / 2;
-   radv_micromap_prefix_sum_partition current_partition;
-   while (true) {
-      current_partition = DEREF(INDEX(radv_micromap_prefix_sum_partition, args.partitions, search_index));
-      if (global_id >= current_partition.start && global_id < current_partition.start + current_partition.local_sum) {
-         break;
-      } else if (global_id < current_partition.start) {
-         search_index -= search_step;
-      } else {
-         search_index += search_step;
-      }
-      search_step /= 2;
+   /* Find the partition of this dword: the last partition that starts at or before it. Both searches halve a closed
+    * interval, so they end after log2 steps for every partition and triangle count.
+    */
+   uint32_t search_index = 0;
+   uint32_t search_last = DIV_ROUND_UP(args.triangle_count, 64) - 1;
+   while (search_index < search_last) {
+      uint32_t middle = (search_index + search_last + 1) / 2;
+      if (DEREF(INDEX(radv_micromap_prefix_sum_partition, args.partitions, middle)).start <= global_id)
+         search_index = middle;
+      else
+         search_last = middle - 1;
    }
 
-   VkMicromapTriangleKHR triangle;
+   radv_micromap_prefix_sum_partition current_partition =
+      DEREF(INDEX(radv_micromap_prefix_sum_partition, args.partitions, search_index));
+   uint32_t partition_dword = global_id - current_partition.start;
 
-   uint32_t data_count;
-   uint32_t dword_count;
-   int32_t dword_index;
-
-   search_index = min(search_index * 64 + 32, args.triangle_count - 1);
-   search_step = 16;
-   uint32_t local_prefix_sum = 0;
-   for (uint32_t i = 0; i < 6; i++) {
-      local_prefix_sum = DEREF(INDEX(uint32_t, args.local_offsets, search_index));
-
-      triangle = DEREF(REF(VkMicromapTriangleKHR)(args.triangles + search_index * args.stride));
-
-      data_count = 1u << (triangle.subdivisionLevel * 2);
-      dword_count = max(data_count * 2 / 32, 1);
-      dword_index = int32_t(global_id) - int32_t(current_partition.start) - int32_t(local_prefix_sum);
-
-      if (dword_index < 0) {
-         search_index -= min(search_step, search_index);
-         search_step /= 2;
-      } else if (search_index == args.triangle_count - 1 || dword_index < dword_count) {
-         break;
-      } else {
-         search_index = min(search_index + search_step, args.triangle_count - 1);
-         search_step /= 2;
-      }
+   /* Find the triangle in the same way: the last triangle of the partition whose local offset is at or before the
+    * dword.
+    */
+   search_index *= 64;
+   search_last = min(search_index + 63, args.triangle_count - 1);
+   while (search_index < search_last) {
+      uint32_t middle = (search_index + search_last + 1) / 2;
+      if (DEREF(INDEX(uint32_t, args.local_offsets, middle)) <= partition_dword)
+         search_index = middle;
+      else
+         search_last = middle - 1;
    }
+
+   VkMicromapTriangleKHR triangle =
+      DEREF(REF(VkMicromapTriangleKHR)(args.triangles + search_index * args.stride));
+
+   uint32_t data_count = 1u << (triangle.subdivisionLevel * 2);
+   uint32_t dword_count = max(data_count * 2 / 32, 1);
+   uint32_t dword_index = partition_dword - DEREF(INDEX(uint32_t, args.local_offsets, search_index));
 
    if (dword_index >= dword_count)
       return;
