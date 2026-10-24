@@ -948,6 +948,7 @@ radv_init_header(VkCommandBuffer commandBuffer, struct vk_device *vk_device, str
          .internal_nodes_offset = layout.internal_nodes_offset - layout.bvh_offset,
          .primitive_count = state->leaf_node_count,
          .type = state->build_info->type,
+         .has_micromaps = !!(state->config.build_flags & VK_BUILD_FLAG_HAS_MICROMAPS),
       };
       radv_bvh_build_set_args(commandBuffer, &args, sizeof(args));
 
