@@ -1732,6 +1732,46 @@ print_intrinsic_instr(nir_intrinsic_instr *instr, print_state *state)
             VAL(flags);
             VAL(world_ray_direction);
             VAL(world_ray_origin);
+            VAL(intersection_triangle_vertex_positions);
+            VAL(cull_mask);
+            VAL(intersection_instance_addr_amd);
+            VAL(intersection_primitive_addr_amd);
+#undef VAL
+         default:
+            fprintf(fp, "unknown");
+            break;
+         }
+         break;
+      }
+
+      case NIR_INTRINSIC_HIT_OBJECT_VALUE: {
+         fprintf(fp, "hit_object_value=");
+         switch (nir_intrinsic_hit_object_value(instr)) {
+#define VAL(_name)                    \
+   case nir_hit_object_value_##_name: \
+      fprintf(fp, #_name);            \
+      break
+            VAL(is_empty);
+            VAL(is_hit);
+            VAL(is_miss);
+            VAL(ray_flags);
+            VAL(ray_t_min);
+            VAL(ray_t_max);
+            VAL(world_ray_origin);
+            VAL(world_ray_direction);
+            VAL(object_ray_origin);
+            VAL(object_ray_direction);
+            VAL(object_to_world);
+            VAL(world_to_object);
+            VAL(instance_id);
+            VAL(instance_custom_index);
+            VAL(geometry_index);
+            VAL(primitive_index);
+            VAL(hit_kind);
+            VAL(sbt_record_index);
+            VAL(shader_record_buffer_handle);
+            VAL(triangle_vertex_positions);
+            VAL(attributes);
 #undef VAL
          default:
             fprintf(fp, "unknown");
