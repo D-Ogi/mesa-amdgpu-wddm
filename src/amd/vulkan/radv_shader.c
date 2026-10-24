@@ -522,6 +522,7 @@ radv_shader_spirv_to_nir(const struct radv_compiler_info *compiler_info, struct 
          .push_const_addr_format = nir_address_format_logical,
          .shared_addr_format = nir_address_format_32bit_offset,
          .constant_addr_format = nir_address_format_64bit_global,
+         .max_vector_components = RADV_MAX_VECTOR_COMPONENTS,
          .debug =
             {
                .func = radv_spirv_nir_debug,

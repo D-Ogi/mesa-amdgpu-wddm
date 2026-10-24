@@ -73,6 +73,9 @@
  */
 #define RADV_MAX_MEMORY_ALLOCATION_SIZE 0xFFFFFFFCull
 
+/* VK_EXT_shader_long_vector: vtn lowers vectors with more than four components to arrays. */
+#define RADV_MAX_VECTOR_COMPONENTS 1024
+
 /* Number of invocations in each subgroup. */
 #define RADV_SUBGROUP_SIZE 64
 
