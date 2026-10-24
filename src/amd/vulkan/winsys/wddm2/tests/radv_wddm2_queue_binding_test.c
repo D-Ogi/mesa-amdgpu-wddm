@@ -3104,75 +3104,200 @@ test_cs_vram_terminal(void)
    free(ws);
 }
 
-/* BD-226: a failed VRAM create whose cleanup is refused, while deferred destruction holds a BO
- * whose work has not retired. The request is not asked again in either domain: no CPU wait for the held BO
- * and no second allocation. The refused allocation stays with the ICD, charged, on the refused list. When the
- * held BO's work retires and the retry interval passes, the drain releases both, the refused allocation with
- * one successful DestroyAllocation2. */
+/* BD-226: a failed VRAM command stream BO whose cleanup is refused, while deferred destruction holds a BO whose
+ * work has not retired. The failure is the VA map or the residency of the create, or the CPU lock after it. The
+ * request is not asked again in either domain: no CPU wait for the held BO and no second allocation, also after
+ * the held BO's work retires. The refused allocation stays with the ICD, charged, on the refused list. When the
+ * retry interval passes, the drain destroys it with one successful DestroyAllocation2, its struct goes to the
+ * pool once, and teardown destroys nothing twice. */
+static unsigned
+pool_entries(struct radv_wddm2_winsys *ws, const struct radv_wddm2_bo *bo)
+{
+   unsigned n = 0;
+   list_for_each_entry (struct radv_wddm2_bo, b, &ws->deferred.pool, pool_link)
+      n += b == bo;
+   return n;
+}
+
+static unsigned
+destroys_of(unsigned from, uint32_t handle)
+{
+   unsigned n = 0;
+   for (unsigned i = from; i < h.n_ev; i++)
+      n += h.ev[i].op == BC250_HOST_DestroyAllocation2 && h.ev[i].value == handle;
+   return n;
+}
+
 static void
 test_cs_vram_cleanup_held(void)
 {
+   static const struct {
+      uint32_t op;
+      const char *name;
+   } steps[] = {
+      {BC250_HOST_MapGpuVirtualAddress, "VA map"},
+      {BC250_HOST_MakeResident, "residency"},
+      {BC250_HOST_Lock2, "CPU lock"},
+   };
    void *const cookie = (void *)(uintptr_t)0xA0;
+
+   for (unsigned s = 0; s < ARRAY_SIZE(steps); s++) {
+      clear_deferred_env();
+      struct radv_wddm2_winsys *ws = make_ws();
+      struct radeon_winsys_ctx *a = new_ctx(ws);
+      bind(ws, a, cookie);
+      const uint32_t a_progress = gfx(a)->bc250_progress.handle;
+      struct radeon_winsys_bo *b0 = sized_bo(ws, 65536, HELD_FLAGS, 0);
+      const uint32_t b0_h = b0->handle;
+      submit_one(ws, a); /* A's 1 */
+      ws->base.buffer_destroy(&ws->base, b0);
+      check(ws->deferred.count == 1 && alloc_live(b0_h), "%s: a BO is held behind A's 1", steps[s].name);
+
+      const uint64_t vram = ws->allocated_vram + ws->allocated_vram_vis;
+      const unsigned start = h.n_ev;
+      fail_calls(steps[s].op, 1);
+      h.refuse_destroy = 1;
+      struct radeon_winsys_bo *bo = NULL;
+      VkResult result = ws->base.buffer_create(&ws->base, 65536, 4096, RADEON_DOMAIN_VRAM, CMD_FLAGS,
+                                               RADV_BO_PRIORITY_CS, 0, NULL, &bo);
+      no_failures();
+      const int c1 = find_op(start, BC250_HOST_CreateAllocation2, 0);
+      const uint32_t failed_h = c1 >= 0 ? (uint32_t)h.ev[c1].value : 0;
+      check(result == VK_ERROR_OUT_OF_DEVICE_MEMORY && !bo && count_op(start, BC250_HOST_CreateAllocation2) == 1 &&
+               !ws->cs_vram_fallbacks,
+            "%s and a refused cleanup: one allocation, none again in either domain (result %d, %u creates, "
+            "%llu fallbacks)",
+            steps[s].name, result, count_op(start, BC250_HOST_CreateAllocation2),
+            (unsigned long long)ws->cs_vram_fallbacks);
+      check(find_op(start, BC250_HOST_WaitForSynchronizationObjectFromCpu, a_progress) < 0 && alloc_live(b0_h) &&
+               ws->deferred.count == 1 && !ws->deferred.oom_waits && !ws->deferred.retries,
+            "%s: no CPU wait for the held BO, which stays held (%u held, %llu waits)", steps[s].name,
+            ws->deferred.count, (unsigned long long)ws->deferred.oom_waits);
+      struct radv_wddm2_bo *kept = ws->deferred.refused_count
+                                      ? list_last_entry(&ws->deferred.refused, struct radv_wddm2_bo, pool_link)
+                                      : NULL;
+      check(failed_h && alloc_live(failed_h) && kept && kept->base.handle == failed_h &&
+               ws->deferred.refused_count == 1 && ws->deferred.refused_bytes == 65536 &&
+               ws->allocated_vram + ws->allocated_vram_vis == vram + 65536 && !pool_entries(ws, kept),
+            "%s: the failed attempt keeps its record, kept and charged (%u kept, %llu bytes)", steps[s].name,
+            ws->deferred.refused_count, (unsigned long long)ws->deferred.refused_bytes);
+
+      retire(a_progress, 1);
+      unsigned mark = h.n_ev;
+      radv_wddm2_deferred_drain(ws);
+      check(!alloc_live(b0_h) && !ws->deferred.count && alloc_live(failed_h) && !destroys_of(mark, failed_h) &&
+               !count_op(mark, BC250_HOST_CreateAllocation2),
+            "%s: A's 1 retires; the held BO goes, nothing is created, the refused one waits for its interval",
+            steps[s].name);
+      ws->deferred.refused_next_ns = 0;
+      mark = h.n_ev;
+      radv_wddm2_deferred_drain(ws);
+      check(!alloc_live(failed_h) && destroys_of(start, failed_h) == 1 &&
+               count_op(mark, BC250_HOST_DestroyAllocation2) == 1 && !count_op(mark, BC250_HOST_CreateAllocation2) &&
+               !ws->deferred.refused_count && !ws->deferred.refused_bytes && ws->deferred.refused_retries == 1 &&
+               ws->allocated_vram + ws->allocated_vram_vis == vram && pool_entries(ws, kept) == 1,
+            "%s: one successful destroy of the refused allocation, its struct pooled once, its bytes gone",
+            steps[s].name);
+
+      mark = h.n_ev;
+      bo = NULL;
+      result = ws->base.buffer_create(&ws->base, 65536, 4096, RADEON_DOMAIN_VRAM, CMD_FLAGS, RADV_BO_PRIORITY_CS, 0,
+                                      NULL, &bo);
+      check(result == VK_SUCCESS && bo && bo->initial_domain == RADEON_DOMAIN_VRAM &&
+               count_op(mark, BC250_HOST_CreateAllocation2) == 1,
+            "%s: the next command stream BO is created in VRAM", steps[s].name);
+      if (bo)
+         ws->base.buffer_destroy(&ws->base, bo);
+      check(unbind(ws, a, cookie) == VK_SUCCESS, "the queue unbinds");
+      ws->base.ctx_destroy(a);
+      radv_wddm2_deferred_finish(ws);
+      check(!live(h.allocs, h.n_allocs, false) && destroys_of(start, failed_h) == 1 && pool_entries(ws, kept) == 1,
+            "%s: after teardown no allocation is left and nothing was destroyed twice", steps[s].name);
+      contract();
+      radv_wddm2_bo_pool_finish(ws);
+      free(ws);
+   }
+}
+
+/* BD-226: the IB path of a command stream (cs_create, radv_winsys_cs_bo_create). With the budget headroom the
+ * IB of a primary stream is placed in VRAM and locked once. A secondary stream that cannot always use IB2 keeps
+ * GTT without RADEON_FLAG_GTT_WC (avoid_vram), whatever the budget says. A recoverable residency failure gives
+ * the stream a GTT IB; a removal from the CPU lock fails the stream and latches the loss. */
+static struct radeon_winsys_bo *
+cs_ib(struct ac_cmdbuf *cs)
+{
+   return ((struct radv_winsys_cs *)cs)->ib_buffer;
+}
+
+static void
+test_cs_vram_caller(void)
+{
+   clear_ib_env();
    clear_deferred_env();
-   struct radv_wddm2_winsys *ws = make_ws();
-   struct radeon_winsys_ctx *a = new_ctx(ws);
-   bind(ws, a, cookie);
-   const uint32_t a_progress = gfx(a)->bc250_progress.handle;
-   struct radeon_winsys_bo *b0 = sized_bo(ws, 65536, HELD_FLAGS, 0);
-   const uint32_t b0_h = b0->handle;
-   submit_one(ws, a); /* A's 1 */
-   ws->base.buffer_destroy(&ws->base, b0);
-   check(ws->deferred.count == 1 && alloc_live(b0_h), "a BO is held behind A's 1");
+   struct radv_wddm2_winsys *ws = make_ib_ws();
+   ws->gpu_info.gfx_level = GFX10;
+   ws->gpu_info.all_vram_visible = true;
+   memset(&local_query, 0, sizeof(local_query));
+   local_query.ok = true;
+   local_query.budget = 8ull << 30;
+   local_query.usage = 1ull << 30;
 
-   const uint64_t vram = ws->allocated_vram + ws->allocated_vram_vis;
-   fail_calls(BC250_HOST_MakeResident, 1);
-   h.refuse_destroy = 1;
    unsigned mark = h.n_ev;
-   struct radeon_winsys_bo *bo = NULL;
-   VkResult result = ws->base.buffer_create(&ws->base, 65536, 4096, RADEON_DOMAIN_VRAM, CMD_FLAGS,
-                                            RADV_BO_PRIORITY_CS, 0, NULL, &bo);
+   struct ac_cmdbuf *cs = ws->base.cs_create(&ws->base, AMD_IP_GFX, false);
+   check(cs && cs_ib(cs) && cs_ib(cs)->initial_domain == RADEON_DOMAIN_VRAM && count_op(mark, BC250_HOST_Lock2) == 1 &&
+            ((struct radv_winsys_cs *)cs)->ib_mapped,
+         "a primary stream's IB is placed in VRAM and locked once");
+   if (cs)
+      ws->base.cs_destroy(cs);
+
+   /* A secondary stream on a queue without IB2: GTT and no write combining, as before. */
+   mark = h.n_ev;
+   cs = ws->base.cs_create(&ws->base, AMD_IP_COMPUTE, true);
+   check(cs && cs_ib(cs) && cs_ib(cs)->initial_domain == RADEON_DOMAIN_GTT &&
+            !(radv_wddm2_bo(cs_ib(cs))->flags & RADEON_FLAG_GTT_WC) && !ws->cs_vram_fallbacks,
+         "a compute secondary stream keeps a GTT IB without write combining (avoid_vram)");
+   if (cs)
+      ws->base.cs_destroy(cs);
+   ws->gpu_info.gfx_level = GFX7;
+   cs = ws->base.cs_create(&ws->base, AMD_IP_GFX, true);
+   check(cs && cs_ib(cs) && cs_ib(cs)->initial_domain == RADEON_DOMAIN_GTT &&
+            !(radv_wddm2_bo(cs_ib(cs))->flags & RADEON_FLAG_GTT_WC),
+         "a graphics secondary stream before GFX8 keeps a GTT IB (avoid_vram)");
+   if (cs)
+      ws->base.cs_destroy(cs);
+   ws->gpu_info.gfx_level = GFX10;
+   cs = ws->base.cs_create(&ws->base, AMD_IP_GFX, true);
+   check(cs && cs_ib(cs) && cs_ib(cs)->initial_domain == RADEON_DOMAIN_VRAM,
+         "a graphics secondary stream that can use IB2 follows the placement");
+   if (cs)
+      ws->base.cs_destroy(cs);
+
+   /* A recoverable residency failure: the stream gets the GTT IB of before. */
+   fail_calls(BC250_HOST_MakeResident, 1);
+   mark = h.n_ev;
+   cs = ws->base.cs_create(&ws->base, AMD_IP_GFX, false);
    no_failures();
-   const int c1 = find_op(mark, BC250_HOST_CreateAllocation2, 0);
-   const uint32_t failed_h = c1 >= 0 ? (uint32_t)h.ev[c1].value : 0;
-   check(result == VK_ERROR_OUT_OF_DEVICE_MEMORY && !bo && count_op(mark, BC250_HOST_CreateAllocation2) == 1 &&
-            !ws->cs_vram_fallbacks,
-         "refused residency and a refused cleanup: one allocation, none again in either domain (result %d, "
-         "%u creates, %llu fallbacks)",
-         result, count_op(mark, BC250_HOST_CreateAllocation2), (unsigned long long)ws->cs_vram_fallbacks);
-   check(!count_op(mark, BC250_HOST_WaitForSynchronizationObjectFromCpu) && alloc_live(b0_h) &&
-            ws->deferred.count == 1 && !ws->deferred.oom_waits,
-         "no CPU wait for the held BO, which stays held (%u waits, %u held)",
-         count_op(mark, BC250_HOST_WaitForSynchronizationObjectFromCpu), ws->deferred.count);
-   check(failed_h && alloc_live(failed_h) && ws->deferred.refused_count == 1 && ws->deferred.refused_bytes == 65536 &&
-            ws->allocated_vram + ws->allocated_vram_vis == vram + 65536 && ws->create_cleanup_failures == 1,
-         "the refused allocation stays with the ICD, kept and charged (%u kept, %llu bytes)",
-         ws->deferred.refused_count, (unsigned long long)ws->deferred.refused_bytes);
+   check(cs && cs_ib(cs) && cs_ib(cs)->initial_domain == RADEON_DOMAIN_GTT && ws->cs_vram_fallbacks == 1 &&
+            count_op(mark, BC250_HOST_CreateAllocation2) == 2 && ((struct radv_winsys_cs *)cs)->ib_mapped,
+         "a refused VRAM residency gives the stream a mapped GTT IB (%llu fallbacks)",
+         (unsigned long long)ws->cs_vram_fallbacks);
+   if (cs)
+      ws->base.cs_destroy(cs);
 
-   retire(a_progress, 1);
+   /* The CPU lock reports a removed device: the stream fails, the loss is latched, nothing is retried. */
+   fail_calls(BC250_HOST_Lock2, 1);
+   h.fail_status = STATUS_DEVICE_REMOVED;
    mark = h.n_ev;
-   radv_wddm2_deferred_drain(ws);
-   check(!alloc_live(b0_h) && !ws->deferred.count && alloc_live(failed_h) && find_destroy(mark, failed_h) < 0,
-         "A's 1 retires: the held BO goes, and the refused one waits for its retry interval");
-   ws->deferred.refused_next_ns = 0;
-   mark = h.n_ev;
-   radv_wddm2_deferred_drain(ws);
-   check(!alloc_live(failed_h) && count_op(mark, BC250_HOST_DestroyAllocation2) == 1 &&
-            find_destroy(mark, failed_h) >= 0 && !ws->deferred.refused_count && !ws->deferred.refused_bytes &&
-            ws->deferred.refused_retries == 1 && ws->allocated_vram + ws->allocated_vram_vis == vram,
-         "the retry destroys the refused allocation once, and its bytes leave the accounting");
-
-   mark = h.n_ev;
-   bo = NULL;
-   result = ws->base.buffer_create(&ws->base, 65536, 4096, RADEON_DOMAIN_VRAM, CMD_FLAGS, RADV_BO_PRIORITY_CS, 0,
-                                   NULL, &bo);
-   check(result == VK_SUCCESS && bo && bo->initial_domain == RADEON_DOMAIN_VRAM &&
-            count_op(mark, BC250_HOST_CreateAllocation2) == 1,
-         "the next command stream BO is created in VRAM");
-   if (bo)
-      ws->base.buffer_destroy(&ws->base, bo);
-   check(unbind(ws, a, cookie) == VK_SUCCESS, "the queue unbinds");
-   ws->base.ctx_destroy(a);
+   cs = ws->base.cs_create(&ws->base, AMD_IP_GFX, false);
+   no_failures();
+   check(!cs && ws->base.device_is_lost(&ws->base) && count_op(mark, BC250_HOST_CreateAllocation2) == 1 &&
+            ws->cs_vram_fallbacks == 1,
+         "a removal from the IB's CPU lock fails the stream, latched, with no GTT attempt (%u creates)",
+         count_op(mark, BC250_HOST_CreateAllocation2));
+   if (cs)
+      ws->base.cs_destroy(cs);
    check(!live(h.allocs, h.n_allocs, false), "no allocation left");
+   memset(&local_query, 0, sizeof(local_query));
    contract();
    radv_wddm2_deferred_finish(ws);
    radv_wddm2_bo_pool_finish(ws);
@@ -5952,6 +6077,7 @@ static const struct {
    {"cs_vram_fallback", test_cs_vram_fallback},
    {"cs_vram_terminal", test_cs_vram_terminal},
    {"cs_vram_cleanup_held", test_cs_vram_cleanup_held},
+   {"cs_vram_caller", test_cs_vram_caller},
    {"cs_domain", test_cs_domain},
    {"deferred_removed", test_deferred_removed},
    {"deferred_teardown", test_deferred_teardown},
