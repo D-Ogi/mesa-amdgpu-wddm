@@ -16,26 +16,29 @@
 radv_micromap_addr
 radv_encode_micromap_addr(vk_ir_triangle_node_micromap src)
 {
-   bool use_special_index = src.opacity_index < 0;
-
    uint64_t opacity_addr = packUint2x32(uvec2(src.opacity_addr_lo, src.opacity_addr_hi));
+
+   /* The leaf pass resolves the index already. An update reads it again from the geometry. */
+   int32_t opacity_index = radv_resolve_micromap_index(opacity_addr, src.opacity_index);
+   bool use_special_index = opacity_index < 0;
 
    radv_micromap_triangle_header micromap_header;
    micromap_header.offset = 0;
    micromap_header.level = 0;
    if (!use_special_index) {
       micromap_header = DEREF(
-         INDEX(radv_micromap_triangle_header, opacity_addr + SIZEOF(radv_accel_struct_header), src.opacity_index));
+         INDEX(radv_micromap_triangle_header, opacity_addr + SIZEOF(radv_accel_struct_header), opacity_index));
    }
 
    uint64_t micromap_addr = OFFSET(opacity_addr, micromap_header.offset) & RADV_MICROMAP_ADDR_ADDR_MASK;
-   if (src.opacity_index == VK_MICROMAP_INDEX_GEOMETRY_FLAGS) {
+   if (opacity_index == VK_MICROMAP_INDEX_GEOMETRY_FLAGS) {
       micromap_addr = RADV_MICROMAP_ADDR_GEOMETRY_FLAGS;
    } else if (use_special_index) {
-      micromap_addr = (uint64_t((-src.opacity_index) - 1) << RADV_MICROMAP_ADDR_SPECIAL_INDEX_SHIFT) |
+      micromap_addr = (uint64_t((-opacity_index) - 1) << RADV_MICROMAP_ADDR_SPECIAL_INDEX_SHIFT) |
                       RADV_MICROMAP_ADDR_SPECIAL_INDEX_ENABLE;
    } else {
-      micromap_addr |= uint64_t(micromap_header.level) << RADV_MICROMAP_ADDR_SUBDIVISION_LEVEL_SHIFT;
+      micromap_addr |= uint64_t(micromap_header.level & RADV_MICROMAP_LEVEL_MASK)
+                       << RADV_MICROMAP_ADDR_SUBDIVISION_LEVEL_SHIFT;
    }
 
    radv_micromap_addr result;

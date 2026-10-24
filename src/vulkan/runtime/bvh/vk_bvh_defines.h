@@ -167,6 +167,11 @@ struct vk_ir_triangle_node_micromap {
 /* vk_bvh_geometry_data::micromap_flags */
 /* The geometry has micromap linkage. */
 #define VK_BVH_GEOMETRY_MICROMAP_LINKED (1u << 0)
+/* The leaf pass can give a fully opaque triangle the opaque geometry flag instead of its micromap and can remove a
+ * fully transparent triangle. Neither changes a traversal result if no instance can disable the micromaps and no
+ * update can change them.
+ */
+#define VK_BVH_GEOMETRY_MICROMAP_RESOLVE (1u << 1)
 
 struct vk_ir_instance_node {
    vk_ir_node base;

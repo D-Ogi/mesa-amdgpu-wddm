@@ -148,4 +148,22 @@ radv_micromap_addr_get_addr(radv_micromap_addr addr)
    return packUint2x32(uvec2(addr.addr_lo, addr.addr_hi));
 }
 
+/* A micromap that contains only one opacity state gives the same result as the special index of that state, which
+ * needs no data load during traversal.
+ */
+int32_t
+radv_resolve_micromap_index(uint64_t micromap_addr, int32_t opacity_index)
+{
+   if (opacity_index < 0 || micromap_addr == 0)
+      return opacity_index;
+
+   radv_micromap_triangle_header header = DEREF(
+      INDEX(radv_micromap_triangle_header, micromap_addr + SIZEOF(radv_accel_struct_header), opacity_index));
+   uint32_t states = (header.level >> RADV_MICROMAP_STATES_SHIFT) & 0xf;
+   if (bitCount(states) != 1)
+      return opacity_index;
+
+   return -1 - findLSB(states);
+}
+
 #endif /* BUILD_HELPERS_H */
