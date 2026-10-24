@@ -388,7 +388,9 @@ radv_pipeline_needed_dynamic_state(const struct radv_device *device, const struc
       !state->rs->rasterizer_discard_enable || (pipeline->dynamic_states & RADV_DYNAMIC_RASTERIZER_DISCARD_ENABLE);
    uint64_t states = RADV_DYNAMIC_ALL;
 
-   if (pdev->info.gfx_level < GFX10_3)
+   /* RADV_BC250_VRS_PROBE keeps the pipeline's shading rate state on GFX1013, so the probe writes the API rate and
+    * combiners and not the defaults (1x1, KEEP). */
+   if (pdev->info.gfx_level < GFX10_3 && !pdev->bc250_vrs_probe)
       states &= ~RADV_DYNAMIC_FRAGMENT_SHADING_RATE;
 
    /* Disable dynamic states that are useless to mesh shading. */

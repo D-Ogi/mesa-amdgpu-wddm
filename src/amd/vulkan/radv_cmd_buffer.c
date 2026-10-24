@@ -5025,6 +5025,12 @@ radv_emit_fsr_state(struct radv_cmd_buffer *cmd_buffer)
     */
    pa_cl_vrs_cntl |= S_028848_HTILE_RATE_COMBINER_MODE(htile_comb_mode);
 
+   /* The API state that the values below come from: width [0:7], height [8:15], combiner 0 [16:23], combiner 1
+    * [24:31] (VkFragmentShadingRateCombinerOpKHR). */
+   radv_bc250_vrs_probe_log(pdev, "FSR_API",
+                            (d->vk.fsr.fragment_size.width & 0xff) | (d->vk.fsr.fragment_size.height & 0xff) << 8 |
+                               (d->vk.fsr.combiner_ops[0] & 0xff) << 16 | (d->vk.fsr.combiner_ops[1] & 0xffu) << 24);
+
    const bool emit_draw_rate = pdev->info.gfx_level >= GFX10_3 || radv_bc250_vrs_probe(pdev, RADV_BC250_VRS_PROBE_DRAW);
    const bool emit_combiners = pdev->info.gfx_level >= GFX10_3 || radv_bc250_vrs_probe(pdev, RADV_BC250_VRS_PROBE_COMB);
 
@@ -14292,7 +14298,7 @@ radv_get_needed_dynamic_states(struct radv_cmd_buffer *cmd_buffer)
          if (cmd_buffer->state.shaders[MESA_SHADER_MESH])
             dynamic_states &= ~(RADV_DYNAMIC_VERTEX_INPUT | RADV_DYNAMIC_VERTEX_INPUT_BINDING_STRIDE |
                                 RADV_DYNAMIC_PRIMITIVE_TOPOLOGY);
-      } else {
+      } else if (!pdev->bc250_vrs_probe) {
          dynamic_states &= ~RADV_DYNAMIC_FRAGMENT_SHADING_RATE;
       }
    }
