@@ -618,6 +618,12 @@ radv_gather_ray_tracing_stage_info(nir_shader *nir)
          if (intr->intrinsic == nir_intrinsic_load_ray_triangle_vertex_positions)
             info.has_position_fetch = true;
 
+         /* radv_nir_lower_hit_objects reads the result of a hit object trace from these dwords. */
+         if (intr->intrinsic == nir_intrinsic_execute_hit_object_amd ||
+             (intr->intrinsic == nir_intrinsic_load_hit_attrib_amd &&
+              nir_intrinsic_base(intr) >= RADV_HIT_OBJECT_RECORD_KIND))
+            info.uses_hit_objects = true;
+
          if (intr->intrinsic != nir_intrinsic_trace_ray)
             continue;
 
@@ -644,6 +650,10 @@ radv_gather_ray_tracing_stage_info(nir_shader *nir)
        nir->info.stage == MESA_SHADER_INTERSECTION)
       info.can_inline = true;
    else if (nir->info.stage == MESA_SHADER_CALLABLE)
+      info.can_inline = false;
+
+   /* Only the function-call lowering supports hit objects. */
+   if (info.uses_hit_objects)
       info.can_inline = false;
 
    return info;
@@ -948,6 +958,7 @@ radv_rt_compile_shaders(struct radv_device *device, struct vk_pipeline_cache *ca
 
       traversal_info.set_flags &= info->set_flags;
       traversal_info.unset_flags &= info->unset_flags;
+      traversal_info.uses_hit_objects |= info->uses_hit_objects;
    }
 
    radv_nir_traversal_preprocess_cb preprocess =
