@@ -277,6 +277,7 @@ enum vtn_base_type {
    vtn_base_type_sampled_image,
    vtn_base_type_accel_struct,
    vtn_base_type_ray_query,
+   vtn_base_type_hit_object,
    vtn_base_type_function,
    vtn_base_type_event,
    vtn_base_type_cooperative_matrix,
