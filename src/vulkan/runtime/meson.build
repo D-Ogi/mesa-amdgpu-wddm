@@ -314,7 +314,7 @@ vulkan_runtime_deps = [
 if prog_glslang.found()
   if with_bvh
     subdir('bvh')
-    vulkan_runtime_files += files('vk_acceleration_structure.c')
+    vulkan_runtime_files += files('vk_acceleration_structure.c', 'vk_micromap.c')
     vulkan_runtime_files += bvh_spv
   endif
   vulkan_runtime_files += files('vk_texcompress_astc.c')

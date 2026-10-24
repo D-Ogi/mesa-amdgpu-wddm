@@ -1268,6 +1268,7 @@ radv_device_init_compiler_info(struct radv_device *device)
                pdev->info.compiler_info.has_smem_with_null_prt_bug && radv_sparse_enabled(pdev),
             .bvh8 = radv_use_bvh8(pdev),
             .no_rt = RADV_DEBUG(instance, NO_RT),
+            .ray_query_opacity_micromap = device->vk.enabled_extensions.EXT_opacity_micromap,
             .rt_cps = !!(instance->perftest_flags & RADV_PERFTEST_RT_CPS),
             .clear_lds = pdev->drirc.misc.clear_lds,
             .disable_aniso_single_level = pdev->drirc.debug.disable_aniso_single_level,

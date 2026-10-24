@@ -8368,6 +8368,7 @@ spirv_to_nir(const uint32_t *words, size_t word_count,
 
    b->shader = nir_shader_create(b, stage, nir_options);
    b->shader->info.float_controls_execution_mode = options->float_controls_execution_mode;
+   b->shader->info.ray_query_has_opacity_micromap = options->ray_query_opacity_micromap;
    if (mesa_shader_stage_uses_workgroup(stage))
       b->shader->info.workgroup_size_variable = true;
    b->shader->info.cs.shader_index = options->shader_index;

@@ -87,6 +87,24 @@ vk_acceleration_structure_get_va(const struct vk_acceleration_structure *accel_s
 VK_DEFINE_NONDISP_HANDLE_CASTS(vk_acceleration_structure, base, VkAccelerationStructureKHR,
                                VK_OBJECT_TYPE_ACCELERATION_STRUCTURE_KHR)
 
+/* VK_EXT_opacity_micromap (vk_micromap.c): a VkMicromapEXT holds a VK_KHR_opacity_micromap micromap, an
+ * acceleration structure of type VK_ACCELERATION_STRUCTURE_TYPE_OPACITY_MICROMAP_KHR.
+ */
+struct vk_micromap {
+   struct vk_object_base base;
+
+   VkAccelerationStructureKHR accel_struct;
+};
+
+VK_DEFINE_NONDISP_HANDLE_CASTS(vk_micromap, base, VkMicromapEXT, VK_OBJECT_TYPE_MICROMAP_EXT)
+
+static inline VkDeviceAddress
+vk_micromap_get_va(const struct vk_micromap *micromap)
+{
+   VK_FROM_HANDLE(vk_acceleration_structure, accel_struct, micromap->accel_struct);
+   return vk_acceleration_structure_get_va(accel_struct);
+}
+
 #define MAX_ENCODE_PASSES 5
 #define MAX_UPDATE_PASSES 2
 

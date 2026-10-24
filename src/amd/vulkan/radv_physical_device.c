@@ -920,6 +920,8 @@ radv_physical_device_get_supported_extensions(const struct radv_physical_device 
       .EXT_non_seamless_cube_map = true,
       /* The GFX12 node format has no micromap encoding in this port. */
       .KHR_opacity_micromap = radv_enable_rt(pdev) && !radv_use_bvh8(pdev),
+      /* The common runtime implements VK_EXT_opacity_micromap with the KHR micromaps (vk_micromap.c). */
+      .EXT_opacity_micromap = radv_enable_rt(pdev) && !radv_use_bvh8(pdev),
       .EXT_pci_bus_info = true,
 #ifndef _WIN32
       .EXT_physical_device_drm = true,
@@ -1725,6 +1727,8 @@ radv_physical_device_get_features(const struct radv_physical_device *pdev, struc
       .antiLag = true,
       /* VK_KHR_opacity_micromap */
       .micromap = true,
+      /* VK_EXT_opacity_micromap */
+      .micromapEXT = true,
    };
 }
 
