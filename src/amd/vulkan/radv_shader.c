@@ -538,6 +538,7 @@ radv_shader_spirv_to_nir(const struct radv_compiler_info *compiler_info, struct 
             },
          .emit_debug_break = compiler_info->debug.trap_enabled,
          .debug_info = compiler_info->key.nir_debug_info,
+         .ray_query_opacity_micromap = compiler_info->key.ray_query_opacity_micromap,
          .printf = compiler_info->debug.printf_enabled,
          .sampler_descriptor_size = compiler_info->sampler_descriptor_size,
          .sampler_descriptor_alignment = compiler_info->sampler_descriptor_alignment,
