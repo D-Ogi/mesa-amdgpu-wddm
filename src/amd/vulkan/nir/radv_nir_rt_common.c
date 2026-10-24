@@ -635,16 +635,25 @@ load_opacity(nir_builder *b, nir_def *addr, nir_def *level, nir_def *barycentric
 
 static nir_def *
 get_opacity(nir_builder *b, const struct radv_compiler_info *compiler_info, const struct radv_ray_traversal_args *args,
-            nir_def *addr, nir_def *barycentrics, nir_def *force_2_state, nir_def *disable)
+            nir_def *addr, nir_def *barycentrics, nir_def *force_2_state, nir_def *disable,
+            nir_def *geometry_id_and_flags)
 {
    nir_def *addr_hi = nir_channel(b, addr, 1);
    nir_def *use_special_index =
       nir_test_mask(b, addr_hi, BITFIELD_BIT(RADV_MICROMAP_ADDR_SPECIAL_INDEX_ENABLE_SHIFT - 32));
+   nir_def *level = nir_ubitfield_extract_imm(b, addr_hi, RADV_MICROMAP_ADDR_SUBDIVISION_LEVEL_SHIFT - 32, 4);
+
+   /* A triangle without a micromap, and every triangle of an instance that disables micromaps, uses the geometry
+    * flags. A non-opaque geometry acts as an unknown-opaque micromap that is not forced to 2 states.
+    */
+   nir_def *use_geometry_flags = nir_ior(b, disable, nir_iand(b, use_special_index, nir_ine_imm(b, level, 0)));
 
    nir_def *ignored, *non_ignored, *special_index, *loaded;
-   nir_push_if(b, disable);
+   nir_push_if(b, use_geometry_flags);
    {
-      ignored = nir_imm_int(b, VK_OPACITY_MICROMAP_SPECIAL_INDEX_FULLY_UNKNOWN_OPAQUE_KHR);
+      ignored = nir_bcsel(b, nir_test_mask(b, geometry_id_and_flags, RADV_GEOMETRY_OPAQUE),
+                          nir_imm_int(b, VK_OPACITY_MICROMAP_SPECIAL_INDEX_FULLY_OPAQUE_KHR),
+                          nir_imm_int(b, VK_OPACITY_MICROMAP_SPECIAL_INDEX_FULLY_UNKNOWN_OPAQUE_KHR));
    }
    nir_push_else(b, NULL);
    {
@@ -654,8 +663,6 @@ get_opacity(nir_builder *b, const struct radv_compiler_info *compiler_info, cons
       }
       nir_push_else(b, NULL);
       {
-         nir_def *level = nir_ubitfield_extract_imm(b, addr_hi, RADV_MICROMAP_ADDR_SUBDIVISION_LEVEL_SHIFT - 32, 4);
-
          /* Sign-extend from bit 47 as build_node_to_addr() does: the WDDM winsys uses the bottom half of the
           * address space.
           */
@@ -810,7 +817,7 @@ insert_traversal_triangle_case(const struct radv_compiler_info *compiler_info, n
             nir_def *force_2_state = nir_test_mask(b, instance_flags, RADV_INSTANCE_FORCE_2_STATE_MICROMAPS);
             nir_def *disable_micromap = nir_test_mask(b, instance_flags, RADV_INSTANCE_DISABLE_MICROMAPS);
             opacity = get_opacity(b, compiler_info, args, micromap_addr, intersection.barycentrics, force_2_state,
-                                  disable_micromap);
+                                  disable_micromap, intersection.base.geometry_id_and_flags);
          } else {
             nir_def *triangle_info = nir_load_global(
                b, 2, 32,
