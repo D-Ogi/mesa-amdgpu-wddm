@@ -6441,7 +6441,11 @@ vtn_handle_execution_mode_id(struct vtn_builder *b, struct vtn_value *entry_poin
       break;
 
    case SpvExecutionModeOpacityMicromapIdKHR:
-      b->shader->info.ray_query_has_opacity_micromap = vtn_constant_bool(b, mode->operands[0]);
+      /* The execution mode declares micromap use. It cannot turn off the micromaps that
+       * VK_EXT_opacity_micromap always applies.
+       */
+      b->shader->info.ray_query_has_opacity_micromap =
+         b->options->ray_query_opacity_micromap || vtn_constant_bool(b, mode->operands[0]);
       break;
 
    default:
