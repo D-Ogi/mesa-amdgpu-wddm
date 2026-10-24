@@ -36,6 +36,10 @@ main(void)
    else
       serialization_metadata_size = SIZEOF(radv_blas_serialization_header);
 
+   /* Same layout as radv_init_header(): a BLAS with micromaps serializes one micromap address per primitive. */
+   if (args.type == VK_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL_KHR && args.has_micromaps != 0)
+      serialization_metadata_size += SIZEOF(radv_blas_serialization_block) + SIZEOF(uint64_t) * args.primitive_count;
+
    uint32_t serialization_size = compacted_size + align(serialization_metadata_size, 128);
 
    uint32_t size = serialization_size - serialization_metadata_size;
