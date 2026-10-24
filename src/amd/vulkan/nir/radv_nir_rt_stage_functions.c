@@ -478,7 +478,8 @@ lower_rt_instruction(nir_builder *b, nir_instr *instr, void *_vars)
       break;
    }
    case nir_intrinsic_load_ray_flags: {
-      ret = nir_iand_imm(b, nir_load_param(b, vars->cull_mask_and_flags_param), 0xFFFFFF);
+      /* Also removes RADV_RAY_FLAG_HIT_OBJECT_RECORD, which any-hit and intersection shaders can see. */
+      ret = nir_iand_imm(b, nir_load_param(b, vars->cull_mask_and_flags_param), RADV_RAY_FLAGS_API_MASK);
       break;
    }
    case nir_intrinsic_load_ray_hit_kind: {
@@ -685,6 +686,81 @@ lower_rt_instruction(nir_builder *b, nir_instr *instr, void *_vars)
 
       break;
    }
+   case nir_intrinsic_execute_hit_object_amd: {
+      nir_def *kind = intr->src[0].ssa;
+      nir_def *sbt_index = intr->src[1].ssa;
+      nir_def *cull_mask_and_flags = intr->src[2].ssa;
+      nir_def *is_hit = nir_ieq_imm(b, kind, RADV_HIT_OBJECT_KIND_HIT);
+      nir_def *sbt_descriptors = nir_load_param(b, RT_ARG_SBT_DESCRIPTORS);
+
+      /* An empty hit object calls no shader. */
+      nir_push_if(b, nir_ine_imm(b, kind, RADV_HIT_OBJECT_KIND_EMPTY));
+      {
+         struct radv_nir_sbt_data hit_data, miss_data;
+         nir_push_if(b, is_hit);
+         {
+            hit_data = radv_nir_load_sbt_entry(b, sbt_descriptors, sbt_index, SBT_HIT, SBT_RECURSIVE_PTR);
+         }
+         nir_push_else(b, NULL);
+         {
+            miss_data = radv_nir_load_sbt_entry(b, sbt_descriptors, sbt_index, SBT_MISS, SBT_RECURSIVE_PTR);
+         }
+         nir_pop_if(b, NULL);
+         nir_def *shader_addr = nir_if_phi(b, hit_data.shader_addr, miss_data.shader_addr);
+         nir_def *shader_record_ptr = nir_if_phi(b, hit_data.shader_record_ptr, miss_data.shader_record_ptr);
+
+         /* As for trace_ray, a null shader is not called, and SkipClosestHitShader skips the closest-hit shader
+          * of a hit. A trace, a reorder and an execution of a hit object are equivalent to OpTraceRayKHR.
+          */
+         nir_def *skip_closest_hit =
+            nir_iand(b, is_hit, nir_test_mask(b, cull_mask_and_flags, SpvRayFlagsSkipClosestHitShaderKHRMask));
+         nir_def *should_call = nir_iand(b, nir_ine_imm(b, shader_addr, 0), nir_inot(b, skip_closest_hit));
+
+         nir_push_if(b, should_call);
+         {
+            nir_def *undef = nir_undef(b, 1, 32);
+            unsigned param_count = CHIT_MISS_ARG_PAYLOAD_BASE + DIV_ROUND_UP(vars->payload_size, 4);
+            nir_def **args = rzalloc_array_size(b->shader, sizeof(nir_def *), param_count);
+            args[RT_ARG_LAUNCH_ID] = nir_load_param(b, RT_ARG_LAUNCH_ID);
+            args[RT_ARG_LAUNCH_SIZE] = nir_load_param(b, RT_ARG_LAUNCH_SIZE);
+            if (uses_descriptor_heap) {
+               args[RT_ARG_HEAP_RESOURCE] = nir_load_param(b, RT_ARG_HEAP_RESOURCE);
+               args[RT_ARG_HEAP_SAMPLER] = nir_load_param(b, RT_ARG_HEAP_SAMPLER);
+            } else {
+               args[RT_ARG_DESCRIPTORS] = nir_load_param(b, RT_ARG_DESCRIPTORS);
+               args[RT_ARG_DYNAMIC_DESCRIPTORS] = nir_load_param(b, RT_ARG_DYNAMIC_DESCRIPTORS);
+            }
+            args[RT_ARG_PUSH_CONSTANTS] = nir_load_param(b, RT_ARG_PUSH_CONSTANTS);
+            args[RT_ARG_SBT_DESCRIPTORS] = sbt_descriptors;
+            args[RT_ARG_IS_COMPUTE_QUEUE] = nir_load_param(b, RT_ARG_IS_COMPUTE_QUEUE);
+            args[CHIT_MISS_ARG_TRAVERSAL_ADDR] = nir_load_param(b, vars->traversal_addr_param);
+            args[CHIT_MISS_ARG_SHADER_RECORD_PTR] = shader_record_ptr;
+            /* Only the traversal shader reads these. */
+            args[CHIT_MISS_ARG_ACCEL_STRUCT] = nir_undef(b, 1, 64);
+            args[CHIT_MISS_ARG_SBT_OFFSET] = undef;
+            args[CHIT_MISS_ARG_SBT_STRIDE] = undef;
+            args[CHIT_MISS_ARG_MISS_INDEX] = undef;
+            args[CHIT_MISS_ARG_CULL_MASK_AND_FLAGS] = cull_mask_and_flags;
+            args[CHIT_MISS_ARG_RAY_ORIGIN] = intr->src[3].ssa;
+            args[CHIT_MISS_ARG_RAY_TMIN] = intr->src[4].ssa;
+            args[CHIT_MISS_ARG_RAY_DIRECTION] = intr->src[5].ssa;
+            args[CHIT_MISS_ARG_RAY_TMAX] = intr->src[6].ssa;
+            args[CHIT_MISS_ARG_PRIMITIVE_ADDR] = intr->src[7].ssa;
+            args[CHIT_MISS_ARG_PRIMITIVE_ID] = intr->src[8].ssa;
+            args[CHIT_MISS_ARG_INSTANCE_ADDR] = intr->src[9].ssa;
+            args[CHIT_MISS_ARG_GEOMETRY_ID_AND_FLAGS] = intr->src[10].ssa;
+            args[CHIT_MISS_ARG_HIT_KIND] = intr->src[11].ssa;
+            for (unsigned i = 0; i < DIV_ROUND_UP(vars->payload_size, 4); ++i) {
+               args[CHIT_MISS_ARG_PAYLOAD_BASE + i] =
+                  nir_instr_def(&nir_build_deref_var(b, vars->out_payload_storage[i])->instr);
+            }
+            nir_build_indirect_call(b, vars->chit_miss_func, shader_addr, param_count, args);
+         }
+         nir_pop_if(b, NULL);
+      }
+      nir_pop_if(b, NULL);
+      break;
+   }
    case nir_intrinsic_ignore_ray_intersection: {
       nir_store_deref(b, vars->accept, nir_imm_false(b), 0x1);
 
@@ -786,7 +862,8 @@ lower_rt_deref_var(nir_shader *shader, nir_function_impl *impl, nir_instr *instr
       nir_intrinsic_instr *intrin = nir_instr_as_intrinsic(parent);
       if (intrin->intrinsic != nir_intrinsic_trace_ray && intrin->intrinsic != nir_intrinsic_execute_callable &&
           intrin->intrinsic != nir_intrinsic_execute_closest_hit_amd &&
-          intrin->intrinsic != nir_intrinsic_execute_miss_amd)
+          intrin->intrinsic != nir_intrinsic_execute_miss_amd &&
+          intrin->intrinsic != nir_intrinsic_execute_hit_object_amd)
          continue;
 
       nir_builder b = nir_builder_at(nir_before_instr(parent));
