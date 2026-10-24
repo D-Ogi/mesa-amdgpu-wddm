@@ -1884,6 +1884,11 @@ vtn_storage_class_to_mode(struct vtn_builder *b,
       }
       break;
    case SpvStorageClassPrivate:
+   case SpvStorageClassHitObjectAttributeEXT:
+      /* HitObjectAttributeEXT variables are visible to all functions of the
+       * invocation, as Private variables are. The hit object instructions
+       * copy them to and from the hit object.
+       */
       mode = vtn_variable_mode_private;
       nir_mode = nir_var_shader_temp;
       break;

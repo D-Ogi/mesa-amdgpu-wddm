@@ -163,6 +163,7 @@ static const struct spirv_capabilities implemented_capabilities = {
    .Shader = true,
    .ShaderClockKHR = true,
    .ShaderEnqueueAMDX = true,
+   .ShaderInvocationReorderEXT = true,
    .ShaderLayer = true,
    .ShaderNonUniformEXT = true,
    .ShaderSMBuiltinsNV = true,
@@ -458,6 +459,7 @@ vtn_base_type_to_string(enum vtn_base_type t)
    CASE(sampled_image);
    CASE(accel_struct);
    CASE(ray_query);
+   CASE(hit_object);
    CASE(function);
    CASE(event);
    CASE(cooperative_matrix);
@@ -1548,6 +1550,7 @@ vtn_types_compatible(struct vtn_builder *b,
       return true;
    case vtn_base_type_accel_struct:
    case vtn_base_type_ray_query:
+   case vtn_base_type_hit_object:
       return true;
 
    case vtn_base_type_function:
@@ -1589,6 +1592,7 @@ vtn_type_copy(struct vtn_builder *b, struct vtn_type *src)
    case vtn_base_type_event:
    case vtn_base_type_accel_struct:
    case vtn_base_type_ray_query:
+   case vtn_base_type_hit_object:
    case vtn_base_type_cooperative_matrix:
    case vtn_base_type_buffer:
    case vtn_base_type_long_vector:
@@ -2147,6 +2151,12 @@ type_decoration_cb(struct vtn_builder *b,
 
    case SpvDecorationUTFEncodedKHR:
       /* Ignored. */
+      break;
+
+   case SpvDecorationHitObjectShaderRecordBufferEXT:
+      /* A buffer reference into the shader record of a hit object. For NIR
+       * it is an ordinary physical storage buffer.
+       */
       break;
 
    default:
@@ -2761,6 +2771,14 @@ vtn_handle_type(struct vtn_builder *b, SpvOp opcode,
          val->type->access = ACCESS_INCLUDE_HELPERS;
       break;
    }
+
+   case SpvOpTypeHitObjectEXT:
+      /* A hit object is an opaque handle. The driver lowers the variables
+       * that hold one through the hit object intrinsics that use them.
+       */
+      val->type->base_type = vtn_base_type_hit_object;
+      val->type->type = glsl_uint64_t_type();
+      break;
 
    case SpvOpTypeTensorLayoutNV:
    case SpvOpTypeTensorViewNV:
@@ -6493,6 +6511,7 @@ vtn_handle_variable_or_type_instruction(struct vtn_builder *b, SpvOp opcode,
    case SpvOpTypePipe:
    case SpvOpTypeAccelerationStructureKHR:
    case SpvOpTypeRayQueryKHR:
+   case SpvOpTypeHitObjectEXT:
    case SpvOpTypeCooperativeMatrixKHR:
    case SpvOpTypeUntypedPointerKHR:
    case SpvOpTypeBufferEXT:
@@ -6793,6 +6812,345 @@ vtn_handle_ray_intrinsic(struct vtn_builder *b, SpvOp opcode,
       nir_builder_instr_insert(&b->nb, &intrin->instr);
       break;
    }
+
+   default:
+      vtn_fail_with_opcode("Unhandled opcode", opcode);
+   }
+}
+
+/* Hit object attributes are at most 32 bytes. NIR passes them as 8 dwords in
+ * natural layout, which is the layout that drivers use for HitAttributeKHR
+ * variables.
+ */
+#define VTN_HIT_OBJECT_ATTRIB_DWORDS 8
+
+static void
+vtn_hit_object_attribs_copy(struct vtn_builder *b, nir_deref_instr *deref,
+                            unsigned offset, nir_def **dwords, bool to_dwords)
+{
+   nir_builder *nb = &b->nb;
+   const struct glsl_type *type = deref->type;
+
+   if (glsl_type_is_struct_or_ifc(type)) {
+      for (unsigned i = 0; i < glsl_get_length(type); i++) {
+         const struct glsl_type *field = glsl_get_struct_field(type, i);
+         unsigned size, align;
+         glsl_get_natural_size_align_bytes(field, &size, &align);
+         offset = ALIGN_POT(offset, align);
+         vtn_hit_object_attribs_copy(b, nir_build_deref_struct(nb, deref, i),
+                                     offset, dwords, to_dwords);
+         offset += size;
+      }
+      return;
+   }
+
+   if (glsl_type_is_array_or_matrix(type)) {
+      const struct glsl_type *elem = glsl_get_array_element(type);
+      unsigned size, align;
+      glsl_get_natural_size_align_bytes(elem, &size, &align);
+      const unsigned stride = ALIGN_POT(size, align);
+      const unsigned length = glsl_type_is_matrix(type) ?
+                              glsl_get_matrix_columns(type) :
+                              glsl_get_length(type);
+      for (unsigned i = 0; i < length; i++) {
+         vtn_hit_object_attribs_copy(b, nir_build_deref_array_imm(nb, deref, i),
+                                     offset + i * stride, dwords, to_dwords);
+      }
+      return;
+   }
+
+   vtn_fail_if(!glsl_type_is_vector_or_scalar(type),
+               "Hit object attributes must contain only scalars and vectors");
+
+   const unsigned num_components = glsl_get_vector_elements(type);
+   const bool is_bool = glsl_type_is_boolean(type);
+   const unsigned bit_size = is_bool ? 32 : glsl_get_bit_size(type);
+   const unsigned comp_bytes = bit_size / 8;
+
+   vtn_fail_if(offset + num_components * comp_bytes >
+               VTN_HIT_OBJECT_ATTRIB_DWORDS * 4,
+               "Hit object attributes are larger than 32 bytes");
+
+   nir_def *value = to_dwords ? nir_load_deref(nb, deref) : NULL;
+   nir_def *comps[NIR_MAX_VEC_COMPONENTS];
+
+   for (unsigned c = 0; c < num_components; c++) {
+      const unsigned comp_offset = offset + c * comp_bytes;
+      const unsigned dw = comp_offset / 4;
+      const unsigned shift = (comp_offset % 4) * 8;
+
+      if (to_dwords) {
+         nir_def *comp = nir_channel(nb, value, c);
+         if (is_bool)
+            comp = nir_b2i32(nb, comp);
+
+         if (bit_size == 64) {
+            dwords[dw] = nir_unpack_64_2x32_split_x(nb, comp);
+            dwords[dw + 1] = nir_unpack_64_2x32_split_y(nb, comp);
+         } else if (bit_size == 32) {
+            dwords[dw] = comp;
+         } else {
+            dwords[dw] = nir_ior(nb, dwords[dw],
+                                 nir_ishl_imm(nb, nir_u2u32(nb, comp), shift));
+         }
+      } else {
+         if (bit_size == 64) {
+            comps[c] = nir_pack_64_2x32_split(nb, dwords[dw], dwords[dw + 1]);
+         } else if (bit_size == 32) {
+            comps[c] = is_bool ? nir_ine_imm(nb, dwords[dw], 0) : dwords[dw];
+         } else {
+            comps[c] = nir_u2uN(nb, nir_ushr_imm(nb, dwords[dw], shift),
+                                bit_size);
+         }
+      }
+   }
+
+   if (!to_dwords) {
+      nir_store_deref(nb, deref, nir_vec(nb, comps, num_components),
+                      BITFIELD_MASK(num_components));
+   }
+}
+
+static nir_def *
+vtn_hit_object_attribs_to_dwords(struct vtn_builder *b, nir_deref_instr *deref)
+{
+   nir_def *dwords[VTN_HIT_OBJECT_ATTRIB_DWORDS];
+   for (unsigned i = 0; i < VTN_HIT_OBJECT_ATTRIB_DWORDS; i++)
+      dwords[i] = nir_imm_int(&b->nb, 0);
+
+   vtn_hit_object_attribs_copy(b, deref, 0, dwords, true);
+   return nir_vec(&b->nb, dwords, VTN_HIT_OBJECT_ATTRIB_DWORDS);
+}
+
+static void
+vtn_hit_object_attribs_from_dwords(struct vtn_builder *b, nir_deref_instr *deref,
+                                   nir_def *vec)
+{
+   nir_def *dwords[VTN_HIT_OBJECT_ATTRIB_DWORDS];
+   for (unsigned i = 0; i < VTN_HIT_OBJECT_ATTRIB_DWORDS; i++)
+      dwords[i] = nir_channel(&b->nb, vec, i);
+
+   vtn_hit_object_attribs_copy(b, deref, 0, dwords, false);
+}
+
+static nir_def *
+vtn_hit_object_deref(struct vtn_builder *b, uint32_t id)
+{
+   nir_deref_instr *deref = vtn_nir_deref(b, id);
+   vtn_fail_if(glsl_without_array(deref->type) != glsl_uint64_t_type(),
+               "Hit Object must be a pointer to a hit object");
+   return &deref->def;
+}
+
+static void
+vtn_hit_object_load(struct vtn_builder *b, const uint32_t *w,
+                    nir_hit_object_value value)
+{
+   nir_builder *nb = &b->nb;
+   struct vtn_type *res_type = vtn_get_type(b, w[1]);
+   const struct glsl_type *type = res_type->type;
+   nir_def *hit_object = vtn_hit_object_deref(b, w[3]);
+
+   if (glsl_type_is_array_or_matrix(type)) {
+      const struct glsl_type *elem_type = glsl_get_array_element(type);
+      const unsigned elems = glsl_type_is_matrix(type) ?
+                             glsl_get_matrix_columns(type) :
+                             glsl_get_length(type);
+
+      struct vtn_ssa_value *ssa = vtn_create_ssa_value(b, res_type);
+      for (unsigned i = 0; i < elems; i++) {
+         ssa->elems[i]->def =
+            nir_load_hit_object(nb, glsl_get_vector_elements(elem_type),
+                                glsl_get_bit_size(elem_type), hit_object,
+                                .hit_object_value = value, .column = i);
+      }
+      vtn_push_ssa_value(b, w[2], ssa);
+   } else {
+      vtn_push_nir_ssa(b, w[2],
+                       nir_load_hit_object(nb, glsl_get_vector_elements(type),
+                                           glsl_get_bit_size(type), hit_object,
+                                           .hit_object_value = value));
+   }
+}
+
+static void
+vtn_handle_hit_object_intrinsic(struct vtn_builder *b, SpvOp opcode,
+                                const uint32_t *w, unsigned count)
+{
+   nir_builder *nb = &b->nb;
+
+   switch (opcode) {
+   case SpvOpHitObjectTraceRayEXT:
+   case SpvOpHitObjectTraceReorderExecuteEXT: {
+      nir_intrinsic_instr *intrin =
+         nir_intrinsic_instr_create(b->nb.shader,
+                                    nir_intrinsic_hit_object_trace_ray);
+      nir_def *hit_object = vtn_hit_object_deref(b, w[1]);
+      intrin->src[0] = nir_src_for_ssa(hit_object);
+      /* The ray sources are in the same order as in trace_ray. */
+      for (unsigned i = 0; i < 10; i++)
+         intrin->src[i + 1] = nir_src_for_ssa(vtn_ssa_value(b, w[i + 2])->def);
+      nir_deref_instr *payload = vtn_nir_deref(b, w[12]);
+      intrin->src[11] = nir_src_for_ssa(&payload->def);
+      nir_builder_instr_insert(nb, &intrin->instr);
+
+      if (opcode == SpvOpHitObjectTraceReorderExecuteEXT) {
+         if (count > 13) {
+            nir_hit_object_reorder_thread(nb, hit_object,
+                                          vtn_get_nir_ssa(b, w[13]),
+                                          vtn_get_nir_ssa(b, w[14]));
+         } else {
+            nir_hit_object_reorder_thread(nb, hit_object, nir_imm_int(nb, 0),
+                                          nir_imm_int(nb, 0));
+         }
+         nir_hit_object_execute_shader(nb, hit_object, &payload->def);
+      }
+      break;
+   }
+
+   case SpvOpHitObjectExecuteShaderEXT:
+   case SpvOpHitObjectReorderExecuteShaderEXT: {
+      nir_def *hit_object = vtn_hit_object_deref(b, w[1]);
+      nir_deref_instr *payload = vtn_nir_deref(b, w[2]);
+      if (opcode == SpvOpHitObjectReorderExecuteShaderEXT) {
+         if (count > 3) {
+            nir_hit_object_reorder_thread(nb, hit_object,
+                                          vtn_get_nir_ssa(b, w[3]),
+                                          vtn_get_nir_ssa(b, w[4]));
+         } else {
+            nir_hit_object_reorder_thread(nb, hit_object, nir_imm_int(nb, 0),
+                                          nir_imm_int(nb, 0));
+         }
+      }
+      nir_hit_object_execute_shader(nb, hit_object, &payload->def);
+      break;
+   }
+
+   case SpvOpHitObjectRecordEmptyEXT:
+      nir_hit_object_record_empty(nb, vtn_hit_object_deref(b, w[1]));
+      break;
+
+   case SpvOpHitObjectRecordMissEXT:
+      nir_hit_object_record_miss(nb, vtn_hit_object_deref(b, w[1]),
+                                 vtn_get_nir_ssa(b, w[2]),
+                                 vtn_get_nir_ssa(b, w[3]),
+                                 vtn_get_nir_ssa(b, w[4]),
+                                 vtn_get_nir_ssa(b, w[5]),
+                                 vtn_get_nir_ssa(b, w[6]),
+                                 vtn_get_nir_ssa(b, w[7]));
+      break;
+
+   case SpvOpHitObjectRecordFromQueryEXT: {
+      nir_def *attribs =
+         vtn_hit_object_attribs_to_dwords(b, vtn_nir_deref(b, w[4]));
+      /* Revision 2 and earlier of the extension had no Hit Kind operand.
+       * Accept such modules. The hit kind is then 0 for an AABB hit.
+       */
+      nir_def *hit_kind = count > 5 ? vtn_get_nir_ssa(b, w[5]) :
+                                      nir_imm_int(nb, 0);
+      nir_hit_object_record_from_query(nb, vtn_hit_object_deref(b, w[1]),
+                                       vtn_ssa_value(b, w[2])->def,
+                                       vtn_get_nir_ssa(b, w[3]),
+                                       attribs, hit_kind);
+      break;
+   }
+
+   case SpvOpHitObjectSetShaderBindingTableRecordIndexEXT:
+      nir_hit_object_set_sbt_record_index(nb, vtn_hit_object_deref(b, w[1]),
+                                          vtn_get_nir_ssa(b, w[2]));
+      break;
+
+   case SpvOpHitObjectGetAttributesEXT: {
+      nir_def *attribs =
+         nir_load_hit_object(nb, VTN_HIT_OBJECT_ATTRIB_DWORDS, 32,
+                             vtn_hit_object_deref(b, w[1]),
+                             .hit_object_value = nir_hit_object_value_attributes);
+      vtn_hit_object_attribs_from_dwords(b, vtn_nir_deref(b, w[2]), attribs);
+      break;
+   }
+
+   case SpvOpReorderThreadWithHintEXT:
+      nir_reorder_thread(nb, vtn_get_nir_ssa(b, w[1]), vtn_get_nir_ssa(b, w[2]));
+      break;
+
+   case SpvOpReorderThreadWithHitObjectEXT:
+      if (count > 2) {
+         nir_hit_object_reorder_thread(nb, vtn_hit_object_deref(b, w[1]),
+                                       vtn_get_nir_ssa(b, w[2]),
+                                       vtn_get_nir_ssa(b, w[3]));
+      } else {
+         nir_hit_object_reorder_thread(nb, vtn_hit_object_deref(b, w[1]),
+                                       nir_imm_int(nb, 0), nir_imm_int(nb, 0));
+      }
+      break;
+
+   case SpvOpHitObjectIsEmptyEXT:
+      vtn_hit_object_load(b, w, nir_hit_object_value_is_empty);
+      break;
+   case SpvOpHitObjectIsHitEXT:
+      vtn_hit_object_load(b, w, nir_hit_object_value_is_hit);
+      break;
+   case SpvOpHitObjectIsMissEXT:
+      vtn_hit_object_load(b, w, nir_hit_object_value_is_miss);
+      break;
+   case SpvOpHitObjectGetRayFlagsEXT:
+      vtn_hit_object_load(b, w, nir_hit_object_value_ray_flags);
+      break;
+   case SpvOpHitObjectGetRayTMinEXT:
+      vtn_hit_object_load(b, w, nir_hit_object_value_ray_t_min);
+      break;
+   case SpvOpHitObjectGetRayTMaxEXT:
+      vtn_hit_object_load(b, w, nir_hit_object_value_ray_t_max);
+      break;
+   case SpvOpHitObjectGetWorldRayOriginEXT:
+      vtn_hit_object_load(b, w, nir_hit_object_value_world_ray_origin);
+      break;
+   case SpvOpHitObjectGetWorldRayDirectionEXT:
+      vtn_hit_object_load(b, w, nir_hit_object_value_world_ray_direction);
+      break;
+   case SpvOpHitObjectGetObjectRayOriginEXT:
+      vtn_hit_object_load(b, w, nir_hit_object_value_object_ray_origin);
+      break;
+   case SpvOpHitObjectGetObjectRayDirectionEXT:
+      vtn_hit_object_load(b, w, nir_hit_object_value_object_ray_direction);
+      break;
+   case SpvOpHitObjectGetObjectToWorldEXT:
+      vtn_hit_object_load(b, w, nir_hit_object_value_object_to_world);
+      break;
+   case SpvOpHitObjectGetWorldToObjectEXT:
+      vtn_hit_object_load(b, w, nir_hit_object_value_world_to_object);
+      break;
+   case SpvOpHitObjectGetInstanceIdEXT:
+      vtn_hit_object_load(b, w, nir_hit_object_value_instance_id);
+      break;
+   case SpvOpHitObjectGetInstanceCustomIndexEXT:
+      vtn_hit_object_load(b, w, nir_hit_object_value_instance_custom_index);
+      break;
+   case SpvOpHitObjectGetGeometryIndexEXT:
+      vtn_hit_object_load(b, w, nir_hit_object_value_geometry_index);
+      break;
+   case SpvOpHitObjectGetPrimitiveIndexEXT:
+      vtn_hit_object_load(b, w, nir_hit_object_value_primitive_index);
+      break;
+   case SpvOpHitObjectGetHitKindEXT:
+      vtn_hit_object_load(b, w, nir_hit_object_value_hit_kind);
+      break;
+   case SpvOpHitObjectGetShaderBindingTableRecordIndexEXT:
+      vtn_hit_object_load(b, w, nir_hit_object_value_sbt_record_index);
+      break;
+   case SpvOpHitObjectGetShaderRecordBufferHandleEXT:
+      vtn_hit_object_load(b, w, nir_hit_object_value_shader_record_buffer_handle);
+      break;
+   case SpvOpHitObjectGetIntersectionTriangleVertexPositionsEXT:
+      vtn_hit_object_load(b, w, nir_hit_object_value_triangle_vertex_positions);
+      break;
+
+   case SpvOpHitObjectTraceRayMotionEXT:
+   case SpvOpHitObjectTraceMotionReorderExecuteEXT:
+   case SpvOpHitObjectRecordMissMotionEXT:
+   case SpvOpHitObjectGetCurrentTimeEXT:
+      vtn_fail("Motion blur hit object instructions need "
+               "SPV_NV_ray_tracing_motion_blur, which is not supported");
 
    default:
       vtn_fail_with_opcode("Unhandled opcode", opcode);
@@ -7579,6 +7937,44 @@ vtn_handle_body_instruction(struct vtn_builder *b, SpvOp opcode,
    case SpvOpRayQueryGetIntersectionWorldToObjectKHR:
    case SpvOpRayQueryGetIntersectionTriangleVertexPositionsKHR:
       vtn_handle_ray_query_intrinsic(b, opcode, w, count);
+      break;
+
+   case SpvOpHitObjectRecordFromQueryEXT:
+   case SpvOpHitObjectRecordMissEXT:
+   case SpvOpHitObjectRecordMissMotionEXT:
+   case SpvOpHitObjectGetIntersectionTriangleVertexPositionsEXT:
+   case SpvOpHitObjectGetRayFlagsEXT:
+   case SpvOpHitObjectSetShaderBindingTableRecordIndexEXT:
+   case SpvOpHitObjectReorderExecuteShaderEXT:
+   case SpvOpHitObjectTraceReorderExecuteEXT:
+   case SpvOpHitObjectTraceMotionReorderExecuteEXT:
+   case SpvOpReorderThreadWithHintEXT:
+   case SpvOpReorderThreadWithHitObjectEXT:
+   case SpvOpHitObjectTraceRayEXT:
+   case SpvOpHitObjectTraceRayMotionEXT:
+   case SpvOpHitObjectRecordEmptyEXT:
+   case SpvOpHitObjectExecuteShaderEXT:
+   case SpvOpHitObjectGetCurrentTimeEXT:
+   case SpvOpHitObjectGetAttributesEXT:
+   case SpvOpHitObjectGetHitKindEXT:
+   case SpvOpHitObjectGetPrimitiveIndexEXT:
+   case SpvOpHitObjectGetGeometryIndexEXT:
+   case SpvOpHitObjectGetInstanceIdEXT:
+   case SpvOpHitObjectGetInstanceCustomIndexEXT:
+   case SpvOpHitObjectGetObjectRayOriginEXT:
+   case SpvOpHitObjectGetObjectRayDirectionEXT:
+   case SpvOpHitObjectGetWorldRayDirectionEXT:
+   case SpvOpHitObjectGetWorldRayOriginEXT:
+   case SpvOpHitObjectGetObjectToWorldEXT:
+   case SpvOpHitObjectGetWorldToObjectEXT:
+   case SpvOpHitObjectGetRayTMaxEXT:
+   case SpvOpHitObjectGetRayTMinEXT:
+   case SpvOpHitObjectGetShaderBindingTableRecordIndexEXT:
+   case SpvOpHitObjectGetShaderRecordBufferHandleEXT:
+   case SpvOpHitObjectIsEmptyEXT:
+   case SpvOpHitObjectIsHitEXT:
+   case SpvOpHitObjectIsMissEXT:
+      vtn_handle_hit_object_intrinsic(b, opcode, w, count);
       break;
 
    case SpvOpLifetimeStart:
