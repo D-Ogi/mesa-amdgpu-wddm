@@ -59,17 +59,25 @@ build_triangle(inout vk_aabb bounds, VOID_REF dst_ptr, vk_bvh_geometry_data geom
     * undefined cases as inactive to filter out NaNs. If the vertex format does not have a NaN
     * representation, then all triangles are considered active.
     */
+   REF(vk_ir_triangle_node) node = REF(vk_ir_triangle_node)(dst_ptr);
+
    if (any(isnan(vertices.vertex[0])) || any(isnan(vertices.vertex[1])) || any(isnan(vertices.vertex[2]))) {
-      if (!VK_TEST_BUILD_FLAG_ALWAYS_ACTIVE)
+      if (!VK_TEST_BUILD_FLAG_ALWAYS_ACTIVE) {
+         /* The encoder also reads the micromap of inactive triangles. */
+         if (VK_TEST_BUILD_FLAG_HAS_MICROMAPS) {
+            REF(vk_ir_triangle_node_micromap) micromap = vk_ir_triangle_node_get_micromap_ref(node);
+            DEREF(micromap).opacity_addr_lo = 0;
+            DEREF(micromap).opacity_addr_hi = 0;
+            DEREF(micromap).opacity_index = VK_MICROMAP_INDEX_GEOMETRY_FLAGS;
+         }
          return false;
+      }
 
       is_valid = false;
       vertices.vertex[0] = vec4(0);
       vertices.vertex[1] = vec4(0);
       vertices.vertex[2] = vec4(0);
    }
-
-   REF(vk_ir_triangle_node) node = REF(vk_ir_triangle_node)(dst_ptr);
 
    bounds.min = vec3(INFINITY);
    bounds.max = vec3(-INFINITY);

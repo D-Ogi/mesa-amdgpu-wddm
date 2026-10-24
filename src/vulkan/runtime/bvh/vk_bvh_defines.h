@@ -159,6 +159,15 @@ struct vk_ir_triangle_node_micromap {
    int32_t opacity_index;
 };
 
+/* Opacity index of a triangle that has no micromap. The geometry flags give its opacity, as for a triangle
+ * in a geometry without micromap linkage.
+ */
+#define VK_MICROMAP_INDEX_GEOMETRY_FLAGS (-5)
+
+/* vk_bvh_geometry_data::micromap_flags */
+/* The geometry has micromap linkage. */
+#define VK_BVH_GEOMETRY_MICROMAP_LINKED (1u << 0)
+
 struct vk_ir_instance_node {
    vk_ir_node base;
    /* See radv_bvh_instance_node */
@@ -193,6 +202,7 @@ struct vk_bvh_geometry_data {
    uint32_t micromap_index_stride;
    uint32_t micromap_index_type;
    uint32_t micromap_base_index;
+   uint32_t micromap_flags;
 };
 
 struct key32_id_pair {
@@ -362,6 +372,11 @@ struct morton_ready_count {
 #define VK_GEOMETRY_INSTANCE_FORCE_NO_OPAQUE_BIT_KHR              8
 #define VK_GEOMETRY_INSTANCE_FORCE_OPACITY_MICROMAP_2_STATE_BIT_KHR 16
 #define VK_GEOMETRY_INSTANCE_DISABLE_OPACITY_MICROMAPS_BIT_KHR    32
+
+#define VK_OPACITY_MICROMAP_SPECIAL_INDEX_FULLY_TRANSPARENT_KHR         (-1)
+#define VK_OPACITY_MICROMAP_SPECIAL_INDEX_FULLY_OPAQUE_KHR              (-2)
+#define VK_OPACITY_MICROMAP_SPECIAL_INDEX_FULLY_UNKNOWN_TRANSPARENT_KHR (-3)
+#define VK_OPACITY_MICROMAP_SPECIAL_INDEX_FULLY_UNKNOWN_OPAQUE_KHR      (-4)
 
 #define TYPE(type, align)                                                                                              \
    layout(buffer_reference, buffer_reference_align = align, scalar) buffer type##_ref                                  \

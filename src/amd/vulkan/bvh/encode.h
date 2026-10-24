@@ -29,7 +29,9 @@ radv_encode_micromap_addr(vk_ir_triangle_node_micromap src)
    }
 
    uint64_t micromap_addr = OFFSET(opacity_addr, micromap_header.offset) & RADV_MICROMAP_ADDR_ADDR_MASK;
-   if (use_special_index) {
+   if (src.opacity_index == VK_MICROMAP_INDEX_GEOMETRY_FLAGS) {
+      micromap_addr = RADV_MICROMAP_ADDR_GEOMETRY_FLAGS;
+   } else if (use_special_index) {
       micromap_addr = (uint64_t((-src.opacity_index) - 1) << RADV_MICROMAP_ADDR_SPECIAL_INDEX_SHIFT) |
                       RADV_MICROMAP_ADDR_SPECIAL_INDEX_ENABLE;
    } else {
