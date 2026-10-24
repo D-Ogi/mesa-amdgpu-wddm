@@ -248,8 +248,12 @@ vk_load_micromap_index(vk_bvh_geometry_data geom_data, uint32_t global_id)
    } else if (geom_data.micromap_indices != 0) {
       uint64_t index_addr = geom_data.micromap_indices + global_id * geom_data.micromap_index_stride;
       switch (geom_data.micromap_index_type) {
+      /* An 8-bit or 16-bit index is unsigned. Only the unsigned casts of the four special indices, the four
+       * largest values, are negative.
+       */
       case VK_INDEX_TYPE_UINT16: {
-         opacity_index = DEREF(REF(int16_t)(index_addr));
+         uint32_t index = uint32_t(DEREF(REF(uint16_t)(index_addr)));
+         opacity_index = index >= 0xfffcu ? int32_t(index) - 0x10000 : int32_t(index);
          break;
       }
       case VK_INDEX_TYPE_UINT32: {
@@ -257,7 +261,8 @@ vk_load_micromap_index(vk_bvh_geometry_data geom_data, uint32_t global_id)
          break;
       }
       case VK_INDEX_TYPE_UINT8_EXT: {
-         opacity_index = DEREF(REF(int8_t)(index_addr));
+         uint32_t index = uint32_t(DEREF(REF(uint8_t)(index_addr)));
+         opacity_index = index >= 0xfcu ? int32_t(index) - 0x100 : int32_t(index);
          break;
       }
       }
