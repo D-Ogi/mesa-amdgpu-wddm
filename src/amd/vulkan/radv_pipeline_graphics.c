@@ -2607,6 +2607,14 @@ radv_graphics_shaders_compile(const struct radv_compiler_info *compiler_info, st
 
       radv_nir_lower_io(stages[i].nir);
 
+      /* Lowering interpolated dereferences creates ordinary at-offset/sample
+       * barycentrics after the earlier explicit-coordinate pass. Resolve them
+       * before shader-info and input ABI selection as well.
+       */
+      if (i == MESA_SHADER_FRAGMENT)
+         NIR_PASS(_, stages[i].nir, radv_nir_lower_fs_barycentric, gfx_state,
+                  num_raster_vertices_per_prim);
+
       /* Scalarize all I/O, because nir_opt_varyings and nir_opt_vectorize_io expect all I/O to be scalarized.
        * Scalar IO is also required by ac_nir_lower_fs_input_loads.
        */

@@ -21,14 +21,21 @@ typedef struct {
 static nir_def *
 lower_interp_center_smooth(nir_builder *b, nir_def *offset)
 {
-   nir_def *pull_model = nir_load_barycentric_model(b, 32);
+   /* Quad inputs and gradients must exist even if this use is divergent or
+    * follows terminate/discard. Only the offset-dependent math stays at use.
+    */
+   nir_builder inputs = nir_builder_at(nir_before_impl(b->impl));
+   inputs.fp_math_ctrl = b->fp_math_ctrl;
+   nir_def *pull_model = nir_load_barycentric_model(&inputs, 32);
 
    nir_def *deriv_x =
-      nir_vec3(b, nir_ddx_fine(b, nir_channel(b, pull_model, 0)), nir_ddx_fine(b, nir_channel(b, pull_model, 1)),
-               nir_ddx_fine(b, nir_channel(b, pull_model, 2)));
+      nir_vec3(&inputs, nir_ddx_fine(&inputs, nir_channel(&inputs, pull_model, 0)),
+               nir_ddx_fine(&inputs, nir_channel(&inputs, pull_model, 1)),
+               nir_ddx_fine(&inputs, nir_channel(&inputs, pull_model, 2)));
    nir_def *deriv_y =
-      nir_vec3(b, nir_ddy_fine(b, nir_channel(b, pull_model, 0)), nir_ddy_fine(b, nir_channel(b, pull_model, 1)),
-               nir_ddy_fine(b, nir_channel(b, pull_model, 2)));
+      nir_vec3(&inputs, nir_ddy_fine(&inputs, nir_channel(&inputs, pull_model, 0)),
+               nir_ddy_fine(&inputs, nir_channel(&inputs, pull_model, 1)),
+               nir_ddy_fine(&inputs, nir_channel(&inputs, pull_model, 2)));
 
    nir_def *offset_x = nir_channel(b, offset, 0);
    nir_def *offset_y = nir_channel(b, offset, 1);
@@ -47,7 +54,7 @@ lower_interp_center_smooth(nir_builder *b, nir_def *offset)
 static nir_def *
 lower_barycentric_coord_at_offset(nir_builder *b, nir_def *src, enum glsl_interp_mode mode)
 {
-   if (mode == INTERP_MODE_SMOOTH)
+   if (mode == INTERP_MODE_SMOOTH || mode == INTERP_MODE_NONE)
       return lower_interp_center_smooth(b, src);
 
    return nir_load_barycentric_at_offset(b, 32, src, .interp_mode = mode);
@@ -181,6 +188,28 @@ static bool
 lower_load_barycentric_coord(nir_builder *b, nir_intrinsic_instr *intrin, void *data)
 {
    lower_fs_barycentric_state *state = data;
+
+   /* Ordinary interpolation needs the same rational evaluation as explicit
+    * barycentric coordinates. Finite differences of already divided I/J are
+    * not valid at an offset when W varies. Lower before shader-info gathering
+    * so the pull-model input is enabled and survives argument compaction.
+    * Handle at-sample here too: the late FS pass would otherwise introduce an
+    * at-offset operation after the input ABI has already been selected.
+    */
+   if (intrin->intrinsic == nir_intrinsic_load_barycentric_at_offset ||
+       intrin->intrinsic == nir_intrinsic_load_barycentric_at_sample) {
+      const enum glsl_interp_mode mode = (enum glsl_interp_mode)nir_intrinsic_interp_mode(intrin);
+      if (mode != INTERP_MODE_SMOOTH && mode != INTERP_MODE_NONE)
+         return false;
+
+      b->cursor = nir_after_instr(&intrin->instr);
+      nir_def *interp = intrin->intrinsic == nir_intrinsic_load_barycentric_at_offset
+                           ? lower_interp_center_smooth(b, intrin->src[0].ssa)
+                           : lower_barycentric_coord_at_sample(b, state, intrin);
+      nir_def_replace(&intrin->def, interp);
+      return true;
+   }
+
    if (intrin->intrinsic != nir_intrinsic_load_barycentric_coord_pixel &&
        intrin->intrinsic != nir_intrinsic_load_barycentric_coord_centroid &&
        intrin->intrinsic != nir_intrinsic_load_barycentric_coord_sample &&
