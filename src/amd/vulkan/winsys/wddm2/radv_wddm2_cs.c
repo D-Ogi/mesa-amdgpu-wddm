@@ -1905,9 +1905,11 @@ radv_wddm2_cs_submit(struct radeon_winsys_ctx *_ctx,
       STACK_ARRAY_FINISH(handles);
       STACK_ARRAY_FINISH(values);
 
-      assert(NT_SUCCESS(status));
-      if (!NT_SUCCESS(status))
+      if (!NT_SUCCESS(status)) {
+         amdgpu_wddm_log("bc250: GPU wait refused: NTSTATUS=0x%X, %u fences, ip %u\n", (unsigned)status,
+                         wait_count, (unsigned)submit->ip_type);
          return VK_ERROR_DEVICE_LOST;
+      }
    }
 
    bool merge_progress = false;
@@ -2013,6 +2015,8 @@ radv_wddm2_cs_submit(struct radeon_winsys_ctx *_ctx,
          };
          status = BC250_WDDM_CALL(&ws->host, SignalSynchronizationObjectFromGpu2, &progress_signal);
          if (!NT_SUCCESS(status)) {
+            amdgpu_wddm_log("bc250: progress signal refused: NTSTATUS=0x%X, value %" PRIu64 "\n", (unsigned)status,
+                            next_value);
             queue->bc250_submit_failed = true; // accepted IB has no retirement value: never reuse its slot
             /* R6, the accepted work whose signal failed: the same signal once more. In-order execution
              * makes its completion proof that this IB is done too. */
@@ -2100,7 +2104,16 @@ radv_wddm2_cs_submit(struct radeon_winsys_ctx *_ctx,
          };
          status = BC250_WDDM_CALL(&ws->host, SubmitSignalSyncObjectsToHwQueue, &signal);
       } else {
+         /* The GPU signal of a value can come after a signal of a larger value to the same fence:
+          * a queue that waits for a value and then signals the next one is submitted first
+          * (wait-before-signal across two queues, legal on a Vulkan timeline). The flag lets the
+          * kernel queue a value behind one already queued (d3dukmdt.h, D3DDDICB_SIGNALFLAGS). The
+          * wait keeps the order on the GPU, so the value of the fence still only grows. The
+          * hardware-queue path above and the CPU signal (vk_wddm2_monitored_fence.c) set it too. */
          D3DKMT_SIGNALSYNCHRONIZATIONOBJECTFROMGPU2 signal = {
+            .Flags = {
+               .AllowFenceRewind = 1,
+            },
             .ObjectCount = count,
             .ObjectHandleArray = handles,
             .BroadcastContextCount = 1,
@@ -2117,8 +2130,9 @@ radv_wddm2_cs_submit(struct radeon_winsys_ctx *_ctx,
          p_atomic_inc(&ws->submit_stats.signal_calls);
          p_atomic_add(&ws->submit_stats.signal_objects, (uint64_t)signal_count);
       }
-      assert(NT_SUCCESS(status));
       if (!NT_SUCCESS(status)) {
+         amdgpu_wddm_log("bc250: GPU signal refused: NTSTATUS=0x%X, %u fences, ip %u\n", (unsigned)status,
+                         count, (unsigned)submit->ip_type);
          if (merge_progress) {
             queue->bc250_submit_failed = true; // accepted IB has no retirement value: never reuse its slot
             /* R6: the progress value rode in this call, so it was not signalled either. */

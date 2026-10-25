@@ -115,6 +115,7 @@ struct obj {
    void *cookie;      /* contexts: the cookie they were created with */
    uint64_t value;    /* syncs: what the fence's CPU mapping shows */
    uint64_t gpu_va;   /* syncs: the FenceValueGPUVirtualAddress the host gave (h.gpu_va_mode) */
+   uint64_t queued;   /* syncs: the largest value a GPU signal queued */
    void *mem;         /* allocations: Lock2 memory */
    bool locked;       /* allocations: a Lock2 the host has not seen unlocked */
 };
@@ -176,6 +177,8 @@ static struct {
 
    unsigned queue_op_out_of_scope, cookie_mismatch, wrong_thread;
    unsigned dead_context, dead_sync, device_contexts, unexpected;
+   /* GPU signal calls with AllowFenceRewind, and GPU signals refused for their order. */
+   unsigned rewind_signals, refused_signals;
    /* A DestroyAllocation2 of a locked allocation: refused, as the D3D12 shell's HostedDispatch refuses it. */
    unsigned locked_destroy;
 
@@ -572,6 +575,22 @@ fake_dispatch(void *userdata, uint32_t op, void *arg)
          use_sync(s->ObjectHandleArray[i]);
       if (!s->ObjectCount)
          h.unexpected++;
+      /* A value behind a larger value already queued to the same fence is refused without
+       * AllowFenceRewind, which is the order that the kernel can refuse. */
+      for (unsigned i = 0; i < s->ObjectCount; i++) {
+         const struct obj *o = find(h.syncs, h.n_syncs, s->ObjectHandleArray[i]);
+         if (o && s->MonitoredFenceValueArray[i] < o->queued && !s->Flags.AllowFenceRewind) {
+            h.refused_signals++;
+            return (int32_t)0xC000000D; /* STATUS_INVALID_PARAMETER */
+         }
+      }
+      if (s->Flags.AllowFenceRewind)
+         h.rewind_signals++;
+      for (unsigned i = 0; i < s->ObjectCount; i++) {
+         struct obj *o = find(h.syncs, h.n_syncs, s->ObjectHandleArray[i]);
+         if (o && s->MonitoredFenceValueArray[i] > o->queued)
+            o->queued = s->MonitoredFenceValueArray[i];
+      }
       record(op, s->BroadcastContextArray[0], s->ObjectHandleArray[0], s->MonitoredFenceValueArray[0], NULL);
       record_objs(s->ObjectCount, s->ObjectHandleArray, s->MonitoredFenceValueArray);
       return 0;
@@ -6195,6 +6214,67 @@ test_compute_unbound(void)
    compute_end(ws, c, 2, bo);
 }
 
+/* Wait-before-signal across two queues on one timeline (legal in Vulkan), on an unbound device:
+ * the COMPUTE queue waits for 4 and signals 5, and only then does the GFX queue signal 4. The GFX
+ * signal is queued behind 5, so every application signal call carries AllowFenceRewind. The GFX
+ * queue then waits for 5 and signals 6. */
+static void
+test_compute_wait_before_signal(void)
+{
+   struct radv_wddm2_winsys *ws = make_compute_ws();
+   struct radeon_winsys_ctx *c = device_ctx(ws);
+   struct vk_wddm2_monitored_fence timeline, probe;
+   app_fence(&timeline);
+   app_fence(&probe);
+
+   /* The model of the fake host: without the flag, a value behind a queued one is refused. */
+   uint64_t five = 5, four = 4;
+   D3DKMT_SIGNALSYNCHRONIZATIONOBJECTFROMGPU2 raw = {
+      .ObjectCount = 1,
+      .ObjectHandleArray = &probe.handle,
+      .BroadcastContextCount = 1,
+      .BroadcastContextArray = &gfx(c)->context_h,
+      .MonitoredFenceValueArray = &five,
+   };
+   check(fake_dispatch(&h, BC250_HOST_SignalSynchronizationObjectFromGpu2, &raw) == 0, "the model: 5 is queued");
+   raw.MonitoredFenceValueArray = &four;
+   check(fake_dispatch(&h, BC250_HOST_SignalSynchronizationObjectFromGpu2, &raw) != 0 && h.refused_signals == 1,
+         "the model: 4 behind 5 without AllowFenceRewind is refused");
+   h.refused_signals = 0;
+   h.rewind_signals = 0;
+
+   struct radeon_winsys_bo *bo[1];
+   uint32_t *map[1];
+   if (!pattern_bos(ws, 1, bo, map)) {
+      check(false, "a mapped command BO");
+      return;
+   }
+   struct fake_cs fb, fa, fc;
+   struct ac_cmdbuf *cs_b = fake_cs(&fb, bo[0], bo[0]->va, 16);
+   struct ac_cmdbuf *cs_a = fake_cs(&fa, NULL, 0x100000, 8);
+   struct ac_cmdbuf *cs_c = fake_cs(&fc, NULL, 0x100000, 8);
+   const struct vk_sync_wait wait4 = {.sync = &timeline.base, .wait_value = 4};
+   const struct vk_sync_wait wait5 = {.sync = &timeline.base, .wait_value = 5};
+   const struct vk_sync_signal signal4 = {.sync = &timeline.base, .signal_value = 4};
+   const struct vk_sync_signal signal5 = {.sync = &timeline.base, .signal_value = 5};
+   const struct vk_sync_signal signal6 = {.sync = &timeline.base, .signal_value = 6};
+
+   unsigned mark = h.n_ev;
+   check(submit_ip(ws, c, AMD_IP_COMPUTE, 1, &cs_b, 1, &wait4, 1, &signal5) == VK_SUCCESS,
+         "COMPUTE B waits for 4 and signals 5");
+   check(event_is(find_op(mark, BC250_HOST_WaitForSynchronizationObjectFromGpu, 0),
+                  BC250_HOST_WaitForSynchronizationObjectFromGpu, compute(c)->context_h, timeline.handle, 4),
+         "the node 2 context waits for 4 on the GPU");
+   check(submit_ip(ws, c, AMD_IP_GFX, 1, &cs_a, 0, NULL, 1, &signal4) == VK_SUCCESS,
+         "GFX A: the signal of 4, queued behind 5, is accepted");
+   check(submit_ip(ws, c, AMD_IP_GFX, 1, &cs_c, 1, &wait5, 1, &signal6) == VK_SUCCESS,
+         "GFX C waits for 5 and signals 6");
+   check(h.rewind_signals == 3 && !h.refused_signals,
+         "the three application signal calls carry AllowFenceRewind (%u, %u refused)", h.rewind_signals,
+         h.refused_signals);
+   compute_end(ws, c, 1, bo);
+}
+
 /* bc250kmd refuses the node 2 context: the COMPUTE submission is lost, nothing is left behind, a
  * later COMPUTE submission tries again, and the GFX queue continues. */
 static void
@@ -6295,6 +6375,7 @@ static const struct {
    {"compute_unbound", test_compute_unbound},
    {"compute_refused", test_compute_refused},
    {"compute_bound", test_compute_bound},
+   {"compute_wait_before_signal", test_compute_wait_before_signal},
 };
 
 int
