@@ -482,16 +482,22 @@ radv_wddm2_queue_init(struct radv_wddm2_winsys *ws, enum amd_ip_type hw_ip,
    UINT private_size = sizeof(create_context_data);
 
    if (ws->bc250) {
-      /* GFX1013 has no compute queue (fact M50). Node 1 is not a UMD queue. */
-      if (hw_ip != AMD_IP_GFX)
+      /* GFX on node 0 and COMPUTE on node 2, the compute node, which the
+       * caps offer (has_bc250_compute_node); ac_fill_hw_ip_info keeps the
+       * COMPUTE IP only then. Node 1 is not a UMD queue. */
+      if (hw_ip != AMD_IP_GFX && hw_ip != AMD_IP_COMPUTE)
          return VK_SUCCESS;
-      node = 0;
+      /* A gang ACE queue (parent set) is a hardware queue under the GFX context, and
+       * bc250kmd has no hardware-queue DDIs: no context for it. */
+      if (hw_ip == AMD_IP_COMPUTE && (parent || !ws->gpu_info.ip[AMD_IP_COMPUTE].num_queues))
+         return VK_SUCCESS;
+      node = hw_ip == AMD_IP_COMPUTE ? BC250_COMPUTE_NODE : 0;
       bc250_ctx.magic = BC250_CONTEXT_MAGIC;
       bc250_ctx.version = 2;
       bc250_ctx.size = sizeof(bc250_ctx);
       _Static_assert(sizeof(bc250_ctx) == 80, "BC2C version 2 is 80 bytes");
-      bc250_ctx.ip_type = BC250_IP_GFX;
-      bc250_ctx.node_ordinal = 0;
+      bc250_ctx.ip_type = hw_ip == AMD_IP_COMPUTE ? BC250_IP_COMPUTE : BC250_IP_GFX;
+      bc250_ctx.node_ordinal = node;
       private_data = &bc250_ctx;
       private_size = sizeof(bc250_ctx);
    } else if (hw_ip == AMD_IP_GFX) {
@@ -637,8 +643,19 @@ radv_wddm2_ctx_create(struct radeon_winsys *_ws, enum radeon_ctx_priority priori
    if (!ctx)
       return VK_ERROR_OUT_OF_HOST_MEMORY;
    ctx->ws = ws;
+   ctx->priority = priority;
 
    for (uint32_t ip = 0; ip < AMD_NUM_IP_TYPES; ip++) {
+      /* bc250: the node 2 context comes with the first COMPUTE submission
+       * (radv_wddm2_cs_submit). A device that never uses the compute family
+       * holds no node 2 context, and a closed or faulted node 2 cannot fail
+       * the creation of a device that renders on node 0 only. */
+      if (ws->bc250 && ip == AMD_IP_COMPUTE) {
+         ctx->per_ip[ip].queue.hw_ip = ip;
+         ctx->per_ip[ip].queue.bc250_ws = ws;
+         util_dynarray_init(&ctx->per_ip[ip].queue.sparse_ops, NULL);
+         continue;
+      }
       result = radv_wddm2_queue_init(ws, ip, priority, NULL, &ctx->per_ip[ip].queue, false, NULL);
       if (result != VK_SUCCESS)
          goto fail_contexts;
@@ -1503,7 +1520,10 @@ radv_wddm2_bc250_submit(struct radv_wddm2_ctx *ctx, struct radv_wddm2_queue *que
       va = ibs[0].ib.va;
       bytes = ibs[0].ib.cdw * 4;
    } else {
-      const bool copy_all = ws->bc250_gather_copy;
+      /* The compute ring runs no IB2 (upstream RADV calls IB2 on the gfx IP only,
+       * radv_winsys_cs_execute_secondary): every IB of a COMPUTE submission is
+       * copied into the IB1. */
+      const bool copy_all = ws->bc250_gather_copy || queue->hw_ip == AMD_IP_COMPUTE;
       uint64_t copied_dw = 0;
       unsigned pad = 0;
       uint8_t *dst;
@@ -1525,7 +1545,7 @@ radv_wddm2_bc250_submit(struct radv_wddm2_ctx *ctx, struct radv_wddm2_queue *que
       /* The IB1 ends on the IB padding of the GFX queue, as every RADV IB does. Copied IBs are
        * already padded; four-dword calls may leave half a unit (the progress write is 8 dwords). */
       if (!copy_all || gpu_progress) {
-         const uint32_t pad_mask = ws->gpu_info.ip[AMD_IP_GFX].ib_pad_dw_mask;
+         const uint32_t pad_mask = ws->gpu_info.ip[queue->hw_ip].ib_pad_dw_mask;
          pad = (unsigned)((pad_mask + 1u - (total & pad_mask)) & pad_mask);
          total += pad;
       }
@@ -1625,11 +1645,12 @@ radv_wddm2_bc250_submit(struct radv_wddm2_ctx *ctx, struct radv_wddm2_queue *que
    blob.magic = BC250_SUBMIT_MAGIC;
    blob.version = 1;
    blob.num_ibs = 1;
-   blob.ip_type = BC250_IP_GFX;
+   /* bc250kmd runs a BC2S blob only on the node of its IP: GFX on node 0, COMPUTE on node 2. */
+   blob.ip_type = queue->hw_ip == AMD_IP_COMPUTE ? BC250_IP_COMPUTE : BC250_IP_GFX;
    blob.size = 40 + sizeof(struct bc250_ib_blob);
    blob.ib[0].va_start = va;
    blob.ib[0].ib_bytes = bytes;
-   blob.ib[0].ip_type = BC250_IP_GFX;
+   blob.ib[0].ip_type = blob.ip_type;
 
    memset(&cmd, 0, sizeof(cmd));
    cmd.Commands = va;
@@ -1800,6 +1821,24 @@ radv_wddm2_cs_submit(struct radeon_winsys_ctx *_ctx,
 
    if (radv_wddm2_ctx_unbound(ctx))
       return VK_ERROR_VALIDATION_FAILED;
+
+   /* bc250: the node 2 context of the compute family, made at its first
+    * submission (radv_wddm2_ctx_create). Only the one VkQueue of that family
+    * submits COMPUTE work on this context, under the queue's external
+    * synchronization, so no other thread makes it at the same time. */
+   if (ws->bc250 && submit->ip_type == AMD_IP_COMPUTE && !queue->context_h) {
+      /* A bound queue gets its contexts from the embedder, which binds GFX only. RADV shows no
+       * compute family on a bound instance (radv_compute_queue_enabled). */
+      if (ctx->bindable)
+         return VK_ERROR_DEVICE_LOST;
+      if (radv_wddm2_queue_init(ws, AMD_IP_COMPUTE, ctx->priority, NULL, queue, false, NULL) != VK_SUCCESS ||
+          !queue->context_h) {
+         radv_wddm2_queue_reset_unbound(ws, AMD_IP_COMPUTE, queue);
+         amdgpu_wddm_log("bc250: no context on the compute node: the compute queue is lost\n");
+         return VK_ERROR_DEVICE_LOST;
+      }
+      amdgpu_wddm_log("bc250: compute queue context 0x%x on node %u\n", queue->context_h, BC250_COMPUTE_NODE);
+   }
 
    /* Destroy the held BOs whose waits retired (no host call when none did). */
    radv_wddm2_deferred_drain(ws);

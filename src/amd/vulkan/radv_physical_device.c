@@ -227,6 +227,11 @@ radv_compute_queue_enabled(const struct radv_physical_device *pdev)
 
    const struct radv_instance *instance = radv_physical_device_instance(pdev);
 
+   /* A bound instance gets the context of every queue from its embedder, and
+    * the embedder binds GFX contexts on node 0 only (radv_wddm2_ctx_bind). */
+   if (radv_bound_queues_enabled(pdev))
+      return false;
+
    return pdev->info.ip[AMD_IP_COMPUTE].num_queues > 0 &&
           (!(instance->queue_disable_flags & RADV_QUEUE_DISABLE_COMPUTE) || !pdev->info.has_graphics);
 }
@@ -3314,6 +3319,10 @@ radv_get_physical_device_queue_family_properties(struct radv_physical_device *pd
 
    if (radv_compute_queue_enabled(pdev)) {
       VkQueueFlags compute_flags = VK_QUEUE_COMPUTE_BIT | VK_QUEUE_TRANSFER_BIT | VK_QUEUE_SPARSE_BINDING_BIT;
+      /* The BC-250 compute node binds no sparse memory: the queue mapping of the
+       * WDDM winsys runs on the graphics family's companion context only. */
+      if (pdev->info.has_bc250_compute_node)
+         compute_flags &= ~VK_QUEUE_SPARSE_BINDING_BIT;
       if (*pCount > idx) {
          *pQueueFamilyProperties[idx] = (VkQueueFamilyProperties){
             .queueFlags = compute_flags | radv_queue_family_protected_flag(pdev, RADV_QUEUE_COMPUTE),

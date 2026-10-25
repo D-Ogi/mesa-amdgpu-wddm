@@ -489,18 +489,23 @@ static const uint32_t ac_ip_type_dw_padding_minus_1[AMD_NUM_IP_TYPES] = {
     [AMD_IP_VPE]      = 0xf,
 };
 
-/* RADV_BC250_ACE_QUEUES: expose the GFX1013 COMPUTE IP (the ACE rings). Off by
- * default; the native Task arm (RADV_BC250_NATIVE_TASK, BC250_NATIVE_TASK_COMPILE)
- * needs a compute queue and therefore turns it on as well. */
-DEBUG_GET_ONCE_BOOL_OPTION(bc250_ace_queues, "RADV_BC250_ACE_QUEUES", false)
+/* RADV_BC250_ACE_QUEUES: the GFX1013 COMPUTE IP (the ACE rings). Unset, it is
+ * kept when the kernel driver offers a compute node (has_bc250_compute_node, the
+ * BC-250 WDDM winsys) and dropped otherwise, as upstream drops it. 0 drops it and
+ * 1 keeps it whatever the kernel driver says. The native Task arm
+ * (RADV_BC250_NATIVE_TASK, BC250_NATIVE_TASK_COMPILE) needs a compute queue and
+ * therefore keeps it as well. */
+DEBUG_GET_ONCE_OPTION(bc250_ace_queues, "RADV_BC250_ACE_QUEUES", NULL)
 DEBUG_GET_ONCE_BOOL_OPTION(bc250_native_task, "RADV_BC250_NATIVE_TASK", false)
 DEBUG_GET_ONCE_BOOL_OPTION(bc250_native_task_compile, "BC250_NATIVE_TASK_COMPILE", false)
 
 static bool
-ac_bc250_ace_queues_enabled(void)
+ac_bc250_ace_queues_enabled(const struct radeon_info *info)
 {
-   return debug_get_option_bc250_ace_queues() || debug_get_option_bc250_native_task() ||
-          debug_get_option_bc250_native_task_compile();
+   if (debug_get_option_bc250_native_task() || debug_get_option_bc250_native_task_compile())
+      return true;
+   const char *ace = debug_get_option_bc250_ace_queues();
+   return ace ? debug_parse_bool_option(ace, false) : info->has_bc250_compute_node;
 }
 
 bool
@@ -517,14 +522,14 @@ ac_fill_hw_ip_info(struct radeon_info *info, const struct drm_amdgpu_info_device
        * COMPUTE IP on this chip and every submission goes to the gfx ring.
        * The DirectMesh reference removes this refusal, because its native Task
        * route submits on an ACE queue and it runs on a patched Linux kernel
-       * (PASID TLB invalidation and compute GFXOFF fixes). Neither applies by
-       * default here: no BC-250 submission has ever gone to an ACE ring, and
-       * exposing a compute queue family changes the queue topology for every
-       * client (vkd3d-proton routes D3D12 compute and copy there, DXVK takes
-       * an async-compute queue). Keep the refusal and make it opt-in, so the
-       * native-task arm can measure ACE submission through bc250kmd. */
+       * (PASID TLB invalidation and compute GFXOFF fixes). bc250kmd runs
+       * COMPUTE work on a WDDM node of its own, one MEC queue with its own
+       * VMID switch, TLB invalidation and fence, and says so in its caps
+       * (has_bc250_compute_node): then the IP is kept, and RADV shows a
+       * compute queue family. Without that node the refusal stays, as
+       * upstream has it (ac_bc250_ace_queues_enabled). */
       if (ip_type == AMD_IP_COMPUTE && device_info->family == FAMILY_NV &&
-          ASICREV_IS(device_info->external_rev, GFX1013) && !ac_bc250_ace_queues_enabled())
+          ASICREV_IS(device_info->external_rev, GFX1013) && !ac_bc250_ace_queues_enabled(info))
          return false;
 
       info->ip[ip_type].num_queues = util_bitcount(ip_info->available_rings);

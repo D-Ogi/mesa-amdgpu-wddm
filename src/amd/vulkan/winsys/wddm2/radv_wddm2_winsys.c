@@ -192,6 +192,7 @@ kmd_to_amdgpu_vram_type(uint32_t kmd_type)
 #define BC250_OFF_DRM_MAJOR 1272u
 #define BC250_OFF_ADDR32 1284u
 #define BC250_OFF_MAX_IBS 1344u
+#define BC250_OFF_NODE_MASK 1408u /* submittable_node_mask, version 3 */
 
 static uint32_t
 bc250_rd32(const uint8_t *p, uint32_t off)
@@ -245,6 +246,9 @@ radv_wddm2_try_bc250(struct radv_wddm2_winsys *ws, struct drm_amdgpu_info_device
     * RADV_WDDM2_32BIT_HEAP_START. Shader pointer expansion must match it. */
    info->address32_hi = RADV_WDDM2_32BIT_HEAP_START >> 32;
    info->userq_ip_mask = 0;
+   /* Bit 2 of submittable_node_mask: node 2, the compute node, is open (bc250kmd
+    * docs/design/compute-node.md). ac_fill_hw_ip_info keeps the COMPUTE IP only then. */
+   info->has_bc250_compute_node = (bc250_rd32(blob, BC250_OFF_NODE_MASK) & (1u << BC250_COMPUTE_NODE)) != 0;
 
    mask = bc250_rd32(blob, BC250_OFF_HW_IP_MASK);
    for (i = 0; i < 10 && i < AMD_NUM_IP_TYPES; i++) {
@@ -266,6 +270,10 @@ radv_wddm2_try_bc250(struct radv_wddm2_winsys *ws, struct drm_amdgpu_info_device
    }
    for (i = 0; i < 10 && i < AMD_NUM_IP_TYPES; i++)
       info->max_submitted_ibs[i] = bc250_rd32(blob, BC250_OFF_MAX_IBS + i * 4);
+   /* Node 2 is one MEC queue. The VkQueues of one family and priority share one
+    * context (radv_queue_init), so the family has one queue. */
+   if (info->ip[AMD_IP_COMPUTE].num_queues)
+      info->ip[AMD_IP_COMPUTE].num_queues = 1;
 
    info->me_fw_version = bc250_rd32(blob, BC250_OFF_FW_ME);
    info->me_fw_feature = bc250_rd32(blob, BC250_OFF_FW_ME + 4);
@@ -309,8 +317,9 @@ radv_wddm2_try_bc250(struct radv_wddm2_winsys *ws, struct drm_amdgpu_info_device
                                    info->gfx_level >= GFX10 ? 3 : 0;
 
    ws->bc250 = true;
-   amdgpu_wddm_log("bc250: caps blob, device 0x%x family %u gfx %u\n", dev->device_id, info->family,
-           info->gfx_level);
+   amdgpu_wddm_log("bc250: caps blob, device 0x%x family %u gfx %u, compute node %s, compute queues %u\n",
+                   dev->device_id, info->family, info->gfx_level, info->has_bc250_compute_node ? "open" : "absent",
+                   info->ip[AMD_IP_COMPUTE].num_queues);
    return true;
 }
 
