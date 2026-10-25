@@ -2594,6 +2594,13 @@ radv_is_sample_shading_enabled(struct radv_cmd_buffer *cmd_buffer, float *min_sa
    return false;
 }
 
+/* Rasterization samples of the hardware: a SPLIT16 draw (radv_no16.h) records 8-sample passes. */
+static ALWAYS_INLINE unsigned
+radv_hw_rast_samples(const struct radv_cmd_buffer *cmd_buffer)
+{
+   return radv_no16_physical_samples(cmd_buffer->state.no16_draw, cmd_buffer->state.num_rast_samples);
+}
+
 static ALWAYS_INLINE unsigned
 radv_get_ps_iter_samples(struct radv_cmd_buffer *cmd_buffer)
 {
@@ -2601,7 +2608,7 @@ radv_get_ps_iter_samples(struct radv_cmd_buffer *cmd_buffer)
    float min_sample_shading;
 
    if (radv_is_sample_shading_enabled(cmd_buffer, &min_sample_shading)) {
-      ps_iter_samples = ceilf(min_sample_shading * cmd_buffer->state.num_rast_samples);
+      ps_iter_samples = ceilf(min_sample_shading * radv_hw_rast_samples(cmd_buffer));
       ps_iter_samples = util_next_power_of_two(ps_iter_samples);
    }
 
@@ -2773,7 +2780,7 @@ radv_gfx10_compute_bin_size(struct radv_cmd_buffer *cmd_buffer)
    const unsigned color_tag_part = (color_tag_count * rb_count / pipe_count) * color_tag_size * pipe_count;
    const unsigned fmask_tag_part = (fmask_tag_count * rb_count / pipe_count) * fmask_tag_size * pipe_count;
 
-   const unsigned total_samples = cmd_buffer->state.num_rast_samples;
+   const unsigned total_samples = radv_hw_rast_samples(cmd_buffer);
    const unsigned samples_log = util_logbase2_ceil(total_samples);
 
    unsigned color_bytes_per_pixel = 0;
@@ -3067,7 +3074,7 @@ radv_gfx9_compute_bin_size(struct radv_cmd_buffer *cmd_buffer)
    unsigned log_num_rb_per_se = util_logbase2_ceil(pdev->info.max_render_backends / pdev->info.max_se);
    unsigned log_num_se = util_logbase2_ceil(pdev->info.max_se);
 
-   unsigned total_samples = cmd_buffer->state.num_rast_samples;
+   unsigned total_samples = radv_hw_rast_samples(cmd_buffer);
    unsigned ps_iter_samples = radv_get_ps_iter_samples(cmd_buffer);
    unsigned effective_samples = total_samples;
    unsigned color_bytes_per_pixel = 0;
@@ -5025,9 +5032,6 @@ radv_emit_ls_hs_config(struct radv_cmd_buffer *cmd_buffer)
 static bool
 radv_s16f8_probe_active(struct radv_cmd_buffer *cmd_buffer)
 {
-   /* radv_no16_update_draw admitted this draw with the same conditions. */
-   if (cmd_buffer->state.no16_draw == RADV_NO16_DRAW_COVERAGE16)
-      return true;
    const struct radv_device *device = radv_cmd_buffer_device(cmd_buffer);
    const struct radv_physical_device *pdev = radv_device_physical(device);
    return radv_s16f8_probe_mode() >= 2 &&
@@ -5044,7 +5048,7 @@ radv_emit_rast_samples_state(struct radv_cmd_buffer *cmd_buffer)
 {
    struct radv_device *device = radv_cmd_buffer_device(cmd_buffer);
    const struct radv_physical_device *pdev = radv_device_physical(device);
-   const unsigned rasterization_samples = cmd_buffer->state.num_rast_samples;
+   const unsigned rasterization_samples = radv_hw_rast_samples(cmd_buffer);
    unsigned ps_iter_samples = radv_get_ps_iter_samples(cmd_buffer);
    const struct radv_dynamic_state *d = &cmd_buffer->state.dynamic;
    unsigned spi_baryc_cntl = S_0286E0_FRONT_FACE_ALL_BITS(0);
@@ -5070,7 +5074,10 @@ radv_emit_rast_samples_state(struct radv_cmd_buffer *cmd_buffer)
                        S_028A4C_MULTI_SHADER_ENGINE_PRIM_DISCARD_ENABLE(1) | S_028A4C_FORCE_EOV_CNTDWN_ENABLE(1) |
                        S_028A4C_FORCE_EOV_REZ_ENABLE(1) | S_028A4C_WALK_ALIGN8_PRIM_FITS_ST(walk_align8);
 
-   if (!d->sample_location.count || !d->vk.ms.sample_locations_enable)
+   if (cmd_buffer->state.no16_draw == RADV_NO16_DRAW_SPLIT16)
+      radv_no16_emit_split_sample_locations(pdev, cmd_buffer->cs, cmd_buffer->state.no16_pass,
+                                            radv_no16_auto_mode());
+   else if (!d->sample_location.count || !d->vk.ms.sample_locations_enable)
       radv_emit_default_sample_locations(pdev, cmd_buffer->cs,
                                          radv_s16f8_probe_active(cmd_buffer) ? 16 : rasterization_samples);
 
@@ -6560,7 +6567,7 @@ radv_emit_occlusion_query_state(struct radv_cmd_buffer *cmd_buffer)
       }
 
       if (gfx_level < GFX12) {
-         const uint32_t rasterization_samples = cmd_buffer->state.num_rast_samples;
+         const uint32_t rasterization_samples = radv_hw_rast_samples(cmd_buffer);
          const uint32_t sample_rate = util_logbase2(rasterization_samples);
 
          db_count_control |= S_028004_SAMPLE_RATE(sample_rate);
@@ -14455,6 +14462,7 @@ radv_get_nggc_settings(struct radv_cmd_buffer *cmd_buffer)
    }
 
    if ((!d->vk.ms.sample_locations_enable || d->sample_location.allow_small_prim_ngg_culling) &&
+       cmd_buffer->state.no16_draw == RADV_NO16_DRAW_DEFAULT &&
        radv_viewports_have_equal_pixel_center_spacing_and_positioning(cmd_buffer)) {
       const unsigned log2_scaling_factor = d->vk.ms.sample_locations_enable
                                               ? d->sample_location.log2_small_prim_ngg_culling_scaling_factor
@@ -14539,7 +14547,7 @@ radv_emit_ps_state(struct radv_cmd_buffer *cmd_buffer)
    }
 
    if (ps->info.ps.selects_sample_mask_in_dynamically) {
-      use_sample_mask_in = cmd_buffer->state.num_rast_samples != 1;
+      use_sample_mask_in = radv_hw_rast_samples(cmd_buffer) != 1;
 
       if (!use_sample_mask_in)
          spi_ps_input_ena &= C_0286CC_SAMPLE_COVERAGE_ENA;
@@ -14572,9 +14580,12 @@ radv_emit_ps_state(struct radv_cmd_buffer *cmd_buffer)
    if (ps_state_offset) {
       const bool smooth_lines = raster_prim == V_030998_LINESTRIP &&
                                 cmd_buffer->state.line_rast_mode == VK_LINE_RASTERIZATION_MODE_RECTANGULAR_SMOOTH;
-      const unsigned rasterization_samples = cmd_buffer->state.num_rast_samples;
+      const unsigned rasterization_samples = MIN2(radv_hw_rast_samples(cmd_buffer), 8);
       const unsigned ps_iter_samples = radv_get_ps_iter_samples(cmd_buffer);
       const uint16_t ps_iter_mask = ac_get_ps_iter_mask(ps_iter_samples);
+      const unsigned no16_base = cmd_buffer->state.no16_draw == RADV_NO16_DRAW_SPLIT16
+                                    ? radv_no16_split_sample_base(cmd_buffer->state.no16_pass, radv_no16_auto_mode())
+                                    : 0;
       /* BC250 barycentric vertex order (radv_nir_bc250_lower_bary_rotation): GFX10.1 has no
        * LOAD_PROVOKING_VTX, so the fragment shader is told the provoking vertex mode. */
       const bool provoking_last =
@@ -14588,7 +14599,8 @@ radv_emit_ps_state(struct radv_cmd_buffer *cmd_buffer)
                                 SET_SGPR_FIELD(PS_STATE_USE_QUAD_POS, use_quad_pos) |
                                 SET_SGPR_FIELD(PS_STATE_USE_SAMPLE_MASK_IN, use_sample_mask_in) |
                                 SET_SGPR_FIELD(PS_STATE_FRONT_FACE_SELECT, front_face_select) |
-                                SET_SGPR_FIELD(PS_STATE_PROVOKING_LAST, provoking_last);
+                                SET_SGPR_FIELD(PS_STATE_PROVOKING_LAST, provoking_last) |
+                                SET_SGPR_FIELD(PS_STATE_NO16_BASE, no16_base);
 
       if (pdev->info.gfx_level >= GFX12) {
          gfx12_push_sh_reg(ps_state_offset, ps_state);
@@ -14681,7 +14693,9 @@ radv_emit_ngg_state(struct radv_cmd_buffer *cmd_buffer)
    const uint32_t ngg_state =
       SET_SGPR_FIELD(NGG_STATE_NUM_VERTS_PER_PRIM, radv_get_ngg_state_num_verts_per_prim(cmd_buffer)) |
       SET_SGPR_FIELD(NGG_STATE_PROVOKING_VTX, radv_get_ngg_state_provoking_vtx(cmd_buffer)) |
-      SET_SGPR_FIELD(NGG_STATE_QUERY, radv_get_ngg_state_query(cmd_buffer));
+      SET_SGPR_FIELD(NGG_STATE_QUERY, radv_get_ngg_state_query(cmd_buffer)) |
+      SET_SGPR_FIELD(NGG_STATE_NO16_PASS,
+                     cmd_buffer->state.no16_draw == RADV_NO16_DRAW_SPLIT16 && cmd_buffer->state.no16_pass);
 
    const uint64_t query_va = pdev->info.gfx_level >= GFX11 ? cmd_buffer->state.shader_query_buf_va
                                                            : cmd_buffer->state.bc250_safe_stats_buf_va;
@@ -14992,7 +15006,7 @@ radv_emit_db_shader_control(struct radv_cmd_buffer *cmd_buffer)
    const struct radeon_info *gpu_info = &pdev->info;
    const struct radv_shader *ps = cmd_buffer->state.shaders[MESA_SHADER_FRAGMENT];
    const struct radv_dynamic_state *d = &cmd_buffer->state.dynamic;
-   const unsigned rasterization_samples = cmd_buffer->state.num_rast_samples;
+   const unsigned rasterization_samples = radv_hw_rast_samples(cmd_buffer);
    uint32_t db_dfsm_control = S_028060_PUNCHOUT_MODE(V_028060_FORCE_OFF);
    uint32_t db_shader_control;
 
@@ -15458,10 +15472,15 @@ radv_emit_msaa_state(struct radv_cmd_buffer *cmd_buffer)
    const struct radv_instance *instance = radv_physical_device_instance(pdev);
    const struct radv_shader *ps = cmd_buffer->state.shaders[MESA_SHADER_FRAGMENT];
    const bool s16f8_probe = radv_s16f8_probe_active(cmd_buffer);
-   const unsigned rasterization_samples = s16f8_probe ? 16 : cmd_buffer->state.num_rast_samples;
+   const enum radv_no16_draw no16 = cmd_buffer->state.no16_draw;
+   const unsigned rasterization_samples = s16f8_probe ? 16 : radv_hw_rast_samples(cmd_buffer);
    const struct radv_rendering_state *render = &cmd_buffer->state.render;
    const struct radv_dynamic_state *d = &cmd_buffer->state.dynamic;
-   const uint32_t sample_mask = d->vk.ms.sample_mask | ((uint32_t)d->vk.ms.sample_mask << 16);
+   /* A SPLIT16 pass covers the logical samples 8 * pass to 8 * pass + 7. */
+   const uint16_t api_sample_mask = no16 == RADV_NO16_DRAW_SPLIT16
+                                       ? (d->vk.ms.sample_mask >> (8 * cmd_buffer->state.no16_pass)) & 0xff
+                                       : d->vk.ms.sample_mask;
+   const uint32_t sample_mask = api_sample_mask | ((uint32_t)api_sample_mask << 16);
    const bool enable_1x_user_sample_locs =
       d->vk.ms.sample_locations_enable && d->sample_location.count > 0 && d->sample_location.per_pixel == 1;
    const VkLineRasterizationModeEXT line_rast_mode = cmd_buffer->state.line_rast_mode;
@@ -15519,7 +15538,10 @@ radv_emit_msaa_state(struct radv_cmd_buffer *cmd_buffer)
       }
    }
 
-   if (!d->sample_location.count || !d->vk.ms.sample_locations_enable) {
+   if (no16 == RADV_NO16_DRAW_SPLIT16) {
+      /* The halves of the standard 16-sample pattern (radv_no16_emit_split_sample_locations). */
+      max_sample_dist = radv_get_default_max_sample_dist(4);
+   } else if (!d->sample_location.count || !d->vk.ms.sample_locations_enable) {
       max_sample_dist = radv_get_default_max_sample_dist(log_samples);
    } else {
       uint32_t num_samples = (uint32_t)d->sample_location.per_pixel;
@@ -15536,7 +15558,10 @@ radv_emit_msaa_state(struct radv_cmd_buffer *cmd_buffer)
    }
 
    if (msaa_enable) {
-      unsigned z_samples = s16f8_probe ? 8 : MAX2(render->ds_samples, rasterization_samples);
+      /* EQAA: 16 coverage samples with at most 8 Z samples (RadeonSI si_state.c). */
+      unsigned z_samples = s16f8_probe || no16 == RADV_NO16_DRAW_NATIVE16
+                              ? 8
+                              : MAX2(render->ds_samples, rasterization_samples);
       unsigned ps_iter_samples = radv_get_ps_iter_samples(cmd_buffer);
       unsigned log_z_samples = util_logbase2(z_samples);
       unsigned log_ps_iter_samples = util_logbase2(ps_iter_samples);
@@ -15571,12 +15596,12 @@ radv_emit_msaa_state(struct radv_cmd_buffer *cmd_buffer)
               radv_s16f8_probe_mode(), s16f8_probe, rasterization_samples,
               radv_get_ps_iter_samples(cmd_buffer), d->vk.ms.sample_mask, pa_sc_aa_config, db_eqaa);
 #if defined(RADV_S16F8_PROBE) && RADV_S16F8_PROBE
-   if (cmd_buffer->state.no16_draw != RADV_NO16_DRAW_DEFAULT)
+   if (no16 != RADV_NO16_DRAW_DEFAULT)
       fprintf(stderr,
-              "RADV_NO16_AUTO draw mode=%s decision=%s coverage=%u ps=%u mask=%04x PA_SC_AA_CONFIG=%08x "
+              "RADV_NO16_AUTO draw mode=%s decision=%s pass=%u coverage=%u ps=%u mask=%04x PA_SC_AA_CONFIG=%08x "
               "DB_EQAA=%08x\n",
-              radv_no16_auto_mode_name(radv_no16_auto_mode()), radv_no16_draw_name(cmd_buffer->state.no16_draw),
-              rasterization_samples, radv_get_ps_iter_samples(cmd_buffer), d->vk.ms.sample_mask, pa_sc_aa_config,
+              radv_no16_auto_mode_name(radv_no16_auto_mode()), radv_no16_draw_name(no16), cmd_buffer->state.no16_pass,
+              rasterization_samples, radv_get_ps_iter_samples(cmd_buffer), api_sample_mask, pa_sc_aa_config,
               db_eqaa);
 #endif
 
@@ -16263,7 +16288,7 @@ radv_bind_graphics_shaders(struct radv_cmd_buffer *cmd_buffer)
  * only for a marked shader, a 16-sample state or a non-default current state.
  */
 static ATTRIBUTE_NOINLINE bool
-radv_no16_update_draw_slow(struct radv_cmd_buffer *cmd_buffer)
+radv_no16_update_draw_slow(struct radv_cmd_buffer *cmd_buffer, bool dgc)
 {
    const enum radv_no16_auto_mode mode = radv_no16_auto_mode();
    if (mode == RADV_NO16_AUTO_OFF)
@@ -16272,34 +16297,28 @@ radv_no16_update_draw_slow(struct radv_cmd_buffer *cmd_buffer)
    const struct radv_physical_device *pdev = radv_device_physical(device);
    const struct radv_shader *ps = cmd_buffer->state.shaders[MESA_SHADER_FRAGMENT];
    const struct radv_dynamic_state *d = &cmd_buffer->state.dynamic;
-   const unsigned api_samples = radv_get_rasterization_samples(cmd_buffer);
-   unsigned ps_iter_samples = 1;
-   float min_sample_shading;
-   if (radv_is_sample_shading_enabled(cmd_buffer, &min_sample_shading))
-      ps_iter_samples = util_next_power_of_two(ceilf(min_sample_shading * api_samples));
    const struct radv_no16_draw_inputs in = {
       .mode = mode,
-      .gfx10 = pdev->info.gfx_level == GFX10 || pdev->info.gfx_level == GFX10_3,
-      .fs_logical16 = ps && ps->info.ps.no16_logical16,
-      .api_samples = api_samples,
+      .gfx_level_ok = radv_no16_gfx_level_ok(pdev->info.gfx_level == GFX10, pdev->info.gfx_level == GFX10_3),
+      /* Without a fragment shader, 16 samples only give coverage: NATIVE16. */
+      .marker = ps ? (enum radv_no16_draw)ps->info.ps.no16 : RADV_NO16_DRAW_NATIVE16,
       .state_samples = d->vk.ms.rasterization_samples,
-      .ps_iter_samples = ps_iter_samples,
+      .rast_samples = radv_get_rasterization_samples(cmd_buffer),
       .sample_locations_enable = d->vk.ms.sample_locations_enable,
       .conservative = d->vk.rs.conservative_mode != VK_CONSERVATIVE_RASTERIZATION_MODE_DISABLED_EXT,
       .color_att_count = cmd_buffer->state.render.color_att_count,
       .ds_attachment = cmd_buffer->state.render.ds_att.format != VK_FORMAT_UNDEFINED,
-      .triangles = radv_vgt_outprim_is_triangle(radv_get_vgt_outprim_type(cmd_buffer)) &&
-                   d->vk.rs.polygon_mode == V_028814_X_DRAW_TRIANGLES,
       .vrs = device->force_vrs_enabled || cmd_buffer->state.render.vrs_att.iview ||
              d->vk.fsr.fragment_size.width != 1 || d->vk.fsr.fragment_size.height != 1,
+      .generated_commands = dgc,
    };
    const char *reason;
    const enum radv_no16_draw decision = radv_no16_draw_decide(&in, &reason);
    if (decision == RADV_NO16_DRAW_REFUSE) {
 #if defined(RADV_S16F8_PROBE) && RADV_S16F8_PROBE
       if (cmd_buffer->vk.record_result == VK_SUCCESS)
-         fprintf(stderr, "RADV_NO16_AUTO draw-refused mode=%s reason=%s samples=%u marked=%u\n",
-                 radv_no16_auto_mode_name(mode), reason, api_samples, in.fs_logical16);
+         fprintf(stderr, "RADV_NO16_AUTO draw-refused mode=%s reason=%s samples=%u marker=%s\n",
+                 radv_no16_auto_mode_name(mode), reason, in.state_samples, radv_no16_draw_name(in.marker));
 #endif
       vk_command_buffer_set_error(&cmd_buffer->vk, RADV_BC250_CMD_REFUSED);
       return false;
@@ -16308,7 +16327,9 @@ radv_no16_update_draw_slow(struct radv_cmd_buffer *cmd_buffer)
       cmd_buffer->state.no16_draw = decision;
       cmd_buffer->state.dirty |= RADV_CMD_DIRTY_BINNING_STATE | RADV_CMD_DIRTY_RAST_SAMPLES_STATE |
                                  RADV_CMD_DIRTY_PS_STATE | RADV_CMD_DIRTY_DB_SHADER_CONTROL |
-                                 RADV_CMD_DIRTY_MSAA_STATE;
+                                 RADV_CMD_DIRTY_MSAA_STATE | RADV_CMD_DIRTY_NGGC_SETTINGS | RADV_CMD_DIRTY_NGG_STATE;
+      if (pdev->info.gfx_level < GFX12)
+         cmd_buffer->state.dirty |= RADV_CMD_DIRTY_OCCLUSION_QUERY;
    }
    return true;
 }
@@ -16316,13 +16337,39 @@ radv_no16_update_draw_slow(struct radv_cmd_buffer *cmd_buffer)
 /* Every draw that does not touch the no-output16 path leaves here without a
  * state change: no marked shader, not 16 samples, default current state. */
 static ALWAYS_INLINE bool
-radv_no16_update_draw(struct radv_cmd_buffer *cmd_buffer)
+radv_no16_update_draw(struct radv_cmd_buffer *cmd_buffer, bool dgc)
 {
    const struct radv_shader *ps = cmd_buffer->state.shaders[MESA_SHADER_FRAGMENT];
-   if (likely(cmd_buffer->state.no16_draw == RADV_NO16_DRAW_DEFAULT && !(ps && ps->info.ps.no16_logical16) &&
+   if (likely(cmd_buffer->state.no16_draw == RADV_NO16_DRAW_DEFAULT && !(ps && ps->info.ps.no16) &&
               cmd_buffer->state.dynamic.vk.ms.rasterization_samples != 16))
       return true;
-   return radv_no16_update_draw_slow(cmd_buffer);
+   return radv_no16_update_draw_slow(cmd_buffer, dgc);
+}
+
+static ATTRIBUTE_NOINLINE bool
+radv_no16_begin_pass_slow(struct radv_cmd_buffer *cmd_buffer, unsigned pass)
+{
+   const enum radv_no16_draw draw = cmd_buffer->state.no16_draw;
+   const bool run =
+      pass == 0 || (draw == RADV_NO16_DRAW_SPLIT16 && pass < radv_no16_draw_passes(draw, radv_no16_auto_mode()));
+   const unsigned state_pass = run ? pass : 0;
+   if (cmd_buffer->state.no16_pass != state_pass) {
+      cmd_buffer->state.no16_pass = state_pass;
+      cmd_buffer->state.dirty |= RADV_CMD_DIRTY_RAST_SAMPLES_STATE | RADV_CMD_DIRTY_PS_STATE |
+                                 RADV_CMD_DIRTY_MSAA_STATE | RADV_CMD_DIRTY_NGG_STATE;
+   }
+   return run;
+}
+
+/* radv_no16.h: the passes of one draw command. Pass 0 always runs and starts
+ * from pass state 0. radv_before_draw of pass 0 selects the command state; a
+ * SPLIT16 draw then runs pass 1 with the logical samples 8-15. */
+static ALWAYS_INLINE bool
+radv_no16_begin_pass(struct radv_cmd_buffer *cmd_buffer, unsigned pass)
+{
+   if (likely(!cmd_buffer->state.no16_pass && cmd_buffer->state.no16_draw != RADV_NO16_DRAW_SPLIT16))
+      return pass == 0;
+   return radv_no16_begin_pass_slow(cmd_buffer, pass);
 }
 
 /* MUST inline this function to avoid massive perf loss in drawoverhead */
@@ -16372,7 +16419,7 @@ radv_before_draw(struct radv_cmd_buffer *cmd_buffer, const struct radv_draw_info
       radv_bind_graphics_shaders(cmd_buffer);
    }
 
-   if (!radv_no16_update_draw(cmd_buffer))
+   if (!radv_no16_update_draw(cmd_buffer, dgc))
       return false;
 
    /* This is the optimal packet order:
@@ -16484,7 +16531,7 @@ radv_before_taskmesh_draw(struct radv_cmd_buffer *cmd_buffer, const struct radv_
       radv_bind_graphics_shaders(cmd_buffer);
    }
 
-   if (!radv_no16_update_draw(cmd_buffer))
+   if (!radv_no16_update_draw(cmd_buffer, dgc))
       return false;
 
    struct radv_cmd_stream *ace_cs = cmd_buffer->gang.cs;
@@ -16611,10 +16658,12 @@ radv_CmdDraw(VkCommandBuffer commandBuffer, uint32_t vertexCount, uint32_t insta
    info.indirect_va = 0;
    info.indexed = false;
 
-   if (!radv_before_draw(cmd_buffer, &info, 1, 0, false))
-      return;
-   radv_emit_direct_draw_packet(cmd_buffer, vertexCount, 0);
-   radv_after_draw(cmd_buffer);
+   for (unsigned pass = 0; radv_no16_begin_pass(cmd_buffer, pass); pass++) {
+      if (!radv_before_draw(cmd_buffer, &info, 1, 0, false))
+         return;
+      radv_emit_direct_draw_packet(cmd_buffer, vertexCount, 0);
+      radv_after_draw(cmd_buffer);
+   }
 }
 
 VKAPI_ATTR void VKAPI_CALL
@@ -16635,10 +16684,12 @@ radv_CmdDrawMultiEXT(VkCommandBuffer commandBuffer, uint32_t drawCount, const Vk
    info.indirect_va = 0;
    info.indexed = false;
 
-   if (!radv_before_draw(cmd_buffer, &info, drawCount, 0, false))
-      return;
-   radv_emit_direct_multi_draw_packets(cmd_buffer, drawCount, pVertexInfo, stride);
-   radv_after_draw(cmd_buffer);
+   for (unsigned pass = 0; radv_no16_begin_pass(cmd_buffer, pass); pass++) {
+      if (!radv_before_draw(cmd_buffer, &info, drawCount, 0, false))
+         return;
+      radv_emit_direct_multi_draw_packets(cmd_buffer, drawCount, pVertexInfo, stride);
+      radv_after_draw(cmd_buffer);
+   }
 }
 
 VKAPI_ATTR void VKAPI_CALL
@@ -16656,10 +16707,12 @@ radv_CmdDrawIndexed(VkCommandBuffer commandBuffer, uint32_t indexCount, uint32_t
    info.strmout_va = 0;
    info.indirect_va = 0;
 
-   if (!radv_before_draw(cmd_buffer, &info, 1, 0, false))
-      return;
-   radv_emit_direct_draw_indexed_packet(cmd_buffer, firstIndex, indexCount);
-   radv_after_draw(cmd_buffer);
+   for (unsigned pass = 0; radv_no16_begin_pass(cmd_buffer, pass); pass++) {
+      if (!radv_before_draw(cmd_buffer, &info, 1, 0, false))
+         return;
+      radv_emit_direct_draw_indexed_packet(cmd_buffer, firstIndex, indexCount);
+      radv_after_draw(cmd_buffer);
+   }
 }
 
 VKAPI_ATTR void VKAPI_CALL
@@ -16682,10 +16735,12 @@ radv_CmdDrawMultiIndexedEXT(VkCommandBuffer commandBuffer, uint32_t drawCount,
    info.strmout_va = 0;
    info.indirect_va = 0;
 
-   if (!radv_before_draw(cmd_buffer, &info, drawCount, 0, false))
-      return;
-   radv_emit_direct_multi_draw_indexed_packets(cmd_buffer, &info, drawCount, pIndexInfo, stride, pVertexOffset);
-   radv_after_draw(cmd_buffer);
+   for (unsigned pass = 0; radv_no16_begin_pass(cmd_buffer, pass); pass++) {
+      if (!radv_before_draw(cmd_buffer, &info, drawCount, 0, false))
+         return;
+      radv_emit_direct_multi_draw_indexed_packets(cmd_buffer, &info, drawCount, pIndexInfo, stride, pVertexOffset);
+      radv_after_draw(cmd_buffer);
+   }
 }
 
 VKAPI_ATTR void VKAPI_CALL
@@ -16723,10 +16778,12 @@ radv_CmdDrawIndirect2KHR(VkCommandBuffer commandBuffer, const VkDrawIndirect2Inf
    info.indexed = false;
    info.instance_count = 0;
 
-   if (!radv_before_draw(cmd_buffer, &info, 1, pInfo->drawCount, false))
-      return;
-   radv_emit_indirect_draw_packets(cmd_buffer, &info);
-   radv_after_draw(cmd_buffer);
+   for (unsigned pass = 0; radv_no16_begin_pass(cmd_buffer, pass); pass++) {
+      if (!radv_before_draw(cmd_buffer, &info, 1, pInfo->drawCount, false))
+         return;
+      radv_emit_indirect_draw_packets(cmd_buffer, &info);
+      radv_after_draw(cmd_buffer);
+   }
 }
 
 VKAPI_ATTR void VKAPI_CALL
@@ -16764,10 +16821,12 @@ radv_CmdDrawIndexedIndirect2KHR(VkCommandBuffer commandBuffer, const VkDrawIndir
    info.strmout_va = 0;
    info.instance_count = 0;
 
-   if (!radv_before_draw(cmd_buffer, &info, 1, pInfo->drawCount, false))
-      return;
-   radv_emit_indirect_draw_packets(cmd_buffer, &info);
-   radv_after_draw(cmd_buffer);
+   for (unsigned pass = 0; radv_no16_begin_pass(cmd_buffer, pass); pass++) {
+      if (!radv_before_draw(cmd_buffer, &info, 1, pInfo->drawCount, false))
+         return;
+      radv_emit_indirect_draw_packets(cmd_buffer, &info);
+      radv_after_draw(cmd_buffer);
+   }
 }
 
 VKAPI_ATTR void VKAPI_CALL
@@ -16809,10 +16868,12 @@ radv_CmdDrawIndirectCount2KHR(VkCommandBuffer commandBuffer, const VkDrawIndirec
    info.indexed = false;
    info.instance_count = 0;
 
-   if (!radv_before_draw(cmd_buffer, &info, 1, pInfo->maxDrawCount, false))
-      return;
-   radv_emit_indirect_draw_packets(cmd_buffer, &info);
-   radv_after_draw(cmd_buffer);
+   for (unsigned pass = 0; radv_no16_begin_pass(cmd_buffer, pass); pass++) {
+      if (!radv_before_draw(cmd_buffer, &info, 1, pInfo->maxDrawCount, false))
+         return;
+      radv_emit_indirect_draw_packets(cmd_buffer, &info);
+      radv_after_draw(cmd_buffer);
+   }
 }
 
 VKAPI_ATTR void VKAPI_CALL
@@ -16855,10 +16916,12 @@ radv_CmdDrawIndexedIndirectCount2KHR(VkCommandBuffer commandBuffer, const VkDraw
    info.strmout_va = 0;
    info.instance_count = 0;
 
-   if (!radv_before_draw(cmd_buffer, &info, 1, pInfo->maxDrawCount, false))
-      return;
-   radv_emit_indirect_draw_packets(cmd_buffer, &info);
-   radv_after_draw(cmd_buffer);
+   for (unsigned pass = 0; radv_no16_begin_pass(cmd_buffer, pass); pass++) {
+      if (!radv_before_draw(cmd_buffer, &info, 1, pInfo->maxDrawCount, false))
+         return;
+      radv_emit_indirect_draw_packets(cmd_buffer, &info);
+      radv_after_draw(cmd_buffer);
+   }
 }
 
 /* The Mesh shader the next draw will use: shader objects are bound at draw
@@ -19751,21 +19814,23 @@ radv_CmdDrawIndirectByteCount2EXT(VkCommandBuffer commandBuffer, uint32_t instan
    info.indexed = false;
    info.indirect_va = 0;
 
-   if (!radv_before_draw(cmd_buffer, &info, 1, 0, false))
-      return;
-   radv_emit_strmout_buffer(cmd_buffer, &info, counterOffset);
-   radv_emit_direct_draw_packet(cmd_buffer, 0, S_0287F0_USE_OPAQUE(1));
+   for (unsigned pass = 0; radv_no16_begin_pass(cmd_buffer, pass); pass++) {
+      if (!radv_before_draw(cmd_buffer, &info, 1, 0, false))
+         return;
+      radv_emit_strmout_buffer(cmd_buffer, &info, counterOffset);
+      radv_emit_direct_draw_packet(cmd_buffer, 0, S_0287F0_USE_OPAQUE(1));
 
-   if (pdev->info.has_draw_opaque_ge_bug) {
-      /* DrawTransformFeedback requires 3 SQ_NON_EVENTs after the packet. */
-      radeon_begin(cs);
-      radeon_event_write(V_028A90_SQ_NON_EVENT);
-      radeon_event_write(V_028A90_SQ_NON_EVENT);
-      radeon_event_write(V_028A90_SQ_NON_EVENT);
-      radeon_end();
+      if (pdev->info.has_draw_opaque_ge_bug) {
+         /* DrawTransformFeedback requires 3 SQ_NON_EVENTs after the packet. */
+         radeon_begin(cs);
+         radeon_event_write(V_028A90_SQ_NON_EVENT);
+         radeon_event_write(V_028A90_SQ_NON_EVENT);
+         radeon_event_write(V_028A90_SQ_NON_EVENT);
+         radeon_end();
+      }
+
+      radv_after_draw(cmd_buffer);
    }
-
-   radv_after_draw(cmd_buffer);
 }
 
 /* VK_AMD_buffer_marker */
