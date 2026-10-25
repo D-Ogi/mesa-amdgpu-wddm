@@ -4825,6 +4825,11 @@ radv_emit_ls_hs_config(struct radv_cmd_buffer *cmd_buffer)
 static bool
 radv_s16f8_probe_active(struct radv_cmd_buffer *cmd_buffer)
 {
+#if defined(RADV_S16F8_PROBE) && RADV_S16F8_PROBE
+   /* radv_no16_update_draw admitted this draw with the same conditions. */
+   if (cmd_buffer->state.no16_draw == RADV_NO16_DRAW_COVERAGE16)
+      return true;
+#endif
    const struct radv_device *device = radv_cmd_buffer_device(cmd_buffer);
    const struct radv_physical_device *pdev = radv_device_physical(device);
    return radv_s16f8_probe_mode() >= 2 &&
@@ -13775,6 +13780,15 @@ radv_emit_msaa_state(struct radv_cmd_buffer *cmd_buffer)
       fprintf(stderr, "RADV_S16F8_PROBE mode=%u active=%u coverage=%u ps=%u mask=%04x PA_SC_AA_CONFIG=%08x DB_EQAA=%08x raw_coverage=1\n",
               radv_s16f8_probe_mode(), s16f8_probe, rasterization_samples,
               radv_get_ps_iter_samples(cmd_buffer), d->vk.ms.sample_mask, pa_sc_aa_config, db_eqaa);
+#if defined(RADV_S16F8_PROBE) && RADV_S16F8_PROBE
+   if (radv_no16_auto_mode() != RADV_NO16_AUTO_OFF)
+      fprintf(stderr,
+              "RADV_NO16_AUTO draw mode=%s decision=%s coverage=%u ps=%u mask=%04x PA_SC_AA_CONFIG=%08x "
+              "DB_EQAA=%08x\n",
+              radv_no16_auto_mode_name(radv_no16_auto_mode()), radv_no16_draw_name(cmd_buffer->state.no16_draw),
+              rasterization_samples, radv_get_ps_iter_samples(cmd_buffer), d->vk.ms.sample_mask, pa_sc_aa_config,
+              db_eqaa);
+#endif
 
    if (RADV_DEBUG(instance, NO_ATOC_DITHERING)) {
       db_alpha_to_mask = S_028B70_ALPHA_TO_MASK_OFFSET0(2) | S_028B70_ALPHA_TO_MASK_OFFSET1(2) |
@@ -14443,6 +14457,60 @@ radv_bind_graphics_shaders(struct radv_cmd_buffer *cmd_buffer)
    }
 }
 
+#if defined(RADV_S16F8_PROBE) && RADV_S16F8_PROBE
+/* RADV_NO16_AUTO (radv_s16f8_probe.h): selects the command state of a draw from
+ * the marker of the bound fragment shader and the current state. A refused draw
+ * is not recorded and the command buffer records an error.
+ */
+static bool
+radv_no16_update_draw(struct radv_cmd_buffer *cmd_buffer)
+{
+   const enum radv_no16_auto_mode mode = radv_no16_auto_mode();
+   if (mode == RADV_NO16_AUTO_OFF)
+      return true;
+   const struct radv_device *device = radv_cmd_buffer_device(cmd_buffer);
+   const struct radv_physical_device *pdev = radv_device_physical(device);
+   const struct radv_shader *ps = cmd_buffer->state.shaders[MESA_SHADER_FRAGMENT];
+   const struct radv_dynamic_state *d = &cmd_buffer->state.dynamic;
+   const unsigned api_samples = radv_get_rasterization_samples(cmd_buffer);
+   unsigned ps_iter_samples = 1;
+   float min_sample_shading;
+   if (radv_is_sample_shading_enabled(cmd_buffer, &min_sample_shading))
+      ps_iter_samples = util_next_power_of_two(ceilf(min_sample_shading * api_samples));
+   const struct radv_no16_draw_inputs in = {
+      .mode = mode,
+      .gfx10 = pdev->info.gfx_level == GFX10 || pdev->info.gfx_level == GFX10_3,
+      .fs_logical16 = ps && ps->info.ps.no16_logical16,
+      .api_samples = api_samples,
+      .ps_iter_samples = ps_iter_samples,
+      .sample_locations_enable = d->vk.ms.sample_locations_enable,
+      .conservative = d->vk.rs.conservative_mode != VK_CONSERVATIVE_RASTERIZATION_MODE_DISABLED_EXT,
+      .color_att_count = cmd_buffer->state.render.color_att_count,
+      .ds_attachment = cmd_buffer->state.render.ds_att.format != VK_FORMAT_UNDEFINED,
+      .triangles = radv_vgt_outprim_is_triangle(radv_get_vgt_outprim_type(cmd_buffer)) &&
+                   d->vk.rs.polygon_mode == V_028814_X_DRAW_TRIANGLES,
+      .vrs = device->force_vrs_enabled || cmd_buffer->state.render.vrs_att.iview ||
+             d->vk.fsr.fragment_size.width != 1 || d->vk.fsr.fragment_size.height != 1,
+   };
+   const char *reason;
+   const enum radv_no16_draw decision = radv_no16_draw_decide(&in, &reason);
+   if (decision == RADV_NO16_DRAW_REFUSE) {
+      if (cmd_buffer->vk.record_result == VK_SUCCESS)
+         fprintf(stderr, "RADV_NO16_AUTO draw-refused mode=%s reason=%s samples=%u marked=%u\n",
+                 radv_no16_auto_mode_name(mode), reason, api_samples, in.fs_logical16);
+      vk_command_buffer_set_error(&cmd_buffer->vk, VK_ERROR_OUT_OF_DEVICE_MEMORY);
+      return false;
+   }
+   if (cmd_buffer->state.no16_draw != decision) {
+      cmd_buffer->state.no16_draw = decision;
+      cmd_buffer->state.dirty |= RADV_CMD_DIRTY_BINNING_STATE | RADV_CMD_DIRTY_RAST_SAMPLES_STATE |
+                                 RADV_CMD_DIRTY_PS_STATE | RADV_CMD_DIRTY_DB_SHADER_CONTROL |
+                                 RADV_CMD_DIRTY_MSAA_STATE;
+   }
+   return true;
+}
+#endif
+
 /* MUST inline this function to avoid massive perf loss in drawoverhead */
 ALWAYS_INLINE static bool
 radv_before_draw(struct radv_cmd_buffer *cmd_buffer, const struct radv_draw_info *info, uint32_t drawCount,
@@ -14481,6 +14549,11 @@ radv_before_draw(struct radv_cmd_buffer *cmd_buffer, const struct radv_draw_info
    if (cmd_buffer->state.dirty & RADV_CMD_DIRTY_GRAPHICS_SHADERS) {
       radv_bind_graphics_shaders(cmd_buffer);
    }
+
+#if defined(RADV_S16F8_PROBE) && RADV_S16F8_PROBE
+   if (!radv_no16_update_draw(cmd_buffer))
+      return false;
+#endif
 
    /* This is the optimal packet order:
     * Set all states first, so that all SET packets are processed in parallel with previous draw
@@ -14548,6 +14621,11 @@ radv_before_taskmesh_draw(struct radv_cmd_buffer *cmd_buffer, const struct radv_
    if (cmd_buffer->state.dirty & RADV_CMD_DIRTY_GRAPHICS_SHADERS) {
       radv_bind_graphics_shaders(cmd_buffer);
    }
+
+#if defined(RADV_S16F8_PROBE) && RADV_S16F8_PROBE
+   if (!radv_no16_update_draw(cmd_buffer))
+      return false;
+#endif
 
    struct radv_cmd_stream *ace_cs = cmd_buffer->gang.cs;
    struct radv_shader *task_shader = cmd_buffer->state.shaders[MESA_SHADER_TASK];

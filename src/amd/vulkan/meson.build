@@ -236,6 +236,15 @@ endif
 
 radv_deps = []
 
+# Lab-only automatic no-output16 Stage B transform (radv_s16f8_probe.h). The
+# release flavour neither compiles nor links it.
+if get_option('amdgpu-wddm-lab-flavour')
+  libradv_files += files(
+    'nir/radv_nir_no16.c',
+    'nir/radv_nir_no16.h',
+  )
+endif
+
 if with_vulkan_dx
   libradv_files += files(
     'winsys/wddm2/radv_wddm2_bo.c',

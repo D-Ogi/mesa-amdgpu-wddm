@@ -294,6 +294,11 @@ struct radv_shader_stage {
    unsigned char shader_blake3[BLAKE3_KEY_LEN];
 
    nir_shader *nir;
+#if defined(RADV_S16F8_PROBE) && RADV_S16F8_PROBE
+   /* RADV_NO16_AUTO: the fragment shader must pass the Stage B transform, and did. */
+   bool no16_logical16_requested;
+   bool no16_transformed;
+#endif
    nir_shader *gs_copy_shader;
    nir_shader *internal_nir; /* meta shaders */
 
