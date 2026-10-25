@@ -248,6 +248,12 @@ bool radv_sparse_enabled(const struct radv_physical_device *pdev);
  */
 #define RADV_BC250_BOUND_GENERAL_QUEUES 8
 
+/* COMPUTE queues of a bound instance, when the compute family exists: the
+ * D3D12 compute and copy queues of one device. Each has its own node 2
+ * context, with the same objects per queue as a GENERAL one. bc250kmd takes
+ * any number of contexts on node 2; they share its one MEC queue. */
+#define RADV_BC250_BOUND_COMPUTE_QUEUES 8
+
 bool radv_bound_queues_enabled(const struct radv_physical_device *pdev);
 
 uint32_t radv_general_queue_count(const struct radv_physical_device *pdev);
