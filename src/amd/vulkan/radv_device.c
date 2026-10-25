@@ -9,6 +9,7 @@
  */
 
 #include "radv_s16f8_probe.h"
+#include "radv_no16.h"
 #include <errno.h>
 #include <fcntl.h>
 #include <stdbool.h>
@@ -1191,8 +1192,9 @@ radv_device_is_cache_disabled(const struct radv_device *device)
    if (radv_s16f8_probe_mode())
       return true; /* Raw coverage shaders must never share normal shader cache entries. */
 #if defined(RADV_S16F8_PROBE) && RADV_S16F8_PROBE
-   if (radv_no16_auto_mode())
-      return true; /* Transformed shaders and their markers never enter or leave a cache. */
+   /* The lab negative controls change a transformed shader under the same pipeline key. */
+   if (radv_no16_auto_mode() >= RADV_NO16_AUTO_NEG_UPPER)
+      return true;
 #endif
    const struct radv_physical_device *pdev = radv_device_physical(device);
    const struct radv_instance *instance = radv_physical_device_instance(pdev);

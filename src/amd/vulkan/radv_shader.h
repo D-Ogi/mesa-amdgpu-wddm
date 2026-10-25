@@ -148,7 +148,9 @@ struct radv_graphics_state_key {
     * pre-rasterization stage; dynamic_provoking_vtx_mode is only set for NGG VS, GS
     * and Mesh, not TES). */
    uint32_t bc250_ps_dynamic_provoking : 1;
-   uint32_t reserved : 12;
+   /* radv_no16.h: an admitted 16-sample request, created as a physical 8-sample pipeline. */
+   uint32_t no16_logical16 : 1;
+   uint32_t reserved : 11;
 
    struct {
       uint8_t topology;
@@ -354,11 +356,6 @@ struct radv_shader_stage {
    uint64_t bc250_bary_ref_mask;
    int8_t bc250_bary_raw_slot;
    int8_t bc250_bary_flat_slot;
-#if defined(RADV_S16F8_PROBE) && RADV_S16F8_PROBE
-   /* RADV_NO16_AUTO: the fragment shader must pass the Stage B transform, and did. */
-   bool no16_logical16_requested;
-   bool no16_transformed;
-#endif
    nir_shader *gs_copy_shader;
    nir_shader *internal_nir; /* meta shaders */
 

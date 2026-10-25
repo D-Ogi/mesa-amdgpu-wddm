@@ -1,5 +1,5 @@
 /* SPDX-License-Identifier: MIT
- * Lab-only automatic no-output16 transform for the frozen Stage B VS/FS pair.
+ * Automatic no-output16 transform for the frozen Stage B VS/FS pair (radv_no16.h).
  * Ported from the host prototype scratch/bd232 R3 (no-output16-r3-body-prototype.c)
  * with these changes: RADV names, the negative lab modes, and admission of
  * load_front_face_select_amd, which radv_nir_opt_fs_builtins adds before
@@ -18,16 +18,21 @@
  */
 #include "radv_nir_no16.h"
 #include "nir_builder.h"
+#if defined(RADV_S16F8_PROBE) && RADV_S16F8_PROBE
+#include <stdio.h>
 #include "util/mesa-blake3.h"
 #include "util/u_call_once.h"
+#endif
 
 const uint32_t radv_no16_stageb_ps_blake3[8] = {0x0e8ba7fe, 0xc140abe9, 0x8ca99153, 0xb00eb11b,
                                                 0x4e11f0a7, 0x7c4f9762, 0xdce51af0, 0x111d8d51};
 const uint32_t radv_no16_stageb_vs_blake3[8] = {0x15459962, 0x346f6ae5, 0xcaa484c0, 0x0965e5ac,
                                                 0xb7b65bec, 0xaf35daf1, 0x725cc11c, 0x31a10df2};
 
+#if defined(RADV_S16F8_PROBE) && RADV_S16F8_PROBE
 static enum radv_no16_auto_mode radv_no16_latched_mode;
 
+/* Lab kill switch (radv_no16.h). A set variable prints one line. */
 static void
 radv_no16_auto_latch(void)
 {
@@ -45,6 +50,7 @@ radv_no16_auto_mode(void)
    util_call_once(&once, radv_no16_auto_latch);
    return radv_no16_latched_mode;
 }
+#endif
 
 const char *
 radv_no16_result_name(enum radv_no16_result r)
@@ -55,6 +61,7 @@ radv_no16_result_name(enum radv_no16_result r)
    return (unsigned)r < ARRAY_SIZE(names) ? names[r] : "invalid";
 }
 
+#if defined(RADV_S16F8_PROBE) && RADV_S16F8_PROBE
 void
 radv_no16_format_blake3(const uint32_t blake3[8], char out[65])
 {
@@ -62,6 +69,7 @@ radv_no16_format_blake3(const uint32_t blake3[8], char out[65])
    memcpy(bytes, blake3, sizeof(bytes));
    _mesa_blake3_format(out, bytes);
 }
+#endif
 
 static bool
 is_quad(nir_intrinsic_op op)
