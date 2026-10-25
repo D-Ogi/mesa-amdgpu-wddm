@@ -148,7 +148,7 @@ struct radv_graphics_state_key {
     * pre-rasterization stage; dynamic_provoking_vtx_mode is only set for NGG VS, GS
     * and Mesh, not TES). */
    uint32_t bc250_ps_dynamic_provoking : 1;
-   /* radv_no16.h: an admitted 16-sample request, created as a physical 8-sample pipeline. */
+   /* radv_no16.h: an admitted 16-sample request without attachments. */
    uint32_t no16_logical16 : 1;
    uint32_t reserved : 11;
 
@@ -244,6 +244,9 @@ struct radv_graphics_pipeline_key {
 #define NGG_STATE_PROVOKING_VTX__MASK       0x7
 #define NGG_STATE_QUERY__SHIFT              6
 #define NGG_STATE_QUERY__MASK               0x7
+/* radv_no16.h SPLIT16: set in pass 1, where the vertex shader skips its memory writes. */
+#define NGG_STATE_NO16_PASS__SHIFT          9
+#define NGG_STATE_NO16_PASS__MASK           0x1
 
 #define PS_STATE_NUM_SAMPLES__SHIFT  0
 #define PS_STATE_NUM_SAMPLES__MASK   0xf
@@ -251,6 +254,9 @@ struct radv_graphics_pipeline_key {
 #define PS_STATE_SMOOTH_LINES__MASK  0x1
 #define PS_STATE_PS_ITER_MASK__SHIFT 5
 #define PS_STATE_PS_ITER_MASK__MASK  0xff
+/* radv_no16.h SPLIT16: the logical sample index of hardware sample h is h + NO16_BASE. */
+#define PS_STATE_NO16_BASE__SHIFT 13
+#define PS_STATE_NO16_BASE__MASK  0xf
 /* gap: bits 13:21 */
 #define PS_STATE_RAST_PRIM__SHIFT               22
 #define PS_STATE_RAST_PRIM__MASK                0x3

@@ -419,6 +419,8 @@ radv_fill_shader_rings(struct radv_device *device, uint32_t *desc, struct radeon
    memcpy(desc, device->sample_locations_4x, 32);
    desc += 8;
    memcpy(desc, device->sample_locations_8x, 64);
+   desc += 16;
+   memcpy(desc, device->sample_locations_16x, 128);
 }
 
 static void
@@ -1124,7 +1126,8 @@ radv_update_preamble_cs(struct radv_queue_state *queue, struct radv_device *devi
        tess_rings_bo != queue->tess_rings_bo || task_rings_bo != queue->task_rings_bo ||
        mesh_scratch_ring_bo != queue->mesh_scratch_ring_bo || ge_rings_bo != queue->ge_rings_bo ||
        add_sample_positions) {
-      const uint32_t size = 304;
+      /* 11 ring descriptors, then the sample positions of 1, 2, 4, 8 and 16 samples. */
+      const uint32_t size = 432;
 
       result = radv_bo_create(device, NULL, size, 4096, RADEON_DOMAIN_VRAM,
                               RADEON_FLAG_CPU_ACCESS | RADEON_FLAG_NO_INTERPROCESS_SHARING | RADEON_FLAG_READ_ONLY,

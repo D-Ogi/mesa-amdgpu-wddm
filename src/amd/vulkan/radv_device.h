@@ -26,6 +26,7 @@
 #include "radv_radeon_winsys.h"
 #include "radv_shader.h"
 #include "radv_bc250_timer.h"
+#include "radv_no16.h"
 
 #include "vk_acceleration_structure.h"
 #include "vk_device.h"
@@ -273,6 +274,7 @@ struct radv_device {
    float sample_locations_2x[2][2];
    float sample_locations_4x[4][2];
    float sample_locations_8x[8][2];
+   float sample_locations_16x[16][2]; /* radv_no16.h */
 
    /* GFX7 and later */
    uint32_t gfx_init_size_dw;
@@ -475,6 +477,9 @@ radv_uses_image_float32_atomics(const struct radv_device *device)
 VkResult radv_device_init_vrs_state(struct radv_device *device);
 
 unsigned radv_get_default_max_sample_dist(int log_samples);
+
+void radv_no16_emit_split_sample_locations(const struct radv_physical_device *pdev, struct radv_cmd_stream *cs,
+                                           unsigned pass, enum radv_no16_auto_mode mode);
 
 void radv_emit_default_sample_locations(const struct radv_physical_device *pdev, struct radv_cmd_stream *cs,
                                         int nr_samples);
