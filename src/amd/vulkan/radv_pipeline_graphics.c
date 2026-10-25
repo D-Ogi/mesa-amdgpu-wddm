@@ -9,9 +9,7 @@
  */
 
 #include "radv_s16f8_probe.h"
-#if defined(RADV_S16F8_PROBE) && RADV_S16F8_PROBE
 #include "nir/radv_nir_no16.h"
-#endif
 #include "util/u_compile_stack.h"
 #include "meta/radv_meta.h"
 #include "nir/nir.h"
@@ -2466,9 +2464,8 @@ radv_skip_graphics_pipeline_compile(const struct radv_device *device, const VkGr
    return binary_stages == active_stages;
 }
 
-#if defined(RADV_S16F8_PROBE) && RADV_S16F8_PROBE
-/* RADV_NO16_AUTO (radv_s16f8_probe.h). Runs after radv_nir_lower_io of the
- * fragment shader of a pipeline that radv_no16_pipeline_candidate admitted.
+/* radv_no16.h. Runs after radv_nir_lower_io of the fragment shader of a
+ * pipeline that radv_no16_pipeline_candidate admitted (gfx_state->no16_logical16).
  * The pipeline is already physical 8-sample here. A shader that does not pass
  * the frozen Stage B transform fails pipeline creation: it never runs as an
  * ordinary body with 16 coverage samples or silently with 8 samples.
@@ -2494,6 +2491,7 @@ radv_no16_lower_fs(const struct radv_compiler_info *compiler_info, struct radv_s
    else
       result = radv_nir_no16_lower_stageb(fs, vs, mode);
 
+#if defined(RADV_S16F8_PROBE) && RADV_S16F8_PROBE
    char fs_hash[65], vs_hash[65];
    uint32_t words[8];
    memcpy(words, fs->info.source_blake3, sizeof(words));
@@ -2506,12 +2504,11 @@ radv_no16_lower_fs(const struct radv_compiler_info *compiler_info, struct radv_s
    }
    fprintf(stderr, "RADV_NO16_AUTO compile mode=%s result=%s state=%s fs_blake3=%s vs_blake3=%s\n",
            radv_no16_auto_mode_name(mode), radv_no16_result_name(result), state ? state : "ok", fs_hash, vs_hash);
-   if (result != RADV_NO16_OK)
-      return VK_ERROR_UNKNOWN;
-   stages[MESA_SHADER_FRAGMENT].no16_transformed = true;
-   return VK_SUCCESS;
-}
+#else
+   (void)state;
 #endif
+   return result == RADV_NO16_OK ? VK_SUCCESS : VK_ERROR_FEATURE_NOT_PRESENT;
+}
 
 VkResult
 radv_graphics_shaders_compile(const struct radv_compiler_info *compiler_info, struct vk_pipeline_cache *cache,
@@ -2658,13 +2655,11 @@ radv_graphics_shaders_compile(const struct radv_compiler_info *compiler_info, st
 
       radv_nir_lower_io(stages[i].nir);
 
-#if defined(RADV_S16F8_PROBE) && RADV_S16F8_PROBE
-      if (i == MESA_SHADER_FRAGMENT && stages[i].no16_logical16_requested) {
+      if (i == MESA_SHADER_FRAGMENT && gfx_state->no16_logical16) {
          const VkResult no16_result = radv_no16_lower_fs(compiler_info, stages, gfx_state, num_raster_vertices_per_prim);
          if (no16_result != VK_SUCCESS)
             return no16_result;
       }
-#endif
 
       /* Lowering interpolated dereferences creates ordinary at-offset/sample
        * barycentrics after the earlier explicit-coordinate pass. Resolve them
@@ -2743,12 +2738,8 @@ radv_graphics_shaders_compile(const struct radv_compiler_info *compiler_info, st
        * Default-off; disables the API-visible per-invocation mask adjustment only here.
        * Run with RADV_DEBUG=nocache and a fresh engine shader cache.
        */
-#if defined(RADV_S16F8_PROBE) && RADV_S16F8_PROBE
-      /* The transformed wrapper splits the raw 16-bit coverage per logical phase itself. */
-      if (!radv_s16f8_probe_mode() && !stages[MESA_SHADER_FRAGMENT].no16_transformed)
-#else
-      if (!radv_s16f8_probe_mode())
-#endif
+      /* The no-output16 wrapper splits the raw 16-bit coverage per logical phase itself. */
+      if (!radv_s16f8_probe_mode() && !gfx_state->no16_logical16)
          NIR_PASS(_, stages[MESA_SHADER_FRAGMENT].nir, ac_nir_lower_sample_mask_in, &lower_sample_mask_in_options);
    }
 
@@ -2839,10 +2830,9 @@ radv_graphics_shaders_compile(const struct radv_compiler_info *compiler_info, st
    }
 
    radv_fill_shader_info(compiler_info, RADV_PIPELINE_GRAPHICS, gfx_state, stages, active_nir_stages);
-#if defined(RADV_S16F8_PROBE) && RADV_S16F8_PROBE
-   if (stages[MESA_SHADER_FRAGMENT].nir)
-      stages[MESA_SHADER_FRAGMENT].info.ps.no16_logical16 = stages[MESA_SHADER_FRAGMENT].no16_transformed;
-#endif
+   /* radv_no16_lower_fs either transformed this shader or failed the compile. */
+   if (gfx_state->no16_logical16 && stages[MESA_SHADER_FRAGMENT].nir)
+      stages[MESA_SHADER_FRAGMENT].info.ps.no16_logical16 = true;
 
    /* Remove the primitive shading rate output if VRS flat shading overrides it. */
    radv_foreach_stage (i, active_nir_stages) {
@@ -2962,61 +2952,55 @@ radv_graphics_pipeline_state_finish(struct radv_device *device, struct radv_grap
    }
 }
 
-#if defined(RADV_S16F8_PROBE) && RADV_S16F8_PROBE
-/* RADV_NO16_AUTO (radv_s16f8_probe.h): admits a complete pipeline that asks
- * for 16 rasterization samples without attachments, and makes it a physical
- * 8-sample pipeline. Its fragment shader must then pass radv_no16_lower_fs.
- * Each graphics pipeline in this mode prints one marker line.
+/* radv_no16.h: admits a complete pipeline that asks for 16 rasterization
+ * samples without attachments, and makes it a physical 8-sample pipeline. Its
+ * fragment shader must then pass radv_no16_lower_fs. A pipeline that does not
+ * ask for 16 samples returns at the first test and is not changed. The lab
+ * flavour prints one marker line for each 16-sample request.
  */
 static bool
 radv_no16_pipeline_candidate(const struct radv_device *device, VkPipelineCreateFlags2 create_flags,
                              const VkPipelineLibraryCreateInfoKHR *libs_info,
                              struct radv_graphics_pipeline_state *gfx_state)
 {
-   const enum radv_no16_auto_mode mode = radv_no16_auto_mode();
-   if (mode == RADV_NO16_AUTO_OFF)
-      return false;
    const struct vk_graphics_pipeline_state *state = &gfx_state->vk;
-   const struct radv_physical_device *pdev = radv_device_physical(device);
    const unsigned samples = state->ms ? state->ms->rasterization_samples : 0;
-   const char *reason = NULL;
-   if (samples != 16) {
-      reason = "samples";
-   } else if (pdev->info.gfx_level != GFX10 && pdev->info.gfx_level != GFX10_3) {
-      reason = "gfx-level";
-   } else if ((create_flags & VK_PIPELINE_CREATE_2_LIBRARY_BIT_KHR) || libs_info) {
-      reason = "library";
-   } else if (BITSET_TEST(state->dynamic, MESA_VK_DYNAMIC_MS_RASTERIZATION_SAMPLES)) {
-      reason = "dynamic-samples";
-   } else if (BITSET_TEST(state->dynamic, MESA_VK_DYNAMIC_MS_SAMPLE_LOCATIONS_ENABLE) ||
-              BITSET_TEST(state->dynamic, MESA_VK_DYNAMIC_MS_SAMPLE_LOCATIONS) || state->ms->sample_locations_enable) {
-      reason = "sample-locations";
-   } else if (state->shader_stages != (VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT)) {
-      reason = "stages";
-   } else if (!state->rs || BITSET_TEST(state->dynamic, MESA_VK_DYNAMIC_RS_CONSERVATIVE_MODE) ||
-              state->rs->conservative_mode != VK_CONSERVATIVE_RASTERIZATION_MODE_DISABLED_EXT ||
-              BITSET_TEST(state->dynamic, MESA_VK_DYNAMIC_RS_RASTERIZER_DISCARD_ENABLE) ||
-              state->rs->rasterizer_discard_enable) {
-      reason = "rasterization";
-   } else if (!state->rp || state->rp->depth_attachment_format != VK_FORMAT_UNDEFINED ||
-              state->rp->stencil_attachment_format != VK_FORMAT_UNDEFINED) {
-      reason = "attachments";
-   } else {
-      for (unsigned i = 0; i < state->rp->color_attachment_count; i++) {
-         if (state->rp->color_attachment_formats[i] != VK_FORMAT_UNDEFINED)
-            reason = "attachments";
-      }
-   }
+   if (samples != 16)
+      return false;
+   const struct radv_physical_device *pdev = radv_device_physical(device);
+   bool attachments = !state->rp || state->rp->depth_attachment_format != VK_FORMAT_UNDEFINED ||
+                      state->rp->stencil_attachment_format != VK_FORMAT_UNDEFINED;
+   for (unsigned i = 0; state->rp && i < state->rp->color_attachment_count; i++)
+      attachments |= state->rp->color_attachment_formats[i] != VK_FORMAT_UNDEFINED;
+   const struct radv_no16_pipeline_inputs in = {
+      .mode = radv_no16_auto_mode(),
+      .gfx10 = pdev->info.gfx_level == GFX10 || pdev->info.gfx_level == GFX10_3,
+      .samples = samples,
+      .library = (create_flags & VK_PIPELINE_CREATE_2_LIBRARY_BIT_KHR) || libs_info,
+      .dynamic_samples = BITSET_TEST(state->dynamic, MESA_VK_DYNAMIC_MS_RASTERIZATION_SAMPLES),
+      .sample_locations = BITSET_TEST(state->dynamic, MESA_VK_DYNAMIC_MS_SAMPLE_LOCATIONS_ENABLE) ||
+                          BITSET_TEST(state->dynamic, MESA_VK_DYNAMIC_MS_SAMPLE_LOCATIONS) ||
+                          state->ms->sample_locations_enable,
+      .vs_fs_only = state->shader_stages == (VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT),
+      .rasterization = state->rs && !BITSET_TEST(state->dynamic, MESA_VK_DYNAMIC_RS_CONSERVATIVE_MODE) &&
+                       state->rs->conservative_mode == VK_CONSERVATIVE_RASTERIZATION_MODE_DISABLED_EXT &&
+                       !BITSET_TEST(state->dynamic, MESA_VK_DYNAMIC_RS_RASTERIZER_DISCARD_ENABLE) &&
+                       !state->rs->rasterizer_discard_enable,
+      .attachments = attachments,
+   };
+   const char *reason;
+   const bool admitted = radv_no16_pipeline_admit(&in, &reason);
+#if defined(RADV_S16F8_PROBE) && RADV_S16F8_PROBE
    fprintf(stderr, "RADV_NO16_AUTO pipeline mode=%s samples=%u candidate=%u reason=%s\n",
-           radv_no16_auto_mode_name(mode), samples, !reason, reason ? reason : "none");
-   if (reason)
+           radv_no16_auto_mode_name(in.mode), samples, admitted, reason);
+#endif
+   if (!admitted)
       return false;
    /* Without libraries every state points into this pipeline's own storage
     * (vk_graphics_pipeline_state_fill), so the multisample state is ours. */
    ((struct vk_multisample_state *)state->ms)->rasterization_samples = VK_SAMPLE_COUNT_8_BIT;
    return true;
 }
-#endif
 
 VkResult
 radv_generate_graphics_pipeline_state(struct radv_device *device, const VkGraphicsPipelineCreateInfo *pCreateInfo,
@@ -3065,9 +3049,7 @@ radv_generate_graphics_pipeline_state(struct radv_device *device, const VkGraphi
    if (pipeline_layout)
       radv_graphics_pipeline_import_layout(&gfx_state->layout, pipeline_layout);
 
-#if defined(RADV_S16F8_PROBE) && RADV_S16F8_PROBE
    gfx_state->no16_logical16 = radv_no16_pipeline_candidate(device, create_flags, libs_info, gfx_state);
-#endif
 
    if (radv_should_compute_pipeline_hash(device, pipeline_type, fast_linking_enabled))
       radv_pipeline_layout_hash(&gfx_state->layout);
@@ -3075,6 +3057,8 @@ radv_generate_graphics_pipeline_state(struct radv_device *device, const VkGraphi
    gfx_state->compilation_required = !radv_skip_graphics_pipeline_compile(device, pCreateInfo);
    if (gfx_state->compilation_required) {
       gfx_state->key = radv_generate_graphics_pipeline_key(device, pCreateInfo, &gfx_state->vk, needed_lib_flags);
+      /* In the pipeline hash: an admitted request never shares cache entries with a real 8-sample pipeline. */
+      gfx_state->key.gfx_state.no16_logical16 = gfx_state->no16_logical16;
 
       gfx_state->stages = calloc(MESA_VULKAN_SHADER_STAGES, sizeof(struct radv_shader_stage));
       if (!gfx_state->stages) {
@@ -3096,9 +3080,6 @@ radv_generate_graphics_pipeline_state(struct radv_device *device, const VkGraphi
       }
 
       radv_pipeline_load_retained_shaders(device, pCreateInfo, gfx_state->stages);
-#if defined(RADV_S16F8_PROBE) && RADV_S16F8_PROBE
-      gfx_state->stages[MESA_SHADER_FRAGMENT].no16_logical16_requested = gfx_state->no16_logical16;
-#endif
    }
 
    return VK_SUCCESS;
@@ -3533,18 +3514,18 @@ radv_graphics_pipeline_init(struct radv_graphics_pipeline *pipeline, struct radv
    if (result == VK_SUCCESS)
       result = radv_graphics_pipeline_check_shaders(device, pipeline);
 
-#if defined(RADV_S16F8_PROBE) && RADV_S16F8_PROBE
-   /* RADV_NO16_AUTO: an admitted 16-sample request is physical 8-sample now.
+   /* radv_no16.h: an admitted 16-sample request is physical 8-sample now.
     * Whatever path produced its shaders (compile, binaries), it must carry the
     * transformed fragment shader, or the pipeline is not created. */
    if (result == VK_SUCCESS && gfx_state.no16_logical16) {
       const struct radv_shader *fs = pipeline->base.shaders[MESA_SHADER_FRAGMENT];
       const bool marked = fs && fs->info.ps.no16_logical16;
+#if defined(RADV_S16F8_PROBE) && RADV_S16F8_PROBE
       fprintf(stderr, "RADV_NO16_AUTO pipeline-result marked=%u\n", marked);
-      if (!marked)
-         result = VK_ERROR_UNKNOWN;
-   }
 #endif
+      if (!marked)
+         result = VK_ERROR_FEATURE_NOT_PRESENT;
+   }
 
    if (result != VK_SUCCESS) {
       radv_graphics_pipeline_state_finish(device, &gfx_state);

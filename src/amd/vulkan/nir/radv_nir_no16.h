@@ -1,16 +1,12 @@
 /* SPDX-License-Identifier: MIT
- * Lab-only automatic no-output16 transform for the frozen Stage B VS/FS pair.
- * Not a capability implementation; see radv_s16f8_probe.h for the selector.
+ * Automatic no-output16 transform for the frozen Stage B VS/FS pair
+ * (radv_no16.h: the case, the pipeline and draw decisions, the lab kill switch).
  */
 #ifndef RADV_NIR_NO16_H
 #define RADV_NIR_NO16_H
 
-#if !defined(RADV_S16F8_PROBE) || !RADV_S16F8_PROBE || !defined(AMDGPU_WDDM_LAB_FLAVOUR) || !AMDGPU_WDDM_LAB_FLAVOUR
-#error The no-output16 transform exists only in the lab flavour with RADV_S16F8_PROBE
-#endif
-
 #include "nir.h"
-#include "radv_s16f8_probe.h"
+#include "radv_no16.h"
 
 enum radv_no16_result {
    RADV_NO16_OK,
@@ -45,7 +41,9 @@ enum radv_no16_result radv_nir_no16_lower_stageb(nir_shader *fs, const nir_shade
 
 const char *radv_no16_result_name(enum radv_no16_result result);
 
-/* Writes 64 hex digits and a terminating zero. */
+#if defined(RADV_S16F8_PROBE) && RADV_S16F8_PROBE
+/* Lab markers: writes 64 hex digits and a terminating zero. */
 void radv_no16_format_blake3(const uint32_t blake3[8], char out[65]);
+#endif
 
 #endif
