@@ -723,6 +723,8 @@ struct radv_graphics_pipeline_state {
    struct radv_graphics_pipeline_key key;
 
    struct radv_pipeline_layout layout;
+   /* radv_no16.h: a 16-sample request created as a physical 8-sample pipeline. */
+   bool no16_logical16;
 };
 
 void radv_graphics_pipeline_hash(const struct radv_device *device, const struct radv_graphics_pipeline_state *gfx_state,

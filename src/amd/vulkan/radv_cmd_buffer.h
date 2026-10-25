@@ -378,6 +378,7 @@ struct radv_cmd_state {
 
    struct radv_multisample_state ms;
    uint32_t num_rast_samples;
+   uint8_t no16_draw; /* enum radv_no16_draw of the current graphics state (radv_no16.h) */
 
    /* Custom blend mode for internal operations. */
    unsigned custom_blend_mode;

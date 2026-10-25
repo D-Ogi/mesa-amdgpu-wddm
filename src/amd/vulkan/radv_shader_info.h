@@ -221,6 +221,8 @@ struct radv_shader_info {
       bool selects_front_face_dynamically : 1;
 
       bool has_epilog : 1;
+      /* radv_no16.h marker: logical 16-sample body on a physical 8-sample pipeline. */
+      bool no16_logical16 : 1;
    } ps;
    struct {
       uint32_t block_size[3];

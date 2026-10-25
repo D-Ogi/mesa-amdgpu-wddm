@@ -8,6 +8,8 @@
  * SPDX-License-Identifier: MIT
  */
 
+#include "radv_s16f8_probe.h"
+#include "radv_no16.h"
 #include <errno.h>
 #include <fcntl.h>
 #include <stdbool.h>
@@ -1021,6 +1023,17 @@ static const uint32_t sample_locs_8x[] = {
 };
 static const unsigned max_dist_8x = 7;
 static const uint64_t centroid_priority_8x = 0x7654321076543210ull;
+/* Exact Vulkan standard16 positions, in specification sample-index order.
+ * ref/Vulkan-Docs01aaacd, primsrast.adoc:standard-sample-locations.
+ * This diagnostic does not expose16-sample image or framebuffer capabilities.
+ */
+static const uint32_t sample_locs_16x_probe[] = {
+   FILL_SREG(1, 1, -1, -3, -3, 2, 4, -1),
+   FILL_SREG(-5, -2, 2, 5, 5, 3, 3, -5),
+   FILL_SREG(-2, 6, 0, -7, -4, -6, -6, 4),
+   FILL_SREG(-8, 0, 7, -4, 6, 7, -7, -8),
+};
+
 
 unsigned
 radv_get_default_max_sample_dist(int log_samples)
@@ -1030,6 +1043,7 @@ radv_get_default_max_sample_dist(int log_samples)
       max_dist_2x,
       max_dist_4x,
       max_dist_8x,
+      8, /* diagnostic standard16 has -8 offsets */
    };
    return max_dist[log_samples];
 }
@@ -1076,6 +1090,12 @@ radv_emit_default_sample_locations(const struct radv_physical_device *pdev, stru
       radeon_emit_array(sample_locs_8x, 4);
       radeon_emit_array(sample_locs_8x, 2);
       break;
+   case 16:
+      centroid_priority = 0xfedcba9876543210ull;
+      radeon_set_context_reg_seq(R_028BF8_PA_SC_AA_SAMPLE_LOCS_PIXEL_X0Y0_0, 16);
+      for (unsigned pixel = 0; pixel < 4; ++pixel)
+         radeon_emit_array(sample_locs_16x_probe, 4);
+      break;
    }
 
    /* The exclusion bits can be set to improve rasterization efficiency if no sample lies on the
@@ -1084,7 +1104,7 @@ radv_emit_default_sample_locations(const struct radv_physical_device *pdev, stru
     */
    if (pdev->info.gfx_level >= GFX7 && pdev->info.gfx_level < GFX12) {
       radeon_opt_set_context_reg(R_02882C_PA_SU_PRIM_FILTER_CNTL, AC_TRACKED_PA_SU_PRIM_FILTER_CNTL,
-                                 S_02882C_XMAX_RIGHT_EXCLUSION(1) | S_02882C_YMAX_BOTTOM_EXCLUSION(1));
+                                 S_02882C_XMAX_RIGHT_EXCLUSION(nr_samples != 16) | S_02882C_YMAX_BOTTOM_EXCLUSION(nr_samples != 16));
    }
 
    if (pdev->info.gfx_level >= GFX12) {
@@ -1141,6 +1161,13 @@ radv_device_init_msaa(struct radv_device *device)
 static bool
 radv_device_is_cache_disabled(const struct radv_device *device)
 {
+   if (radv_s16f8_probe_mode())
+      return true; /* Raw coverage shaders must never share normal shader cache entries. */
+#if defined(RADV_S16F8_PROBE) && RADV_S16F8_PROBE
+   /* The lab negative controls change a transformed shader under the same pipeline key. */
+   if (radv_no16_auto_mode() >= RADV_NO16_AUTO_NEG_UPPER)
+      return true;
+#endif
    const struct radv_physical_device *pdev = radv_device_physical(device);
    const struct radv_instance *instance = radv_physical_device_instance(pdev);
 

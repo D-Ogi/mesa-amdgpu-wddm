@@ -144,7 +144,9 @@ struct radv_graphics_state_key {
    uint32_t dynamic_provoking_vtx_mode : 1;
    uint32_t smooth_lines_may_be_enabled : 1;
    uint32_t dcc_decompress_gfx11 : 1;
-   uint32_t reserved : 13;
+   /* radv_no16.h: an admitted 16-sample request, created as a physical 8-sample pipeline. */
+   uint32_t no16_logical16 : 1;
+   uint32_t reserved : 12;
 
    struct {
       uint8_t topology;

@@ -236,6 +236,13 @@ endif
 
 radv_deps = []
 
+# Automatic no-output16 path (radv_no16.h), in both flavours.
+libradv_files += files(
+  'nir/radv_nir_no16.c',
+  'nir/radv_nir_no16.h',
+  'radv_no16.h',
+)
+
 if with_vulkan_dx
   libradv_files += files(
     'winsys/wddm2/radv_wddm2_bo.c',
@@ -393,6 +400,20 @@ _dev_icd = custom_target(
 devenv.append('VK_DRIVER_FILES', _dev_icd.full_path())
 
 if with_radv_tests
+  test(
+    'radv_perspective_offset_test',
+    executable(
+      'radv_perspective_offset_test',
+      files('nir/radv_nir_lower_fs_barycentric.c', 'nir/radv_nir_lower_io.c',
+            'tests/radv_nir_perspective_offset_test.c'),
+      include_directories : [inc_include, inc_src, inc_amd, inc_amd_common,
+                             inc_compiler, include_directories('nir', '../compiler')],
+      link_with : [libamd_common],
+      dependencies : [dep_thread, idep_nir, idep_mesautil, idep_vulkan_runtime_headers,
+                      idep_amd_generated_headers],
+    ),
+    suite : ['compiler', 'nir'],
+  )
   test(
     'radv_tests',
     executable(

@@ -9,6 +9,8 @@
  */
 
 #include "radv_cmd_buffer.h"
+#include "radv_s16f8_probe.h"
+#include "radv_no16.h"
 #include "meta/radv_meta.h"
 #include "tools/radv_debug_hang.h"
 #include "tools/radv_rmv.h"
@@ -4817,6 +4819,27 @@ radv_emit_ls_hs_config(struct radv_cmd_buffer *cmd_buffer)
    radeon_end();
 }
 
+/* Source: PAL palMsaaState.h coverage16/PS8 and RadeonSI si_state.c S16F8.
+ * Only the isolated client uses an8-sample no-attachment pipeline. Logical pipeline state
+ * stays8 so no unrelated compiler/ring-buffer16 path is enabled by this diagnostic.
+ */
+static bool
+radv_s16f8_probe_active(struct radv_cmd_buffer *cmd_buffer)
+{
+   /* radv_no16_update_draw admitted this draw with the same conditions. */
+   if (cmd_buffer->state.no16_draw == RADV_NO16_DRAW_COVERAGE16)
+      return true;
+   const struct radv_device *device = radv_cmd_buffer_device(cmd_buffer);
+   const struct radv_physical_device *pdev = radv_device_physical(device);
+   return radv_s16f8_probe_mode() >= 2 &&
+          (pdev->info.gfx_level == GFX10 || pdev->info.gfx_level == GFX10_3) &&
+          cmd_buffer->state.num_rast_samples == 8 &&
+          !cmd_buffer->state.dynamic.vk.ms.sample_locations_enable &&
+          cmd_buffer->state.dynamic.vk.rs.conservative_mode == VK_CONSERVATIVE_RASTERIZATION_MODE_DISABLED_EXT &&
+          cmd_buffer->state.render.color_att_count == 0 &&
+          cmd_buffer->state.render.ds_att.format == VK_FORMAT_UNDEFINED;
+}
+
 static void
 radv_emit_rast_samples_state(struct radv_cmd_buffer *cmd_buffer)
 {
@@ -4849,7 +4872,8 @@ radv_emit_rast_samples_state(struct radv_cmd_buffer *cmd_buffer)
                        S_028A4C_FORCE_EOV_REZ_ENABLE(1) | S_028A4C_WALK_ALIGN8_PRIM_FITS_ST(walk_align8);
 
    if (!d->sample_location.count || !d->vk.ms.sample_locations_enable)
-      radv_emit_default_sample_locations(pdev, cmd_buffer->cs, rasterization_samples);
+      radv_emit_default_sample_locations(pdev, cmd_buffer->cs,
+                                         radv_s16f8_probe_active(cmd_buffer) ? 16 : rasterization_samples);
 
    if (ps_iter_samples > 1) {
       spi_baryc_cntl |= S_0286E0_POS_FLOAT_LOCATION(2);
@@ -13659,7 +13683,8 @@ radv_emit_msaa_state(struct radv_cmd_buffer *cmd_buffer)
    const struct radv_physical_device *pdev = radv_device_physical(device);
    const struct radv_instance *instance = radv_physical_device_instance(pdev);
    const struct radv_shader *ps = cmd_buffer->state.shaders[MESA_SHADER_FRAGMENT];
-   const unsigned rasterization_samples = cmd_buffer->state.num_rast_samples;
+   const bool s16f8_probe = radv_s16f8_probe_active(cmd_buffer);
+   const unsigned rasterization_samples = s16f8_probe ? 16 : cmd_buffer->state.num_rast_samples;
    const struct radv_rendering_state *render = &cmd_buffer->state.render;
    const struct radv_dynamic_state *d = &cmd_buffer->state.dynamic;
    const uint32_t sample_mask = d->vk.ms.sample_mask | ((uint32_t)d->vk.ms.sample_mask << 16);
@@ -13723,14 +13748,15 @@ radv_emit_msaa_state(struct radv_cmd_buffer *cmd_buffer)
    }
 
    if (msaa_enable) {
-      unsigned z_samples = MAX2(render->ds_samples, rasterization_samples);
+      unsigned z_samples = s16f8_probe ? 8 : MAX2(render->ds_samples, rasterization_samples);
       unsigned ps_iter_samples = radv_get_ps_iter_samples(cmd_buffer);
       unsigned log_z_samples = util_logbase2(z_samples);
       unsigned log_ps_iter_samples = util_logbase2(ps_iter_samples);
       bool uses_underestimate = d->vk.rs.conservative_mode == VK_CONSERVATIVE_RASTERIZATION_MODE_UNDERESTIMATE_EXT;
 
       pa_sc_aa_config |=
-         S_028BE0_MSAA_NUM_SAMPLES(uses_underestimate ? 0 : log_samples) | S_028BE0_MSAA_EXPOSED_SAMPLES(log_samples);
+         S_028BE0_MSAA_NUM_SAMPLES(uses_underestimate ? 0 : log_samples) |
+         S_028BE0_MSAA_EXPOSED_SAMPLES(s16f8_probe && radv_s16f8_probe_mode() == 2 ? 3 : log_samples);
 
       if (pdev->info.gfx_level >= GFX12) {
          pa_sc_aa_config |= S_028BE0_PS_ITER_SAMPLES(log_ps_iter_samples);
@@ -13741,12 +13767,27 @@ radv_emit_msaa_state(struct radv_cmd_buffer *cmd_buffer)
                             S_028BE0_COVERED_CENTROID_IS_CENTER(pdev->info.gfx_level >= GFX10_3);
 
          db_eqaa |= S_028804_MAX_ANCHOR_SAMPLES(log_z_samples) | S_028804_PS_ITER_SAMPLES(log_ps_iter_samples) |
-                    S_028804_MASK_EXPORT_NUM_SAMPLES(log_samples) | S_028804_ALPHA_TO_MASK_NUM_SAMPLES(log_samples);
+                    S_028804_MASK_EXPORT_NUM_SAMPLES(s16f8_probe ? 3 : log_samples) |
+                    S_028804_ALPHA_TO_MASK_NUM_SAMPLES(log_samples);
       }
 
       if (line_rast_mode == VK_LINE_RASTERIZATION_MODE_RECTANGULAR_SMOOTH)
          db_eqaa |= S_028804_OVERRASTERIZATION_AMOUNT(log_samples);
    }
+
+   if (radv_s16f8_probe_mode())
+      fprintf(stderr, "RADV_S16F8_PROBE mode=%u active=%u coverage=%u ps=%u mask=%04x PA_SC_AA_CONFIG=%08x DB_EQAA=%08x raw_coverage=1\n",
+              radv_s16f8_probe_mode(), s16f8_probe, rasterization_samples,
+              radv_get_ps_iter_samples(cmd_buffer), d->vk.ms.sample_mask, pa_sc_aa_config, db_eqaa);
+#if defined(RADV_S16F8_PROBE) && RADV_S16F8_PROBE
+   if (cmd_buffer->state.no16_draw != RADV_NO16_DRAW_DEFAULT)
+      fprintf(stderr,
+              "RADV_NO16_AUTO draw mode=%s decision=%s coverage=%u ps=%u mask=%04x PA_SC_AA_CONFIG=%08x "
+              "DB_EQAA=%08x\n",
+              radv_no16_auto_mode_name(radv_no16_auto_mode()), radv_no16_draw_name(cmd_buffer->state.no16_draw),
+              rasterization_samples, radv_get_ps_iter_samples(cmd_buffer), d->vk.ms.sample_mask, pa_sc_aa_config,
+              db_eqaa);
+#endif
 
    if (RADV_DEBUG(instance, NO_ATOC_DITHERING)) {
       db_alpha_to_mask = S_028B70_ALPHA_TO_MASK_OFFSET0(2) | S_028B70_ALPHA_TO_MASK_OFFSET1(2) |
@@ -14415,6 +14456,74 @@ radv_bind_graphics_shaders(struct radv_cmd_buffer *cmd_buffer)
    }
 }
 
+/* radv_no16.h: selects the command state of a draw from the marker of the
+ * bound fragment shader and the current state. A refused draw is not recorded
+ * and the command buffer records an error. Called by radv_no16_update_draw
+ * only for a marked shader, a 16-sample state or a non-default current state.
+ */
+static ATTRIBUTE_NOINLINE bool
+radv_no16_update_draw_slow(struct radv_cmd_buffer *cmd_buffer)
+{
+   const enum radv_no16_auto_mode mode = radv_no16_auto_mode();
+   if (mode == RADV_NO16_AUTO_OFF)
+      return true;
+   const struct radv_device *device = radv_cmd_buffer_device(cmd_buffer);
+   const struct radv_physical_device *pdev = radv_device_physical(device);
+   const struct radv_shader *ps = cmd_buffer->state.shaders[MESA_SHADER_FRAGMENT];
+   const struct radv_dynamic_state *d = &cmd_buffer->state.dynamic;
+   const unsigned api_samples = radv_get_rasterization_samples(cmd_buffer);
+   unsigned ps_iter_samples = 1;
+   float min_sample_shading;
+   if (radv_is_sample_shading_enabled(cmd_buffer, &min_sample_shading))
+      ps_iter_samples = util_next_power_of_two(ceilf(min_sample_shading * api_samples));
+   const struct radv_no16_draw_inputs in = {
+      .mode = mode,
+      .gfx10 = pdev->info.gfx_level == GFX10 || pdev->info.gfx_level == GFX10_3,
+      .fs_logical16 = ps && ps->info.ps.no16_logical16,
+      .api_samples = api_samples,
+      .state_samples = d->vk.ms.rasterization_samples,
+      .ps_iter_samples = ps_iter_samples,
+      .sample_locations_enable = d->vk.ms.sample_locations_enable,
+      .conservative = d->vk.rs.conservative_mode != VK_CONSERVATIVE_RASTERIZATION_MODE_DISABLED_EXT,
+      .color_att_count = cmd_buffer->state.render.color_att_count,
+      .ds_attachment = cmd_buffer->state.render.ds_att.format != VK_FORMAT_UNDEFINED,
+      .triangles = radv_vgt_outprim_is_triangle(radv_get_vgt_outprim_type(cmd_buffer)) &&
+                   d->vk.rs.polygon_mode == V_028814_X_DRAW_TRIANGLES,
+      .vrs = device->force_vrs_enabled || cmd_buffer->state.render.vrs_att.iview ||
+             d->vk.fsr.fragment_size.width != 1 || d->vk.fsr.fragment_size.height != 1,
+   };
+   const char *reason;
+   const enum radv_no16_draw decision = radv_no16_draw_decide(&in, &reason);
+   if (decision == RADV_NO16_DRAW_REFUSE) {
+#if defined(RADV_S16F8_PROBE) && RADV_S16F8_PROBE
+      if (cmd_buffer->vk.record_result == VK_SUCCESS)
+         fprintf(stderr, "RADV_NO16_AUTO draw-refused mode=%s reason=%s samples=%u marked=%u\n",
+                 radv_no16_auto_mode_name(mode), reason, api_samples, in.fs_logical16);
+#endif
+      vk_command_buffer_set_error(&cmd_buffer->vk, VK_ERROR_OUT_OF_DEVICE_MEMORY);
+      return false;
+   }
+   if (cmd_buffer->state.no16_draw != decision) {
+      cmd_buffer->state.no16_draw = decision;
+      cmd_buffer->state.dirty |= RADV_CMD_DIRTY_BINNING_STATE | RADV_CMD_DIRTY_RAST_SAMPLES_STATE |
+                                 RADV_CMD_DIRTY_PS_STATE | RADV_CMD_DIRTY_DB_SHADER_CONTROL |
+                                 RADV_CMD_DIRTY_MSAA_STATE;
+   }
+   return true;
+}
+
+/* Every draw that does not touch the no-output16 path leaves here without a
+ * state change: no marked shader, not 16 samples, default current state. */
+static ALWAYS_INLINE bool
+radv_no16_update_draw(struct radv_cmd_buffer *cmd_buffer)
+{
+   const struct radv_shader *ps = cmd_buffer->state.shaders[MESA_SHADER_FRAGMENT];
+   if (likely(cmd_buffer->state.no16_draw == RADV_NO16_DRAW_DEFAULT && !(ps && ps->info.ps.no16_logical16) &&
+              cmd_buffer->state.dynamic.vk.ms.rasterization_samples != 16))
+      return true;
+   return radv_no16_update_draw_slow(cmd_buffer);
+}
+
 /* MUST inline this function to avoid massive perf loss in drawoverhead */
 ALWAYS_INLINE static bool
 radv_before_draw(struct radv_cmd_buffer *cmd_buffer, const struct radv_draw_info *info, uint32_t drawCount,
@@ -14453,6 +14562,9 @@ radv_before_draw(struct radv_cmd_buffer *cmd_buffer, const struct radv_draw_info
    if (cmd_buffer->state.dirty & RADV_CMD_DIRTY_GRAPHICS_SHADERS) {
       radv_bind_graphics_shaders(cmd_buffer);
    }
+
+   if (!radv_no16_update_draw(cmd_buffer))
+      return false;
 
    /* This is the optimal packet order:
     * Set all states first, so that all SET packets are processed in parallel with previous draw
@@ -14520,6 +14632,9 @@ radv_before_taskmesh_draw(struct radv_cmd_buffer *cmd_buffer, const struct radv_
    if (cmd_buffer->state.dirty & RADV_CMD_DIRTY_GRAPHICS_SHADERS) {
       radv_bind_graphics_shaders(cmd_buffer);
    }
+
+   if (!radv_no16_update_draw(cmd_buffer))
+      return false;
 
    struct radv_cmd_stream *ace_cs = cmd_buffer->gang.cs;
    struct radv_shader *task_shader = cmd_buffer->state.shaders[MESA_SHADER_TASK];
