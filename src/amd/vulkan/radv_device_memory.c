@@ -285,7 +285,7 @@ radv_bc250_trace_mem(void)
 {
    static int enabled = -1;
    if (enabled < 0)
-      enabled = debug_get_bool_option("RADV_BC250_TRACE_MEM", false);
+      enabled = BC250_ENV_BOOL(RADV_BC250_TRACE_MEM, false);
    return enabled;
 }
 

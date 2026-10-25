@@ -495,9 +495,9 @@ static const uint32_t ac_ip_type_dw_padding_minus_1[AMD_NUM_IP_TYPES] = {
  * 1 keeps it whatever the kernel driver says. The native Task arm
  * (RADV_BC250_NATIVE_TASK, BC250_NATIVE_TASK_COMPILE) needs a compute queue and
  * therefore keeps it as well. */
-DEBUG_GET_ONCE_OPTION(bc250_ace_queues, "RADV_BC250_ACE_QUEUES", NULL)
-DEBUG_GET_ONCE_BOOL_OPTION(bc250_native_task, "RADV_BC250_NATIVE_TASK", false)
-DEBUG_GET_ONCE_BOOL_OPTION(bc250_native_task_compile, "BC250_NATIVE_TASK_COMPILE", false)
+BC250_GET_ONCE_OPTION(bc250_ace_queues, RADV_BC250_ACE_QUEUES, NULL)
+BC250_GET_ONCE_BOOL_OPTION_P(bc250_native_task, RADV_BC250_NATIVE_TASK, false)
+BC250_GET_ONCE_BOOL_OPTION(bc250_native_task_compile, BC250_NATIVE_TASK_COMPILE, false)
 
 static bool
 ac_bc250_ace_queues_enabled(const struct radeon_info *info)

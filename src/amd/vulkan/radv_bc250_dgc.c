@@ -207,7 +207,7 @@ radv_bc250_dgc_shader(struct radv_device *device, const struct radv_indirect_com
    nir_store_var(&b, i, nir_iadd_imm(&b, word, 64), 1);
    nir_pop_loop(&b, NULL);
    nir_validate_shader(b.shader, "BC250 DGC token resolution");
-   const char *dump = debug_get_option("BC250_DGC_DUMP", NULL);
+   const char *dump = BC250_ENV_STR(BC250_DGC_DUMP, NULL);
    if (dump) {
       char path[4096];
       snprintf(path, sizeof(path), "%s/prepare-%u.nir", dump, layout->vk.draw_count);
@@ -281,7 +281,11 @@ radv_bc250_dgc_report(const struct radv_device *device)
                          "route's accepted state is narrower than the direct DispatchMesh path's (BD-119, "
                          "bc250_dgc_state_valid): multiview, streamout, VRS, an active query and a few more "
                          "refuse the execute"
-                       : "the mesh DGC route is off (RADV_BC250_EXPOSE_DGC=0 or the native-task compile), so no "
+                       : "the mesh DGC route is off ("
+#ifdef AMDGPU_WDDM_LAB_FLAVOUR
+                         "RADV_BC250_EXPOSE_DGC=0 or "
+#endif
+                         "the native-task compile), so no "
                          "mesh draw token can execute and no mesh stage is reported",
            verdict);
 }
@@ -382,7 +386,7 @@ bc250_dgc_patch_queries(struct radv_cmd_buffer *cmd, const VkGeneratedCommandsIn
    if (ok) {
       bool native_stats = radv_get_num_pipeline_stat_queries(cmd) > 0;
       FILE *packets = NULL;
-      const char *dump = debug_get_option("BC250_DGC_DUMP", NULL);
+      const char *dump = BC250_ENV_STR(BC250_DGC_DUMP, NULL);
       if (dump) {
          VK_FROM_HANDLE(radv_indirect_command_layout, layout, info->indirectCommandsLayout);
          char path[4096];
@@ -521,7 +525,7 @@ bc250_dgc_capture(struct radv_cmd_buffer *owner, const struct radv_cmd_buffer *s
       cmd->state.active_stages &= ~RADV_GRAPHICS_STAGE_BITS;
       radv_CmdBindPipeline(radv_cmd_buffer_to_handle(cmd), VK_PIPELINE_BIND_POINT_GRAPHICS,
                           radv_pipeline_to_handle(&pipeline->base));
-      const char *dump = debug_get_option("BC250_DGC_DUMP", NULL);
+      const char *dump = BC250_ENV_STR(BC250_DGC_DUMP, NULL);
       if (dump) {
          char path[4096];
          snprintf(path, sizeof(path), "%s/bindings-%u-%u.json", dump, layout->vk.draw_count, seq);
@@ -730,7 +734,7 @@ bc250_dgc_prepare(struct radv_cmd_buffer *cmd, const VkGeneratedCommandsInfoEXT 
       .sequences = info->maxSequenceCount, .stride = shape.stride,
       .code = shape.code, .records = shape.records,
    };
-   const char *dump = debug_get_option("BC250_DGC_DUMP", NULL);
+   const char *dump = BC250_ENV_STR(BC250_DGC_DUMP, NULL);
    if (dump) {
       char path[4096];
       snprintf(path, sizeof(path), "%s/capture-%u.bin", dump, layout->vk.draw_count);
@@ -849,7 +853,7 @@ radv_bc250_dgc_execute(struct radv_cmd_buffer *cmd, VkBool32 preprocessed, const
    cmd->state.flush_bits |= AC_BARRIER_WB_L2 | AC_BARRIER_INV_L2;
    radv_emit_cache_flush(cmd, false);
    ac_emit_cp_pfp_sync_me(cmd->cs->b, false);
-   const char *dump = debug_get_option("BC250_DGC_DUMP", NULL);
+   const char *dump = BC250_ENV_STR(BC250_DGC_DUMP, NULL);
    if (dump) {
       VK_FROM_HANDLE(radv_indirect_command_layout, layout, info->indirectCommandsLayout);
       char path[4096];

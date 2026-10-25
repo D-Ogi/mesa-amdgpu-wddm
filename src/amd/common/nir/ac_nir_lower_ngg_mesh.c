@@ -4066,7 +4066,7 @@ ac_nir_lower_ngg_mesh(nir_shader *shader, const ac_nir_lower_ngg_options *option
    /* RADV_BC250_MESH_IMPLICIT_TRIS (see ms_implicit_index). */
    const char *implicit_reason = ms_implicit_indices_ok(shader, options, vertices_per_prim);
    const bool implicit_indices = !implicit_reason;
-   if (options->bc250_implicit_tris && getenv("BC250_TRACE_COMPILE"))
+   if (options->bc250_implicit_tris && BC250_GETENV(BC250_TRACE_COMPILE))
       fprintf(stderr, "BC250 MESH IMPLICIT TRIS: %s V=%u P=%u%s%s\n", implicit_indices ? "applied" : "not applied",
               max_vertices, max_primitives, implicit_reason ? " reason=" : "", implicit_reason ? implicit_reason : "");
 
@@ -4174,7 +4174,7 @@ ac_nir_lower_ngg_mesh(nir_shader *shader, const ac_nir_lower_ngg_options *option
    if (options->bc250_culldist_culled)
       *options->bc250_culldist_culled = dont_export_cull;
 
-   if (options->bc250_autocull && getenv("BC250_TRACE_COMPILE"))
+   if (options->bc250_autocull && BC250_GETENV(BC250_TRACE_COMPILE))
       fprintf(stderr, "BC250 MESH AUTOCULL: %s V=%u P=%u wave=%u hw_workgroup=%u lds=%u app_cull=%u%s%s\n",
               autocull ? "applied" : "not applied", max_vertices, max_primitives, options->wave_size,
               options->max_workgroup_size, layout.lds.total_size, uses_cull,
@@ -4203,7 +4203,7 @@ ac_nir_lower_ngg_mesh(nir_shader *shader, const ac_nir_lower_ngg_options *option
          layout.lds.total_size = total;
       }
    }
-   if (options->bc250_compact && getenv("BC250_TRACE_COMPILE"))
+   if (options->bc250_compact && BC250_GETENV(BC250_TRACE_COMPILE))
       fprintf(stderr, "BC250 MESH COMPACT: %s W=%u D=%u V=%u P=%u keys=%u lanes=%u wave=%u table=%u owned=0x%x "
               "autocull=%u direct=%u lds=%u%s%s\n",
               compact ? "applied" : "not applied", AC_NIR_BC250_COMPACT_W, AC_NIR_BC250_COMPACT_W + 1, max_vertices,
@@ -4213,12 +4213,12 @@ ac_nir_lower_ngg_mesh(nir_shader *shader, const ac_nir_lower_ngg_options *option
    if (options->bc250_compact_applied)
       *options->bc250_compact_applied = compact;
 
-   if (options->bc250_direct_read && getenv("BC250_TRACE_COMPILE"))
+   if (options->bc250_direct_read && BC250_GETENV(BC250_TRACE_COMPILE))
       fprintf(stderr, "BC250 MESH DIRECT READ: %s locations=0x%" PRIx64 " (%u of %u per-vertex)%s%s\n",
               direct.mask ? "applied" : "not applied", direct.mask, util_bitcount64(direct.mask),
               util_bitcount64(per_vertex_outputs), direct_reason ? " reason=" : "", direct_reason ? direct_reason : "");
 
-   if (getenv("BC250_TRACE_COMPILE"))
+   if (BC250_GETENV(BC250_TRACE_COMPILE))
       fprintf(stderr, "BC250 MESH LDS: V=%u P=%u api_shared=%u vtx_attr=%u@%u%s prm_attr=%u@%u indices=%u total=%u "
               "scratch_vtx=%u scratch_prm=%u var_vtx=%u var_prm=%u\n",
               max_vertices, max_primitives, shader->info.shared_size,
@@ -4285,10 +4285,10 @@ ac_nir_lower_ngg_mesh(nir_shader *shader, const ac_nir_lower_ngg_options *option
          lds_cover_addr = align(layout.lds.total_size, 4);
          layout.lds.total_size = lds_cover_addr + 32 + max_vertices;
       }
-      if (options->bc250_lds_cover && getenv("BC250_TRACE_COMPILE"))
+      if (options->bc250_lds_cover && BC250_GETENV(BC250_TRACE_COMPILE))
          fprintf(stderr, "BC250 MESH LDS COVER: %s V=%u P=%u\n", lds_cover ? "applied" : "not applied",
                  max_vertices, max_primitives);
-      if (options->bc250_lds_plan && getenv("BC250_TRACE_COMPILE"))
+      if (options->bc250_lds_plan && BC250_GETENV(BC250_TRACE_COMPILE))
          fprintf(stderr, "BC250 MESH LDS PLAN: %s V=%u P=%u intervals=%u bytes=%u\n", lds_plan ? "applied" : "not applied",
                  max_vertices, max_primitives, plan_intervals, lds_plan ? plan_size : 0);
       /* RADV_BC250_MESH_SAFE_COMPACT: the renumbered survivor indices follow the counts. Without the
@@ -4320,23 +4320,23 @@ ac_nir_lower_ngg_mesh(nir_shader *shader, const ac_nir_lower_ngg_options *option
          ix[2] = 1;
          ix[3] = max_vertices;
       }
-      if (options->bc250_safe_autocull && getenv("BC250_TRACE_COMPILE"))
+      if (options->bc250_safe_autocull && BC250_GETENV(BC250_TRACE_COMPILE))
          fprintf(stderr, "BC250 MESH SAFE AUTOCULL: %s\n",
                  options->bc250_safe_local ? "before check and local remap" : "before parallel remap");
-      if (options->bc250_safe_check && getenv("BC250_TRACE_COMPILE"))
+      if (options->bc250_safe_check && BC250_GETENV(BC250_TRACE_COMPILE))
          fprintf(stderr, "BC250 MESH SAFE CHECK: wave-local counts, one publication\n");
-      if (options->bc250_pp_share && getenv("BC250_TRACE_COMPILE"))
+      if (options->bc250_pp_share && BC250_GETENV(BC250_TRACE_COMPILE))
          fprintf(stderr, "BC250 MESH PP SHARE: %s provoking=%u table=%u\n", pp_share ? "applied" : "not applied",
                  options->bc250_compact_owned_corners, options->bc250_compact_index_staging[3]);
-      if (safe_compact && getenv("BC250_TRACE_COMPILE"))
+      if (safe_compact && BC250_GETENV(BC250_TRACE_COMPILE))
          fprintf(stderr, "BC250 MESH SAFE COMPACT: referenced vertices renumbered, W=31\n");
-      if (options->bc250_safe_corners && getenv("BC250_TRACE_COMPILE"))
+      if (options->bc250_safe_corners && BC250_GETENV(BC250_TRACE_COMPILE))
          fprintf(stderr, "BC250 MESH SAFE CORNERS: private surviving corners, W=2, bound=%u\n", 3 * max_primitives);
-      if (options->bc250_safe_local && getenv("BC250_TRACE_COMPILE"))
+      if (options->bc250_safe_local && BC250_GETENV(BC250_TRACE_COMPILE))
          fprintf(stderr, "BC250 MESH SAFE LOCAL: one-wave 10-triangle intervals, packed LDS\n");
-      if (options->bc250_safe_parallel && !options->bc250_safe_local && getenv("BC250_TRACE_COMPILE"))
+      if (options->bc250_safe_parallel && !options->bc250_safe_local && BC250_GETENV(BC250_TRACE_COMPILE))
          fprintf(stderr, "BC250 MESH SAFE PARALLEL: source-key window=31\n");
-      if (getenv("BC250_TRACE_COMPILE"))
+      if (BC250_GETENV(BC250_TRACE_COMPILE))
          fprintf(stderr, "BC250 MESH SAFE DIRECT: applied W=31 V=%u P=%u lanes=%u wave=%u lds=%u\n",
                  max_vertices, max_primitives, options->max_workgroup_size, options->wave_size, layout.lds.total_size);
    }

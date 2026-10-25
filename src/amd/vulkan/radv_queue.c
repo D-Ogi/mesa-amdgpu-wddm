@@ -46,7 +46,7 @@ radv_get_queue_global_priority(const VkDeviceQueueGlobalPriorityCreateInfo *pObj
 enum radeon_ctx_priority
 radv_bc250_compute_priority_option(const struct radv_physical_device *pdev)
 {
-   const char *v = os_get_option("RADV_BC250_COMPUTE_QUEUE_PRIORITY");
+   const char *v = BC250_OS_OPTION(RADV_BC250_COMPUTE_QUEUE_PRIORITY);
    if (!v || !v[0] || pdev->info.family != CHIP_GFX1013 || !radv_compute_queue_enabled(pdev))
       return RADEON_CTX_PRIORITY_INVALID;
    if (!strcmp(v, "low"))
@@ -57,7 +57,9 @@ radv_bc250_compute_priority_option(const struct radv_physical_device *pdev)
       return RADEON_CTX_PRIORITY_HIGH;
    if (!strcmp(v, "realtime"))
       return RADEON_CTX_PRIORITY_REALTIME;
+#ifdef AMDGPU_WDDM_LAB_FLAVOUR
    fprintf(stderr, "radv/bc250: RADV_BC250_COMPUTE_QUEUE_PRIORITY=%s ignored (low|medium|high|realtime)\n", v);
+#endif
    return RADEON_CTX_PRIORITY_INVALID;
 }
 
@@ -927,7 +929,7 @@ radv_preamble_no_idle_wait(void)
 #if defined(AMDGPU_WDDM_LAB_FLAVOUR)
    static int mode = -1; /* benign race: every thread computes the same value */
    if (mode < 0) {
-      const char *value = getenv("BC250_PREAMBLE_NO_IDLE_WAIT");
+      const char *value = BC250_GETENV(BC250_PREAMBLE_NO_IDLE_WAIT);
       mode = value && !strcmp(value, "1");
    }
    return mode == 1;
@@ -2155,6 +2157,7 @@ radv_queue_submit(struct vk_queue *vqueue, struct vk_queue_submit *submission)
          (unsigned long long)trace_submit, result);
    if (result == VK_SUCCESS && unlikely(device->bc250_timer.enabled))
       radv_bc250_timer_submit(device, queue, submission, timer_call_ns); /* BC250_MESH_TIMER: queue + lazy readback */
+#ifdef AMDGPU_WDDM_LAB_FLAVOUR
    if (result == VK_SUCCESS && device->bc250_env.trace_usage) {
       static uint64_t submits, mesh_total, task_total, idx_direct_total, idx_indirect_total, idx_records_total;
       uint64_t mesh = 0, task = 0, idx_direct = 0, idx_indirect = 0, idx_records = 0;
@@ -2179,6 +2182,7 @@ radv_queue_submit(struct vk_queue *vqueue, struct vk_queue_submit *submission)
                  (unsigned long long)idx_direct_total, (unsigned long long)idx_indirect_total,
                  (unsigned long long)idx_records_total);
    }
+#endif
 
 fail:
    if (result != VK_SUCCESS) {

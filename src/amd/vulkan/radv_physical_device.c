@@ -100,7 +100,7 @@ static bool
 radv_bc250_task_strict_ext(const struct radv_physical_device *pdev)
 {
    return (pdev->bc250_hybrid_task || pdev->bc250_native_task) &&
-          debug_get_bool_option("RADV_BC250_TASK_STRICT_EXT", false);
+          BC250_ENV_BOOL(RADV_BC250_TASK_STRICT_EXT, false);
 }
 
 static bool
@@ -214,7 +214,7 @@ radv_bc250_compute_queue_count(const struct radv_physical_device *pdev)
    const uint32_t n = pdev->info.ip[AMD_IP_COMPUTE].num_queues;
    if (pdev->info.family != CHIP_GFX1013)
       return n;
-   const uint32_t v = debug_get_num_option("RADV_BC250_COMPUTE_QUEUE_COUNT", 0);
+   const uint32_t v = BC250_ENV_NUM(RADV_BC250_COMPUTE_QUEUE_COUNT, 0);
    return v ? MIN2(n, v) : n;
 }
 
@@ -1470,7 +1470,7 @@ radv_physical_device_get_features(const struct radv_physical_device *pdev, struc
        * Mesh shaders take the expanded route. vkd3d-proton turns D3D12 view instancing off when Mesh
        * is exposed without multiview Mesh. */
       .multiviewMeshShader = taskmesh_en ||
-         (pdev->bc250_native_mesh && debug_get_bool_option("RADV_BC250_EXPOSE_MULTIVIEW_MESH", false)),
+         (pdev->bc250_native_mesh && BC250_ENV_BOOL_P(RADV_BC250_EXPOSE_MULTIVIEW_MESH, false)),
       .primitiveFragmentShadingRateMeshShader = taskmesh_en,
       /* BC250 counts MESH/TASK invocations through GDS snapshots (v8). */
       /* Replay splitting does not yet preserve mesh-invocation queries. */
@@ -3030,8 +3030,8 @@ radv_physical_device_try_create(struct radv_instance *instance, drmDevicePtr drm
                              !pdev->use_llvm && !RADV_DEBUG(instance, NO_MESH_SHADER);
    pdev->bc250_native_task = pdev->bc250_native_mesh &&
       radv_compute_queue_enabled(pdev) &&
-      (debug_get_bool_option("BC250_NATIVE_TASK_COMPILE", false) ||
-       debug_get_bool_option("RADV_BC250_NATIVE_TASK", false));
+      (BC250_ENV_BOOL(BC250_NATIVE_TASK_COMPILE, false) ||
+       BC250_ENV_BOOL_P(RADV_BC250_NATIVE_TASK, false));
    /* RADV_DIRECTMESH=1: DXVK (D3D9-11, no Mesh shaders) keeps GPL, shader objects and pipeline binaries
     * instead of the preset's hybrid Task. An explicit RADV_BC250_HYBRID_TASK still applies.
     *
@@ -3046,28 +3046,28 @@ radv_physical_device_try_create(struct radv_instance *instance, drmDevicePtr drm
     * RADV_BC250_HYBRID_TASK=0 turns it off. */
    const bool bc250_dxvk = instance->vk.app_info.engine_name && !strcmp(instance->vk.app_info.engine_name, "DXVK");
    pdev->bc250_hybrid_task = pdev->bc250_native_mesh &&
-      debug_get_bool_option("RADV_BC250_HYBRID_TASK", true) && !(bc250_dxvk && radv_bc250_directmesh_hybrid);
-   if (pdev->bc250_native_mesh && bc250_dxvk && radv_bc250_directmesh_hybrid && getenv("BC250_TRACE_COMPILE"))
+      BC250_ENV_BOOL(RADV_BC250_HYBRID_TASK, true) && !(bc250_dxvk && radv_bc250_directmesh_hybrid);
+   if (pdev->bc250_native_mesh && bc250_dxvk && radv_bc250_directmesh_hybrid && BC250_GETENV(BC250_TRACE_COMPILE))
       fprintf(stderr, "radv/bc250: DXVK: hybrid Task off, GPL/shader objects/pipeline binaries kept\n");
    /* On by default with native mesh: VK_EXT_device_generated_commands stays exposed as upstream, and
     * a layout with a mesh draw must take radv_bc250_dgc, because the generic DGC shader emits no mesh
     * draw. RADV_BC250_EXPOSE_DGC=0 turns the route off (a mesh DGC layout then fails closed). */
    pdev->bc250_expose_dgc = pdev->bc250_native_mesh && !pdev->bc250_native_task &&
-      debug_get_bool_option("RADV_BC250_EXPOSE_DGC", true);
+      BC250_ENV_BOOL_P(RADV_BC250_EXPOSE_DGC, true);
    pdev->bc250_fast_binding = pdev->bc250_native_mesh &&
-      debug_get_bool_option("RADV_BC250_EXPOSE_FAST_BINDING", false);
+      BC250_ENV_BOOL_P(RADV_BC250_EXPOSE_FAST_BINDING, false);
    /* GFX1013 has no ROTATE_PC_PTR or LOAD_PROVOKING_VTX; the fragment shader
     * recovers the API vertex order from a position reference exported by the
     * last pre-rasterization stage (radv_nir_bc250_lower_bary_rotation). On by
     * default: without it vkd3d-proton hides mesh shaders (UE5 workaround). */
    pdev->bc250_barycentrics = pdev->info.family == CHIP_GFX1013 &&
-      !debug_get_bool_option("RADV_BC250_NO_BARYCENTRICS", false);
+      !BC250_ENV_BOOL(RADV_BC250_NO_BARYCENTRICS, false);
    /* NOT a capability this driver claims: GFX10.1 has no VRS hardware, so exposing
     * VK_KHR_fragment_shading_rate with shading always 1x1 only makes vkd3d-proton report DX12
     * Ultimate. DirectMesh has this on by default; here it is off and only an explicit
     * RADV_BC250_VRS_NOOP=1 turns it on, for measurement. */
    pdev->bc250_vrs_noop = pdev->info.family == CHIP_GFX1013 &&
-      debug_get_bool_option("RADV_BC250_VRS_NOOP", false);
+      BC250_ENV_BOOL(RADV_BC250_VRS_NOOP, false);
    if (pdev->bc250_native_mesh) {
       assert(pdev->info.family == CHIP_GFX1013);
       assert(pdev->info.gfx_level == GFX10);
@@ -3667,7 +3667,7 @@ radv_get_memory_budget_properties(VkPhysicalDevice physicalDevice,
          static int trace_budget = -1;
          static uint64_t trace_last_ns;
          if (trace_budget < 0)
-            trace_budget = debug_get_bool_option("RADV_BC250_TRACE_MEM", false);
+            trace_budget = BC250_ENV_BOOL(RADV_BC250_TRACE_MEM, false);
          if (unlikely(trace_budget) && os_time_get_nano() - trace_last_ns > 2000000000ull) {
             trace_last_ns = os_time_get_nano();
             fprintf(stderr,

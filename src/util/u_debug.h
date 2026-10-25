@@ -475,4 +475,7 @@ debug_get_option_ ## sufix (void) \
 }
 #endif
 
+/* amdgpu-wddm: the BC-250 switches read the environment through this helper; see bc250_env.h. */
+#include "bc250_env.h"
+
 #endif /* U_DEBUG_H_ */

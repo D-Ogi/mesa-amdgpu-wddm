@@ -2435,7 +2435,7 @@ radv_descriptor_get_va(const struct radv_descriptor_state *descriptors_state, un
 }
 
 /* BC250_CAPTURE_POINTERS (debug dump): read once, not per state flush on every GPU. */
-DEBUG_GET_ONCE_BOOL_OPTION(bc250_capture_pointers, "BC250_CAPTURE_POINTERS", false)
+BC250_GET_ONCE_BOOL_OPTION(bc250_capture_pointers, BC250_CAPTURE_POINTERS, false)
 
 static void
 radv_emit_descriptors_per_stage(const struct radv_device *device, struct radv_cmd_stream *cs,
@@ -14094,11 +14094,14 @@ radv_emit_direct_mesh_draw_packet(struct radv_cmd_buffer *cmd_buffer, uint32_t x
       if (merge_k > 1)
          count = count / merge_k + (count % merge_k != 0);
       if (!view_mask) {
+#ifdef AMDGPU_WDDM_LAB_FLAVOUR
          if (pdev->bc250_native_mesh && device->bc250_env.omit_launch) {
             fprintf(stderr, "BC250_LAUNCH_OMITTED userdata retained grid=%u drawid=%u\n",
                     cmd_buffer->state.shaders[MESA_SHADER_MESH]->info.cs.uses_grid_size,
                     cmd_buffer->state.uses_drawid);
-         } else {
+         } else
+#endif
+         {
             radv_cs_emit_draw_packet(cmd_buffer, count, 0);
          }
       } else {

@@ -111,7 +111,7 @@ radv_wddm2_read_mem_overflow(unsigned *out_internal)
    const char *reg = radv_wddm2_read_hklm_sz(RADV_WDDM2_VK_KEY, RADV_WDDM2_MEM_OVERFLOW_VALUE, reg_buf,
                                              sizeof(reg_buf));
 #if defined(AMDGPU_WDDM_LAB_FLAVOUR)
-   const char *legacy = getenv("BC250_MAKERESIDENT_LEGACY");
+   const char *legacy = BC250_GETENV(BC250_MAKERESIDENT_LEGACY);
 #else
    const char *legacy = NULL; /* a bisect switch, which the release flavour does not read (BD-167): unset */
 #endif
@@ -947,7 +947,7 @@ radv_wddm2_winsys_create(const struct vk_dx_adapter_info *adapter_info,
    ws->debug_log_bos = BITSET_TEST(debug_flags, RADV_DEBUG_HANG);
    ws->dump_ibs = !!(BITSET_TEST(debug_flags, RADV_DEBUG_DUMP_IBS));
 #if defined(AMDGPU_WDDM_LAB_FLAVOUR)
-   const char *trace_submits = getenv("BC250_TRACE_SUBMITS");
+   const char *trace_submits = BC250_GETENV(BC250_TRACE_SUBMITS);
    ws->bc250_trace_submits = trace_submits && strcmp(trace_submits, "1") == 0;
 #else
    ws->bc250_trace_submits = false; /* the release flavour reads no diagnostic variable (BD-167) */

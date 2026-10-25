@@ -2173,8 +2173,8 @@ radv_wddm2_cs_init_functions(struct radv_wddm2_winsys *ws)
 {
    if (ws->bc250) {
 #if defined(AMDGPU_WDDM_LAB_FLAVOUR)
-      const char *nocopy = getenv("BC250_IB_NOCOPY");
-      const char *cap = getenv("BC250_IB_DWORDS");
+      const char *nocopy = BC250_GETENV(BC250_IB_NOCOPY);
+      const char *cap = BC250_GETENV(BC250_IB_DWORDS);
       ws->bc250_ib_dwords_cap = cap && cap[0] ? strtoul(cap, NULL, 0) : 0;
       ws->bc250_gather_copy = (nocopy && !strcmp(nocopy, "0")) || ws->bc250_ib_dwords_cap;
       if (!ws->adapter_query) {

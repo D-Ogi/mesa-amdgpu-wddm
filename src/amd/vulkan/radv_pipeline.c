@@ -382,7 +382,7 @@ radv_postprocess_nir(const struct radv_compiler_info *compiler_info, const struc
     * NGG culling.
     */
    NIR_PASS(_, stage->nir, radv_nir_lower_descriptors, compiler_info, stage);
-   if (getenv("BC250_ORDERED_NIR_DUMP") && stage->stage == MESA_SHADER_COMPUTE && stage->nir->info.name) {
+   if (BC250_GETENV(BC250_ORDERED_NIR_DUMP) && stage->stage == MESA_SHADER_COMPUTE && stage->nir->info.name) {
       unsigned index_base, index_stride;
       if (sscanf(stage->nir->info.name, "bc250_ordered_producer:%u:%u", &index_base, &index_stride) == 2) {
          nir_shader *test = nir_shader_clone(NULL, stage->nir);
@@ -396,7 +396,7 @@ radv_postprocess_nir(const struct radv_compiler_info *compiler_info, const struc
          u_foreach_bit64 (dw, stage->args.ac.inline_push_const_mask)
             fprintf(stderr, "BC250 ORDERED PRODUCER ABI: arg=%u pc=%u\n",
                     stage->args.ac.inline_push_consts[ai++].arg_index, (unsigned)dw * 4);
-         radv_bc250_dump_mesh_nir(getenv("BC250_ORDERED_NIR_DUMP"), test, stage->info.wave_size,
+         radv_bc250_dump_mesh_nir(BC250_GETENV(BC250_ORDERED_NIR_DUMP), test, stage->info.wave_size,
             stage->info.workgroup_size, hash, ix, 0, 0, 0);
          ralloc_free(test);
       }

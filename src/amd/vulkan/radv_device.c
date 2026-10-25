@@ -966,7 +966,7 @@ radv_device_init_cache_key(struct radv_device *device)
       _mesa_blake3_update(&ctx, &plan_version, sizeof(plan_version));
    }
    _mesa_blake3_final(&ctx, device->cache_hash);
-   if (debug_get_bool_option("BC250_CAPTURE_POLICY_SHADERS", false)) {
+   if (BC250_ENV_BOOL(BC250_CAPTURE_POLICY_SHADERS, false)) {
       fprintf(stderr, "BC250POLICYCACHE cu=%u hash=", device->compiler_info.key.bc250_compute_cu_mode);
       for (unsigned i = 0; i < sizeof(device->cache_hash); ++i)
          fprintf(stderr, "%02x", device->cache_hash[i]);
@@ -1288,13 +1288,13 @@ radv_device_is_cache_disabled(const struct radv_device *device)
 static unsigned
 radv_bc250_parse_mesh_reference(const struct radv_physical_device *pdev)
 {
-   if (!debug_get_bool_option("RADV_BC250_MESH_REFERENCE", false))
+   if (!BC250_ENV_BOOL(RADV_BC250_MESH_REFERENCE, false))
       return 0;
    if (pdev->info.family != CHIP_GFX1013 || !pdev->bc250_native_mesh) {
       fprintf(stderr, "radv/bc250: RADV_BC250_MESH_REFERENCE ignored (GFX1013 Mesh only)\n");
       return 0;
    }
-   const char *cd = debug_get_option("RADV_BC250_MESH_REFERENCE_CULLDIST", "keep");
+   const char *cd = BC250_ENV_STR(RADV_BC250_MESH_REFERENCE_CULLDIST, "keep");
    unsigned mode = 1;
    /* The reference driver has none of these experiments; the reference mode switches them off. */
    static const char *const experiments[] = {"RADV_BC250_MESH_AMD", "RADV_BC250_MESH_AMD_SIZE", "RADV_BC250_MESH_AMD_REUSE_OFF",
@@ -1345,7 +1345,7 @@ radv_device_init_compiler_info(struct radv_device *device)
       /* RADV_BC250_NGGC_WIDE: the BC-250 reports as an APU but has GDDR6 and 24 CUs; use the discrete-GPU
        * limit so more vertex shaders get NGG culling. Off by default. */
       nggc_max_ps_params = pdev->info.has_dedicated_vram ||
-         (pdev->info.family == CHIP_GFX1013 && debug_get_bool_option("RADV_BC250_NGGC_WIDE", false)) ? 12 : 8;
+         (pdev->info.family == CHIP_GFX1013 && BC250_ENV_BOOL(RADV_BC250_NGGC_WIDE, false)) ? 12 : 8;
    }
 
    bool image_2d_view_of_3d = device->vk.enabled_features.image2DViewOf3D;
@@ -1406,27 +1406,27 @@ radv_device_init_compiler_info(struct radv_device *device)
             .rbplus_allowed = pdev->info.rbplus_allowed,
             .bc250_barycentrics = pdev->bc250_barycentrics,
             .bc250_bary_no_ref = pdev->bc250_barycentrics &&
-               debug_get_bool_option("RADV_BC250_DIAG_BARY_NO_REF", false),
+               BC250_ENV_BOOL(RADV_BC250_DIAG_BARY_NO_REF, false),
             .bc250_vrs_noop = pdev->bc250_vrs_noop,
             .bc250_mesh_cc_const = pdev->bc250_native_mesh &&
-               debug_get_bool_option("RADV_BC250_MESH_CLIPCULL_CONST", true),
+               BC250_ENV_BOOL(RADV_BC250_MESH_CLIPCULL_CONST, true),
             .bc250_mesh_culldist_cull = pdev->bc250_native_mesh &&
-               debug_get_bool_option("RADV_BC250_MESH_CULLDIST_CULL", true),
+               BC250_ENV_BOOL(RADV_BC250_MESH_CULLDIST_CULL, true),
             .bc250_mesh_allow_pos1 = pdev->bc250_native_mesh &&
-               debug_get_bool_option("RADV_BC250_MESH_ALLOW_POS1", false),
+               BC250_ENV_BOOL_P(RADV_BC250_MESH_ALLOW_POS1, false),
             .bc250_mesh_reference = bc250_reference != 0,
             .bc250_mesh_reference_keep_cd = bc250_reference == 1,
             /* On by default: exact barrier total for waves without API invocations (radv_shader.h). */
             .bc250_mesh_wave_sync = pdev->bc250_native_mesh &&
-               debug_get_bool_option("RADV_BC250_MESH_WAVE_SYNC", true),
+               BC250_ENV_BOOL(RADV_BC250_MESH_WAVE_SYNC, true),
             .bc250_mesh_safe_compact = pdev->bc250_native_mesh && pdev->info.family == CHIP_GFX1013 &&
-               debug_get_bool_option("RADV_BC250_MESH_SAFE_COMPACT", false),
+               BC250_ENV_BOOL_P(RADV_BC250_MESH_SAFE_COMPACT, false),
             .bc250_mesh_dead_payload = pdev->bc250_native_mesh && pdev->info.family == CHIP_GFX1013 &&
-               debug_get_bool_option("RADV_BC250_MESH_DEAD_PAYLOAD", false),
+               BC250_ENV_BOOL_P(RADV_BC250_MESH_DEAD_PAYLOAD, false),
             .bc250_mesh_piece_primid = pdev->bc250_native_mesh && pdev->info.family == CHIP_GFX1013 &&
-               debug_get_bool_option("RADV_BC250_MESH_PIECE_PRIMID", false),
+               BC250_ENV_BOOL_P(RADV_BC250_MESH_PIECE_PRIMID, false),
             .bc250_mesh_fail_closed = pdev->bc250_native_mesh && pdev->info.family == CHIP_GFX1013 &&
-               debug_get_bool_option("RADV_BC250_MESH_FAIL_CLOSED", false),
+               BC250_ENV_BOOL_P(RADV_BC250_MESH_FAIL_CLOSED, false),
          },
       /* Misc values included as part of the cache key */
       .key =
@@ -1440,53 +1440,53 @@ radv_device_init_compiler_info(struct radv_device *device)
             .load_grid_size_from_user_sgpr = pdev->load_grid_size_from_user_sgpr,
             .bc250_native_mesh = pdev->bc250_native_mesh,
             .bc250_compute_cu_mode = pdev->info.family == CHIP_GFX1013 &&
-               debug_get_bool_option("BC250_EXPERIMENTAL_COMPUTE_CU_MODE", false),
+               BC250_ENV_BOOL_P(BC250_EXPERIMENTAL_COMPUTE_CU_MODE, false),
             .bc250_output_regions = pdev->info.family == CHIP_GFX1013 &&
-               debug_get_bool_option("BC250_OUTPUT_REGIONS", false),
+               BC250_ENV_BOOL_P(BC250_OUTPUT_REGIONS, false),
             .bc250_cache_plan = pdev->info.family == CHIP_GFX1013 &&
-               debug_get_bool_option("BC250_CACHE_PLAN", false),
+               BC250_ENV_BOOL_P(BC250_CACHE_PLAN, false),
             .bc250_parallel_cull = pdev->info.family == CHIP_GFX1013 &&
-               debug_get_bool_option("BC250_PARALLEL_CULL", false),
+               BC250_ENV_BOOL_P(BC250_PARALLEL_CULL, false),
             .bc250_compact_vertices = pdev->info.family == CHIP_GFX1013 &&
-               debug_get_bool_option("BC250_COMPACT_VERTICES", false),
+               BC250_ENV_BOOL_P(BC250_COMPACT_VERTICES, false),
             .bc250_single_piece = pdev->info.family == CHIP_GFX1013 &&
-               debug_get_bool_option("BC250_SINGLE_PIECE", false),
+               BC250_ENV_BOOL_P(BC250_SINGLE_PIECE, false),
             .bc250_balanced_slices = pdev->info.family == CHIP_GFX1013 &&
-               debug_get_bool_option("BC250_BALANCED_SLICES", false),
+               BC250_ENV_BOOL_P(BC250_BALANCED_SLICES, false),
             .bc250_cull_compact = pdev->info.family == CHIP_GFX1013 &&
-               debug_get_bool_option("BC250_EXPERIMENTAL_CULL_COMPACT", false),
+               BC250_ENV_BOOL_P(BC250_EXPERIMENTAL_CULL_COMPACT, false),
             .bc250_pack_triangle_vertices = pdev->info.family == CHIP_GFX1013 &&
-               debug_get_bool_option("BC250_EXPERIMENTAL_PACK_TRIANGLE_VERTICES", false),
+               BC250_ENV_BOOL_P(BC250_EXPERIMENTAL_PACK_TRIANGLE_VERTICES, false),
             .bc250_native_task = pdev->bc250_native_task,
             .bc250_split_mesh = pdev->bc250_native_mesh &&
-               debug_get_bool_option("RADV_BC250_SPLIT_MESH", false),
+               BC250_ENV_BOOL_P(RADV_BC250_SPLIT_MESH, false),
             .bc250_direct_split = pdev->bc250_native_mesh &&
-               debug_get_bool_option("BC250_EXPERIMENTAL_DIRECT_SPLIT", false),
+               BC250_ENV_BOOL_P(BC250_EXPERIMENTAL_DIRECT_SPLIT, false),
             .bc250_expand_primitives = pdev->bc250_native_mesh &&
-               debug_get_bool_option("RADV_BC250_EXPAND_PRIMITIVES", false),
+               BC250_ENV_BOOL_P(RADV_BC250_EXPAND_PRIMITIVES, false),
             /* RADV_BC250_MESH_AMD=1 enables all three parts; the
              * RADV_BC250_MESH_AMD_{ROUTE,SIZE,REUSE_OFF} switches enable one
              * part each, to bisect the parts on hardware. */
             .bc250_mesh_amd = pdev->bc250_native_mesh &&
-               (debug_get_bool_option("RADV_BC250_MESH_AMD", false) ||
-                debug_get_bool_option("RADV_BC250_MESH_AMD_ROUTE", false) || bc250_reference),
+               (BC250_ENV_BOOL(RADV_BC250_MESH_AMD, false) ||
+                BC250_ENV_BOOL(RADV_BC250_MESH_AMD_ROUTE, false) || bc250_reference),
             .bc250_mesh_safe_autocull = pdev->bc250_native_mesh && pdev->info.family == CHIP_GFX1013 &&
-               debug_get_bool_option("RADV_BC250_MESH_SAFE_AUTOCULL", false),
+               BC250_ENV_BOOL_P(RADV_BC250_MESH_SAFE_AUTOCULL, false),
             .bc250_mesh_safe_pieces = pdev->bc250_native_mesh && pdev->info.family == CHIP_GFX1013 &&
-               debug_get_bool_option("RADV_BC250_MESH_SAFE_PIECES", false),
+               BC250_ENV_BOOL_P(RADV_BC250_MESH_SAFE_PIECES, false),
             .bc250_mesh_safe_owned = pdev->bc250_native_mesh && pdev->info.family == CHIP_GFX1013 &&
-               debug_get_bool_option("RADV_BC250_MESH_SAFE_OWNED", false),
+               BC250_ENV_BOOL_P(RADV_BC250_MESH_SAFE_OWNED, false),
             .bc250_mesh_safe_fast = pdev->bc250_native_mesh && pdev->info.family == CHIP_GFX1013 &&
-               debug_get_bool_option("RADV_BC250_MESH_SAFE_FAST", false),
+               BC250_ENV_BOOL_P(RADV_BC250_MESH_SAFE_FAST, false),
             .bc250_mesh_safe_ordered = pdev->bc250_native_mesh && pdev->info.family == CHIP_GFX1013 &&
-               debug_get_bool_option("RADV_BC250_MESH_SAFE_ORDERED", false),
+               BC250_ENV_BOOL(RADV_BC250_MESH_SAFE_ORDERED, false),
             .bc250_mesh_safe_parallel = pdev->bc250_native_mesh && pdev->info.family == CHIP_GFX1013 &&
-               debug_get_bool_option("RADV_BC250_MESH_SAFE_PARALLEL", false),
+               BC250_ENV_BOOL_P(RADV_BC250_MESH_SAFE_PARALLEL, false),
             .bc250_mesh_safe_direct = pdev->bc250_native_mesh && pdev->info.family == CHIP_GFX1013 &&
-               debug_get_bool_option("RADV_BC250_MESH_SAFE_DIRECT", false),
+               BC250_ENV_BOOL(RADV_BC250_MESH_SAFE_DIRECT, false),
             .bc250_mesh_amd_size = pdev->bc250_native_mesh && !bc250_reference &&
-               (debug_get_bool_option("RADV_BC250_MESH_AMD", false) ||
-                debug_get_bool_option("RADV_BC250_MESH_AMD_SIZE", false)),
+               (BC250_ENV_BOOL(RADV_BC250_MESH_AMD, false) ||
+                BC250_ENV_BOOL(RADV_BC250_MESH_AMD_SIZE, false)),
             /* GS_FAST_LAUNCH=0 is the only Mesh launch mode on GFX1013: every Mesh
              * pipeline the base driver produces (the base driver expansion, split pieces, hybrid-Task replay,
              * multiview, raw and merged shapes) launches with it, direct and
@@ -1511,20 +1511,20 @@ radv_device_init_compiler_info(struct radv_device *device)
              * 65/80/98 triangles, at VS parity); every 64-triangle raw run hung.
              * Raw-route shaders always launch with fast launch 0 (mixed mode). */
             .bc250_mesh_fast = pdev->bc250_native_mesh &&
-               debug_get_bool_option("RADV_BC250_MESH_FAST", false),
+               BC250_ENV_BOOL(RADV_BC250_MESH_FAST, false),
             /* RADV_BC250_MESH_MERGE=1: pack K consecutive small triangle Mesh
              * workgroups (P <= 64, mesh-only) into one raw fast-launch-0
              * subgroup of K*P >= 65 triangles (radv_bc250_merge_mesh,
              * MESH_PERF/merge/DESIGN.md). Off by default; not hardware-run. */
             .bc250_mesh_merge = pdev->bc250_native_mesh && !bc250_reference &&
-               debug_get_bool_option("RADV_BC250_MESH_MERGE", false),
+               BC250_ENV_BOOL(RADV_BC250_MESH_MERGE, false),
             /* RADV_BC250_MESH_MERGE_INDIRECT (default a): with a, indirect
              * draws of merged shaders run a prep dispatch and launch
              * ceil(N/K) groups (option A, dims user SGPR); b keeps the stage 1/2
              * shaders and launches N groups, the surplus exiting empty. */
             .bc250_mesh_merge_prep = pdev->bc250_native_mesh && !bc250_reference &&
-               debug_get_bool_option("RADV_BC250_MESH_MERGE", false) &&
-               strcmp(debug_get_option("RADV_BC250_MESH_MERGE_INDIRECT", "a"), "b") != 0,
+               BC250_ENV_BOOL(RADV_BC250_MESH_MERGE, false) &&
+               strcmp(BC250_ENV_STR(RADV_BC250_MESH_MERGE_INDIRECT, "a"), "b") != 0,
             /* RADV_BC250_MESH_AUTOCULL=1: the base driver's expanded (private-vertex) triangle Mesh
              * shaders cull their triangles in the epilogue (backface, frustum, small
              * primitive, from the runtime NGG culling settings like VS NGG culling)
@@ -1533,13 +1533,13 @@ radv_device_init_compiler_info(struct radv_device *device)
              * shader branches to its switch-off epilogue; by default only the measured-win
              * size class (wave32, 24..32 triangles) gets it. Off by default. */
             .bc250_mesh_autocull = pdev->bc250_native_mesh &&
-               debug_get_bool_option("RADV_BC250_MESH_AUTOCULL", false),
+               BC250_ENV_BOOL_P(RADV_BC250_MESH_AUTOCULL, false),
             /* RADV_BC250_MESH_AUTOCULL_ALL=1 (experiments, with RADV_BC250_MESH_AUTOCULL=1):
              * autocull every candidate instead of only the measured-win size class
              * (radv_shader_info.c, calc_mesh_workgroup_size). */
             .bc250_mesh_autocull_all = pdev->bc250_native_mesh &&
-               debug_get_bool_option("RADV_BC250_MESH_AUTOCULL", false) &&
-               debug_get_bool_option("RADV_BC250_MESH_AUTOCULL_ALL", false),
+               BC250_ENV_BOOL_P(RADV_BC250_MESH_AUTOCULL, false) &&
+               BC250_ENV_BOOL(RADV_BC250_MESH_AUTOCULL_ALL, false),
             /* RADV_BC250_MESH_COMPACT_LDS=1: every expanded Mesh shader gets a
              * smaller LDS layout with the same exports in the same order: dead
              * shared copies dropped (radv_bc250_expand_primitive_attributes),
@@ -1547,65 +1547,65 @@ radv_device_init_compiler_info(struct radv_device *device)
              * (radv_bc250_split_mesh), packed per-vertex output records
              * (ac_nir_lower_ngg_mesh). Off by default (hardware A/B). */
             .bc250_mesh_compact_lds = pdev->bc250_native_mesh &&
-               debug_get_bool_option("RADV_BC250_MESH_COMPACT_LDS", false),
+               BC250_ENV_BOOL(RADV_BC250_MESH_COMPACT_LDS, false),
             /* RADV_BC250_SPLIT_PREP_FREE=1: direct mesh-only split shaders also take
              * their piece from bc250_constants.split_piece, so order-independent split
              * indirect draws can skip the argument setup (radv_bc250.c,
              * bc250_draw_split_prep_free). Off by default (hardware A/B). */
             .bc250_split_prep_free = pdev->bc250_native_mesh &&
-               debug_get_bool_option("RADV_BC250_SPLIT_PREP_FREE", false),
+               BC250_ENV_BOOL(RADV_BC250_SPLIT_PREP_FREE, false),
             /* RADV_BC250_MESH_DIRECT_READ=1|full|<parts>: expanded Mesh shaders
              * export their outputs straight from the LDS staging instead of an
              * expanded copy (radv_bc250_direct_read_parts). Off by default. */
             .bc250_mesh_direct_read = pdev->bc250_native_mesh ?
-               (radv_bc250_direct_read_parts(debug_get_option("RADV_BC250_MESH_DIRECT_READ", NULL)) |
+               (radv_bc250_direct_read_parts(BC250_ENV_STR_P(RADV_BC250_MESH_DIRECT_READ, NULL)) |
                 ((pdev->info.family == CHIP_GFX1013 &&
-                  debug_get_bool_option("RADV_BC250_MESH_SAFE_CHECK", false)) ? RADV_BC250_MESH_SAFE_CHECK_KEY : 0) |
+                  BC250_ENV_BOOL_P(RADV_BC250_MESH_SAFE_CHECK, false)) ? RADV_BC250_MESH_SAFE_CHECK_KEY : 0) |
                 ((pdev->info.family == CHIP_GFX1013 &&
-                  debug_get_bool_option("RADV_BC250_MESH_SAFE_LOCAL", false)) ? RADV_BC250_MESH_SAFE_LOCAL_KEY : 0) |
+                  BC250_ENV_BOOL_P(RADV_BC250_MESH_SAFE_LOCAL, false)) ? RADV_BC250_MESH_SAFE_LOCAL_KEY : 0) |
                 ((pdev->info.family == CHIP_GFX1013 &&
-                  debug_get_bool_option("RADV_BC250_MESH_SAFE_STATS", false) &&
-                  debug_get_bool_option("BC250_MESH_TIMER", false)) ? RADV_BC250_MESH_SAFE_STATS_KEY : 0)) : 0,
+                  BC250_ENV_BOOL(RADV_BC250_MESH_SAFE_STATS, false) &&
+                  BC250_ENV_BOOL(BC250_MESH_TIMER, false)) ? RADV_BC250_MESH_SAFE_STATS_KEY : 0)) : 0,
             /* RADV_BC250_MESH_AUTOCULL_WIDE=1|2 (with RADV_BC250_MESH_AUTOCULL=1): autocull
              * the wider expanded shapes too, e.g. 64 triangles in wave64 (radv_shader_info.c,
              * radv_bc250_autocull_wide_level). Off by default. */
             .bc250_mesh_autocull_wide = pdev->bc250_native_mesh &&
-                  debug_get_bool_option("RADV_BC250_MESH_AUTOCULL", false) ?
-               radv_bc250_autocull_wide_level(debug_get_option("RADV_BC250_MESH_AUTOCULL_WIDE", NULL)) : 0,
+                  BC250_ENV_BOOL_P(RADV_BC250_MESH_AUTOCULL, false) ?
+               radv_bc250_autocull_wide_level(BC250_ENV_STR_P(RADV_BC250_MESH_AUTOCULL_WIDE, NULL)) : 0,
             .bc250_mesh_safe_corners = pdev->bc250_native_mesh && pdev->info.family == CHIP_GFX1013 &&
-               debug_get_bool_option("RADV_BC250_MESH_SAFE_CORNERS", false),
+               BC250_ENV_BOOL_P(RADV_BC250_MESH_SAFE_CORNERS, false),
             .bc250_mesh_safe_adaptive = pdev->bc250_native_mesh && pdev->info.family == CHIP_GFX1013 &&
-               debug_get_bool_option("RADV_BC250_MESH_SAFE_ADAPTIVE", false),
+               BC250_ENV_BOOL_P(RADV_BC250_MESH_SAFE_ADAPTIVE, false),
             .bc250_mesh_safe_bary = pdev->bc250_native_mesh && pdev->info.family == CHIP_GFX1013 &&
-               debug_get_bool_option("RADV_BC250_MESH_SAFE_BARY", false),
+               BC250_ENV_BOOL_P(RADV_BC250_MESH_SAFE_BARY, false),
             .bc250_mesh_safe_bary_tiny = pdev->bc250_native_mesh && pdev->info.family == CHIP_GFX1013 &&
-               debug_get_bool_option("RADV_BC250_MESH_SAFE_BARY_TINY", false),
+               BC250_ENV_BOOL_P(RADV_BC250_MESH_SAFE_BARY_TINY, false),
             .bc250_mesh_safe_bary_affine = pdev->bc250_native_mesh && pdev->info.family == CHIP_GFX1013 &&
-               debug_get_bool_option("RADV_BC250_MESH_SAFE_BARY_AFFINE", false),
+               BC250_ENV_BOOL_P(RADV_BC250_MESH_SAFE_BARY_AFFINE, false),
             .bc250_bary_io16 = pdev->bc250_native_mesh && pdev->info.family == CHIP_GFX1013 &&
-               debug_get_bool_option("RADV_BC250_BARY_IO16", false),
+               BC250_ENV_BOOL_P(RADV_BC250_BARY_IO16, false),
             .bc250_mesh_safe_bary_last = pdev->bc250_native_mesh && pdev->info.family == CHIP_GFX1013 &&
-               debug_get_bool_option("RADV_BC250_MESH_SAFE_BARY_LAST", false),
+               BC250_ENV_BOOL_P(RADV_BC250_MESH_SAFE_BARY_LAST, false),
             /* RADV_BC250_MESH_IMPLICIT_TRIS=1: expanded Mesh shaders without the compact
              * vertex map derive their primitive connectivity (3p, 3p+1, 3p+2) instead of
              * storing it to LDS and reloading it (ac_nir_lower_ngg_mesh.c,
              * ms_implicit_index). Same exports. Off by default. */
             .bc250_mesh_implicit_tris = pdev->bc250_native_mesh &&
-               debug_get_bool_option("RADV_BC250_MESH_IMPLICIT_TRIS", false),
+               BC250_ENV_BOOL(RADV_BC250_MESH_IMPLICIT_TRIS, false),
             /* RADV_BC250_MESH_COMPACT=1: the base driver's expanded Mesh shaders export
              * shared vertices, renumbered in the epilogue so that every exported vertex
              * is referenced and no backjump exceeds the hardware-proven window
              * (ac_nir_lower_ngg_mesh.c, ms_compact_vertices; MESH_PERF/compact). The
              * launch shape is unchanged. Off by default (hardware gates first). */
             .bc250_mesh_compact = pdev->bc250_native_mesh &&
-               debug_get_bool_option("RADV_BC250_MESH_COMPACT", false),
+               BC250_ENV_BOOL(RADV_BC250_MESH_COMPACT, false),
             .bc250_mesh_min2waves = pdev->bc250_native_mesh && !bc250_reference &&
-               debug_get_bool_option("RADV_BC250_MESH_MIN2WAVES", false),
+               BC250_ENV_BOOL(RADV_BC250_MESH_MIN2WAVES, false),
             .bc250_mesh_alloc_barrier = pdev->bc250_native_mesh && !bc250_reference &&
-               debug_get_bool_option("RADV_BC250_MESH_ALLOC_BARRIER", false),
+               BC250_ENV_BOOL(RADV_BC250_MESH_ALLOC_BARRIER, false),
             .bc250_mesh_amd_reuse = pdev->bc250_native_mesh && !bc250_reference &&
-               (debug_get_bool_option("RADV_BC250_MESH_AMD", false) ||
-                debug_get_bool_option("RADV_BC250_MESH_AMD_REUSE_OFF", false)),
+               (BC250_ENV_BOOL(RADV_BC250_MESH_AMD, false) ||
+                BC250_ENV_BOOL(RADV_BC250_MESH_AMD_REUSE_OFF, false)),
             .emulate_ngg_gs_query_pipeline_stat = pdev->emulate_ngg_gs_query_pipeline_stat,
             .primitives_generated_query = primitives_generated_query,
             .mesh_shader_queries = mesh_shader_queries && pdev->emulate_mesh_shader_queries,
@@ -1657,7 +1657,7 @@ radv_device_init_compiler_info(struct radv_device *device)
              * primitive ceiling of the Mesh split (radv_bc250_split_mesh). It
              * changes the compiled pieces, so it is part of the cache key. */
             .bc250_piece_prims = pdev->bc250_native_mesh ?
-               CLAMP(debug_get_num_option("RADV_BC250_PERF_PIECE_PRIMS", RADV_BC250_DEFAULT_PIECE_PRIMS), 1, 85) : 0,
+               CLAMP(BC250_ENV_NUM_P(RADV_BC250_PERF_PIECE_PRIMS, RADV_BC250_DEFAULT_PIECE_PRIMS), 1, 85) : 0,
          },
       /* Debug/tracing */
       .debug =
@@ -1717,20 +1717,20 @@ radv_device_init_compiler_info(struct radv_device *device)
    radv_get_nir_options(&info);
 
    const bool bc250_mesh = pdev->bc250_native_mesh && pdev->info.family == CHIP_GFX1013;
-   info.bc250x.task_grid_fold = bc250_mesh && debug_get_bool_option("RADV_BC250_TASK_GRID_FOLD", false);
-   info.bc250x.safe_pieces_ext = bc250_mesh && debug_get_bool_option("RADV_BC250_MESH_SAFE_PIECES_EXT", false);
-   info.bc250x.pp_share = bc250_mesh && debug_get_bool_option("RADV_BC250_MESH_PP_SHARE", false);
-   info.bc250x.lean_check = bc250_mesh && debug_get_bool_option("RADV_BC250_MESH_LEAN_CHECK", false);
-   info.bc250x.split_stores = bc250_mesh && debug_get_bool_option("RADV_BC250_MESH_SPLIT_STORES", false);
-   info.bc250x.task_tail = bc250_mesh && debug_get_bool_option("RADV_BC250_TASK_TAIL", false);
-   info.bc250x.task_multiview = bc250_mesh && debug_get_bool_option("RADV_BC250_TASK_MULTIVIEW", false);
-   info.bc250x.mesh_multiview_vtx = bc250_mesh && debug_get_bool_option("RADV_BC250_MESH_MULTIVIEW_VTX", false);
-   info.bc250x.pp_direct = bc250_mesh && debug_get_bool_option("RADV_BC250_MESH_PP_DIRECT", false);
-   info.bc250x.pieces65 = bc250_mesh && debug_get_bool_option("RADV_BC250_MESH_PIECES_65", false);
-   info.bc250x.lds_plan = bc250_mesh && debug_get_bool_option("RADV_BC250_MESH_LDS_PLAN", false);
-   info.bc250x.lds_cover = bc250_mesh && debug_get_bool_option("RADV_BC250_MESH_LDS_COVER", false);
-   info.bc250x.merged_check = bc250_mesh && debug_get_bool_option("RADV_BC250_MESH_MERGED_CHECK", false);
-   info.bc250x.idxpass = bc250_mesh && debug_get_bool_option("RADV_BC250_MESH_IDXPASS", false);
+   info.bc250x.task_grid_fold = bc250_mesh && BC250_ENV_BOOL_P(RADV_BC250_TASK_GRID_FOLD, false);
+   info.bc250x.safe_pieces_ext = bc250_mesh && BC250_ENV_BOOL_P(RADV_BC250_MESH_SAFE_PIECES_EXT, false);
+   info.bc250x.pp_share = bc250_mesh && BC250_ENV_BOOL_P(RADV_BC250_MESH_PP_SHARE, false);
+   info.bc250x.lean_check = bc250_mesh && BC250_ENV_BOOL_P(RADV_BC250_MESH_LEAN_CHECK, false);
+   info.bc250x.split_stores = bc250_mesh && BC250_ENV_BOOL_P(RADV_BC250_MESH_SPLIT_STORES, false);
+   info.bc250x.task_tail = bc250_mesh && BC250_ENV_BOOL_P(RADV_BC250_TASK_TAIL, false);
+   info.bc250x.task_multiview = bc250_mesh && BC250_ENV_BOOL_P(RADV_BC250_TASK_MULTIVIEW, false);
+   info.bc250x.mesh_multiview_vtx = bc250_mesh && BC250_ENV_BOOL_P(RADV_BC250_MESH_MULTIVIEW_VTX, false);
+   info.bc250x.pp_direct = bc250_mesh && BC250_ENV_BOOL_P(RADV_BC250_MESH_PP_DIRECT, false);
+   info.bc250x.pieces65 = bc250_mesh && BC250_ENV_BOOL_P(RADV_BC250_MESH_PIECES_65, false);
+   info.bc250x.lds_plan = bc250_mesh && BC250_ENV_BOOL_P(RADV_BC250_MESH_LDS_PLAN, false);
+   info.bc250x.lds_cover = bc250_mesh && BC250_ENV_BOOL_P(RADV_BC250_MESH_LDS_COVER, false);
+   info.bc250x.merged_check = bc250_mesh && BC250_ENV_BOOL_P(RADV_BC250_MESH_MERGED_CHECK, false);
+   info.bc250x.idxpass = bc250_mesh && BC250_ENV_BOOL_P(RADV_BC250_MESH_IDXPASS, false);
 
    device->compiler_info = info;
 }
@@ -1901,7 +1901,7 @@ radv_destroy_device(struct radv_device *device, const VkAllocationCallbacks *pAl
 static uint32_t
 radv_bc250_parse_mesh_dealloc_dist(const struct radv_physical_device *pdev)
 {
-   const char *v = getenv("RADV_BC250_MESH_DEALLOC_DIST");
+   const char *v = BC250_GETENV(RADV_BC250_MESH_DEALLOC_DIST);
    if (!v || !*v)
       return 0;
 
@@ -1926,7 +1926,7 @@ radv_bc250_parse_mesh_dealloc_dist(const struct radv_physical_device *pdev)
 static uint32_t
 radv_bc250_parse_mesh_vert_grp(const struct radv_physical_device *pdev)
 {
-   const char *v = getenv("RADV_BC250_MESH_VERT_GRP");
+   const char *v = BC250_GETENV(RADV_BC250_MESH_VERT_GRP);
    if (!v || !*v)
       return 0;
 
@@ -2152,9 +2152,11 @@ radv_CreateDevice(VkPhysicalDevice physicalDevice, const VkDeviceCreateInfo *pCr
       }
       if (result != VK_SUCCESS)
          goto fail;
+#ifdef AMDGPU_WDDM_LAB_FLAVOUR
       if (!global_priority && qf == RADV_QUEUE_COMPUTE && device->bc250_compute_priority != RADEON_CTX_PRIORITY_INVALID)
          fprintf(stderr, "radv/bc250: compute queues use kernel context priority %d (RADV_BC250_COMPUTE_QUEUE_PRIORITY)\n",
                  priority);
+#endif
    }
 
    /* Use extra context to allow use of both VCN instances for transcoding. */
@@ -2326,12 +2328,12 @@ radv_CreateDevice(VkPhysicalDevice physicalDevice, const VkDeviceCreateInfo *pCr
    radv_bc250_timer_init(device); /* BC250_MESH_TIMER (off unless set) */
    /* RADV_BC250_ASYNC_COMPILE=1: Mesh pipelines are created with unoptimized ACO binaries of the same NIR
     * (same route, plan and LDS) and swapped to the optimized binaries at a later bind. Off by default. */
-   if (pdev->bc250_native_mesh && debug_get_bool_option("RADV_BC250_ASYNC_COMPILE", false))
+   if (pdev->bc250_native_mesh && BC250_ENV_BOOL(RADV_BC250_ASYNC_COMPILE, false))
       device->bc250_async = util_queue_init(&device->bc250_async_queue, "radv_bc250_async", 256, 1,
                                             UTIL_QUEUE_INIT_USE_MINIMUM_PRIORITY | UTIL_QUEUE_INIT_RESIZE_IF_FULL,
                                             NULL);
    device->bc250_split_batch_prep = pdev->info.family == CHIP_GFX1013 &&
-                                    debug_get_bool_option("RADV_BC250_SPLIT_BATCH_PREP", false);
+                                    BC250_ENV_BOOL(RADV_BC250_SPLIT_BATCH_PREP, false);
    device->bc250_mesh_dealloc_dist = radv_bc250_parse_mesh_dealloc_dist(pdev);
    device->bc250_mesh_vert_grp = radv_bc250_parse_mesh_vert_grp(pdev);
    radv_bc250_dgc_report(device); /* BD-121: one line, what this ICD reports for EXT_dgc and why */

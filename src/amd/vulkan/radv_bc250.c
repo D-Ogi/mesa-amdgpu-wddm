@@ -33,18 +33,6 @@
 #include <unistd.h>
 #endif
 
-#if DETECT_OS_WINDOWS
-/* setenv(3) replacement. _putenv_s updates the CRT environment, so getenv() sees the value, which is
- * what the DirectMesh preset relies on. overwrite == 0 keeps an explicit setting of the caller. */
-static int
-bc250_setenv(const char *name, const char *value, int overwrite)
-{
-   if (!overwrite && getenv(name))
-      return 0;
-   return _putenv_s(name, value);
-}
-#define setenv bc250_setenv
-#endif
 
 /* One unbuffered write of a whole record, and a case-insensitive compare: POSIX write() and
  * strncasecmp() are spelled differently by the Microsoft CRT. */
@@ -122,35 +110,35 @@ radv_bc250_device_env_init(struct radv_device *device, const struct radv_physica
    struct radv_bc250_device_env *env = &device->bc250_env;
    simple_mtx_init(&device->bc250_idx_spare_mtx, mtx_plain);
    env->pipeline_plan = pdev->bc250_native_mesh && !pdev->bc250_native_task &&
-      pdev->info.family == CHIP_GFX1013 && debug_get_bool_option("RADV_BC250_PIPELINE_PLAN", false);
-   env->gpl_source_link = env->pipeline_plan && debug_get_bool_option("RADV_BC250_GPL_SOURCE_LINK", false);
-   env->gpl_binary_link = env->pipeline_plan && debug_get_bool_option("RADV_BC250_GPL_BINARY_LINK", false);
-   env->shader_object_plan = env->pipeline_plan && debug_get_bool_option("RADV_BC250_SHADER_OBJECT_PLAN", false);
-   env->chain_trace = pdev->info.family == CHIP_GFX1013 && debug_get_bool_option("BC250_CHAIN_TRACE", false);
-   env->chain_shader_only = debug_get_bool_option("BC250_CHAIN_SHADER_ONLY", false);
-   env->chain_arguments_only = debug_get_bool_option("BC250_CHAIN_ARGUMENTS_ONLY", false);
-   env->chain_sample_output = debug_get_bool_option("BC250_CHAIN_SAMPLE_OUTPUT", false);
-   env->transient_arena = debug_get_bool_option("BC250_TRANSIENT_ARENA", false);
-   env->trace_compile = getenv("BC250_TRACE_COMPILE") != NULL;
-   env->trace_regs = getenv("BC250_TRACE_REGS") != NULL;
-   env->trace_usage = getenv("BC250_TRACE_USAGE") != NULL;
-   env->omit_launch = getenv("BC250_DIAGNOSTIC_OMIT_LAUNCH") != NULL;
-   env->post_mesh_vgt_flush = debug_get_bool_option("BC250_EXPERIMENTAL_POST_MESH_VGT_FLUSH", false);
-   env->skip_inactive_chunks = debug_get_bool_option("BC250_EXPERIMENTAL_SKIP_INACTIVE_CHUNKS", false);
-   env->no_split_l2_inv = debug_get_bool_option("RADV_BC250_PERF_NO_SPLIT_L2_INV", false);
-   env->split_batch_trace = debug_get_bool_option("RADV_BC250_SPLIT_BATCH_TRACE", false);
-   env->merge_prep_l2_inv = debug_get_bool_option("RADV_BC250_MESH_MERGE_PREP_L2_INV", false);
-   env->native_task_direct = debug_get_bool_option("BC250_NATIVE_TASK_DIRECT", false) ||
-                             debug_get_bool_option("RADV_BC250_NATIVE_TASK", false);
-   env->native_task_indirect = debug_get_bool_option("BC250_NATIVE_TASK_INDIRECT", false) ||
-                               debug_get_bool_option("RADV_BC250_NATIVE_TASK", false);
-   env->scratch_reuse = pdev->bc250_native_mesh && debug_get_bool_option("RADV_BC250_SCRATCH_REUSE", false);
-   env->split_lean_setup = pdev->bc250_native_mesh && debug_get_bool_option("RADV_BC250_SPLIT_LEAN_SETUP", false);
-   env->split_prep_free = pdev->bc250_native_mesh && debug_get_bool_option("RADV_BC250_SPLIT_PREP_FREE", false);
-   env->mesh_no_split = pdev->bc250_native_mesh && debug_get_bool_option("RADV_BC250_MESH_NO_SPLIT", false);
+      pdev->info.family == CHIP_GFX1013 && BC250_ENV_BOOL(RADV_BC250_PIPELINE_PLAN, false);
+   env->gpl_source_link = env->pipeline_plan && BC250_ENV_BOOL(RADV_BC250_GPL_SOURCE_LINK, false);
+   env->gpl_binary_link = env->pipeline_plan && BC250_ENV_BOOL(RADV_BC250_GPL_BINARY_LINK, false);
+   env->shader_object_plan = env->pipeline_plan && BC250_ENV_BOOL(RADV_BC250_SHADER_OBJECT_PLAN, false);
+   env->chain_trace = pdev->info.family == CHIP_GFX1013 && BC250_ENV_BOOL(BC250_CHAIN_TRACE, false);
+   env->chain_shader_only = BC250_ENV_BOOL(BC250_CHAIN_SHADER_ONLY, false);
+   env->chain_arguments_only = BC250_ENV_BOOL(BC250_CHAIN_ARGUMENTS_ONLY, false);
+   env->chain_sample_output = BC250_ENV_BOOL(BC250_CHAIN_SAMPLE_OUTPUT, false);
+   env->transient_arena = BC250_ENV_BOOL_P(BC250_TRANSIENT_ARENA, false);
+   env->trace_compile = BC250_GETENV(BC250_TRACE_COMPILE) != NULL;
+   env->trace_regs = BC250_GETENV(BC250_TRACE_REGS) != NULL;
+   env->trace_usage = BC250_GETENV(BC250_TRACE_USAGE) != NULL;
+   env->omit_launch = BC250_GETENV(BC250_DIAGNOSTIC_OMIT_LAUNCH) != NULL;
+   env->post_mesh_vgt_flush = BC250_ENV_BOOL_P(BC250_EXPERIMENTAL_POST_MESH_VGT_FLUSH, false);
+   env->skip_inactive_chunks = BC250_ENV_BOOL_P(BC250_EXPERIMENTAL_SKIP_INACTIVE_CHUNKS, false);
+   env->no_split_l2_inv = BC250_ENV_BOOL(RADV_BC250_PERF_NO_SPLIT_L2_INV, false);
+   env->split_batch_trace = BC250_ENV_BOOL(RADV_BC250_SPLIT_BATCH_TRACE, false);
+   env->merge_prep_l2_inv = BC250_ENV_BOOL(RADV_BC250_MESH_MERGE_PREP_L2_INV, false);
+   env->native_task_direct = BC250_ENV_BOOL(BC250_NATIVE_TASK_DIRECT, false) ||
+                             BC250_ENV_BOOL_P(RADV_BC250_NATIVE_TASK, false);
+   env->native_task_indirect = BC250_ENV_BOOL(BC250_NATIVE_TASK_INDIRECT, false) ||
+                               BC250_ENV_BOOL_P(RADV_BC250_NATIVE_TASK, false);
+   env->scratch_reuse = pdev->bc250_native_mesh && BC250_ENV_BOOL_P(RADV_BC250_SCRATCH_REUSE, false);
+   env->split_lean_setup = pdev->bc250_native_mesh && BC250_ENV_BOOL(RADV_BC250_SPLIT_LEAN_SETUP, false);
+   env->split_prep_free = pdev->bc250_native_mesh && BC250_ENV_BOOL(RADV_BC250_SPLIT_PREP_FREE, false);
+   env->mesh_no_split = pdev->bc250_native_mesh && BC250_ENV_BOOL(RADV_BC250_MESH_NO_SPLIT, false);
    /* Submission-cost switches (GFX1013 only, default off). */
    const bool bc250 = pdev->info.family == CHIP_GFX1013;
-   env->local_bos = bc250 && debug_get_bool_option("RADV_BC250_LOCAL_BOS", false);
+   env->local_bos = bc250 && BC250_ENV_BOOL_P(RADV_BC250_LOCAL_BOS, false);
    /* RADV_BC250_SUBMIT_PROFILE and RADV_BC250_SUBMIT_KNOWN_SIGNALS are not ported: their counters
     * live in the amdgpu winsys and in vk_queue/vk_sync, which this port leaves alone (our Win32
     * semaphore work is in the same code). */
@@ -161,11 +149,11 @@ radv_bc250_device_env_init(struct radv_device *device, const struct radv_physica
     * bound is the KMD's own hardware fence budget: past it the kernel has already called the
     * submission hung, so the latch cannot mistake a slow submission for a stuck one. No thread ever
     * waits for it (bc250_task_witness_resolve). */
-   env->task_witness = pdev->bc250_hybrid_task && debug_get_bool_option("RADV_BC250_TASK_WITNESS", true);
-   env->task_witness_ms = debug_get_num_option("RADV_BC250_TASK_WITNESS_MS", 12000);
-   env->task_witness_draws = debug_get_num_option("RADV_BC250_TASK_WITNESS_DRAWS", 1);
+   env->task_witness = pdev->bc250_hybrid_task && BC250_ENV_BOOL(RADV_BC250_TASK_WITNESS, true);
+   env->task_witness_ms = BC250_ENV_NUM(RADV_BC250_TASK_WITNESS_MS, 12000);
+   env->task_witness_draws = BC250_ENV_NUM(RADV_BC250_TASK_WITNESS_DRAWS, 1);
 #ifdef AMDGPU_WDDM_LAB_FLAVOUR
-   env->no_producer_pfp_sync = !debug_get_bool_option("RADV_BC250_TASK_PFP_SYNC", true);
+   env->no_producer_pfp_sync = !BC250_ENV_BOOL(RADV_BC250_TASK_PFP_SYNC, true);
    if (env->no_producer_pfp_sync)
       fprintf(stderr, "radv/bc250: RADV_BC250_TASK_PFP_SYNC=0, producer barriers do not hold the PFP\n");
 #else
@@ -495,7 +483,7 @@ bc250_safe_direct_candidate_pp(nir_shader *mesh, bool parallel, unsigned max_slo
     * alignment, workgroup info and original index byte. */
    const unsigned lds_bound = align(mesh->info.shared_size, 16) + 128 + vertex_stride * v + 6 * p + bound +
       (private_bary ? 0 : parallel ? MAX2(4 * v, align(3 * p, 4) + 32) : 4 * v);
-   if (private_bary && getenv("BC250_TRACE_COMPILE"))
+   if (private_bary && BC250_GETENV(BC250_TRACE_COMPILE))
       fprintf(stderr, "BC250 MESH SAFE BARY: LDS bound=%u shared=%u slots=%u V=%u P=%u\n",
               lds_bound, mesh->info.shared_size, util_bitcount64(vertex), v, p);
    if (lds_bound >= (private_bary ? 32 : 30) * 1024)
@@ -713,7 +701,7 @@ radv_bc250_mesh_clip_cull_const(nir_shader *mesh, const nir_shader *fs, bool fs_
        !(mesh->info.outputs_written & (VARYING_BIT_CLIP_DIST0 | VARYING_BIT_CLIP_DIST1 | VARYING_BIT_CULL_DIST0 |
                                        VARYING_BIT_CULL_DIST1)))
       return false;
-   const bool trace = getenv("BC250_TRACE_COMPILE") != NULL;
+   const bool trace = BC250_GETENV(BC250_TRACE_COMPILE) != NULL;
    const char *reason = NULL;
    if (!fs_known) {
       reason = "fragment shader not known";
@@ -1758,7 +1746,7 @@ radv_bc250_merge_mesh(nir_shader *mesh, nir_shader *fs, const struct radv_bc250_
       }
       nir_shader_gather_info(fs, nir_shader_get_entrypoint(fs));
    }
-   if (getenv("BC250_TRACE_MERGE_NIR")) {
+   if (BC250_GETENV(BC250_TRACE_MERGE_NIR)) {
       fprintf(stderr, "BC250 MERGED NIR BEGIN\n");
       nir_print_shader(mesh, stderr);
       fprintf(stderr, "BC250 MERGED NIR END\n");
@@ -2097,8 +2085,13 @@ radv_bc250_direct_read_parts(const char *option)
             known = true;
          }
       }
+#ifdef AMDGPU_WDDM_LAB_FLAVOUR
       if (!known && len)
          fprintf(stderr, "radv: RADV_BC250_MESH_DIRECT_READ: unknown part '%.*s' ignored\n", (int)len, p);
+#else
+      /* The release flavour reads the parts from its own table only, so every part is known. */
+      (void)known;
+#endif
       p += len;
       if (*p == ',')
          p++;
@@ -2171,7 +2164,7 @@ radv_bc250_expand_primitive_attributes(nir_shader *mesh, nir_shader *fs, bool co
       reclaim_dead_shared = true;
    if (reclaim_dead_shared && dead) {
       NIR_PASS(_, mesh, nir_remove_dead_variables, nir_var_mem_shared, NULL);
-      if (getenv("BC250_TRACE_COMPILE"))
+      if (BC250_GETENV(BC250_TRACE_COMPILE))
          fprintf(stderr, "BC250 Mesh compact LDS: dead shared variables dropped=%u (live shared_size=%u)\n",
                  dead, mesh->info.shared_size);
    }
@@ -2208,7 +2201,7 @@ radv_bc250_expand_primitive_attributes(nir_shader *mesh, nir_shader *fs, bool co
       *compact_map = compact;
    if (compact) {
       expanded = logical_vertices + mesh->info.mesh.max_primitives_out - 1;
-      if (getenv("BC250_TRACE_COMPILE"))
+      if (BC250_GETENV(BC250_TRACE_COMPILE))
          fprintf(stderr, "BC250 compact map: logical_vertices=%u primitives=%u physical_capacity=%u\n",
                  logical_vertices, mesh->info.mesh.max_primitives_out, expanded);
    }
@@ -2483,7 +2476,7 @@ radv_bc250_expand_primitive_attributes(nir_shader *mesh, nir_shader *fs, bool co
       NIR_PASS(_, mesh, nir_remove_dead_variables, nir_var_mem_shared, &remove);
    }
    NIR_PASS(_, mesh, nir_lower_vars_to_explicit_types, nir_var_mem_shared, bc250_shared_type);
-   if (getenv("BC250_TRACE_STAGING")) {
+   if (BC250_GETENV(BC250_TRACE_STAGING)) {
       /* The LDS staging layout: name@offset+bytes of every shared variable. */
       fprintf(stderr, "BC250 MESH STAGING:");
       nir_foreach_variable_with_modes(var, mesh, nir_var_mem_shared)
@@ -2499,7 +2492,7 @@ radv_bc250_expand_primitive_attributes(nir_shader *mesh, nir_shader *fs, bool co
       index_staging[3] = logical_vertices;
    }
    if ((direct_read & (RADV_BC250_DIRECT_READ_UNIFORM | RADV_BC250_DIRECT_READ_INDEX16)) &&
-       getenv("BC250_TRACE_COMPILE")) {
+       BC250_GETENV(BC250_TRACE_COMPILE)) {
       unsigned uniform = 0;
       for (unsigned i = 0; i < count; i++)
          uniform += uniform_cell[i] != NULL;
@@ -2762,7 +2755,7 @@ radv_bc250_mesh_safe_owned(nir_shader **mesh_ptr, nir_shader **fs_ptr, bool corn
    nir_shader *original = *mesh_ptr, *fragment = *fs_ptr;
    /* RADV_BC250_MESH_SAFE_SPLIT_PIECES: no fragment shader (rasterizer discard) exports against an
     * empty fragment shader (no varyings read, positions only); none is returned to the caller. */
-   const bool empty_fs = !fragment && original && debug_get_bool_option("RADV_BC250_MESH_SAFE_SPLIT_PIECES", false);
+   const bool empty_fs = !fragment && original && BC250_ENV_BOOL_P(RADV_BC250_MESH_SAFE_SPLIT_PIECES, false);
    if (empty_fs) {
       fragment = nir_builder_init_simple_shader(MESA_SHADER_FRAGMENT, original->options, "bc250_empty_fs").shader;
       ralloc_steal(original, fragment);
@@ -2828,11 +2821,11 @@ radv_bc250_mesh_safe_owned(nir_shader **mesh_ptr, nir_shader **fs_ptr, bool corn
    int raw_slot, flat_slot;
    int cid_slot;
    if (bary && mesh->info.mesh.primitive_type == MESA_PRIM_TRIANGLES &&
-       !debug_get_bool_option("RADV_BC250_BARY_PRIVATE_ROT0", false) &&
+       !BC250_ENV_BOOL(RADV_BC250_BARY_PRIVATE_ROT0, false) &&
        !radv_bc250_bary_ref_slots(mesh, fs, &raw_slot, &flat_slot) &&
-       !(corners && debug_get_bool_option("RADV_BC250_BARY_CORNER_ID", false) &&
+       !(corners && BC250_ENV_BOOL_P(RADV_BC250_BARY_CORNER_ID, false) &&
          radv_bc250_bary_cid_slot(mesh, fs, &cid_slot))) {
-      if (getenv("BC250_TRACE_COMPILE"))
+      if (BC250_GETENV(BC250_TRACE_COMPILE))
          fprintf(stderr, "BC250 MESH SAFE BARY: declined reason=no_two_free_reference_parameters\n");
       ralloc_free(mesh);
       ralloc_free(fs);
@@ -3003,7 +2996,7 @@ bc250_group_output_region(nir_function_impl *impl, nir_variable **sources,
                moved++;
             }
          }
-         if (getenv("BC250_TRACE_COMPILE"))
+         if (BC250_GETENV(BC250_TRACE_COMPILE))
             fprintf(stderr, "BC250 output region: stores=%u ALU=%u\n", count, moved);
          return true;
       }
@@ -3196,7 +3189,7 @@ radv_bc250_split_mesh(nir_shader *mesh, nir_shader *task, nir_shader *fs, bool d
     * child capacity from a proven bound. The 63-primitive ceiling remains. */
    const unsigned limit = balanced_slices ? DIV_ROUND_UP(MAX2(1, bound), pieces) : old_limit;
    if ((min_pieces > 1 || piece_ceiling != RADV_BC250_DEFAULT_PIECE_PRIMS) &&
-       debug_get_bool_option("BC250_TRACE_COMPILE", false))
+       BC250_ENV_BOOL(BC250_TRACE_COMPILE, false))
       fprintf(stderr, "BC250 split piece ceiling: ceiling=%u min_pieces=%u bound=%u pieces=%u primitives_per_piece=%u\n",
               piece_ceiling, min_pieces, bound, pieces, limit);
    /* RADV_BC250_MESH_SPLIT_ANY (default 0): also split line and point Mesh shaders and Mesh shaders
@@ -3205,7 +3198,7 @@ radv_bc250_split_mesh(nir_shader *mesh, nir_shader *task, nir_shader *fs, bool d
    /* Task pipelines only (real or the internal mesh-only amplification producer): Mesh-only
     * shapes keep their existing direct routes, which the split would otherwise pre-empt. */
    const bool split_any = (task || radv_bc250_split_refused_retry) &&
-                          debug_get_bool_option("RADV_BC250_MESH_SPLIT_ANY", false);
+                          BC250_ENV_BOOL_P(RADV_BC250_MESH_SPLIT_ANY, false);
    const bool topo_ok = mesh->info.mesh.primitive_type == MESA_PRIM_TRIANGLES ||
       (split_any && (mesh->info.mesh.primitive_type == MESA_PRIM_LINES ||
                      mesh->info.mesh.primitive_type == MESA_PRIM_POINTS));
@@ -3216,7 +3209,7 @@ radv_bc250_split_mesh(nir_shader *mesh, nir_shader *task, nir_shader *fs, bool d
    if (radv_bc250_split_piece_primid && direct_split && !task && fs &&
        (fs->info.inputs_read & VARYING_BIT_PRIMITIVE_ID) && bc250_split_primid_sliceable(mesh)) {
       primitive_inputs &= ~VARYING_BIT_PRIMITIVE_ID;
-      if (getenv("BC250_TRACE_COMPILE"))
+      if (BC250_GETENV(BC250_TRACE_COMPILE))
          fprintf(stderr, "BC250 MESH PIECE PRIMID: written PrimitiveId sliced with the pieces\n");
    }
    if (fs && fs->info.inputs_read & primitive_inputs)
@@ -3301,7 +3294,7 @@ radv_bc250_split_mesh(nir_shader *mesh, nir_shader *task, nir_shader *fs, bool d
     * load that is not non-writeable). Sampled texture reads and UBO loads are
     * read-only bindings.
     */
-   const bool split_stores = debug_get_bool_option("RADV_BC250_MESH_SPLIT_STORES", false);
+   const bool split_stores = BC250_ENV_BOOL_P(RADV_BC250_MESH_SPLIT_STORES, false);
    bool external_atomics = false, reads_external = false, external_stores = false, reads_storage = false;
    nir_foreach_function_impl(impl, mesh) {
       nir_foreach_block(block, impl) {
@@ -3399,7 +3392,7 @@ radv_bc250_split_mesh(nir_shader *mesh, nir_shader *task, nir_shader *fs, bool d
                   nir_scalar dim = nir_scalar_chase_movs(nir_get_scalar(in->src[0].ssa, c));
                   /* RADV_BC250_MESH_SPLIT_ANY: y/z pass through unchanged (only x is multiplied by
                    * the piece count), so they only need the per-dimension hardware bound. */
-                  if (debug_get_bool_option("RADV_BC250_MESH_SPLIT_ANY", false))
+                  if (BC250_ENV_BOOL_P(RADV_BC250_MESH_SPLIT_ANY, false))
                      launch_ok &= nir_unsigned_upper_bound(task, ranges, dim) <= 65535;
                   else
                      launch_ok &= nir_scalar_is_const(dim) && nir_scalar_as_uint(dim) == 1;
@@ -3420,7 +3413,7 @@ radv_bc250_split_mesh(nir_shader *mesh, nir_shader *task, nir_shader *fs, bool d
          nir_print_shader(task, stderr);
          return bc250_split_reject("unproven task grid bound");
       }
-      if (fold && getenv("BC250_TRACE_COMPILE"))
+      if (fold && BC250_GETENV(BC250_TRACE_COMPILE))
          fprintf(stderr, "BC250 TASK GRID FOLD: pieces=%u records=(pieces,x,y) x_bound=api65535\n", pieces);
 
    }
@@ -3566,7 +3559,7 @@ radv_bc250_split_mesh(nir_shader *mesh, nir_shader *task, nir_shader *fs, bool d
          nir_builder_instr_insert(&b, instr);
          nir_pop_if(&b, NULL);
       }
-      if (debug_get_bool_option("BC250_TRACE_COMPILE", false))
+      if (BC250_ENV_BOOL(BC250_TRACE_COMPILE, false))
          fprintf(stderr, "BC250 split external atomics/stores: %u guarded to the first piece\n",
                  (unsigned)util_dynarray_num_elements(&atomics, nir_intrinsic_instr *));
       util_dynarray_fini(&atomics);
@@ -3604,7 +3597,7 @@ radv_bc250_split_mesh(nir_shader *mesh, nir_shader *task, nir_shader *fs, bool d
    /* RADV_BC250_MESH_NESTED_SLICE (default 0): stores into struct/array members of a primitive
     * (e.g. loc[prim].elements[i] = v) also target the slice, so the full-size per-primitive
     * arrays are never kept in LDS. */
-   const bool nested_slice = debug_get_bool_option("RADV_BC250_MESH_NESTED_SLICE", false);
+   const bool nested_slice = BC250_ENV_BOOL_P(RADV_BC250_MESH_NESTED_SLICE, false);
    nir_foreach_block(block, impl) {
       nir_foreach_instr(instr, block) {
          if (instr->type != nir_instr_type_intrinsic)
@@ -3665,7 +3658,7 @@ radv_bc250_split_mesh(nir_shader *mesh, nir_shader *task, nir_shader *fs, bool d
             nir_pop_if(&b, NULL);
             nir_instr_remove(instr);
             unsigned sunk = bc250_sink_output_alu(value, slice_store, source_block, 0);
-            if (sunk && debug_get_bool_option("BC250_TRACE_COMPILE", false))
+            if (sunk && BC250_ENV_BOOL(BC250_TRACE_COMPILE, false))
                fprintf(stderr, "BC250 slice arithmetic sunk: %u instructions\n", sunk);
          }
       }
@@ -3800,12 +3793,12 @@ radv_bc250_split_mesh(nir_shader *mesh, nir_shader *task, nir_shader *fs, bool d
    NIR_PASS(_, mesh, nir_lower_explicit_io, nir_var_mem_shared, nir_address_format_32bit_offset);
    nir_foreach_variable_with_modes(var, mesh, nir_var_mem_shared)
       assert(var->data.driver_location >= application_shared);
-   if (debug_get_bool_option("BC250_TRACE_COMPILE", false))
+   if (BC250_ENV_BOOL(BC250_TRACE_COMPILE, false))
       fprintf(stderr, "BC250 split shared layout: application=[0,%u) split=[%u,%u)\n",
               application_shared, application_shared, mesh->info.shared_size);
    nir_shader_gather_info(mesh, impl);
    nir_validate_shader(mesh, "BC250 restricted mesh split");
-   if (debug_get_bool_option("BC250_TRACE_SPLIT_NIR", false))
+   if (BC250_ENV_BOOL(BC250_TRACE_SPLIT_NIR, false))
       nir_print_shader(mesh, stderr);
 
    if (task) {
@@ -4350,7 +4343,7 @@ radv_bc250_prepare_direct_split(struct radv_device *device, struct radv_graphics
    nir_shader_gather_info(b.shader, nir_shader_get_entrypoint(b.shader));
    nir_validate_shader(b.shader, "BC250 compact split argument setup");
    /* Test aid (tests/bc250-mesh/split-batch): the builder NIR of both setup shaders. */
-   if (debug_get_bool_option("RADV_BC250_SPLIT_BATCH_PRINT_NIR", false))
+   if (BC250_ENV_BOOL(RADV_BC250_SPLIT_BATCH_PRINT_NIR, false))
       nir_print_shader(b.shader, stderr);
    VkComputePipelineCreateInfo ci = {.sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO,
       .stage = {.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
@@ -4724,7 +4717,7 @@ bc250_prepare_ordered(struct radv_device *device, struct radv_graphics_pipeline 
    producer->info.name = ralloc_asprintf(producer, "bc250_ordered_producer:%u:%u", plan.indices, plan.index_stride);
    nir_shader_gather_info(producer, impl);
    nir_validate_shader(producer, "BC250 ordered producer");
-   if (getenv("BC250_ORDERED_NIR_DUMP")) {
+   if (BC250_GETENV(BC250_ORDERED_NIR_DUMP)) {
       nir_shader *test = nir_shader_clone(NULL, producer);
       NIR_PASS(_, test, nir_lower_vars_to_ssa);
       NIR_PASS(_, test, nir_opt_copy_prop);
@@ -4736,7 +4729,7 @@ bc250_prepare_ordered(struct radv_device *device, struct radv_graphics_pipeline 
       test->info.mesh.primitive_type = MESA_PRIM_TRIANGLES;
       const uint32_t ix[4] = {plan.indices, plan.index_stride, 4, 128};
       const uint8_t hash[32] = {0};
-      radv_bc250_dump_mesh_nir(getenv("BC250_ORDERED_NIR_DUMP"), test, 64, threads, hash, ix, 0, 0, 0);
+      radv_bc250_dump_mesh_nir(BC250_GETENV(BC250_ORDERED_NIR_DUMP), test, 64, threads, hash, ix, 0, 0, 0);
       ralloc_free(test);
    }
 
@@ -4765,7 +4758,7 @@ bc250_prepare_ordered(struct radv_device *device, struct radv_graphics_pipeline 
    nir_pop_if(&eb, NULL);
    nir_shader_gather_info(eb.shader, nir_shader_get_entrypoint(eb.shader));
    nir_validate_shader(eb.shader, "BC250 ordered exporter");
-   if (getenv("BC250_ORDERED_PRINT_NIR")) {
+   if (BC250_GETENV(BC250_ORDERED_PRINT_NIR)) {
       nir_print_shader(producer, stderr);
       nir_print_shader(eb.shader, stderr);
    }
@@ -4818,7 +4811,7 @@ bc250_prepare_ordered(struct radv_device *device, struct radv_graphics_pipeline 
    ms->bc250_ordered_export = true;
    pipeline->bc250_ordered = true;
    pipeline->bc250_payload_stride = stride;
-   if (getenv("BC250_TRACE_COMPILE"))
+   if (BC250_GETENV(BC250_TRACE_COMPILE))
       fprintf(stderr, "BC250 MESH ORDERED: V128/P64 T=%u producer once, exporter=128 pieces=1-or-2 stride=%u\n", threads, stride);
    return VK_SUCCESS;
 }
@@ -4835,7 +4828,7 @@ bc250_prepare_safe_pieces(struct radv_device *device, struct radv_graphics_pipel
    struct radv_shader_stage *ms = &gfx_state->stages[MESA_SHADER_MESH];
    struct radv_shader_stage *fs = &gfx_state->stages[MESA_SHADER_FRAGMENT];
    nir_shader *original = ms->nir;
-   if (original && getenv("BC250_TRACE_COMPILE"))
+   if (original && BC250_GETENV(BC250_TRACE_COMPILE))
       fprintf(stderr, "BC250 MESH PIECES CHECK: V=%u P=%u wave=%u threads=%u outputs=%" PRIx64 " pp=%" PRIx64 " shared=%u\n",
               original->info.mesh.max_vertices_out, original->info.mesh.max_primitives_out,
               original->info.min_subgroup_size, original->info.workgroup_size[0] * original->info.workgroup_size[1] * original->info.workgroup_size[2],
@@ -4881,7 +4874,7 @@ bc250_prepare_safe_pieces(struct radv_device *device, struct radv_graphics_pipel
                       bc250_safe_direct_candidate(mesh, true, 16, false);
    mesh->info.per_primitive_outputs = saved_pp;
    mesh->info.outputs_written = saved_written;
-   if (getenv("BC250_TRACE_COMPILE") && (wave64_promote || cull_bit))
+   if (BC250_GETENV(BC250_TRACE_COMPILE) && (wave64_promote || cull_bit))
       fprintf(stderr, "BC250 MESH SAFE PIECES EXT: wave64=%u cull_primitive=%u plain=%u\n",
               wave64_promote, cull_bit != 0, plain);
    const bool ordinary_piece = device->compiler_info.key.bc250_mesh_safe_bary_last &&
@@ -4913,7 +4906,7 @@ bc250_prepare_safe_pieces(struct radv_device *device, struct radv_graphics_pipel
       ralloc_free(fragment);
       return false;
    }
-   if (getenv("BC250_TRACE_COMPILE"))
+   if (BC250_GETENV(BC250_TRACE_COMPILE))
       fprintf(stderr, "BC250 MESH SAFE PIECES: V=%u P=%u pieces=%u piece_P=%u bound=%u ordered=1 count_setup=indirect_only\n",
               mesh->info.mesh.max_vertices_out, original_p, pieces, mesh->info.mesh.max_primitives_out,
               3 * mesh->info.mesh.max_primitives_out);
@@ -5044,7 +5037,7 @@ radv_bc250_prepare_bary_affine(const struct radv_compiler_info *ci, struct radv_
       }
       /* RADV_BC250_MESH_SAFE_SPLIT_PIECES: never calling SetMeshOutputsEXT also outputs nothing
        * (VK_EXT_mesh_shader: the counts are then zero). */
-      if (empty && (count_written || debug_get_bool_option("RADV_BC250_MESH_SAFE_SPLIT_PIECES", false))) {
+      if (empty && (count_written || BC250_ENV_BOOL_P(RADV_BC250_MESH_SAFE_SPLIT_PIECES, false))) {
          original->info.mesh.max_vertices_out = original->info.mesh.max_primitives_out = 1;
          if (!ci->key.bc250_mesh_safe_bary || !ci->key.bc250_mesh_safe_bary_affine) {
             /* Make both counts literally zero: the output is then nothing at all (no vertex, no
@@ -5062,12 +5055,12 @@ radv_bc250_prepare_bary_affine(const struct radv_compiler_info *ci, struct radv_
                }
             }
             ms->bc250_empty_output = true;
-            if (getenv("BC250_TRACE_COMPILE"))
+            if (BC250_GETENV(BC250_TRACE_COMPILE))
                fprintf(stderr, "BC250 MESH EMPTY: no output stores; declaration shrunk for the fallback\n");
             return false;
          }
          ms->bc250_safe_fast = ms->bc250_safe_bary_affine = true;
-         if (getenv("BC250_TRACE_COMPILE"))
+         if (BC250_GETENV(BC250_TRACE_COMPILE))
             fprintf(stderr, "BC250 MESH SAFE EMPTY: no output stores; every count is empty\n");
          return true;
       }
@@ -5158,7 +5151,7 @@ radv_bc250_prepare_bary_affine(const struct radv_compiler_info *ci, struct radv_
    mesh->info.mesh.max_primitives_out = max_prims;
    ms->nir = mesh;
    ms->bc250_safe_fast = ms->bc250_safe_bary_affine = true;
-   if (getenv("BC250_TRACE_COMPILE"))
+   if (BC250_GETENV(BC250_TRACE_COMPILE))
       fprintf(stderr, "BC250 MESH SAFE BARY AFFINE: corners=%u count_bound=%u referenced=proved backjump_checked=%u\n",
               corners, max_prims, corners - 1);
    ralloc_free(original);
@@ -5861,7 +5854,7 @@ bc250_idx_build_vs(struct radv_device *device, const nir_shader *mesh, const cha
    nir_foreach_block(block, impl) {
       nir_foreach_instr(instr, block) {
          if (instr->type == nir_instr_type_intrinsic && bc250_idx_vs_forbidden(nir_instr_as_intrinsic(instr), why)) {
-            if (getenv("BC250_TRACE_COMPILE") && nir_instr_as_intrinsic(instr)->intrinsic == nir_intrinsic_read_first_invocation) {
+            if (BC250_GETENV(BC250_TRACE_COMPILE) && nir_instr_as_intrinsic(instr)->intrinsic == nir_intrinsic_read_first_invocation) {
                fprintf(stderr, "BC250 MESH IDXPASS: broadcast of: ");
                nir_print_instr(nir_def_instr(nir_instr_as_intrinsic(instr)->src[0].ssa), stderr);
                bc250_idx_lane_free(nir_instr_as_intrinsic(instr)->src[0].ssa, 0);
@@ -6099,7 +6092,7 @@ radv_bc250_prepare_task(struct radv_device *device,
          ms->bc250_safe_owned = ms->bc250_safe_bary_tiny = true;
          ms->bc250_expanded = ms->bc250_private_tris = true;
          ms->bc250_compact_owned = 1;
-         if (getenv("BC250_TRACE_COMPILE"))
+         if (BC250_GETENV(BC250_TRACE_COMPILE))
             fprintf(stderr, "BC250 MESH SAFE BARY TINY: declared_V=%u declared_P=%u proven_V=%u proven_P=%u\n",
                     fast_v, fast_p, ms->nir->info.mesh.max_vertices_out, ms->nir->info.mesh.max_primitives_out);
          return VK_SUCCESS;
@@ -6131,7 +6124,7 @@ radv_bc250_prepare_task(struct radv_device *device,
          /* The fragment shader's per-primitive inputs become flat loads after linking
           * (radv_bc250_pp_direct_fs_inputs). */
          ms->bc250_pp_direct = 1 | (gfx_state->key.gfx_state.rs.provoking_vtx_last ? 2 << 1 : 0);
-         if (getenv("BC250_TRACE_COMPILE"))
+         if (BC250_GETENV(BC250_TRACE_COMPILE))
             fprintf(stderr, "BC250 MESH PP DIRECT: V=%u P=%u provoking=%u per_primitive=0x%" PRIx64 "\n",
                     fast_v, fast_p, ms->bc250_pp_direct >> 1,
                     fast_mesh->info.per_primitive_outputs & (UINT64_C(0xffffffff) << VARYING_SLOT_VAR0));
@@ -6140,7 +6133,7 @@ radv_bc250_prepare_task(struct radv_device *device,
       if (proven_plain || (!radv_bc250_mesh_fs_refused(&device->compiler_info, stages[MESA_SHADER_FRAGMENT].nir) &&
                           bc250_ordered_eligible(fast_mesh, stages[MESA_SHADER_FRAGMENT].nir))) {
          stages[MESA_SHADER_MESH].bc250_safe_fast = true;
-         if (getenv("BC250_TRACE_COMPILE"))
+         if (BC250_GETENV(BC250_TRACE_COMPILE))
             fprintf(stderr, "BC250 MESH SAFE FAST: V=%u P=%u bound=%u launch=%u single-pass lossless\n",
                     fast_v, fast_p, fast_bound, fast_launch);
          return VK_SUCCESS;
@@ -6197,7 +6190,7 @@ radv_bc250_prepare_task(struct radv_device *device,
          !(ms->nir->info.outputs_written & VARYING_BIT_CULL_PRIMITIVE) &&
          !radv_bc250_mesh_needs_expansion(ms->nir) &&
          !gfx_state->key.gfx_state.has_multiview_view_index;
-      if (getenv("BC250_TRACE_NATIVE_TASK"))
+      if (BC250_GETENV(BC250_TRACE_NATIVE_TASK))
          fprintf(stderr, "BC250 task route: %s\n", native_eligible ? "native" : "hybrid-required");
       if (native_eligible)
          return VK_SUCCESS;
@@ -6235,7 +6228,7 @@ radv_bc250_prepare_task(struct radv_device *device,
                                     device->compiler_info.hw.bc250_mesh_allow_pos1 || reference_keep_cd)) {
          /* Native unsplit route: direct DRAW_INDEX_AUTO, indirect
           * DISPATCH_MESH_INDIRECT_MULTI, no setup helper, no producer. */
-         if (getenv("BC250_TRACE_COMPILE"))
+         if (BC250_GETENV(BC250_TRACE_COMPILE))
             fprintf(stderr, "BC250 MESH AMD route: V=%u P=%u no split, no setup dispatch\n",
                     mesh_only->info.mesh.max_vertices_out, mesh_only->info.mesh.max_primitives_out);
          return VK_SUCCESS;
@@ -6279,7 +6272,7 @@ radv_bc250_prepare_task(struct radv_device *device,
                return VK_ERROR_FEATURE_NOT_PRESENT;
             stages[MESA_SHADER_MESH].bc250_split_mesh = true;
             stages[MESA_SHADER_MESH].bc250_split_pieces = single;
-            if (getenv("BC250_TRACE_COMPILE"))
+            if (BC250_GETENV(BC250_TRACE_COMPILE))
                fprintf(stderr, "BC250 single piece: native dispatch, no setup helper\n");
             return VK_SUCCESS;
          }
@@ -6382,7 +6375,7 @@ radv_bc250_prepare_task(struct radv_device *device,
       if (stages[s].stage == MESA_SHADER_NONE)
          continue;
       if (stages[s].layout.mapping) {
-         if (getenv("BC250_TRACE_COMPILE"))
+         if (BC250_GETENV(BC250_TRACE_COMPILE))
             fprintf(stderr, "BC250 hybrid task refused: stage layout mapping\n");
          return VK_ERROR_FEATURE_NOT_PRESENT;
       }
@@ -6411,11 +6404,11 @@ radv_bc250_prepare_task(struct radv_device *device,
       nir_shader *task = stages[MESA_SHADER_TASK].nir;
       nir_shader_gather_info(task, nir_shader_get_entrypoint(task));
       if (BITSET_TEST(task->info.system_values_read, SYSTEM_VALUE_VIEW_INDEX)) {
-         if (getenv("BC250_TRACE_COMPILE"))
+         if (BC250_GETENV(BC250_TRACE_COMPILE))
             fprintf(stderr, "BC250 hybrid task refused: multiview Task shader reads ViewIndex\n");
          return VK_ERROR_FEATURE_NOT_PRESENT;
       }
-      if (getenv("BC250_TRACE_COMPILE"))
+      if (BC250_GETENV(BC250_TRACE_COMPILE))
          fprintf(stderr, "BC250 hybrid task multiview: producer once, consumer per view\n");
    }
 
@@ -6449,7 +6442,7 @@ radv_bc250_prepare_task(struct radv_device *device,
       stages[MESA_SHADER_MESH].bc250_split_pieces = pieces;
    }
    if (task->info.task_payload_size > 16384 || mesh->info.task_payload_size > 16384) {
-      if (getenv("BC250_TRACE_COMPILE"))
+      if (BC250_GETENV(BC250_TRACE_COMPILE))
          fprintf(stderr, "BC250 hybrid task refused: payload over 16 KiB\n");
       return VK_ERROR_FEATURE_NOT_PRESENT;
    }
@@ -6464,7 +6457,7 @@ radv_bc250_prepare_task(struct radv_device *device,
    NIR_PASS(_, producer, nir_lower_task_shader, lower);
    nir_validate_shader(producer, "BC250 TASK normalized");
    if (producer->info.shared_size > 65536) {
-      if (getenv("BC250_TRACE_COMPILE"))
+      if (BC250_GETENV(BC250_TRACE_COMPILE))
          fprintf(stderr, "BC250 hybrid task refused: producer shared %u over 64 KiB\n", producer->info.shared_size);
       ralloc_free(producer);
       return VK_ERROR_FEATURE_NOT_PRESENT;
@@ -7671,11 +7664,13 @@ radv_bc250_split_batch_close(struct radv_cmd_buffer *cmd_buffer)
    cmd_buffer->bc250_split_batch_used = 0;
 }
 
+#ifdef AMDGPU_WDDM_LAB_FLAVOUR
 static bool
 bc250_split_batch_trace(const struct radv_cmd_buffer *cmd_buffer)
 {
    return radv_cmd_buffer_device(cmd_buffer)->bc250_env.split_batch_trace;
 }
+#endif
 
 /* The batched form of the setup shader in radv_bc250_prepare_direct_split.
  * Workgroup w is chunk w - first_chunk of entry table[w]; from there on the
@@ -7740,7 +7735,7 @@ bc250_split_batch_pipeline(struct radv_device *device, VkPipeline *pipeline, VkP
    nir_shader_gather_info(b.shader, nir_shader_get_entrypoint(b.shader));
    nir_validate_shader(b.shader, "BC250 batched split argument setup");
    /* Test aid (tests/bc250-mesh/split-batch): the builder NIR of both setup shaders. */
-   if (debug_get_bool_option("RADV_BC250_SPLIT_BATCH_PRINT_NIR", false))
+   if (BC250_ENV_BOOL(RADV_BC250_SPLIT_BATCH_PRINT_NIR, false))
       nir_print_shader(b.shader, stderr);
    VkComputePipelineCreateInfo ci = {.sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO,
       .stage = {.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
@@ -7804,9 +7799,11 @@ bc250_split_batch_append(struct radv_cmd_buffer *cmd_buffer, const struct bc250_
       cmd_buffer->bc250_split_batch = list;
       cmd_buffer->bc250_split_batch_va = va;
       cmd_buffer->bc250_split_batch_used = 0;
+#ifdef AMDGPU_WDDM_LAB_FLAVOUR
       if (bc250_split_batch_trace(cmd_buffer))
          fprintf(stderr, "BC250_SPLIT_BATCH open list=0x%llx entries=%u chunks=%u\n", (unsigned long long)va,
                  BC250_SPLIT_BATCH_ENTRIES, BC250_SPLIT_BATCH_CHUNKS);
+#endif
    }
    const uint32_t slot = cmd_buffer->bc250_split_batch_used;
    const uint32_t first_chunk = list[0];
@@ -7818,12 +7815,14 @@ bc250_split_batch_append(struct radv_cmd_buffer *cmd_buffer, const struct bc250_
       table[first_chunk + c] = slot;
    cmd_buffer->bc250_split_batch_used = slot + 1;
    list[0] = first_chunk + chunks;
+#ifdef AMDGPU_WDDM_LAB_FLAVOUR
    if (bc250_split_batch_trace(cmd_buffer))
       fprintf(stderr, "BC250_SPLIT_BATCH entry list=0x%llx slot=%u first_chunk=%u chunks=%u input=0x%llx "
               "output=0x%llx count=0x%llx records=%u stride=%u pieces=%u\n",
               (unsigned long long)cmd_buffer->bc250_split_batch_va, slot, first_chunk, chunks,
               (unsigned long long)args->input, (unsigned long long)args->output, (unsigned long long)args->count,
               args->records, args->stride, args->pieces);
+#endif
    return true;
 }
 
@@ -8285,73 +8284,21 @@ radv_bc250_present(void)
 void
 radv_bc250_directmesh_env(void)
 {
+#ifdef AMDGPU_WDDM_LAB_FLAVOUR
    /* On by default when a BC-250 is present; RADV_DIRECTMESH=0 (any value but 1) turns it off. Without a
-    * BC-250 and without RADV_DIRECTMESH=1 nothing is set, so other GPUs keep the stock driver. */
+    * BC-250 and without RADV_DIRECTMESH=1 nothing is set, so other GPUs keep the stock driver. The settings
+    * are the table of util/bc250_env.h; explicitly set variables always win. */
    const char *on = getenv("RADV_DIRECTMESH");
    if (on ? strcmp(on, "1") != 0 : !radv_bc250_present())
       return;
-   static const char *const settings[][2] = {
-      {"RADV_BC250_NATIVE_TASK", "0"},
-      {"BC250_EXPERIMENTAL_COMPUTE_CU_MODE", "false"},
-      {"BC250_BALANCED_SLICES", "true"}, {"BC250_SINGLE_PIECE", "true"}, {"BC250_CACHE_PLAN", "true"},
-      {"BC250_TRANSIENT_ARENA", "true"}, {"BC250_PARALLEL_CULL", "true"}, {"BC250_COMPACT_VERTICES", "false"},
-      /* BC250_EXPERIMENTAL_PRIVATE_GTT is not set: it moved every private allocation out of the VRAM
-       * carveout into snooped GTT (a hang experiment, never shown to help). */
-      {"BC250_OUTPUT_REGIONS", "true"},
-      /* BC250_EXPERIMENTAL_ZEROED_PRIVATE_GTT, RADV_BC250_SUBMIT_KNOWN_SIGNALS and
-       * RADV_BC250_KEEP_IB_KB are dropped from this preset: they are read by the amdgpu winsys,
-       * which this port does not touch (PORT-NOTES.md). */
-      {"RADV_BC250_MESH_ONCE", "false"},
-      {"BC250_EXPERIMENTAL_DIRECT_SPLIT", "true"}, {"BC250_EXPERIMENTAL_SKIP_INACTIVE_CHUNKS", "true"},
-      {"RADV_BC250_SPLIT_MESH", "true"}, {"RADV_BC250_EXPAND_PRIMITIVES", "true"},
-      {"BC250_EXPERIMENTAL_CULL_COMPACT", "true"}, {"BC250_EXPERIMENTAL_PACK_TRIANGLE_VERTICES", "true"},
-      {"BC250_EXPERIMENTAL_POST_MESH_VGT_FLUSH", "0"}, {"BC250_CAPTURE_RAW_IBS", "false"},
-      {"RADV_BC250_EXPOSE_FAST_BINDING", "1"}, {"RADV_BC250_LOCAL_BOS", "1"},
-      {"RADV_BC250_PERF_PIECE_PRIMS", "64"}, {"RADV_BC250_SCRATCH_REUSE", "1"},
-      {"RADV_BC250_MESH_DIRECT_READ", "full"}, {"RADV_BC250_MESH_AUTOCULL", "1"},
-      {"RADV_BC250_MESH_AUTOCULL_WIDE", "1"},
-      /* Direct Mesh path. */
-      {"RADV_BC250_MESH_SAFE_FAST", "1"}, {"RADV_BC250_MESH_SAFE_PIECES", "1"},
-      {"RADV_BC250_MESH_SAFE_OWNED", "1"}, {"RADV_BC250_MESH_SAFE_LOCAL", "1"},
-      {"RADV_BC250_MESH_SAFE_CHECK", "1"}, {"RADV_BC250_MESH_SAFE_CORNERS", "1"},
-      {"RADV_BC250_MESH_SAFE_AUTOCULL", "1"}, {"RADV_BC250_MESH_SAFE_PARALLEL", "1"},
-      {"RADV_BC250_MESH_SAFE_BARY", "1"}, {"RADV_BC250_BARY_IO16", "1"},
-      {"RADV_BC250_MESH_SAFE_BARY_TINY", "1"}, {"RADV_BC250_MESH_SAFE_BARY_AFFINE", "1"},
-      {"RADV_BC250_MESH_SAFE_BARY_LAST", "1"}, {"RADV_BC250_BARY_CORNER_ID", "1"},
-      {"RADV_BC250_MESH_ALLOW_POS1", "1"}, {"RADV_BC250_MESH_SPLIT_ANY", "1"},
-      {"RADV_BC250_MESH_NESTED_SLICE", "1"}, {"RADV_BC250_MESH_SAFE_SPLIT_PIECES", "1"},
-      {"RADV_BC250_MESH_SAFE_ADAPTIVE", "1"},
-      /* Additional direct routes; an explicit zero still overrides this preset. */
-      {"RADV_BC250_MESH_LDS_PLAN", "1"}, {"RADV_BC250_MESH_LDS_COVER", "1"},
-      {"RADV_BC250_MESH_MERGED_CHECK", "1"}, {"RADV_BC250_MESH_PP_DIRECT", "1"},
-      {"RADV_BC250_MESH_PIECES_65", "1"}, {"RADV_BC250_MESH_IDXPASS", "1"},
-      /* Never the raw route: a Mesh pipeline without a protected route is refused. */
-      {"RADV_BC250_MESH_FAIL_CLOSED", "1"},
-      /* More shapes admitted to the safe routes (gates PP1, TG1, PX1). */
-      {"RADV_BC250_MESH_DEAD_PAYLOAD", "1"}, {"RADV_BC250_MESH_PIECE_PRIMID", "1"},
-      {"RADV_BC250_MESH_SAFE_PIECES_EXT", "1"}, {"RADV_BC250_TASK_GRID_FOLD", "1"},
-      /* Renumbered referenced vertices after culling instead of private corners (gate CM1). */
-      {"RADV_BC250_MESH_SAFE_COMPACT", "1"},
-      /* Shared vertices on the owned route, private provoking corners (gates PS1, PS2). */
-      {"RADV_BC250_MESH_PP_SHARE", "1"},
-      /* Skip adaptive checks whose result is already known (gate LC1). */
-      {"RADV_BC250_MESH_LEAN_CHECK", "1"},
-      {"RADV_BC250_EXPOSE_MULTIVIEW_MESH", "1"}, {"RADV_BC250_MESH_SPLIT_STORES", "1"},
-      /* Multiview Mesh: the view layer is a per-vertex export (GFX10.1 has no layer in the primitive export), and
-       * Task+Mesh draws run the Task stage once and the Mesh stage once per view. */
-      {"RADV_BC250_MESH_MULTIVIEW_VTX", "1"}, {"RADV_BC250_TASK_MULTIVIEW", "1"},
-      {"RADV_BC250_TASK_TAIL", "1"}, {"RADV_BC250_EXPOSE_DGC", "1"},
-      /* RADV_BC250_NGGC_WIDE and RADV_BC250_DCC_32B are not set here, although the reference's preset
-       * sets both. Neither has anything to do with mesh shaders: the first raises the NGG culling
-       * admission threshold from 8 to 12 for every pipeline (radv_device.c), the second makes every
-       * colour surface on GFX1013 use a 32-byte DCC minimum compressed block (ac_descriptors.c). They
-       * would therefore change rendering for every DXVK and vkd3d-proton title on the board, on the
-       * reference's unpublished "GDDR6 and 24 CUs" claim, and a wrong DCC minimum block size is an
-       * image-corruption class in front of the release gates. Both switches stay available for a
-       * measured A/B against the b29 baseline. */
-   };
-   for (unsigned i = 0; i < ARRAY_SIZE(settings); i++)
-      setenv(settings[i][0], settings[i][1], 0);
+   bc250_env_apply_directmesh_preset();
+#else
+   /* The release flavour reads no environment and has no RADV_DIRECTMESH: DirectMesh is on exactly when a
+    * BC-250 is present. The reads of the preset's names (the _P forms of util/bc250_env.h) then take the
+    * values of its table, which is what the lab flavour reads with an empty user environment. */
+   if (radv_bc250_present())
+      bc250_env_set_preset();
+#endif
    /* DirectMesh also sets RADV_PERFTEST=mesh,nircache here, because its Mesa line gates mesh shaders
     * on RADV_PERFTEST=mesh. Mesa 26.3.0-devel has no such perftest option: the gate is
     * radv_mesh_enabled() in radv_physical_device.c, so nothing of the mesh route needs the variable.
@@ -8366,7 +8313,7 @@ void
 radv_bc250_idx_create(struct radv_device *device, struct radv_graphics_pipeline *pipeline,
                       const VkGraphicsPipelineCreateInfo *pCreateInfo)
 {
-   const bool trace = getenv("BC250_TRACE_COMPILE") != NULL;
+   const bool trace = BC250_GETENV(BC250_TRACE_COMPILE) != NULL;
    if (pipeline->base.create_flags & VK_PIPELINE_CREATE_2_LIBRARY_BIT_KHR ||
        vk_find_struct_const(pCreateInfo->pNext, PIPELINE_LIBRARY_CREATE_INFO_KHR) || !pCreateInfo->layout) {
       if (trace)
@@ -8436,7 +8383,7 @@ radv_bc250_idx_create(struct radv_device *device, struct radv_graphics_pipeline 
       radv_bc250_pp_direct_fs_inputs(frag);
    }
    cs = bc250_idx_build_cs(device, mesh, false, provoking);
-   if (getenv("BC250_IDX_PRINT")) {
+   if (BC250_GETENV(BC250_IDX_PRINT)) {
       nir_print_shader(cs, stderr);
       nir_print_shader(vs, stderr);
    }
@@ -8472,7 +8419,7 @@ radv_bc250_idx_create(struct radv_device *device, struct radv_graphics_pipeline 
       goto fail;
    {
       nir_shader *ind = bc250_idx_build_cs(device, mesh, true, provoking);
-      if (getenv("BC250_IDX_PRINT"))
+      if (BC250_GETENV(BC250_IDX_PRINT))
          nir_print_shader(ind, stderr);
       ci.stage.module = vk_shader_module_handle_from_nir(ind);
       result = radv_compute_pipeline_create(radv_device_to_handle(device), device->meta_state.cache, &ci, NULL,
@@ -8735,7 +8682,7 @@ radv_bc250_idx_storage_reset(struct radv_cmd_buffer *cmd_buffer, bool destroy)
    cmd_buffer->bc250_idx_npages = 0;
    if (cmd_buffer->bc250_idx_pool_bo) {
       const uint32_t pool_bytes = cmd_buffer->bc250_idx_pool_capacity * 4 + 256;
-      if (getenv("RADV_BC250_IDX_DEBUG")) {
+      if (BC250_GETENV(RADV_BC250_IDX_DEBUG)) {
          /* RADV_BC250_IDX_DEBUG keeps its mapped pool private. */
          radv_bo_destroy(device, NULL, cmd_buffer->bc250_idx_pool_bo);
          p_atomic_add(&device->bc250_idx_storage_bytes, -(int32_t)pool_bytes);
@@ -8899,7 +8846,7 @@ radv_bc250_idx_batch_close(struct radv_cmd_buffer *cmd_buffer, bool discard)
       cmd_buffer->state.flush_bits = saved;
       uint32_t *body = cmd_buffer->bc250_idx_batch_body;
       const uint32_t cap = cmd_buffer->bc250_idx_batch_capacity;
-      if (getenv("BC250_IDX_TRACE"))
+      if (BC250_GETENV(BC250_IDX_TRACE))
          fprintf(stderr, "BC250 IDX BATCH: close dw=%u of %u unchained=%u\n", side->b->cdw, cap,
                  side->b->buf == cmd_buffer->bc250_idx_batch_buf);
       if (side->b->buf == cmd_buffer->bc250_idx_batch_buf && side->b->cdw <= cap) {
@@ -8921,7 +8868,7 @@ bc250_idx_batch_begin(struct radv_cmd_buffer *cmd_buffer, struct radv_cmd_stream
 {
    static int enabled = -1;
    if (enabled < 0)
-      enabled = debug_get_bool_option("RADV_BC250_MESH_IDXPASS_BATCH", true);
+      enabled = BC250_ENV_BOOL(RADV_BC250_MESH_IDXPASS_BATCH, true);
    if (!enabled)
       return false;
    if (cmd_buffer->bc250_idx_batch &&
@@ -9080,16 +9027,16 @@ radv_bc250_draw_idx_indirect(struct radv_cmd_buffer *cmd_buffer, struct radv_gra
       /* RADV_BC250_IDX_POOL_BYTES (debug): a smaller pool exercises the Mesh fallback. */
       static uint64_t pool_bytes = 0;
       if (!pool_bytes)
-         pool_bytes = CLAMP(debug_get_num_option("RADV_BC250_IDX_POOL_BYTES", BC250_IDX_POOL_BYTES), 4096,
+         pool_bytes = CLAMP(BC250_ENV_NUM(RADV_BC250_IDX_POOL_BYTES, BC250_IDX_POOL_BYTES), 4096,
                             BC250_IDX_POOL_MAX_BYTES);
       pool_bytes = ALIGN_POT(pool_bytes, 4096);
-      const bool dbg = getenv("RADV_BC250_IDX_DEBUG") != NULL;
+      const bool dbg = BC250_GETENV(RADV_BC250_IDX_DEBUG) != NULL;
       uint32_t spare_bytes;
       cmd_buffer->bc250_idx_pool_bo =
          dbg ? NULL : bc250_idx_spare_take(device, pool_bytes, pool_bytes, true, &spare_bytes);
       if (!cmd_buffer->bc250_idx_pool_bo) {
          if (!bc250_idx_reserve(device, pool_bytes)) {
-            if (getenv("BC250_IDX_TRACE"))
+            if (BC250_GETENV(BC250_IDX_TRACE))
                fprintf(stderr, "BC250 IDX: indirect Mesh fallback (storage unavailable)\n");
             return false;
          }
@@ -9118,7 +9065,7 @@ radv_bc250_draw_idx_indirect(struct radv_cmd_buffer *cmd_buffer, struct radv_gra
    const uint64_t dims_bytes = ALIGN_POT((uint64_t)max_count * 12, 16), draws_bytes = ALIGN_POT((uint64_t)max_count * 20, 16);
    uint64_t table;
    const uint64_t table_bytes = prefix_bytes + dims_bytes + draws_bytes + (uint64_t)max_count * 12;
-   if (getenv("RADV_BC250_IDX_DEBUG") && cmd_buffer->bc250_idx_dbg_n < 8 && table_bytes < (1u << 20)) {
+   if (BC250_GETENV(RADV_BC250_IDX_DEBUG) && cmd_buffer->bc250_idx_dbg_n < 8 && table_bytes < (1u << 20)) {
       void *tmap;
       if (!radv_cmd_buffer_upload_alloc(cmd_buffer, table_bytes, 256, &table, &tmap))
          return true;
@@ -9205,7 +9152,7 @@ radv_bc250_draw_idx(struct radv_cmd_buffer *cmd_buffer, struct radv_graphics_pip
    uint64_t cva;
    void *cmap = NULL;
    if (!bc250_idx_alloc(cmd_buffer, groups * P * 12, &ib_va)) {
-      if (getenv("BC250_IDX_TRACE"))
+      if (BC250_GETENV(BC250_IDX_TRACE))
          fprintf(stderr, "BC250 IDX: direct Mesh fallback (storage unavailable)\n");
       return false;
    }

@@ -919,7 +919,7 @@ calc_mesh_workgroup_size(const struct radv_compiler_info *compiler_info, const n
          info->ms.bc250_autocull = false;
          info->ms.bc250_autocull_culldist = false;
       }
-      if (getenv("BC250_TRACE_COMPILE"))
+      if (BC250_GETENV(BC250_TRACE_COMPILE))
          fprintf(stderr, "BC250 MESH AUTOCULL policy: culldist %s P=%u wave=%u lanes=%u\n",
                  info->ms.bc250_autocull ? "applied" : "refused (primitives in several waves)", prims,
                  info->wave_size, align(info->workgroup_size, info->wave_size));
@@ -950,12 +950,12 @@ calc_mesh_workgroup_size(const struct radv_compiler_info *compiler_info, const n
       const unsigned wide = compiler_info->key.bc250_mesh_autocull_wide;
       const bool wide_class = wide && prims >= 24 && (prims <= info->wave_size || wide >= 2);
       if (wide_class && (info->wave_size != 32 || prims > 32 || lanes > 96)) {
-         if (getenv("BC250_TRACE_COMPILE"))
+         if (BC250_GETENV(BC250_TRACE_COMPILE))
             fprintf(stderr, "BC250 MESH AUTOCULL policy: wide P=%u wave=%u lanes=%u prim_waves=%u\n", prims,
                     info->wave_size, lanes, DIV_ROUND_UP(prims, info->wave_size));
       } else if (!radv_bc250_autocull_size_policy(compiler_info, prims, info->wave_size, lanes)) {
          info->ms.bc250_autocull = false;
-         if (getenv("BC250_TRACE_COMPILE"))
+         if (BC250_GETENV(BC250_TRACE_COMPILE))
             fprintf(stderr, "BC250 MESH AUTOCULL policy: refused P=%u wave=%u lanes=%u\n", prims, info->wave_size,
                     lanes);
       }

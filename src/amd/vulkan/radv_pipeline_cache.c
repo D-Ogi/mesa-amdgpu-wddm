@@ -93,7 +93,7 @@ radv_shader_spirv_to_nir_cached(const struct radv_compiler_info *compiler_info,
       /* Lookup deserializes into independently owned mutable NIR. */
       nir = radv_pipeline_cache_lookup_nir(compiler_info, cache, stage->stage, key);
    }
-   if (getenv("BC250_TRACE_COMPILE"))
+   if (BC250_GETENV(BC250_TRACE_COMPILE))
       fprintf(stderr, "BC250 original NIR: stage=%u cache=%s\n", stage->stage,
               !enabled ? "disabled" : nir ? "hit" : "miss");
    if (!nir) {

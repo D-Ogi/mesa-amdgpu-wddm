@@ -872,7 +872,7 @@ radv_shader_spirv_to_nir(const struct radv_compiler_info *compiler_info, struct 
          if (!accessed) {
             nir_foreach_variable_with_modes_safe (var, nir, nir_var_mem_task_payload)
                exec_node_remove(&var->node);
-            if (getenv("BC250_TRACE_COMPILE"))
+            if (BC250_GETENV(BC250_TRACE_COMPILE))
                fprintf(stderr, "BC250 MESH DEAD PAYLOAD: unused task payload declaration dropped\n");
          }
       }
@@ -934,7 +934,7 @@ radv_shader_spirv_to_nir(const struct radv_compiler_info *compiler_info, struct 
       unsigned stripped = 0, zeroed = 0;
       bool vrs_progress = false;
       NIR_PASS(vrs_progress, nir, radv_nir_bc250_vrs_noop, &stripped, &zeroed);
-      if (vrs_progress && getenv("BC250_TRACE_COMPILE"))
+      if (vrs_progress && BC250_GETENV(BC250_TRACE_COMPILE))
          fprintf(stderr, "BC250 VRS NOOP: stage=%s stripped_shading_rate_outputs=%u zeroed_shading_rate_reads=%u\n",
                  _mesa_shader_stage_to_string(nir->info.stage), stripped, zeroed);
    }
@@ -1243,7 +1243,7 @@ radv_lower_ngg(const struct radv_compiler_info *compiler_info, struct radv_shade
          options.bc250_safe_compact = false;
          options.bc250_pp_share = false;
          options.bc250_safe_parallel = false;
-         if (getenv("BC250_TRACE_COMPILE"))
+         if (BC250_GETENV(BC250_TRACE_COMPILE))
             fprintf(stderr, "BC250 MESH SAFE BARY TINY: proven private connectivity, no remap\n");
       }
       options.bc250_wave_sync = compiler_info->hw.bc250_mesh_wave_sync;
@@ -1252,8 +1252,8 @@ radv_lower_ngg(const struct radv_compiler_info *compiler_info, struct radv_shade
       NIR_PASS(_, nir, ac_nir_lower_ngg_mesh, &options, &scratch_ring);
       /* BC250_MESH_NIR_DUMP=<dir>: the lowered NGG Mesh NIR for the offline
        * equivalence oracle (tests/bc250-mesh/direct-read). */
-      if (getenv("BC250_MESH_NIR_DUMP")) {
-         if (getenv("BC250_ORDERED_NIR_DUMP")) {
+      if (BC250_GETENV(BC250_MESH_NIR_DUMP)) {
+         if (BC250_GETENV(BC250_ORDERED_NIR_DUMP)) {
             unsigned ai = 0;
             u_foreach_bit64 (dw, ngg_stage->args.ac.inline_push_const_mask)
                fprintf(stderr, "BC250 ORDERED ABI: arg=%u pc=%u\n",
@@ -1274,7 +1274,7 @@ radv_lower_ngg(const struct radv_compiler_info *compiler_info, struct radv_shade
          const uint32_t clipcull = util_bitcount(info->outinfo.clip_dist_mask) |
                                    (culldist_culled ? 0 : util_bitcount(info->outinfo.cull_dist_mask)) << 4 |
                                    (uint32_t)culldist_culled << 8;
-         radv_bc250_dump_mesh_nir(getenv("BC250_MESH_NIR_DUMP"), nir, info->wave_size, options.max_workgroup_size,
+         radv_bc250_dump_mesh_nir(BC250_GETENV(BC250_MESH_NIR_DUMP), nir, info->wave_size, options.max_workgroup_size,
                                   ngg_stage->shader_blake3, ngg_stage->bc250_index_staging, compact_flags, pp_params,
                                   clipcull);
       }
@@ -1968,7 +1968,7 @@ radv_bc250_mesh_pos_export_refusal(const struct radv_compiler_info *compiler_inf
    }
    /* Traced only for shaders with clip/cull distances or more than one position vector (the trace of
     * every other shader stays as it was). */
-   if (getenv("BC250_TRACE_COMPILE") &&
+   if (BC250_GETENV(BC250_TRACE_COMPILE) &&
        (num > 1 || info->outinfo.clip_dist_mask || info->outinfo.cull_dist_mask || max_target > num ||
         done_mismatch))
       fprintf(stderr, "BC250 MESH POS EXPORTS: format=%u clip=%u cull=%u culldist_culled=%u exported=%u "
@@ -1984,10 +1984,18 @@ radv_bc250_mesh_pos_export_refusal(const struct radv_compiler_info *compiler_inf
       return NULL;
    if (clip_dist_mask && !compiler_info->hw.bc250_mesh_allow_pos1)
       return "clip distances need a clip/cull distance position export (POS1), not hardware-proven on "
-             "BC250 Mesh (RADV_BC250_MESH_ALLOW_POS1=1 admits it)";
+             "BC250 Mesh"
+#ifdef AMDGPU_WDDM_LAB_FLAVOUR
+             " (RADV_BC250_MESH_ALLOW_POS1=1 admits it)"
+#endif
+             ;
    if (cull_dist_mask && !compiler_info->hw.bc250_mesh_allow_pos1)
       return "cull distances not culled in the shader (autocull not applicable) need a clip/cull distance "
-             "position export (POS1), not hardware-proven on BC250 Mesh (RADV_BC250_MESH_ALLOW_POS1=1 admits it)";
+             "position export (POS1), not hardware-proven on BC250 Mesh"
+#ifdef AMDGPU_WDDM_LAB_FLAVOUR
+             " (RADV_BC250_MESH_ALLOW_POS1=1 admits it)"
+#endif
+             ;
    return NULL;
 }
 
@@ -2275,7 +2283,7 @@ radv_precompute_registers_hw_ms(struct radv_device *device, struct radv_shader *
       regs->vgt_gs_max_vert_out = info->ngg_info.prim_amp_factor;
 
    if ((info->ms.bc250_amd_mesh || info->ms.bc250_amd_size || info->ms.bc250_amd_reuse || info->ms.bc250_fl0) &&
-       (getenv("BC250_TRACE_COMPILE") || getenv("BC250_TRACE_REGS")))
+       (BC250_GETENV(BC250_TRACE_COMPILE) || BC250_GETENV(BC250_TRACE_REGS)))
       fprintf(stderr, "BC250 MESH AMD: fl0=%u route=%u size=%u reuse=%u T=%u WG=%u WAVE=%u V=%u GE_NGG_SUBGRP_CNTL=%08x VGT_GS_MAX_VERT_OUT=%u merge_k=%u merge_s=%u scratch_ring=%u%s\n",
               info->ms.bc250_fl0, info->ms.bc250_amd_mesh, info->ms.bc250_amd_size, info->ms.bc250_amd_reuse, info->ngg_info.prim_amp_factor, info->workgroup_size, info->wave_size, info->ngg_info.max_out_verts,
               regs->ngg.ge_ngg_subgrp_cntl, regs->vgt_gs_max_vert_out, info->ms.bc250_merge_k, info->ms.bc250_merge_s, info->ms.needs_ms_scratch_ring,
@@ -3420,7 +3428,7 @@ radv_bc250_shader_code_audit(struct radv_device *device, struct radv_shader *sha
       blake3_hash hash;
       _mesa_blake3_compute(dest_ptr, shader->code_size, hash);
       _mesa_blake3_format(shader->bc250_trace_code, hash);
-      const char *target = getenv("BC250_CHAIN_MESH_BLAKE3");
+      const char *target = BC250_GETENV(BC250_CHAIN_MESH_BLAKE3);
       shader->bc250_trace_target = shader->info.stage == MESA_SHADER_MESH && target &&
                                   !strcmp(target, shader->bc250_trace_code);
       shader->bc250_trace_upload = radv_bc250_chain_event(device, "SHADER_UPLOAD_CPU",
@@ -3431,7 +3439,7 @@ radv_bc250_shader_code_audit(struct radv_device *device, struct radv_shader *sha
    }
 
    /* Separate, default-off CPU upload audit for mode/cache experiments. */
-   if (debug_get_bool_option("BC250_CAPTURE_POLICY_SHADERS", false)) {
+   if (BC250_ENV_BOOL(BC250_CAPTURE_POLICY_SHADERS, false)) {
       flockfile(stderr);
       fprintf(stderr, "BC250POLICY stage=%u va=%llx bytes=%u exec=%u wave=%u wg=%u lds=%u scratch=%u sgprs=%u vgprs=%u wgp=%u rsrc1=%08x rsrc2=%08x\n",
               shader->info.stage, (unsigned long long)radv_shader_get_va(shader),
@@ -3449,7 +3457,7 @@ radv_bc250_shader_code_audit(struct radv_device *device, struct radv_shader *sha
 
    /* Opt-in CPU-side upload capture. No GPU waits or extra GPU reads. */
    if (shader->info.stage == MESA_SHADER_MESH &&
-       debug_get_bool_option("BC250_CAPTURE_MESH_CODE", false)) {
+       BC250_ENV_BOOL(BC250_CAPTURE_MESH_CODE, false)) {
       static uint64_t captured_bytes;
       const uint64_t limit = 256ull * 1024 * 1024;
       const uint64_t cost = (uint64_t)shader->code_size * 2 + 512;
