@@ -407,6 +407,10 @@ radv_tes_needs_state_sgpr(const struct radv_shader_info *info)
 static bool
 radv_ps_needs_state_sgpr(const struct radv_shader_info *info, const struct radv_graphics_state_key *gfx_state)
 {
+   /* radv_no16.h: the SPLIT16 pass base. */
+   if (gfx_state && gfx_state->no16_logical16)
+      return true;
+
    if (info->ps.needs_sample_positions && gfx_state->dynamic_rasterization_samples)
       return true;
 
@@ -842,9 +846,11 @@ declare_shader_args(const struct radv_compiler_info *compiler_info, struct radv_
             }
 
             if (info->is_ngg) {
+               /* radv_no16.h: the SPLIT16 pass of a 16-sample pipeline (NGG_STATE_NO16_PASS). */
                const bool ngg_needs_state_sgpr =
                   has_ngg_provoking_vtx || has_shader_query ||
-                  (previous_stage == MESA_SHADER_VERTEX && info->vs.dynamic_num_verts_per_prim);
+                  (previous_stage == MESA_SHADER_VERTEX && info->vs.dynamic_num_verts_per_prim) ||
+                  (previous_stage == MESA_SHADER_VERTEX && gfx_state && gfx_state->no16_logical16);
 
                declare_ngg_sgprs(state, info, ngg_needs_state_sgpr);
 

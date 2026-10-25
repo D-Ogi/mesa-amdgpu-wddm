@@ -1023,17 +1023,18 @@ static const uint32_t sample_locs_8x[] = {
 };
 static const unsigned max_dist_8x = 7;
 static const uint64_t centroid_priority_8x = 0x7654321076543210ull;
-/* Exact Vulkan standard16 positions, in specification sample-index order.
- * ref/Vulkan-Docs01aaacd, primsrast.adoc:standard-sample-locations.
- * This diagnostic does not expose16-sample image or framebuffer capabilities.
+/* 16 samples: the Vulkan and D3D standard locations in sample-index order
+ * (primsrast.adoc standard-sample-locations; radv_no16_standard16 is the same
+ * table). Only 16-sample draws without attachments use them (radv_no16.h).
  */
-static const uint32_t sample_locs_16x_probe[] = {
+static const uint32_t sample_locs_16x[] = {
    FILL_SREG(1, 1, -1, -3, -3, 2, 4, -1),
    FILL_SREG(-5, -2, 2, 5, 5, 3, 3, -5),
    FILL_SREG(-2, 6, 0, -7, -4, -6, -6, 4),
    FILL_SREG(-8, 0, 7, -4, 6, 7, -7, -8),
 };
-
+static const unsigned max_dist_16x = 8;
+static const uint64_t centroid_priority_16x = 0xfedcba9876543210ull;
 
 unsigned
 radv_get_default_max_sample_dist(int log_samples)
@@ -1043,7 +1044,7 @@ radv_get_default_max_sample_dist(int log_samples)
       max_dist_2x,
       max_dist_4x,
       max_dist_8x,
-      8, /* diagnostic standard16 has -8 offsets */
+      max_dist_16x,
    };
    return max_dist[log_samples];
 }
@@ -1091,16 +1092,15 @@ radv_emit_default_sample_locations(const struct radv_physical_device *pdev, stru
       radeon_emit_array(sample_locs_8x, 2);
       break;
    case 16:
-      centroid_priority = 0xfedcba9876543210ull;
+      centroid_priority = centroid_priority_16x;
       radeon_set_context_reg_seq(R_028BF8_PA_SC_AA_SAMPLE_LOCS_PIXEL_X0Y0_0, 16);
       for (unsigned pixel = 0; pixel < 4; ++pixel)
-         radeon_emit_array(sample_locs_16x_probe, 4);
+         radeon_emit_array(sample_locs_16x, 4);
       break;
    }
 
    /* The exclusion bits can be set to improve rasterization efficiency if no sample lies on the
-    * pixel boundary (-8 sample offset). It's currently always TRUE because the driver doesn't
-    * support 16 samples.
+    * pixel boundary (-8 sample offset). Only the 16-sample locations have such a sample.
     */
    if (pdev->info.gfx_level >= GFX7 && pdev->info.gfx_level < GFX12) {
       radeon_opt_set_context_reg(R_02882C_PA_SU_PRIM_FILTER_CNTL, AC_TRACKED_PA_SU_PRIM_FILTER_CNTL,
@@ -1115,6 +1115,67 @@ radv_emit_default_sample_locations(const struct radv_physical_device *pdev, stru
    radeon_emit(centroid_priority);
    radeon_emit(centroid_priority >> 32);
 
+   radeon_end();
+}
+
+/* SPLIT16 pass of a 16-sample draw without attachments (radv_no16.h): an
+ * 8-sample layout whose hardware sample h has the standard 16-sample location
+ * radv_no16_split_location_sample(pass, h). */
+void
+radv_no16_emit_split_sample_locations(const struct radv_physical_device *pdev, struct radv_cmd_stream *cs,
+                                      unsigned pass, enum radv_no16_auto_mode mode)
+{
+   int8_t x[8], y[8];
+   bool boundary = false;
+   for (unsigned h = 0; h < 8; h++) {
+      const unsigned s = radv_no16_split_location_sample(pass, h, mode);
+      x[h] = radv_no16_standard16_offset(s, 0);
+      y[h] = radv_no16_standard16_offset(s, 1);
+      boundary |= x[h] == -8 || y[h] == -8;
+   }
+   const uint32_t locs[4] = {
+      FILL_SREG(x[0], y[0], x[1], y[1], x[2], y[2], x[3], y[3]),
+      FILL_SREG(x[4], y[4], x[5], y[5], x[6], y[6], x[7], y[7]),
+      0,
+      0,
+   };
+
+   /* Centroid priority: hardware samples ordered by distance from the pixel center. */
+   unsigned order[8];
+   for (unsigned h = 0; h < 8; h++)
+      order[h] = h;
+   for (unsigned i = 1; i < 8; i++) {
+      for (unsigned j = i; j > 0; j--) {
+         const unsigned a = order[j - 1], b = order[j];
+         if (x[a] * x[a] + y[a] * y[a] <= x[b] * x[b] + y[b] * y[b])
+            break;
+         order[j - 1] = b;
+         order[j] = a;
+      }
+   }
+   uint64_t centroid_priority = 0;
+   for (unsigned i = 0; i < 16; i++)
+      centroid_priority |= (uint64_t)order[i % 8] << (i * 4);
+
+   radeon_begin(cs);
+   radeon_set_context_reg_seq(R_028BF8_PA_SC_AA_SAMPLE_LOCS_PIXEL_X0Y0_0, 14);
+   radeon_emit_array(locs, 4);
+   radeon_emit_array(locs, 4);
+   radeon_emit_array(locs, 4);
+   radeon_emit_array(locs, 2);
+
+   if (pdev->info.gfx_level >= GFX7 && pdev->info.gfx_level < GFX12) {
+      radeon_opt_set_context_reg(R_02882C_PA_SU_PRIM_FILTER_CNTL, AC_TRACKED_PA_SU_PRIM_FILTER_CNTL,
+                                 S_02882C_XMAX_RIGHT_EXCLUSION(!boundary) | S_02882C_YMAX_BOTTOM_EXCLUSION(!boundary));
+   }
+
+   if (pdev->info.gfx_level >= GFX12) {
+      radeon_set_context_reg_seq(R_028BF0_PA_SC_CENTROID_PRIORITY_0, 2);
+   } else {
+      radeon_set_context_reg_seq(R_028BD4_PA_SC_CENTROID_PRIORITY_0, 2);
+   }
+   radeon_emit(centroid_priority);
+   radeon_emit(centroid_priority >> 32);
    radeon_end();
 }
 
@@ -1137,6 +1198,9 @@ radv_get_sample_position(struct radv_device *device, unsigned sample_count, unsi
    case 8:
       sample_locs = sample_locs_8x;
       break;
+   case 16:
+      sample_locs = sample_locs_16x;
+      break;
    }
 
    out_value[0] = (GET_SX(sample_locs, sample_index) + 8) / 16.0f;
@@ -1156,6 +1220,8 @@ radv_device_init_msaa(struct radv_device *device)
       radv_get_sample_position(device, 4, i, device->sample_locations_4x[i]);
    for (i = 0; i < 8; i++)
       radv_get_sample_position(device, 8, i, device->sample_locations_8x[i]);
+   for (i = 0; i < 16; i++)
+      radv_get_sample_position(device, 16, i, device->sample_locations_16x[i]);
 }
 
 static bool

@@ -136,6 +136,8 @@ struct radv_shader_info {
       bool has_prolog : 1;
       bool dynamic_inputs : 1;
       bool dynamic_num_verts_per_prim : 1;
+      /* radv_no16.h SPLIT16: memory writes run only when NGG_STATE_NO16_PASS is 0. */
+      bool no16_guard : 1;
    } vs;
    struct {
       uint8_t num_components_per_stream[4];
@@ -221,8 +223,8 @@ struct radv_shader_info {
       bool selects_front_face_dynamically : 1;
 
       bool has_epilog : 1;
-      /* radv_no16.h marker: logical 16-sample body on a physical 8-sample pipeline. */
-      bool no16_logical16 : 1;
+      /* radv_no16.h route marker: enum radv_no16_draw, NATIVE16 or SPLIT16 for a 16-sample shader. */
+      uint8_t no16 : 2;
    } ps;
    struct {
       uint32_t block_size[3];

@@ -279,10 +279,13 @@ lower_abi_instr(nir_builder *b, nir_intrinsic_instr *intrin, void *state)
 
       nir_def *ring_offsets = ac_nir_load_arg(b, &s->args->ac, s->args->ac.ring_offsets);
       nir_def *addr = nir_pack_64_2x32(b, ring_offsets);
-      nir_def *sample_id = nir_umin(b, intrin->src[0].ssa, nir_imm_int(b, 7));
+      nir_const_value *const_num_samples = nir_src_as_const_value(intrin->src[1]);
+      /* The ring has a 16-sample table after the 8-sample one (radv_queue.c), used
+       * only with a constant count of 16 (radv_no16.h). */
+      const unsigned max_sample_id = const_num_samples && const_num_samples->u32 == 16 ? 15 : 7;
+      nir_def *sample_id = nir_umin(b, intrin->src[0].ssa, nir_imm_int(b, max_sample_id));
       nir_def *offset = nir_ishl_imm(b, sample_id, 3); /* 2 floats containing samplepos.xy */
 
-      nir_const_value *const_num_samples = nir_src_as_const_value(intrin->src[1]);
       if (const_num_samples) {
          sample_pos_offset += (const_num_samples->u32 << 3);
       } else {
