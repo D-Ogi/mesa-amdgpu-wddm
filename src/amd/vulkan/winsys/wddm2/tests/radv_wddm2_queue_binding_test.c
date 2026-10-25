@@ -189,6 +189,8 @@ static struct {
     * each context made. A node in refuse_nodes is refused; context_calls counts those calls too. */
    uint32_t ctx_node[8], ctx_blob_ip[8], ctx_blob_node[8];
    unsigned context_calls, contexts_made, refuse_nodes;
+   /* The last CREATE_QUEUE_CONTEXT (a bind): its node and its BC2C blob. */
+   uint32_t qctx_node, qctx_blob_ip, qctx_blob_node;
    struct bc250_submit_blob submit_blob;
 
    /* The FenceValueGPUVirtualAddress of the fences the host creates: 0 none (the default: the tests of
@@ -452,6 +454,11 @@ fake_dispatch(void *userdata, uint32_t op, void *arg)
       queue_scope(q);
       if (c->hDevice != DEVICE_H || c->PrivateDriverDataSize != 80)
          h.unexpected++;
+      const struct bc250_context_blob *b = c->pPrivateDriverData;
+      const bool blob_ok = b && c->PrivateDriverDataSize >= sizeof(*b) && b->magic == BC250_CONTEXT_MAGIC;
+      h.qctx_node = c->NodeOrdinal;
+      h.qctx_blob_ip = blob_ok ? b->ip_type : UINT32_MAX;
+      h.qctx_blob_node = blob_ok ? b->node_ordinal : UINT32_MAX;
       struct obj *o = new_obj(h.contexts, &h.n_contexts, 0x1000);
       o->cookie = q->queue;
       c->hContext = o->handle;
@@ -755,16 +762,23 @@ make_ws(void)
    return ws;
 }
 
-/* The embedder's bind and unbind of the queue that cookie names. */
+/* The embedder's bind and unbind of the queue that cookie names; bind_ip for a queue of the family of
+ * that IP, bind for a GENERAL queue. */
 static VkResult
-bind(struct radv_wddm2_winsys *ws, struct radeon_winsys_ctx *ctx, void *cookie)
+bind_ip(struct radv_wddm2_winsys *ws, struct radeon_winsys_ctx *ctx, enum amd_ip_type ip, void *cookie)
 {
    h.in_scope = true;
    h.scope_cookie = cookie;
-   VkResult result = ws->base.ctx_bind(ctx, cookie);
+   VkResult result = ws->base.ctx_bind(ctx, ip, cookie);
    h.in_scope = false;
    h.scope_cookie = NULL;
    return result;
+}
+
+static VkResult
+bind(struct radv_wddm2_winsys *ws, struct radeon_winsys_ctx *ctx, void *cookie)
+{
+   return bind_ip(ws, ctx, AMD_IP_GFX, cookie);
 }
 
 static VkResult
@@ -6295,20 +6309,77 @@ test_compute_refused(void)
    compute_end(ws, c, 0, NULL);
 }
 
-/* A bound queue has no compute context, and the embedder binds none: a COMPUTE submission there is
- * lost with no host call. */
+/* A bound GENERAL queue has no compute context: a COMPUTE submission there is lost with no host call.
+ * A bound COMPUTE queue (the D3D12 compute and copy queues) gets its context from the embedder's
+ * queue: BC2C COMPUTE on node 2 through the queue's cookie. Its COMPUTE work goes there, copied into
+ * the IB1, and GFX work on it is lost with no host call. Without the COMPUTE IP the bind is refused
+ * with no host call. */
 static void
 test_compute_bound(void)
 {
    void *const cookie = (void *)(uintptr_t)0xE0;
    struct radv_wddm2_winsys *ws = make_compute_ws();
    struct radeon_winsys_ctx *c = new_ctx(ws);
-   check(bind(ws, c, cookie) == VK_SUCCESS, "the queue binds");
-   const unsigned mark = h.n_ev;
+   check(bind(ws, c, cookie) == VK_SUCCESS && h.qctx_node == 0 && h.qctx_blob_ip == BC250_IP_GFX,
+         "the GENERAL queue binds a GFX context on node 0 (%u, %u)", h.qctx_node, h.qctx_blob_ip);
+   unsigned mark = h.n_ev;
    check(submit_compute_one(ws, c) == VK_ERROR_DEVICE_LOST && h.n_ev == mark,
-         "a COMPUTE submission on a bound queue is lost, with no host call");
+         "a COMPUTE submission on a bound GENERAL queue is lost, with no host call");
    check(unbind(ws, c, cookie) == VK_SUCCESS, "the queue unbinds");
    ws->base.ctx_destroy(c);
+
+   void *const ccookie = (void *)(uintptr_t)0xE8;
+   struct radeon_winsys_ctx *cc = new_ctx(ws);
+   mark = h.n_ev;
+   check(bind_ip(ws, cc, AMD_IP_COMPUTE, ccookie) == VK_SUCCESS, "the COMPUTE queue binds");
+   const int create = find_op(mark, BC250_HOST_CREATE_QUEUE_CONTEXT, 0);
+   check(create >= 0 && h.ev[create].cookie == ccookie && h.qctx_node == BC250_COMPUTE_NODE &&
+            h.qctx_blob_ip == BC250_IP_COMPUTE && h.qctx_blob_node == BC250_COMPUTE_NODE,
+         "through its cookie, a context of NodeOrdinal %u, BC2C ip_type %u node %u", h.qctx_node, h.qctx_blob_ip,
+         h.qctx_blob_node);
+   const uint32_t compute_h = compute(cc)->context_h;
+   check(compute_h && !gfx(cc)->context_h, "the bind fills the COMPUTE queue only");
+   check(!count_op(mark, BC250_HOST_CreateContextVirtual), "no device-level context");
+
+   struct radeon_winsys_bo *bo[2];
+   uint32_t *map[2];
+   if (!pattern_bos(ws, 2, bo, map)) {
+      check(false, "two mapped command BOs");
+      return;
+   }
+   struct fake_cs fa, fb;
+   struct ac_cmdbuf *cs[2];
+   cs[0] = fake_cs(&fa, bo[0], bo[0]->va, 16);
+   cs[1] = fake_cs(&fb, bo[1], bo[1]->va + 256, 24);
+   check(submit_ip(ws, cc, AMD_IP_COMPUTE, 2, cs, 0, NULL, 0, NULL) == VK_SUCCESS && h.submit_context == compute_h &&
+            h.submit_blob.ip_type == BC250_IP_COMPUTE && h.submit_blob.ib[0].ip_type == BC250_IP_COMPUTE,
+         "COMPUTE work goes to the bound node 2 context with a BC2S blob of COMPUTE (0x%x)", h.submit_context);
+   const uint32_t *ib1 = last_ib1(compute(cc));
+   check(one_ib1(compute(cc), 40) && !memcmp(ib1, map[0], 16 * 4) && !memcmp(ib1 + 16, map[1] + 64, 24 * 4),
+         "both streams copied into one IB1 of 40 dwords");
+   mark = h.n_ev;
+   check(submit_one(ws, cc) == VK_ERROR_DEVICE_LOST && h.n_ev == mark,
+         "GFX work on a bound COMPUTE queue is lost, with no host call");
+   check(ws->base.ctx_wait_idle(cc, AMD_IP_COMPUTE, 0), "the COMPUTE queue goes idle");
+   check(unbind(ws, cc, ccookie) == VK_SUCCESS && !compute(cc)->context_h, "the COMPUTE queue unbinds");
+   const int destroy = find_op(mark, BC250_HOST_DESTROY_QUEUE_CONTEXT, 0);
+   check(destroy >= 0 && h.ev[destroy].cookie == ccookie && h.ev[destroy].context == compute_h,
+         "the unbind destroys the node 2 context through the same cookie");
+   check(!live(h.contexts, h.n_contexts, false), "no context is left");
+   ws->base.ctx_destroy(cc);
+   for (unsigned i = 0; i < 2; i++)
+      ws->base.buffer_destroy(&ws->base, bo[i]);
+
+   struct radeon_winsys_ctx *cn = new_ctx(ws);
+   ws->gpu_info.ip[AMD_IP_COMPUTE].num_queues = 0;
+   mark = h.n_ev;
+   check(bind_ip(ws, cn, AMD_IP_COMPUTE, ccookie) == VK_ERROR_INITIALIZATION_FAILED && h.n_ev == mark,
+         "without the COMPUTE IP (RADV_BC250_ACE_QUEUES=0) a COMPUTE bind is refused, with no host call");
+   check(bind_ip(ws, cn, AMD_IP_SDMA, ccookie) == VK_ERROR_INITIALIZATION_FAILED && h.n_ev == mark,
+         "a bind of another IP is refused, with no host call");
+   check(bind(ws, cn, ccookie) == VK_SUCCESS && unbind(ws, cn, ccookie) == VK_SUCCESS,
+         "the same context still binds as a GENERAL queue");
+   ws->base.ctx_destroy(cn);
    contract();
 }
 

@@ -207,10 +207,14 @@ radv_video_encode_queue_enabled(const struct radv_physical_device *pdev)
 
 /* RADV_BC250_COMPUTE_QUEUE_COUNT=<n> (GFX1013 only, default off): expose at most n queues in the compute
  * family (vkd3d-proton creates min(queueCount, 4) and spreads its D3D12 compute / copy queues over them;
- * each Vulkan compute queue is its own kernel scheduler entity, placed on one of the kernel compute rings). */
+ * each Vulkan compute queue is its own kernel scheduler entity, placed on one of the kernel compute rings).
+ * A bound instance has RADV_BC250_BOUND_COMPUTE_QUEUES: each of them gets its own node 2 context from the
+ * embedder, so the count is not one of hardware queues. */
 static uint32_t
 radv_bc250_compute_queue_count(const struct radv_physical_device *pdev)
 {
+   if (radv_bound_queues_enabled(pdev))
+      return RADV_BC250_BOUND_COMPUTE_QUEUES;
    const uint32_t n = pdev->info.ip[AMD_IP_COMPUTE].num_queues;
    if (pdev->info.family != CHIP_GFX1013)
       return n;
@@ -227,11 +231,11 @@ radv_compute_queue_enabled(const struct radv_physical_device *pdev)
 
    const struct radv_instance *instance = radv_physical_device_instance(pdev);
 
-   /* A bound instance gets the context of every queue from its embedder, and
-    * the embedder binds GFX contexts on node 0 only (radv_wddm2_ctx_bind). */
-   if (radv_bound_queues_enabled(pdev))
-      return false;
-
+   /* A bound instance gets the context of every queue from its embedder:
+    * radv_wddm2_ctx_bind binds the IP of the queue's family, so a compute
+    * queue gets a COMPUTE context on node 2. The COMPUTE IP, and with it this
+    * family, exists only when ac_fill_hw_ip_info kept it
+    * (RADV_BC250_ACE_QUEUES, the compute node of the caps). */
    return pdev->info.ip[AMD_IP_COMPUTE].num_queues > 0 &&
           (!(instance->queue_disable_flags & RADV_QUEUE_DISABLE_COMPUTE) || !pdev->info.has_graphics);
 }

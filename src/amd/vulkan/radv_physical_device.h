@@ -242,11 +242,23 @@ VK_DEFINE_HANDLE_CASTS(radv_physical_device, vk.base, VkPhysicalDevice, VK_OBJEC
 bool radv_sparse_enabled(const struct radv_physical_device *pdev);
 
 /* GENERAL queues of a hosted instance whose queues the embedder binds
- * (draft): the engine's internal queue plus seven application queues. Each
- * bound queue holds one WDDM context, two monitored fences and at most
- * BC250_GATHER_SLOTS gather BOs, so this also bounds those per device.
+ * (draft): the engine's internal queue plus fifteen application queues. 16 is
+ * the most that vkd3d-proton takes of one family in its inline queue mode.
+ * With the compute family hidden (node 2 closed), the D3D12 compute and copy
+ * queues are GENERAL queues too. Each bound queue holds one WDDM context, two
+ * monitored fences and at most BC250_GATHER_SLOTS gather BOs, so this also
+ * bounds those per device; none of them exists before the bind, and bc250kmd
+ * takes any number of contexts on node 0.
  */
-#define RADV_BC250_BOUND_GENERAL_QUEUES 8
+#define RADV_BC250_BOUND_GENERAL_QUEUES 16
+
+/* COMPUTE queues of a bound instance, when the compute family exists: the
+ * D3D12 compute and copy queues of one device. Each has its own node 2
+ * context, with the same objects per queue as a GENERAL one. bc250kmd takes
+ * any number of contexts on node 2; they share its one MEC queue. 16 is the
+ * most that vkd3d-proton takes of one family in its inline queue mode, and a
+ * queue holds no kernel object before its bind. */
+#define RADV_BC250_BOUND_COMPUTE_QUEUES 16
 
 bool radv_bound_queues_enabled(const struct radv_physical_device *pdev);
 

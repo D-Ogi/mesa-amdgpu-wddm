@@ -724,27 +724,33 @@ radv_wddm2_ctx_create_bindable(struct radeon_winsys *_ws, enum radeon_ctx_priori
  * destroy something: then the context keeps it and is never bound again.
  */
 static VkResult
-radv_wddm2_ctx_bind(struct radeon_winsys_ctx *rwctx, void *cookie)
+radv_wddm2_ctx_bind(struct radeon_winsys_ctx *rwctx, enum amd_ip_type ip, void *cookie)
 {
    struct radv_wddm2_ctx *ctx = radv_wddm2_ctx(rwctx);
    struct radv_wddm2_winsys *ws = ctx->ws;
-   struct radv_wddm2_queue *queue = &ctx->per_ip[AMD_IP_GFX].queue;
 
    if (!ctx->bindable || ctx->bound || ctx->kept)
+      return VK_ERROR_INITIALIZATION_FAILED;
+   /* GFX on node 0, or COMPUTE on node 2 when the COMPUTE IP was kept
+    * (ac_fill_hw_ip_info): radv_wddm2_queue_init makes no context for any
+    * other IP. A COMPUTE queue exists only then (radv_compute_queue_enabled). */
+   if (ip != AMD_IP_GFX && (ip != AMD_IP_COMPUTE || !ws->gpu_info.ip[AMD_IP_COMPUTE].num_queues))
       return VK_ERROR_INITIALIZATION_FAILED;
    /* A lost device gets no new context. */
    if (bc250_host_check_status(&ws->host) < 0)
       return VK_ERROR_DEVICE_LOST;
 
-   radv_wddm2_queue_reset_unbound(ws, AMD_IP_GFX, queue);
-   memset(&ctx->per_ip[AMD_IP_GFX].last_submission, 0, sizeof(ctx->per_ip[AMD_IP_GFX].last_submission));
+   struct radv_wddm2_queue *queue = &ctx->per_ip[ip].queue;
+   radv_wddm2_queue_reset_unbound(ws, ip, queue);
+   memset(&ctx->per_ip[ip].last_submission, 0, sizeof(ctx->per_ip[ip].last_submission));
+   ctx->bound_ip = ip;
 
-   VkResult result = radv_wddm2_queue_init(ws, AMD_IP_GFX, ctx->priority, NULL, queue, true, cookie);
+   VkResult result = radv_wddm2_queue_init(ws, ip, ctx->priority, NULL, queue, true, cookie);
    if (result != VK_SUCCESS) {
       if (radv_wddm2_queue_holds(queue))
          ctx->kept = true;
       else
-         radv_wddm2_queue_reset_unbound(ws, AMD_IP_GFX, queue);
+         radv_wddm2_queue_reset_unbound(ws, ip, queue);
       return result;
    }
 
@@ -764,7 +770,8 @@ radv_wddm2_ctx_unbind(struct radeon_winsys_ctx *rwctx)
 {
    struct radv_wddm2_ctx *ctx = radv_wddm2_ctx(rwctx);
    struct radv_wddm2_winsys *ws = ctx->ws;
-   struct radv_wddm2_queue *queue = &ctx->per_ip[AMD_IP_GFX].queue;
+   const enum amd_ip_type ip = ctx->bound_ip;
+   struct radv_wddm2_queue *queue = &ctx->per_ip[ip].queue;
 
    if (!ctx->bindable || !ctx->bound)
       return VK_ERROR_INITIALIZATION_FAILED;
@@ -772,10 +779,10 @@ radv_wddm2_ctx_unbind(struct radeon_winsys_ctx *rwctx)
    bool retired;
    const bool released = radv_wddm2_queue_release(queue, true, &retired);
    ctx->bound = false;
-   memset(&ctx->per_ip[AMD_IP_GFX].last_submission, 0, sizeof(ctx->per_ip[AMD_IP_GFX].last_submission));
+   memset(&ctx->per_ip[ip].last_submission, 0, sizeof(ctx->per_ip[ip].last_submission));
 
    if (released) {
-      radv_wddm2_queue_reset_unbound(ws, AMD_IP_GFX, queue);
+      radv_wddm2_queue_reset_unbound(ws, ip, queue);
       return VK_SUCCESS;
    }
    ctx->kept = true;
@@ -1821,16 +1828,16 @@ radv_wddm2_cs_submit(struct radeon_winsys_ctx *_ctx,
 
    if (radv_wddm2_ctx_unbound(ctx))
       return VK_ERROR_VALIDATION_FAILED;
+   /* A bound queue has the one context of its bind (radv_wddm2_ctx_bind), on the IP of its family.
+    * Work of another IP has no context there and is lost with no host call. */
+   if (ctx->bindable && submit->ip_type != ctx->bound_ip)
+      return VK_ERROR_DEVICE_LOST;
 
-   /* bc250: the node 2 context of the compute family, made at its first
+   /* bc250: the node 2 context of the compute family of an unbound device, made at its first
     * submission (radv_wddm2_ctx_create). Only the one VkQueue of that family
     * submits COMPUTE work on this context, under the queue's external
     * synchronization, so no other thread makes it at the same time. */
    if (ws->bc250 && submit->ip_type == AMD_IP_COMPUTE && !queue->context_h) {
-      /* A bound queue gets its contexts from the embedder, which binds GFX only. RADV shows no
-       * compute family on a bound instance (radv_compute_queue_enabled). */
-      if (ctx->bindable)
-         return VK_ERROR_DEVICE_LOST;
       if (radv_wddm2_queue_init(ws, AMD_IP_COMPUTE, ctx->priority, NULL, queue, false, NULL) != VK_SUCCESS ||
           !queue->context_h) {
          radv_wddm2_queue_reset_unbound(ws, AMD_IP_COMPUTE, queue);

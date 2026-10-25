@@ -2093,20 +2093,29 @@ radv_CreateDevice(VkPhysicalDevice physicalDevice, const VkDeviceCreateInfo *pCr
    if (bound_queues) {
       /* Admission matches consumption: each bound queue takes one context
        * of the embedder's, so never create more than were reported. */
-      uint32_t general_queues = 0;
+      uint32_t general_queues = 0, compute_queues = 0;
       for (unsigned i = 0; i < pCreateInfo->queueCreateInfoCount; i++) {
          const VkDeviceQueueCreateInfo *queue_create = &pCreateInfo->pQueueCreateInfos[i];
          const enum radv_queue_family qf = vk_queue_to_radv(pdev, queue_create->queueFamilyIndex);
 
-         /* Binding creates a graphics context only. */
-         if (qf != RADV_QUEUE_GENERAL && qf != RADV_QUEUE_SPARSE) {
+         /* Binding creates a GFX context on node 0, and a COMPUTE context on
+          * node 2 for a queue of the compute family (radv_wddm2_ctx_bind),
+          * which exists only when the COMPUTE IP was kept. */
+         if (qf != RADV_QUEUE_GENERAL && qf != RADV_QUEUE_SPARSE &&
+             (qf != RADV_QUEUE_COMPUTE || !radv_compute_queue_enabled(pdev))) {
+            amdgpu_wddm_log("radv/bc250: a bound device refuses queue family %u (RADV queue family %d)\n",
+                            queue_create->queueFamilyIndex, qf);
             result = VK_ERROR_FEATURE_NOT_PRESENT;
             goto fail;
          }
          if (qf == RADV_QUEUE_GENERAL)
             general_queues += queue_create->queueCount;
+         else if (qf == RADV_QUEUE_COMPUTE)
+            compute_queues += queue_create->queueCount;
       }
-      if (general_queues > radv_general_queue_count(pdev)) {
+      if (general_queues > radv_general_queue_count(pdev) || compute_queues > RADV_BC250_BOUND_COMPUTE_QUEUES) {
+         amdgpu_wddm_log("radv/bc250: a bound device refuses %u general and %u compute queues (at most %u and %u)\n",
+                         general_queues, compute_queues, radv_general_queue_count(pdev), RADV_BC250_BOUND_COMPUTE_QUEUES);
          result = VK_ERROR_INITIALIZATION_FAILED;
          goto fail;
       }

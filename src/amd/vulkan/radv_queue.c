@@ -2438,7 +2438,7 @@ radv_bc250_bind_queue(void *vk_queue, void *cookie)
 
    vk_queue_lock(&queue->vk);
    if (!queue->bound) {
-      result = device->ws->ctx_bind(queue->hw_ctx, cookie);
+      result = device->ws->ctx_bind(queue->hw_ctx, radv_queue_ring(queue), cookie);
       queue->bound = result == VK_SUCCESS;
    }
    vk_queue_unlock(&queue->vk);
