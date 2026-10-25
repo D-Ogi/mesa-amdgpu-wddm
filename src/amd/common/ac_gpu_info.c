@@ -493,7 +493,7 @@ static const uint32_t ac_ip_type_dw_padding_minus_1[AMD_NUM_IP_TYPES] = {
  * kept when the kernel driver offers a compute node (has_bc250_compute_node, the
  * BC-250 WDDM winsys) and dropped otherwise, as upstream drops it. 0 drops it and
  * 1 keeps it whatever the kernel driver says. */
-DEBUG_GET_ONCE_OPTION(bc250_ace_queues, "RADV_BC250_ACE_QUEUES", NULL)
+BC250_GET_ONCE_OPTION(bc250_ace_queues, RADV_BC250_ACE_QUEUES, NULL)
 
 static bool
 ac_bc250_ace_queues_enabled(const struct radeon_info *info)

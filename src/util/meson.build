@@ -165,6 +165,8 @@ files_mesa_util = files(
   'u_compile_stack.c',
   'u_compile_stack.h',
   'u_debug.c',
+  'bc250_env.c',
+  'bc250_env.h',
   'u_debug.h',
   'u_debug_memory.c',
   'u_cpu_detect.c',
@@ -545,6 +547,20 @@ if with_tests
     endif
   endif
 
+  # amdgpu-wddm: the release reads of the BC-250 switches against the lab reads (bc250_env.h), and the check that
+  # the table of reads that the test expands is the one the sources give.
+  test('bc250_env',
+    executable('bc250_env_test', files('bc250_env.c', 'tests/bc250_env_test.c'),
+      c_args : ['-DBC250_ENV_TEST'],
+      dependencies : [idep_mesautil],
+    ),
+    suite : ['util'], timeout : 60,
+  )
+  test('bc250_env_sites',
+    prog_python,
+    args : [files('tests/bc250_env_sites.py'), meson.project_source_root(), '--check'],
+    suite : ['util'], timeout : 60,
+  )
   test(
     'util_tests',
     executable(
