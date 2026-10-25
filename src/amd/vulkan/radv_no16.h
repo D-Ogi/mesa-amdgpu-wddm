@@ -21,6 +21,13 @@
  * "stageb" is the default, "off" gives the behaviour without this path, and
  * the stageb-neg-* values are lab controls that must make the frozen analyzer
  * or the pipeline fail.
+ *
+ * The advertised limits do not change: framebufferNoAttachmentsSampleCounts
+ * stays without 16 samples, so a D3D12 engine that checks it refuses the
+ * 16-sample PSO before it reaches this path. For the lab measurement only,
+ * "stageb-expose16" and the stageb-neg-* values also add 16 samples to that
+ * one limit in the process (radv_no16_expose16). The release flavour never
+ * does this.
  */
 #ifndef RADV_NO16_H
 #define RADV_NO16_H
@@ -57,6 +64,7 @@ radv_no16_auto_parse(const char *value, const char *probe_mode)
    if (!value || !*value)
       return RADV_NO16_AUTO_STAGEB;
    if (!strcmp(value, "off")) return RADV_NO16_AUTO_OFF;
+   if (!strcmp(value, "stageb") || !strcmp(value, "stageb-expose16")) return RADV_NO16_AUTO_STAGEB;
    if (!strcmp(value, "stageb-neg-upper")) return RADV_NO16_AUTO_NEG_UPPER;
    if (!strcmp(value, "stageb-neg-position")) return RADV_NO16_AUTO_NEG_POSITION;
    if (!strcmp(value, "stageb-neg-state")) return RADV_NO16_AUTO_NEG_STATE;
@@ -64,13 +72,31 @@ radv_no16_auto_parse(const char *value, const char *probe_mode)
    return RADV_NO16_AUTO_STAGEB;
 }
 
+/* Lab measurement only: true when the process adds 16 samples to
+ * framebufferNoAttachmentsSampleCounts. A set RADV_S16F8_PROBE_MODE, an unset
+ * variable, "stageb", "off" and unknown values keep the advertised limit. */
+static inline bool
+radv_no16_expose16_parse(const char *value, const char *probe_mode)
+{
+   if ((probe_mode && *probe_mode) || !value)
+      return false;
+   return !strcmp(value, "stageb-expose16") || !strncmp(value, "stageb-neg-", 11);
+}
+
 /* The process value of the kill switch, read at the first call. */
 enum radv_no16_auto_mode radv_no16_auto_mode(void);
+bool radv_no16_expose16(void);
 #else
 static inline enum radv_no16_auto_mode
 radv_no16_auto_mode(void)
 {
    return RADV_NO16_AUTO_STAGEB;
+}
+
+static inline bool
+radv_no16_expose16(void)
+{
+   return false;
 }
 #endif
 
