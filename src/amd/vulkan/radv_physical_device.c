@@ -32,6 +32,7 @@
 #include "radv_physical_device.h"
 #include "radv_bc250.h"
 #include "radv_bc250_dgc_stages.h"
+#include "radv_no16.h"
 #include "radv_pipeline_rt.h"
 #include "radv_video.h"
 #include "radv_wsi.h"
@@ -2050,7 +2051,8 @@ radv_get_physical_device_properties(struct radv_physical_device *pdev)
       .framebufferColorSampleCounts = sample_counts,
       .framebufferDepthSampleCounts = sample_counts,
       .framebufferStencilSampleCounts = sample_counts,
-      .framebufferNoAttachmentsSampleCounts = sample_counts,
+      /* radv_no16.h: only a lab measurement process adds 16 samples here. */
+      .framebufferNoAttachmentsSampleCounts = sample_counts | (radv_no16_expose16() ? VK_SAMPLE_COUNT_16_BIT : 0),
       .maxColorAttachments = MAX_RTS,
       .sampledImageColorSampleCounts = sample_counts,
       .sampledImageIntegerSampleCounts = sample_counts,

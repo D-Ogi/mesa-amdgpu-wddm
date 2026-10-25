@@ -31,24 +31,35 @@ const uint32_t radv_no16_stageb_vs_blake3[8] = {0x15459962, 0x346f6ae5, 0xcaa484
 
 #if defined(RADV_S16F8_PROBE) && RADV_S16F8_PROBE
 static enum radv_no16_auto_mode radv_no16_latched_mode;
+static bool radv_no16_latched_expose16;
 
 /* Lab kill switch (radv_no16.h). A set variable prints one line. */
 static void
 radv_no16_auto_latch(void)
 {
    const char *value = getenv("RADV_NO16_AUTO");
-   radv_no16_latched_mode = radv_no16_auto_parse(value, getenv("RADV_S16F8_PROBE_MODE"));
+   const char *probe_mode = getenv("RADV_S16F8_PROBE_MODE");
+   radv_no16_latched_mode = radv_no16_auto_parse(value, probe_mode);
+   radv_no16_latched_expose16 = radv_no16_expose16_parse(value, probe_mode);
    if (value && *value)
-      fprintf(stderr, "RADV_NO16_AUTO mode=%s requested=%s\n", radv_no16_auto_mode_name(radv_no16_latched_mode),
-              value);
+      fprintf(stderr, "RADV_NO16_AUTO mode=%s requested=%s expose16=%d\n",
+              radv_no16_auto_mode_name(radv_no16_latched_mode), value, radv_no16_latched_expose16);
 }
+
+static util_once_flag radv_no16_latch_once = UTIL_ONCE_FLAG_INIT;
 
 enum radv_no16_auto_mode
 radv_no16_auto_mode(void)
 {
-   static util_once_flag once = UTIL_ONCE_FLAG_INIT;
-   util_call_once(&once, radv_no16_auto_latch);
+   util_call_once(&radv_no16_latch_once, radv_no16_auto_latch);
    return radv_no16_latched_mode;
+}
+
+bool
+radv_no16_expose16(void)
+{
+   util_call_once(&radv_no16_latch_once, radv_no16_auto_latch);
+   return radv_no16_latched_expose16;
 }
 #endif
 
