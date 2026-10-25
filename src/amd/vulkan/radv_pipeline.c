@@ -12,6 +12,7 @@
 #include "meta/radv_meta.h"
 #include "nir/nir.h"
 #include "nir/radv_nir.h"
+#include "nir/radv_nir_no16.h"
 #include "tools/radv_rmv.h"
 #include "util/u_atomic.h"
 #include "radv_pipeline_rt.h"
@@ -409,6 +410,11 @@ radv_postprocess_nir(const struct radv_compiler_info *compiler_info, const struc
 
    /* Lower I/O intrinsics to memory instructions. */
    bool io_to_mem = radv_nir_lower_io_to_mem(compiler_info, stage);
+   /* radv_no16.h: the memory writes of the vertex body, before NGG adds its own. */
+   if (stage->stage == MESA_SHADER_VERTEX && stage->info.vs.no16_guard) {
+      assert(lowered_ngg);
+      NIR_PASS(_, stage->nir, radv_nir_no16_guard_vs_memory, &stage->args);
+   }
    if (lowered_ngg) {
       radv_lower_ngg(compiler_info, stage, gfx_state);
    } else if (is_last_vgt_stage) {
@@ -494,6 +500,10 @@ radv_postprocess_nir(const struct radv_compiler_info *compiler_info, const struc
             &(nir_lower_idiv_options){
                .allow_fp16 = gfx_level >= GFX9,
             });
+
+   /* radv_no16.h: after the last pass that creates a sample index. */
+   if (stage->stage == MESA_SHADER_FRAGMENT && stage->info.ps.no16 == RADV_NO16_DRAW_SPLIT16)
+      NIR_PASS(_, stage->nir, radv_nir_no16_lower_split_late, &stage->args);
 
    NIR_PASS(
       _, stage->nir, ac_nir_lower_intrinsics_to_args, &stage->args.ac,

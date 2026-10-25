@@ -1946,8 +1946,12 @@ radv_get_physical_device_properties(struct radv_physical_device *pdev)
       .framebufferColorSampleCounts = sample_counts,
       .framebufferDepthSampleCounts = sample_counts,
       .framebufferStencilSampleCounts = sample_counts,
-      /* radv_no16.h: only a lab measurement process adds 16 samples here. */
-      .framebufferNoAttachmentsSampleCounts = sample_counts | (radv_no16_expose16() ? VK_SAMPLE_COUNT_16_BIT : 0),
+      /* radv_no16.h: 16 samples without attachments (NATIVE16 and SPLIT16 routes). */
+      .framebufferNoAttachmentsSampleCounts =
+         sample_counts | (radv_no16_auto_mode() != RADV_NO16_AUTO_OFF &&
+                                radv_no16_gfx_level_ok(pdev->info.gfx_level == GFX10, pdev->info.gfx_level == GFX10_3)
+                             ? VK_SAMPLE_COUNT_16_BIT
+                             : 0),
       .maxColorAttachments = MAX_RTS,
       .sampledImageColorSampleCounts = sample_counts,
       .sampledImageIntegerSampleCounts = sample_counts,
