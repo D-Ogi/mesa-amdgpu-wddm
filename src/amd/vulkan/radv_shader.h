@@ -354,6 +354,11 @@ struct radv_shader_stage {
    uint64_t bc250_bary_ref_mask;
    int8_t bc250_bary_raw_slot;
    int8_t bc250_bary_flat_slot;
+#if defined(RADV_S16F8_PROBE) && RADV_S16F8_PROBE
+   /* RADV_NO16_AUTO: the fragment shader must pass the Stage B transform, and did. */
+   bool no16_logical16_requested;
+   bool no16_transformed;
+#endif
    nir_shader *gs_copy_shader;
    nir_shader *internal_nir; /* meta shaders */
 

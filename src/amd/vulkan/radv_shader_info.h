@@ -247,6 +247,10 @@ struct radv_shader_info {
       bool selects_front_face_dynamically : 1;
 
       bool has_epilog : 1;
+#if defined(RADV_S16F8_PROBE) && RADV_S16F8_PROBE
+      /* RADV_NO16_AUTO marker: logical 16-sample body on a physical 8-sample pipeline. */
+      bool no16_logical16 : 1;
+#endif
    } ps;
    struct {
       uint32_t block_size[3];
