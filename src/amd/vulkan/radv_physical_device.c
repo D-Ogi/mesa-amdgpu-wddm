@@ -3145,6 +3145,10 @@ radv_get_physical_device_queue_family_properties(struct radv_physical_device *pd
 
    if (radv_compute_queue_enabled(pdev)) {
       VkQueueFlags compute_flags = VK_QUEUE_COMPUTE_BIT | VK_QUEUE_TRANSFER_BIT | VK_QUEUE_SPARSE_BINDING_BIT;
+      /* The BC-250 compute node binds no sparse memory: the queue mapping of the
+       * WDDM winsys runs on the graphics family's companion context only. */
+      if (pdev->info.has_bc250_compute_node)
+         compute_flags &= ~VK_QUEUE_SPARSE_BINDING_BIT;
       if (*pCount > idx) {
          *pQueueFamilyProperties[idx] = (VkQueueFamilyProperties){
             .queueFlags = compute_flags | radv_queue_family_protected_flag(pdev, RADV_QUEUE_COMPUTE),

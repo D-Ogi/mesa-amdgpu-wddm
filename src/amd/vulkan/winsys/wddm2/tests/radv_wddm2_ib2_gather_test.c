@@ -32,6 +32,13 @@
  * copy_fallback is the same control inside this build: BC250_IB_NOCOPY=0 copies every IB, and the
  * submission above IB_SIZE is refused again.
  *
+ * The compute cases are for the compute queue family on node 2 (the caps offer node 2 in their
+ * submittable node mask). ctx_create makes the node 0 context only, and the first COMPUTE
+ * submission makes the node 2 context, with a BC2C of ip_type COMPUTE and node 2. The BC2S blob
+ * of a COMPUTE submission names COMPUTE, and every IB of it is copied into the IB1, because the
+ * compute ring runs no IB2. A refused or absent node 2 gives VK_ERROR_DEVICE_LOST on the compute
+ * queue only, and the GFX queue continues.
+ *
  * Usage: radv_wddm2_ib2_gather_test [test], no argument runs all.
  */
 #undef VK_USE_PLATFORM_WAYLAND_KHR
@@ -134,6 +141,12 @@ static struct {
    unsigned n_syncs;
 
    unsigned contexts, submits, unknown, lost_reports;
+
+   /* What each CreateContextVirtual asked for: its node and its BC2C blob. A node in refuse_nodes
+    * is refused (STATUS_UNSUCCESSFUL); context_calls counts the refused calls too. */
+   uint32_t ctx_node[8], ctx_blob_ip[8], ctx_blob_node[8];
+   unsigned context_calls, refuse_nodes;
+   uint32_t blob_ip, blob_ib_ip;
 
    /* The last SubmitCommand, with a copy of its IB1 taken in the call. */
    uint64_t submit_va;
@@ -272,6 +285,16 @@ fake_dispatch(void *userdata, uint32_t op, void *arg)
    }
    case BC250_HOST_CreateContextVirtual: {
       D3DKMT_CREATECONTEXTVIRTUAL *c = arg;
+      const struct bc250_context_blob *b = c->pPrivateDriverData;
+      h.context_calls++;
+      if (c->NodeOrdinal < 32 && (h.refuse_nodes & (1u << c->NodeOrdinal)))
+         return (int32_t)0xC0000001; /* STATUS_UNSUCCESSFUL */
+      if (h.contexts < ARRAY_SIZE(h.ctx_node)) {
+         const bool blob_ok = b && c->PrivateDriverDataSize >= sizeof(*b) && b->magic == BC250_CONTEXT_MAGIC;
+         h.ctx_node[h.contexts] = c->NodeOrdinal;
+         h.ctx_blob_ip[h.contexts] = blob_ok ? b->ip_type : UINT32_MAX;
+         h.ctx_blob_node[h.contexts] = blob_ok ? b->node_ordinal : UINT32_MAX;
+      }
       c->hContext = CONTEXT_H + h.contexts++;
       return STATUS_SUCCESS;
    }
@@ -308,6 +331,8 @@ fake_dispatch(void *userdata, uint32_t op, void *arg)
       h.blob_num_ibs = h.blob_magic ? blob->num_ibs : 0;
       h.blob_va = h.blob_magic ? blob->ib[0].va_start : 0;
       h.blob_bytes = h.blob_magic ? blob->ib[0].ib_bytes : 0;
+      h.blob_ip = h.blob_magic ? blob->ip_type : UINT32_MAX;
+      h.blob_ib_ip = h.blob_magic ? blob->ib[0].ip_type : UINT32_MAX;
       const struct alloc *a = alloc_at(c->Commands, c->CommandLength);
       h.ib1_in_alloc = a != NULL;
       h.ib1_dw = 0;
@@ -391,6 +416,10 @@ make_ws(const char *nocopy)
    ws->gpu_info.gart_page_size = 4096;
    ws->gpu_info.ip[AMD_IP_GFX].ib_alignment = 256;
    ws->gpu_info.ip[AMD_IP_GFX].ib_pad_dw_mask = 0x7;
+   /* The caps offer node 2: one COMPUTE queue (radv_wddm2_winsys.c). */
+   ws->gpu_info.ip[AMD_IP_COMPUTE].num_queues = 1;
+   ws->gpu_info.ip[AMD_IP_COMPUTE].ib_alignment = 256;
+   ws->gpu_info.ip[AMD_IP_COMPUTE].ib_pad_dw_mask = 0x7;
    ws->base.query_info = test_query_info;
    radv_wddm2_bo_init_functions(ws);
    radv_wddm2_cs_init_functions(ws);
@@ -412,12 +441,18 @@ gfx(struct radeon_winsys_ctx *ctx)
    return &radv_wddm2_ctx(ctx)->per_ip[AMD_IP_GFX].queue;
 }
 
-/* A primary GFX stream of payload dwords: NOP packets of at most 16384 dwords, then the finalize
- * of the winsys, which pads it to the GFX unit and records its IBs. */
-static struct ac_cmdbuf *
-make_stream(struct radv_wddm2_winsys *ws, unsigned payload)
+static struct radv_wddm2_queue *
+compute(struct radeon_winsys_ctx *ctx)
 {
-   struct ac_cmdbuf *cs = ws->base.cs_create(&ws->base, AMD_IP_GFX, false);
+   return &radv_wddm2_ctx(ctx)->per_ip[AMD_IP_COMPUTE].queue;
+}
+
+/* A primary stream of payload dwords for the ip: NOP packets of at most 16384 dwords, then the
+ * finalize of the winsys, which pads it to the unit of the ip and records its IBs. */
+static struct ac_cmdbuf *
+make_stream_ip(struct radv_wddm2_winsys *ws, enum amd_ip_type ip, unsigned payload)
+{
+   struct ac_cmdbuf *cs = ws->base.cs_create(&ws->base, ip, false);
    check(cs != NULL, "cs_create");
    if (!cs)
       return NULL;
@@ -440,15 +475,29 @@ make_stream(struct radv_wddm2_winsys *ws, unsigned payload)
    return cs;
 }
 
+/* A primary GFX stream of payload dwords. */
+static struct ac_cmdbuf *
+make_stream(struct radv_wddm2_winsys *ws, unsigned payload)
+{
+   return make_stream_ip(ws, AMD_IP_GFX, payload);
+}
+
 static VkResult
-submit(struct radv_wddm2_winsys *ws, struct radeon_winsys_ctx *ctx, unsigned count, struct ac_cmdbuf **cs)
+submit_ip(struct radv_wddm2_winsys *ws, struct radeon_winsys_ctx *ctx, enum amd_ip_type ip, unsigned count,
+          struct ac_cmdbuf **cs)
 {
    const struct radv_winsys_submit_info info = {
-      .ip_type = AMD_IP_GFX,
+      .ip_type = ip,
       .cs_count = count,
       .cs_array = cs,
    };
    return ws->base.cs_submit(ctx, &info, 0, NULL, 0, NULL);
+}
+
+static VkResult
+submit(struct radv_wddm2_winsys *ws, struct radeon_winsys_ctx *ctx, unsigned count, struct ac_cmdbuf **cs)
+{
+   return submit_ip(ws, ctx, AMD_IP_GFX, count, cs);
 }
 
 static uint64_t
@@ -847,6 +896,107 @@ test_odd_call_padding(void)
    finish(ws, ctx, 3, cs);
 }
 
+/* ctx_create makes the node 0 context only. The first COMPUTE submission makes the node 2
+ * context, and the submission goes to it with a BC2S blob of COMPUTE. A later COMPUTE submission
+ * uses the same context, and GFX submissions stay on node 0. */
+static void
+test_compute_lazy_context(void)
+{
+   struct radv_wddm2_winsys *ws = make_ws(NULL);
+   struct radeon_winsys_ctx *ctx = make_ctx(ws);
+   check(h.contexts == 1 && h.ctx_node[0] == 0 && h.ctx_blob_ip[0] == BC250_IP_GFX && h.ctx_blob_node[0] == 0,
+         "ctx_create makes one context: node 0, BC2C GFX node 0 (%u contexts)", h.contexts);
+   check(!compute(ctx)->context_h, "no node 2 context before the first COMPUTE submission");
+
+   struct ac_cmdbuf *cs[3] = {make_stream_ip(ws, AMD_IP_COMPUTE, 13), make_stream_ip(ws, AMD_IP_COMPUTE, 8),
+                              make_stream(ws, 8)};
+   check(submit_ip(ws, ctx, AMD_IP_COMPUTE, 1, cs) == VK_SUCCESS && h.submits == 1,
+         "the first COMPUTE submission is accepted");
+   check(h.contexts == 2 && h.ctx_node[1] == BC250_COMPUTE_NODE && h.ctx_blob_ip[1] == BC250_IP_COMPUTE &&
+            h.ctx_blob_node[1] == BC250_COMPUTE_NODE,
+         "it makes the node 2 context: NodeOrdinal %u, BC2C ip_type %u node %u", h.ctx_node[1], h.ctx_blob_ip[1],
+         h.ctx_blob_node[1]);
+   const uint32_t compute_h = compute(ctx)->context_h;
+   check(compute_h && compute_h != gfx(ctx)->context_h && h.submit_context == compute_h,
+         "the submission goes to the node 2 context (0x%x)", h.submit_context);
+   check(h.blob_ip == BC250_IP_COMPUTE && h.blob_ib_ip == BC250_IP_COMPUTE,
+         "its BC2S blob names COMPUTE (%u, IB %u)", h.blob_ip, h.blob_ib_ip);
+   const struct radv_winsys_ib a = radv_winsys_cs(cs[0])->ib_buffers[0];
+   check(h.submit_va == a.va && h.submit_bytes == a.cdw * 4, "one IB runs at its own address (%u bytes)",
+         h.submit_bytes);
+
+   check(submit_ip(ws, ctx, AMD_IP_COMPUTE, 1, cs + 1) == VK_SUCCESS && h.submits == 2 && h.contexts == 2 &&
+            h.submit_context == compute_h,
+         "a second COMPUTE submission uses the same context (%u contexts)", h.contexts);
+   check(submit(ws, ctx, 1, cs + 2) == VK_SUCCESS && h.submit_context == gfx(ctx)->context_h &&
+            h.blob_ip == BC250_IP_GFX && h.blob_ib_ip == BC250_IP_GFX && h.contexts == 2,
+         "a GFX submission stays on node 0 with a BC2S blob of GFX");
+   finish(ws, ctx, 3, cs);
+}
+
+/* The compute ring runs no IB2: the IBs of a COMPUTE submission are copied into one IB1, without
+ * BC250_IB_NOCOPY, while GFX streams of the same context are called as IB2. */
+static void
+test_compute_copies(void)
+{
+   struct radv_wddm2_winsys *ws = make_ws(NULL);
+   check(!GATHER_COPY(ws), "without BC250_IB_NOCOPY the GFX IB2 calls are on");
+   struct radeon_winsys_ctx *ctx = make_ctx(ws);
+   struct ac_cmdbuf *cs[4] = {make_stream_ip(ws, AMD_IP_COMPUTE, 13), make_stream_ip(ws, AMD_IP_COMPUTE, 20),
+                              make_stream(ws, 8), make_stream(ws, 8)};
+   const struct radv_winsys_ib a = radv_winsys_cs(cs[0])->ib_buffers[0];
+   const struct radv_winsys_ib b = radv_winsys_cs(cs[1])->ib_buffers[0];
+   check(a.cdw == 16 && b.cdw == 24, "the COMPUTE streams are padded to 16 and 24 dwords (%u, %u)", a.cdw, b.cdw);
+
+   check(submit_ip(ws, ctx, AMD_IP_COMPUTE, 2, cs) == VK_SUCCESS, "two COMPUTE streams are accepted");
+   const uint32_t *ma = (const uint32_t *)radv_buffer_map(&ws->base, a.bo) + (a.va - a.bo->va) / 4;
+   const uint32_t *mb = (const uint32_t *)radv_buffer_map(&ws->base, b.bo) + (b.va - b.bo->va) / 4;
+   check(one_ib1(compute(ctx), 40) && !memcmp(h.ib1, ma, 16 * 4) && !memcmp(h.ib1 + 16, mb, 24 * 4),
+         "one IB1 of 40 dwords in a gather BO of the compute queue: both streams copied (%u bytes)",
+         h.submit_bytes);
+   struct walk w = walk_ib1();
+   check(w.ok && !w.calls && !w.other, "the IB1 holds no IB2 call (%u)", w.calls);
+   check(h.blob_ip == BC250_IP_COMPUTE, "its BC2S blob names COMPUTE");
+
+   check(submit(ws, ctx, 2, cs + 2) == VK_SUCCESS && one_ib1(gfx(ctx), 8), "two GFX streams: two IB2 calls");
+   w = walk_ib1();
+   check(w.ok && w.calls == 2 && w.targets_ok, "the GFX IB1 calls both streams");
+   finish(ws, ctx, 4, cs);
+}
+
+/* bc250kmd refuses a node 2 context (node 2 closed under the caps, or a fault): the COMPUTE
+ * submission gets VK_ERROR_DEVICE_LOST, nothing is submitted or left behind, and GFX continues. */
+static void
+test_compute_refused(void)
+{
+   struct radv_wddm2_winsys *ws = make_ws(NULL);
+   struct radeon_winsys_ctx *ctx = make_ctx(ws);
+   h.refuse_nodes = 1u << BC250_COMPUTE_NODE;
+   struct ac_cmdbuf *cs[2] = {make_stream_ip(ws, AMD_IP_COMPUTE, 8), make_stream(ws, 8)};
+   const unsigned syncs = h.n_syncs;
+   check(submit_ip(ws, ctx, AMD_IP_COMPUTE, 1, cs) == VK_ERROR_DEVICE_LOST && !h.submits,
+         "a refused node 2 context gives VK_ERROR_DEVICE_LOST, and nothing is submitted");
+   check(h.context_calls == 2 && h.contexts == 1 && !compute(ctx)->context_h && h.n_syncs == syncs,
+         "one refused CreateContextVirtual, no context and no fence left (%u calls)", h.context_calls);
+   check(submit(ws, ctx, 1, cs + 1) == VK_SUCCESS && h.submits == 1 && h.submit_context == gfx(ctx)->context_h,
+         "the GFX queue continues");
+   finish(ws, ctx, 2, cs);
+}
+
+/* Caps without node 2 keep no COMPUTE queue (num_queues 0), so RADV shows no compute family. A
+ * COMPUTE submission that comes anyway asks for no context and gets VK_ERROR_DEVICE_LOST. */
+static void
+test_compute_absent(void)
+{
+   struct radv_wddm2_winsys *ws = make_ws(NULL);
+   ws->gpu_info.ip[AMD_IP_COMPUTE].num_queues = 0;
+   struct radeon_winsys_ctx *ctx = make_ctx(ws);
+   struct ac_cmdbuf *cs[1] = {make_stream_ip(ws, AMD_IP_COMPUTE, 8)};
+   check(submit_ip(ws, ctx, AMD_IP_COMPUTE, 1, cs) == VK_ERROR_DEVICE_LOST && !h.submits && h.context_calls == 1,
+         "no node 2 context is asked for, and the submission is lost (%u calls)", h.context_calls);
+   finish(ws, ctx, 1, cs);
+}
+
 static const struct {
    const char *name;
    void (*fn)(void);
@@ -862,6 +1012,10 @@ static const struct {
    {"direct_outside_bo", test_direct_outside_bo},
    {"dgc_mark", test_dgc_mark},
    {"odd_call_padding", test_odd_call_padding},
+   {"compute_lazy_context", test_compute_lazy_context},
+   {"compute_copies", test_compute_copies},
+   {"compute_refused", test_compute_refused},
+   {"compute_absent", test_compute_absent},
 };
 
 int

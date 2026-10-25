@@ -20,6 +20,11 @@
 #define BC250_HEAP_GTT  0x2u
 #define BC250_HEAP_VRAM 0x4u
 #define BC250_IP_GFX    0u
+#define BC250_IP_COMPUTE 1u /* AMDGPU_HW_IP_COMPUTE */
+
+/* WDDM node 2: bc250kmd's compute node, one MEC queue. It takes BC2C and BC2S blobs
+ * of BC250_IP_COMPUTE only, and node 0 takes BC250_IP_GFX only. */
+#define BC250_COMPUTE_NODE 2u
 
 #define BC250_A_EXACT_VA 0x1u
 

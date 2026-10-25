@@ -72,6 +72,8 @@ struct radv_wddm2_queue {
 
 struct radv_wddm2_ctx {
    struct radv_wddm2_winsys *ws;
+   /* The priority of the node 2 context, which comes with the first COMPUTE submission. */
+   enum radeon_ctx_priority priority;
 
    struct radv_wddm2_queue ace_queue;
 

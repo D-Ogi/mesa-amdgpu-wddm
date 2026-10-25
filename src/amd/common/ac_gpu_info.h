@@ -420,6 +420,9 @@ struct radeon_info {
    bool has_trap_handler_support;
    bool kernel_has_modifiers;
    uint32_t userq_ip_mask; /* AMD_IP_* bits */
+   /* The BC-250 WDDM kernel driver runs COMPUTE work on a node of its own (WDDM node 2, one MEC queue): bit 2 of
+    * the caps blob's submittable_node_mask. Only the WDDM winsys sets it. */
+   bool has_bc250_compute_node;
    uint8_t address_prt_wa_control_bit;
 
    struct ac_compiler_info compiler_info;

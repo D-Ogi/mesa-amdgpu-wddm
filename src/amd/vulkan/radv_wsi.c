@@ -104,6 +104,14 @@ radv_init_wsi(struct radv_physical_device *pdev)
       return result;
 
    pdev->wsi_device.supports_modifiers = pdev->info.is_amdgpu;
+   /* The BC-250 compute family does not present (vkGetPhysicalDeviceSurfaceSupportKHR
+    * answers VK_FALSE): the present route is tested from the graphics family only. */
+   if (pdev->info.has_bc250_compute_node) {
+      for (uint32_t i = 0; i < pdev->num_queues; i++) {
+         if (pdev->vk_queue_to_radv[i] == RADV_QUEUE_COMPUTE)
+            pdev->wsi_device.queue_supports_blit &= ~BITFIELD64_BIT(i);
+      }
+   }
 #ifndef _WIN32
    pdev->wsi_device.set_memory_ownership = radv_wsi_set_memory_ownership;
    pdev->wsi_device.get_blit_queue = radv_wsi_get_prime_blit_queue;

@@ -15,6 +15,7 @@
 #include "amd_family.h"
 #include "amdgfxregs.h"
 #include "util/macros.h"
+#include "util/u_debug.h"
 #include "util/u_math.h"
 #include "util/os_misc.h"
 #include "util/format/u_format.h"
@@ -488,6 +489,19 @@ static const uint32_t ac_ip_type_dw_padding_minus_1[AMD_NUM_IP_TYPES] = {
     [AMD_IP_VPE]      = 0xf,
 };
 
+/* RADV_BC250_ACE_QUEUES: the GFX1013 COMPUTE IP (the ACE rings). Unset, it is
+ * kept when the kernel driver offers a compute node (has_bc250_compute_node, the
+ * BC-250 WDDM winsys) and dropped otherwise, as upstream drops it. 0 drops it and
+ * 1 keeps it whatever the kernel driver says. */
+DEBUG_GET_ONCE_OPTION(bc250_ace_queues, "RADV_BC250_ACE_QUEUES", NULL)
+
+static bool
+ac_bc250_ace_queues_enabled(const struct radeon_info *info)
+{
+   const char *ace = debug_get_option_bc250_ace_queues();
+   return ace ? debug_parse_bool_option(ace, false) : info->has_bc250_compute_node;
+}
+
 bool
 ac_fill_hw_ip_info(struct radeon_info *info, const struct drm_amdgpu_info_device *device_info,
                    unsigned ip_type, const struct drm_amdgpu_info_hw_ip *ip_info)
@@ -498,9 +512,14 @@ ac_fill_hw_ip_info(struct radeon_info *info, const struct drm_amdgpu_info_device
        */
       info->ip[ip_type].num_queues = 1;
    } else if (ip_info->available_rings) {
-      /* GFX1013 is known to have broken compute queue */
+      /* GFX1013 is known to have broken compute queue. bc250kmd runs COMPUTE
+       * work on a WDDM node of its own, one MEC queue with its own VMID switch,
+       * TLB invalidation and fence, and says so in its caps
+       * (has_bc250_compute_node): then the IP is kept, and RADV shows a compute
+       * queue family. Without that node the refusal stays, as upstream has it
+       * (ac_bc250_ace_queues_enabled). */
       if (ip_type == AMD_IP_COMPUTE && device_info->family == FAMILY_NV &&
-          ASICREV_IS(device_info->external_rev, GFX1013))
+          ASICREV_IS(device_info->external_rev, GFX1013) && !ac_bc250_ace_queues_enabled(info))
          return false;
 
       info->ip[ip_type].num_queues = util_bitcount(ip_info->available_rings);
