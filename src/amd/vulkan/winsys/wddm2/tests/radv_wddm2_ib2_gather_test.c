@@ -115,7 +115,7 @@ const struct vk_sync_type vk_wddm2_monitored_fence_type = {0};
 #define SYNC_BASE    0x60u
 #define ALLOC_BASE   0x100u
 #define MAX_ALLOC    256u
-#define MAX_SYNC     8u
+#define MAX_SYNC     16u
 #define IB1_COPY_DW  65536u
 
 #define IB2_HEADER   0xC0023F00u /* PKT3(PKT3_INDIRECT_BUFFER, 2, 0) */
@@ -137,10 +137,14 @@ static struct {
       uint32_t handle;
       bool live;
       uint64_t value; /* the CPU view of a monitored fence */
+      uint64_t queued; /* the largest value a GPU signal queued */
    } syncs[MAX_SYNC];
    unsigned n_syncs;
 
    unsigned contexts, submits, unknown, lost_reports;
+
+   /* GPU waits, GPU signal calls with AllowFenceRewind, and GPU signals refused. */
+   unsigned gpu_waits, rewind_signals, refused_signals;
 
    /* What each CreateContextVirtual asked for: its node and its BC2C blob. A node in refuse_nodes
     * is refused (STATUS_UNSUCCESSFUL); context_calls counts the refused calls too. */
@@ -211,6 +215,15 @@ sync_value(uint32_t handle)
    for (unsigned i = 0; i < h.n_syncs; i++)
       if (h.syncs[i].handle == handle && h.syncs[i].live)
          return &h.syncs[i].value;
+   return NULL;
+}
+
+static uint64_t *
+sync_queued(uint32_t handle)
+{
+   for (unsigned i = 0; i < h.n_syncs; i++)
+      if (h.syncs[i].handle == handle && h.syncs[i].live)
+         return &h.syncs[i].queued;
    return NULL;
 }
 
@@ -307,6 +320,7 @@ fake_dispatch(void *userdata, uint32_t op, void *arg)
       h.syncs[h.n_syncs].handle = SYNC_BASE + h.n_syncs;
       h.syncs[h.n_syncs].live = true;
       h.syncs[h.n_syncs].value = s->Info.MonitoredFence.InitialFenceValue;
+      h.syncs[h.n_syncs].queued = s->Info.MonitoredFence.InitialFenceValue;
       s->hSyncObject = h.syncs[h.n_syncs].handle;
       s->Info.MonitoredFence.FenceValueCPUVirtualAddress = &h.syncs[h.n_syncs].value;
       s->Info.MonitoredFence.FenceValueGPUVirtualAddress = 0x7f0000000ull + 8ull * h.n_syncs;
@@ -343,15 +357,33 @@ fake_dispatch(void *userdata, uint32_t op, void *arg)
       return STATUS_SUCCESS;
    }
    case BC250_HOST_SignalSynchronizationObjectFromGpu2: {
-      /* The GPU of the test: the work before the signal is done at once. */
+      /* The GPU of the test: the work before the signal is done at once. A value behind a larger
+       * value already queued to the same fence is refused without AllowFenceRewind, which is the
+       * order that the kernel can refuse. */
       const D3DKMT_SIGNALSYNCHRONIZATIONOBJECTFROMGPU2 *s = arg;
       for (unsigned i = 0; i < s->ObjectCount; i++) {
+         const uint64_t *q = sync_queued(s->ObjectHandleArray[i]);
+         if (q && s->MonitoredFenceValueArray[i] < *q && !s->Flags.AllowFenceRewind) {
+            h.refused_signals++;
+            return (int32_t)0xC000000D; /* STATUS_INVALID_PARAMETER */
+         }
+      }
+      if (s->Flags.AllowFenceRewind)
+         h.rewind_signals++;
+      for (unsigned i = 0; i < s->ObjectCount; i++) {
          uint64_t *v = sync_value(s->ObjectHandleArray[i]);
+         uint64_t *q = sync_queued(s->ObjectHandleArray[i]);
          if (v && s->MonitoredFenceValueArray[i] > *v)
             *v = s->MonitoredFenceValueArray[i];
+         if (q && s->MonitoredFenceValueArray[i] > *q)
+            *q = s->MonitoredFenceValueArray[i];
       }
       return STATUS_SUCCESS;
    }
+   case BC250_HOST_WaitForSynchronizationObjectFromGpu:
+      /* A GPU wait is queued on the context: nothing for the CPU to do. */
+      h.gpu_waits++;
+      return STATUS_SUCCESS;
    case BC250_HOST_WaitForSynchronizationObjectFromCpu: {
       const D3DKMT_WAITFORSYNCHRONIZATIONOBJECTFROMCPU *w = arg;
       for (unsigned i = 0; i < w->ObjectCount; i++) {
@@ -997,6 +1029,76 @@ test_compute_absent(void)
    finish(ws, ctx, 1, cs);
 }
 
+/* Wait-before-signal across two queues on one timeline (legal in Vulkan): the COMPUTE queue
+ * waits for 4 and signals 5, and only then does the GFX queue signal 4. The GFX signal is
+ * queued behind 5, so every application signal call carries AllowFenceRewind. The GFX queue
+ * then waits for 5 and signals 6. The progress fences of the queues need no flag. */
+static void
+test_wait_before_signal(void)
+{
+   struct radv_wddm2_winsys *ws = make_ws(NULL);
+   struct radeon_winsys_ctx *ctx = make_ctx(ws);
+   D3DKMT_CREATESYNCHRONIZATIONOBJECT2 create = {0};
+   create.Info.Type = D3DDDI_MONITORED_FENCE;
+   create.Info.MonitoredFence.InitialFenceValue = 3;
+   check(fake_dispatch(&h, BC250_HOST_CreateSynchronizationObject2, &create) == STATUS_SUCCESS,
+         "the timeline fence is made at 3");
+   struct vk_wddm2_monitored_fence timeline = {
+      .base = {.type = &vk_wddm2_monitored_fence_type},
+      .handle = create.hSyncObject,
+      .value_map = (uint64_t *)create.Info.MonitoredFence.FenceValueCPUVirtualAddress,
+   };
+
+   /* The model of the fake host: without the flag, a value behind a queued one is refused. */
+   uint64_t five = 5, four = 4;
+   D3DKMT_SIGNALSYNCHRONIZATIONOBJECTFROMGPU2 raw = {
+      .ObjectCount = 1,
+      .ObjectHandleArray = &create.hSyncObject,
+      .BroadcastContextCount = 1,
+      .BroadcastContextArray = &gfx(ctx)->context_h,
+      .MonitoredFenceValueArray = &five,
+   };
+   D3DKMT_CREATESYNCHRONIZATIONOBJECT2 probe = create;
+   probe.Info.MonitoredFence.InitialFenceValue = 3;
+   check(fake_dispatch(&h, BC250_HOST_CreateSynchronizationObject2, &probe) == STATUS_SUCCESS,
+         "a second fence for the model check");
+   raw.ObjectHandleArray = &probe.hSyncObject;
+   check(fake_dispatch(&h, BC250_HOST_SignalSynchronizationObjectFromGpu2, &raw) == STATUS_SUCCESS,
+         "the model: 5 is queued");
+   raw.MonitoredFenceValueArray = &four;
+   check(fake_dispatch(&h, BC250_HOST_SignalSynchronizationObjectFromGpu2, &raw) != STATUS_SUCCESS &&
+            h.refused_signals == 1,
+         "the model: 4 behind 5 without AllowFenceRewind is refused");
+   h.refused_signals = 0;
+   h.rewind_signals = 0;
+
+   struct ac_cmdbuf *cs[3] = {make_stream_ip(ws, AMD_IP_COMPUTE, 8), make_stream(ws, 8), make_stream(ws, 8)};
+   const struct vk_sync_wait wait4 = {.sync = &timeline.base, .wait_value = 4};
+   const struct vk_sync_wait wait5 = {.sync = &timeline.base, .wait_value = 5};
+   const struct vk_sync_signal signal4 = {.sync = &timeline.base, .signal_value = 4};
+   const struct vk_sync_signal signal5 = {.sync = &timeline.base, .signal_value = 5};
+   const struct vk_sync_signal signal6 = {.sync = &timeline.base, .signal_value = 6};
+   const struct radv_winsys_submit_info b = {.ip_type = AMD_IP_COMPUTE, .cs_count = 1, .cs_array = cs};
+   const struct radv_winsys_submit_info a = {.ip_type = AMD_IP_GFX, .cs_count = 1, .cs_array = cs + 1};
+   const struct radv_winsys_submit_info c = {.ip_type = AMD_IP_GFX, .cs_count = 1, .cs_array = cs + 2};
+
+   check(ws->base.cs_submit(ctx, &b, 1, &wait4, 1, &signal5) == VK_SUCCESS && h.gpu_waits == 1,
+         "COMPUTE B: a GPU wait for 4, then a signal of 5 (%u waits)", h.gpu_waits);
+   check(ws->base.cs_submit(ctx, &a, 0, NULL, 1, &signal4) == VK_SUCCESS && !h.refused_signals,
+         "GFX A: the signal of 4, queued behind 5, is accepted (%u refused)", h.refused_signals);
+   check(ws->base.cs_submit(ctx, &c, 1, &wait5, 1, &signal6) == VK_SUCCESS && h.gpu_waits == 2,
+         "GFX C: a GPU wait for 5, then a signal of 6");
+   check(h.rewind_signals == 3 && !h.refused_signals && *timeline.value_map == 6,
+         "the three application signal calls carry AllowFenceRewind (%u), and the fence is at %" PRIu64,
+         h.rewind_signals, *timeline.value_map);
+
+   D3DKMT_DESTROYSYNCHRONIZATIONOBJECT destroy = {.hSyncObject = create.hSyncObject};
+   fake_dispatch(&h, BC250_HOST_DestroySynchronizationObject, &destroy);
+   destroy.hSyncObject = probe.hSyncObject;
+   fake_dispatch(&h, BC250_HOST_DestroySynchronizationObject, &destroy);
+   finish(ws, ctx, 3, cs);
+}
+
 static const struct {
    const char *name;
    void (*fn)(void);
@@ -1016,6 +1118,7 @@ static const struct {
    {"compute_copies", test_compute_copies},
    {"compute_refused", test_compute_refused},
    {"compute_absent", test_compute_absent},
+   {"wait_before_signal", test_wait_before_signal},
 };
 
 int
