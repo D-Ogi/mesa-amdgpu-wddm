@@ -225,12 +225,47 @@ build_asin(nir_builder *b, nir_def *x, bool piecewise)
    }
 }
 
+/* Reduce the Taylor series argument to [0, 1/2]. Computing acos directly
+ * avoids subtracting two nearly equal values near x = 1.
+ */
+static nir_def *
+build_inverse_sine_32(nir_builder *b, nir_def *x, bool acos_result)
+{
+   nir_def *a = nir_fabs(b, x);
+   nir_def *small = nir_flt_imm(b, a, 0.5);
+   nir_def *reduced = nir_fsqrt(b, nir_fmul_imm(b, nir_fsub_imm(b, 1.0, a), 0.5));
+   nir_def *t = nir_bcsel(b, small, a, reduced);
+   nir_def *z = nir_fmul(b, t, t);
+   /* binomial(2*n,n) / (4^n * (2*n+1)), n = 0..9. */
+   static const double coefficients[] = {
+      1.0, 1.0 / 6.0, 3.0 / 40.0, 5.0 / 112.0, 35.0 / 1152.0,
+      63.0 / 2816.0, 231.0 / 13312.0, 143.0 / 10240.0,
+      6435.0 / 557056.0, 12155.0 / 1245184.0,
+   };
+   nir_def *p = nir_imm_float(b, coefficients[9]);
+   for (int i = 8; i >= 0; --i)
+      p = nir_ffma(b, p, z, nir_imm_float(b, coefficients[i]));
+   p = nir_fmul(b, t, p);
+
+   nir_def *twice = nir_fmul_imm(b, p, 2.0);
+   if (acos_result) {
+      nir_def *large_result = nir_bcsel(b, nir_flt_imm(b, x, 0.0),
+                                      nir_fsub_imm(b, M_PIf, twice), twice);
+      return nir_bcsel(b, small,
+                      nir_fsub_imm(b, M_PI_2f, nir_copysign(b, p, x)), large_result);
+   }
+   return nir_copysign(b, nir_bcsel(b, small, p, nir_fsub_imm(b, M_PI_2f, twice)), x);
+}
+
 nir_def *
 nir_asin(nir_builder *b, nir_def *x)
 {
    /* See build_asin for promotion explanation */
    if (x->bit_size == 16)
       return nir_f2f16(b, nir_asin(b, nir_f2f32(b, x)));
+
+   if (x->bit_size == 32)
+      return build_inverse_sine_32(b, x, false);
 
    /* use piecewise approximation to keep low relative error near 0 */
    return build_asin(b, x, true);
@@ -242,6 +277,9 @@ nir_acos(nir_builder *b, nir_def *x)
    /* Promote acos in a similar fashion to asin to reduce error */
    if (x->bit_size == 16)
       return nir_f2f16(b, nir_acos(b, nir_f2f32(b, x)));
+
+   if (x->bit_size == 32)
+      return build_inverse_sine_32(b, x, true);
 
    /* piecewise approximation not needed to keep low relative error */
    return nir_fsub_imm(b, M_PI_2f, build_asin(b, x, false));
