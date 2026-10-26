@@ -11,6 +11,7 @@
 
 #include "bvh/bvh_defines.h"
 #include "nir/radv_nir_rt_common.h"
+#include "radv_nir_ray_query_cull_mask.h"
 #include "radv_device.h"
 #include "radv_nir.h"
 #include "radv_physical_device.h"
@@ -151,8 +152,6 @@ struct ray_query_vars {
    bool shared_stack;
    uint32_t shared_base;
    uint32_t stack_entries;
-
-   nir_intrinsic_instr *initialize;
 };
 
 static void
@@ -343,8 +342,6 @@ lower_rq_initialize(nir_builder *b, nir_intrinsic_instr *instr, struct ray_query
    rq_store(b, rq, trav_top_stack, nir_imm_int(b, -1));
 
    rq_store(b, rq, incomplete, nir_iand_imm(b, accel_struct_non_null, !compiler_info->key.no_rt));
-
-   vars->initialize = instr;
 }
 
 static nir_def *
@@ -518,19 +515,10 @@ load_stack_entry(nir_builder *b, nir_def *index, const struct radv_ray_traversal
 
 static nir_def *
 lower_rq_proceed(nir_builder *b, nir_intrinsic_instr *instr, struct ray_query_vars *vars, nir_deref_instr *rq,
-                 const struct radv_compiler_info *compiler_info)
+                 const struct radv_compiler_info *compiler_info, bool ignore_cull_mask)
 {
    nir_deref_instr *closest = rq_deref(b, rq, closest);
    nir_deref_instr *candidate = rq_deref(b, rq, candidate);
-
-   nir_metadata_require(instr->instr.block->impl, nir_metadata_dominance);
-
-   bool ignore_cull_mask = false;
-   if (vars->initialize && nir_block_dominates(vars->initialize->instr.block, instr->instr.block)) {
-      nir_src cull_mask = vars->initialize->src[3];
-      if (nir_src_is_const(cull_mask) && nir_src_as_uint(cull_mask) == 0xFF)
-         ignore_cull_mask = true;
-   }
 
    nir_variable *inv_dir = nir_local_variable_create(b->impl, glsl_vector_type(GLSL_TYPE_FLOAT, 3), "inv_dir");
    nir_store_var(b, inv_dir, nir_frcp(b, rq_load(b, rq, trav_direction)), 0x7);
@@ -629,6 +617,7 @@ radv_nir_lower_ray_queries(struct nir_shader *shader, const struct radv_compiler
 {
    bool progress = false;
    struct hash_table *query_ht = _mesa_pointer_hash_table_create(NULL);
+   struct set *full_mask_proceeds = radv_nir_ray_query_full_mask_proceeds(shader);
 
    nir_foreach_variable_in_list (var, &shader->variables) {
       if (!var->data.ray_query)
@@ -687,7 +676,8 @@ radv_nir_lower_ray_queries(struct nir_shader *shader, const struct radv_compiler
                new_dest = lower_rq_load(compiler_info, &builder, intrinsic, rq);
                break;
             case nir_intrinsic_rq_proceed:
-               new_dest = lower_rq_proceed(&builder, intrinsic, vars, rq, compiler_info);
+               new_dest = lower_rq_proceed(&builder, intrinsic, vars, rq, compiler_info,
+                                           _mesa_set_search(full_mask_proceeds, instr) != NULL);
                break;
             case nir_intrinsic_rq_terminate:
                lower_rq_terminate(&builder, intrinsic, rq);
@@ -710,6 +700,7 @@ radv_nir_lower_ray_queries(struct nir_shader *shader, const struct radv_compiler
    }
 
    ralloc_free(query_ht);
+   _mesa_set_destroy(full_mask_proceeds, NULL);
 
    if (progress) {
       NIR_PASS(_, shader, nir_lower_continue_constructs);

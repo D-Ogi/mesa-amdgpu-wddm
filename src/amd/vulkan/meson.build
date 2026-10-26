@@ -448,3 +448,34 @@ if with_radv_tests
     ],
   )
 endif
+
+# CPU-only ray-query lowering regressions.
+if with_tests
+  test(
+    'radv_ray_query_cull_mask',
+    executable(
+      'radv_ray_query_cull_mask',
+      files('nir/tests/ray_query_cull_mask_test.cpp'),
+      cpp_args : [cpp_msvc_compat_args],
+      include_directories : [inc_include, inc_src, inc_compiler, inc_util],
+      dependencies : [dep_thread, idep_nir, idep_mesautil],
+    ),
+    suite : ['compiler', 'nir'],
+  )
+  test(
+    'radv_ray_query_lowering',
+    executable(
+      'radv_ray_query_lowering',
+      files('nir/tests/ray_query_lowering_test.c',
+            'nir/radv_nir_lower_ray_queries.c', 'nir/radv_nir_rt_common.c'),
+      c_args : [radv_flags, c_msvc_compat_args],
+      include_directories : [inc_include, inc_src, inc_amd, inc_amd_common, inc_radv_winsys_common,
+                             inc_compiler, inc_util, include_directories('.', 'nir', '../compiler')],
+      link_with : [libamd_common],
+      dependencies : [dep_thread, idep_nir, idep_mesautil, idep_vulkan_runtime_headers,
+                      idep_amd_generated_headers, idep_vulkan_util_headers, idep_vulkan_wsi_headers, radv_deps],
+    ),
+    suite : ['compiler', 'nir'],
+    timeout : 3,
+  )
+endif
