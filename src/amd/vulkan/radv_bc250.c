@@ -4716,7 +4716,8 @@ bc250_prepare_ordered(struct radv_device *device, struct radv_graphics_pipeline 
       if (pl->dynamic_shader_stages & VK_SHADER_STAGE_MESH_BIT_EXT)
          pl->dynamic_shader_stages |= VK_SHADER_STAGE_COMPUTE_BIT;
       VkPipelineCreateFlags2CreateInfo flags = {.sType = VK_STRUCTURE_TYPE_PIPELINE_CREATE_FLAGS_2_CREATE_INFO,
-         .flags = pipeline->base.create_flags & VK_PIPELINE_CREATE_2_DESCRIPTOR_BUFFER_BIT_EXT};
+         .flags = pipeline->base.create_flags & (VK_PIPELINE_CREATE_2_DESCRIPTOR_BUFFER_BIT_EXT |
+                                               VK_PIPELINE_CREATE_2_DESCRIPTOR_HEAP_BIT_EXT)};
       if (ms->key.optimisations_disabled)
          flags.flags |= VK_PIPELINE_CREATE_2_DISABLE_OPTIMIZATION_BIT;
       VkPipelineRobustnessCreateInfo robust = {.sType = VK_STRUCTURE_TYPE_PIPELINE_ROBUSTNESS_CREATE_INFO,
@@ -5934,9 +5935,9 @@ radv_bc250_prepare_task(struct radv_device *device,
    for (unsigned s = 0; s < MESA_VULKAN_SHADER_STAGES; s++) {
       if (stages[s].stage == MESA_SHADER_NONE)
          continue;
-      if (stages[s].layout.mapping) {
+      if (stages[s].layout.mapping && !stages[s].key.descriptor_heap) {
          if (BC250_GETENV(BC250_TRACE_COMPILE))
-            fprintf(stderr, "BC250 hybrid task refused: stage layout mapping\n");
+            fprintf(stderr, "BC250 hybrid task refused: descriptor mapping without heap shader ABI\n");
          return VK_ERROR_FEATURE_NOT_PRESENT;
       }
       if (!stages[s].nir) {
@@ -5946,6 +5947,11 @@ radv_bc250_prepare_task(struct radv_device *device,
          };
          stages[s].nir = radv_shader_spirv_to_nir_cached(&device->compiler_info, NULL, &stages[s], &options, false);
       }
+      /* The SPIR-V conversion above has already applied this stage's descriptor-heap mapping.
+       * Redirect its generated application push-data loads along with explicit push constants,
+       * before adding any private constants. The producer clone retains the lowered heap loads;
+       * its compute pipeline must retain DESCRIPTOR_HEAP so their heap-base SGPRs are allocated.
+       */
       /* RADV_BC250_TASK_TAIL: DrawID from the per-draw slot. That load reads the private block,
        * so it is added after the application push constants were redirected (data != NULL
        * leaves DrawID to it). */
@@ -6112,12 +6118,13 @@ radv_bc250_prepare_task(struct radv_device *device,
       VK_FROM_HANDLE(radv_pipeline_layout, producer_layout, pipeline->bc250_task_layout);
       if (producer_layout->dynamic_shader_stages & VK_SHADER_STAGE_TASK_BIT_EXT)
          producer_layout->dynamic_shader_stages |= VK_SHADER_STAGE_COMPUTE_BIT;
-      /* A descriptor buffer graphics pipeline's set layouts are descriptor
-       * buffer layouts: create the private compute pipelines the same way
-       * (the flag does not enter the shader key). */
+      /* Descriptor-buffer layouts and the descriptor-heap shader ABI both
+       * carry into application-derived compute producers. The latter flag
+       * allocates the heap-base SGPRs for the already-lowered heap loads. */
       VkPipelineCreateFlags2CreateInfo producer_flags = {
          .sType = VK_STRUCTURE_TYPE_PIPELINE_CREATE_FLAGS_2_CREATE_INFO,
-         .flags = pipeline->base.create_flags & VK_PIPELINE_CREATE_2_DESCRIPTOR_BUFFER_BIT_EXT,
+         .flags = pipeline->base.create_flags & (VK_PIPELINE_CREATE_2_DESCRIPTOR_BUFFER_BIT_EXT |
+                                               VK_PIPELINE_CREATE_2_DESCRIPTOR_HEAP_BIT_EXT),
       };
       VkComputePipelineCreateInfo info = {
          .sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO,
@@ -8002,7 +8009,8 @@ radv_bc250_idx_create(struct radv_device *device, struct radv_graphics_pipeline 
    if (result != VK_SUCCESS)
       goto fail;
    VkPipelineCreateFlags2CreateInfo flags = {.sType = VK_STRUCTURE_TYPE_PIPELINE_CREATE_FLAGS_2_CREATE_INFO,
-      .flags = pipeline->base.create_flags & VK_PIPELINE_CREATE_2_DESCRIPTOR_BUFFER_BIT_EXT};
+      .flags = pipeline->base.create_flags & (VK_PIPELINE_CREATE_2_DESCRIPTOR_BUFFER_BIT_EXT |
+                                            VK_PIPELINE_CREATE_2_DESCRIPTOR_HEAP_BIT_EXT)};
    VkPipelineRobustnessCreateInfo robust = {.sType = VK_STRUCTURE_TYPE_PIPELINE_ROBUSTNESS_CREATE_INFO,
       .pNext = &flags,
       .storageBuffers = ms.key.storage_robustness2 ? VK_PIPELINE_ROBUSTNESS_BUFFER_BEHAVIOR_ROBUST_BUFFER_ACCESS_2 :

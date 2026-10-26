@@ -93,9 +93,9 @@ radv_mesh_enabled(const struct radv_physical_device *pdev)
  * behaviour for an A/B: each extension entry and its mandatory feature are gated together, so the
  * strict arm never advertises an extension whose feature reads VK_FALSE. The maxDrawIndirectCount
  * clamp is not part of the switch: the mesh routes enforce 4096 themselves, so it always applies.
- * Descriptor heaps have a separate capability gate: the hybrid Task pipeline
- * rejects descriptor-set mappings before lowering its private producer. Keep
- * descriptor buffers available through the existing fast-binding path.
+ * Hybrid producers lower descriptor-heap mappings before moving application
+ * push data and retain the heap shader ABI. Both descriptor heap and descriptor
+ * buffer state survive their private compute dispatches.
  */
 static bool
 radv_bc250_task_strict_ext(const struct radv_physical_device *pdev)
@@ -107,7 +107,7 @@ radv_bc250_task_strict_ext(const struct radv_physical_device *pdev)
 static bool
 radv_bc250_descriptor_heap_exposed(const struct radv_physical_device *pdev)
 {
-   return !pdev->bc250_hybrid_task && !radv_bc250_task_strict_ext(pdev);
+   return !radv_bc250_task_strict_ext(pdev);
 }
 
 static bool
