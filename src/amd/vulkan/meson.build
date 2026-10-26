@@ -493,7 +493,7 @@ if with_tests
                              inc_compiler, inc_util, include_directories('.', 'nir', '../compiler')],
       link_with : [libamd_common],
       dependencies : [dep_thread, idep_nir, idep_mesautil, idep_vulkan_runtime_headers,
-                      idep_amd_generated_headers],
+                      idep_amd_generated_headers, idep_vulkan_util_headers],
     ),
     suite : ['compiler', 'nir'],
     timeout : 3,
