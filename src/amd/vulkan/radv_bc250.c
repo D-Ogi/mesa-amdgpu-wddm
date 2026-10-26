@@ -7912,6 +7912,9 @@ radv_bc250_idx_create(struct radv_device *device, struct radv_graphics_pipeline 
    nir_shader *cs = NULL, *vs = NULL;
    unsigned output_bytes = 0;
    const char *storage = BC250_ENV_STR(RADV_BC250_MESH_IDXPASS_STORE, NULL);
+   /* NULL selects automatic stored output, including in the hardened Windows build.
+    * With the existing IDXPASS preset this changes eligible Mesh-only defaults from
+    * the older recompute route; leaving the preset table unchanged does not keep that route. */
    bool automatic = !storage || !strcmp(storage, "auto");
    bool stored = automatic || BC250_ENV_BOOL(RADV_BC250_MESH_IDXPASS_STORE, false);
    struct radv_bc250_idx_cost cost = {0};
