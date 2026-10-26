@@ -26,6 +26,7 @@
  */
 
 #include "radv_wddm2_cs.h"
+#include "util/amdgpu_wddm_stdio.h"
 #include "sid.h"
 #include "radv_wddm2_bc250.h"
 #include "radv_wddm2_bo.h"
@@ -315,7 +316,7 @@ radv_wddm2_queue_init(struct radv_wddm2_winsys *ws, enum amd_ip_type hw_ip,
 
    status = BC250_WDDM_CALL(&ws->host, CreateContextVirtual, &create_context);
    if (!NT_SUCCESS(status)) {
-      fprintf(stderr, "Create context failed 0x%X for IP %i and device 0x%x\n", status, hw_ip, ws->device_h);
+      amdgpu_wddm_log("Create context failed 0x%X for IP %i and device 0x%x\n", status, hw_ip, ws->device_h);
       return VK_ERROR_INITIALIZATION_FAILED;
    }
    queue->context_h = create_context.hContext;
@@ -379,7 +380,7 @@ radv_wddm2_queue_init(struct radv_wddm2_winsys *ws, enum amd_ip_type hw_ip,
       };
       status = BC250_WDDM_CALL(&ws->host, CreateHwQueue, &create_queue);
       if (!NT_SUCCESS(status)) {
-         fprintf(stderr, "Create queue failed 0x%X for IP %i and device 0x%x\n", status, hw_ip, ws->device_h);
+         amdgpu_wddm_log("Create queue failed 0x%X for IP %i and device 0x%x\n", status, hw_ip, ws->device_h);
          goto failed;
       }
       queue->handle = create_queue.hHwQueue;
@@ -396,7 +397,7 @@ radv_wddm2_queue_init(struct radv_wddm2_winsys *ws, enum amd_ip_type hw_ip,
       };
       status = BC250_WDDM_CALL(&ws->host, CreateSynchronizationObject2, &create_sync);
       if (unlikely(!NT_SUCCESS(status))) {
-         fprintf(stderr, "CreateSynchronizationObject2 failed with NTSTATUS 0x%x\n", status);
+         amdgpu_wddm_log("CreateSynchronizationObject2 failed with NTSTATUS 0x%x\n", status);
          goto failed;
       }
       queue->vm_fence.handle = create_sync.hSyncObject;
@@ -502,15 +503,15 @@ radv_wddm2_device_lost(struct radv_wddm2_winsys *ws, unsigned *unanswered)
    NTSTATUS status = BC250_WDDM_CALL(&ws->host, GetDeviceState, &get_state);
    if (unlikely(!NT_SUCCESS(status))) {
       if (status == STATUS_DEVICE_REMOVED || status == STATUS_INVALID_HANDLE) {
-         fprintf(stderr, "radv/wddm2: GetDeviceState(EXECUTION): 0x%X, the device is gone\n", status);
+         amdgpu_wddm_log("radv/wddm2: GetDeviceState(EXECUTION): 0x%X, the device is gone\n", status);
          return true;
       }
       if (++*unanswered < RADV_WDDM2_UNANSWERED_STATE_MAX) {
-         fprintf(stderr, "radv/wddm2: GetDeviceState(EXECUTION): 0x%X, unanswered %u of %u\n", status,
+         amdgpu_wddm_log("radv/wddm2: GetDeviceState(EXECUTION): 0x%X, unanswered %u of %u\n", status,
                  *unanswered, RADV_WDDM2_UNANSWERED_STATE_MAX);
          return false;
       }
-      fprintf(stderr, "radv/wddm2: GetDeviceState(EXECUTION): 0x%X, %u unanswered in a row: the device is lost\n",
+      amdgpu_wddm_log("radv/wddm2: GetDeviceState(EXECUTION): 0x%X, %u unanswered in a row: the device is lost\n",
               status, *unanswered);
       return true;
    }
@@ -547,7 +548,7 @@ vk_wddm2_fence_wait(struct radv_wddm2_winsys *ws, struct vk_wddm2_fence *fence)
 
    if (unlikely(!NT_SUCCESS(status))) {
       vk_async_event_close(async_event);
-      fprintf(stderr, "fence wait failed: 0x%X\n", status);
+      amdgpu_wddm_log("fence wait failed: 0x%X\n", status);
       return false;
    }
 
@@ -586,17 +587,17 @@ vk_wddm2_fence_wait(struct radv_wddm2_winsys *ws, struct vk_wddm2_fence *fence)
       if (waited_ns >= total_ns)
          break;
       if (waited_ns == slice_ns)
-         fprintf(stderr,
+         amdgpu_wddm_log(
                  "radv/wddm2: fence %u value %" PRIu64 " pending after %" PRIu64
                  " ms, device active: waiting on\n",
                  fence->handle, fence->wait_value, waited_ns / 1000000);
    }
    vk_async_event_close(async_event);
    if (result != VK_SUCCESS)
-      fprintf(stderr, "async wait event: 0x%x after %" PRIu64 " ms%s\n", result, waited_ns / 1000000,
+      amdgpu_wddm_log("async wait event: 0x%x after %" PRIu64 " ms%s\n", result, waited_ns / 1000000,
               lost ? ", device lost" : "");
    else if (waited_ns >= slice_ns)
-      fprintf(stderr, "radv/wddm2: fence %u value %" PRIu64 " completed after %" PRIu64 " ms of wait\n",
+      amdgpu_wddm_log("radv/wddm2: fence %u value %" PRIu64 " completed after %" PRIu64 " ms of wait\n",
               fence->handle, fence->wait_value, waited_ns / 1000000);
 
    /* Read the fence back before asking the kernel anything. A wait that returned with the fence valid and at
@@ -616,20 +617,20 @@ vk_wddm2_fence_wait(struct radv_wddm2_winsys *ws, struct vk_wddm2_fence *fence)
    };
    status = BC250_WDDM_CALL(&ws->host, GetDeviceState, &get_state);
    if (unlikely(!NT_SUCCESS(status))) {
-      fprintf(stderr, "GetDeviceState(EXECUTION): 0x%X\n", status);
+      amdgpu_wddm_log("GetDeviceState(EXECUTION): 0x%X\n", status);
    } else if (get_state.ExecutionState != D3DKMT_DEVICEEXECUTION_ACTIVE) {
-      fprintf(stderr, "device execution state: %i\n", get_state.ExecutionState);
+      amdgpu_wddm_log("device execution state: %i\n", get_state.ExecutionState);
 
       if (get_state.ExecutionState == D3DKMT_DEVICEEXECUTION_ERROR_DMAPAGEFAULT) {
          get_state.StateType = D3DKMT_DEVICESTATE_PAGE_FAULT;
          status = BC250_WDDM_CALL(&ws->host, GetDeviceState, &get_state);
          if (unlikely(!NT_SUCCESS(status))) {
-            fprintf(stderr, "GetDeviceState(PAGE_FAULT): 0x%X\n", status);
+            amdgpu_wddm_log("GetDeviceState(PAGE_FAULT): 0x%X\n", status);
             return false;
          }
          D3DKMT_DEVICEPAGEFAULT_STATE fault = get_state.PageFaultState;
 
-         fprintf(stderr, "faulted VA: 0x%" PRIx64 ", error: 0x%x (vendor specific: %i), flags: %i, stage: %i\n",
+         amdgpu_wddm_log("faulted VA: 0x%" PRIx64 ", error: 0x%x (vendor specific: %i), flags: %i, stage: %i\n",
                 fault.FaultedVirtualAddress, fault.FaultErrorCode.GeneralErrorCode,
                 fault.FaultErrorCode.DeviceSpecificCode, fault.PageFaultFlags, fault.FaultedPipelineStage);
       }
@@ -828,7 +829,7 @@ radv_wddm2_submit_add_cs(struct radv_wddm2_ctx *ctx, struct submit_pdd_writer *p
          }
       } else {
          WRITE_ENTRY(pdd, GFX_IB, gfx_ib, entry) {
-            fprintf(stderr, "Adding IB with VA 0x%" PRIx64 " and length %u bytes\n", ib.va, ib.cdw * 4);
+            amdgpu_wddm_log("Adding IB with VA 0x%" PRIx64 " and length %u bytes\n", ib.va, ib.cdw * 4);
             entry->len = ib.cdw * 4;
             entry->flags = flags;
             entry->ip_type = radv_wddm2_cs_translate_ip_type(cs->hw_ip);
@@ -927,7 +928,7 @@ bc250_collect_cs(struct radv_winsys_cs *cs, struct bc250_submit_ib *out, unsigne
    unsigned count = cs->chain_ib ? 1 : cs->num_ib_buffers;
    unsigned i;
    if (*n > cap || count > cap - *n) {
-      fprintf(stderr, "bc250: gather IB limit used=%u add=%u cap=%u\n", *n, count, cap);
+      amdgpu_wddm_log("bc250: gather IB limit used=%u add=%u cap=%u\n", *n, count, cap);
       return false;
    }
    if (out) {
@@ -1052,7 +1053,7 @@ radv_wddm2_bc250_submit(struct radv_wddm2_ctx *ctx, struct radv_wddm2_queue *que
             return STATUS_NO_MEMORY;
          queue->bc250_ibs = replacement;
          queue->bc250_ib_capacity = (unsigned)capacity;
-         fprintf(stderr, "bc250: IB collection capacity=%u required=%u\n",
+         amdgpu_wddm_log("bc250: IB collection capacity=%u required=%u\n",
                  queue->bc250_ib_capacity, required);
       }
       ibs = queue->bc250_ibs;
@@ -1102,7 +1103,7 @@ radv_wddm2_bc250_submit(struct radv_wddm2_ctx *ctx, struct radv_wddm2_queue *que
       /* Match the GFX INDIRECT_BUFFER IB_SIZE field, not an arbitrary 1 MiB
        * staging limit. The caller retired the selected gather slot before any write or resize. */
       if (total == 0 || total > G_3F3_IB_SIZE(UINT32_MAX)) {
-         fprintf(stderr, "bc250: gather exceeds IB_SIZE field: %" PRIu64 " dwords (%u calls, %u copies)\n",
+         amdgpu_wddm_log("bc250: gather exceeds IB_SIZE field: %" PRIu64 " dwords (%u calls, %u copies)\n",
                  total, calls, copies);
          return STATUS_INVALID_PARAMETER;
       }
@@ -1125,7 +1126,7 @@ radv_wddm2_bc250_submit(struct radv_wddm2_ctx *ctx, struct radv_wddm2_queue *que
             ws->base.buffer_destroy(&ws->base, queue->bc250_gather[queue->bc250_gather_index].bo);
          queue->bc250_gather[queue->bc250_gather_index].bo = replacement;
          queue->bc250_gather[queue->bc250_gather_index].map = mapping;
-         fprintf(stderr, "bc250: gather capacity=%" PRIu64 " bytes required=%u ibs=%u calls=%u copies=%u\n",
+         amdgpu_wddm_log("bc250: gather capacity=%" PRIu64 " bytes required=%u ibs=%u calls=%u copies=%u\n",
                  capacity, bytes, n, calls, copies);
       }
       dst = queue->bc250_gather[queue->bc250_gather_index].map;
@@ -1164,7 +1165,7 @@ radv_wddm2_bc250_submit(struct radv_wddm2_ctx *ctx, struct radv_wddm2_queue *que
       if (!copy_all && copies) {
          const uint64_t count = p_atomic_inc_return(&ws->bc250_inline_submits);
          if (count <= 16 || util_is_power_of_two_or_zero64(count))
-            fprintf(stderr,
+            amdgpu_wddm_log(
                     "bc250: IB2 fallback: %u of %u IBs copied into the IB1 (%u call an IB2 themselves, %u outside "
                     "IB_BASE/IB_SIZE), %" PRIu64 " dwords; %" PRIu64 " such submissions so far\n",
                     copies, n, nested, copies - nested, copied_dw, count);
@@ -1179,7 +1180,7 @@ radv_wddm2_bc250_submit(struct radv_wddm2_ctx *ctx, struct radv_wddm2_queue *que
    {
       const unsigned long cap = ws->bc250_ib_dwords_cap;
       if (cap > 0 && cap < 0x100000ul && cap * 4ul < bytes) {
-         fprintf(stderr, "bc250: IB clamped to %lu dwords (%u were ready)\n", cap, bytes / 4u);
+         amdgpu_wddm_log("bc250: IB clamped to %lu dwords (%u were ready)\n", cap, bytes / 4u);
          bytes = (uint32_t)(cap * 4ul);
       }
    }
@@ -1210,7 +1211,7 @@ radv_wddm2_bc250_submit(struct radv_wddm2_ctx *ctx, struct radv_wddm2_queue *que
    _mm_sfence();
    status = BC250_WDDM_CALL(&ws->host, SubmitCommand, &cmd);
    if (!NT_SUCCESS(status))
-      fprintf(stderr, "bc250: SubmitCommand 0x%X (%u ibs packed, %u bytes)\n", status, n, bytes);
+      amdgpu_wddm_log("bc250: SubmitCommand 0x%X (%u ibs packed, %u bytes)\n", status, n, bytes);
    else if (ws->bc250_trace_submits) {
       const uint32_t *dw = NULL;
       if (direct && ibs[0].ib.bo)
@@ -1218,41 +1219,41 @@ radv_wddm2_bc250_submit(struct radv_wddm2_ctx *ctx, struct radv_wddm2_queue *que
                                  (ibs[0].ib.va - ibs[0].ib.bo->va));
       else
          dw = (const uint32_t *)queue->bc250_gather[queue->bc250_gather_index].map;
-      fprintf(stderr, "bc250: SubmitCommand ib 0x%" PRIx64 " %u bytes (from %u) %08x %08x %08x %08x\n",
+      amdgpu_wddm_log("bc250: SubmitCommand ib 0x%" PRIx64 " %u bytes (from %u) %08x %08x %08x %08x\n",
               va, bytes, n,
               dw ? dw[0] : 0, dw && bytes >= 8 ? dw[1] : 0,
               dw && bytes >= 12 ? dw[2] : 0, dw && bytes >= 16 ? dw[3] : 0);
       if (!direct)
-         fprintf(stderr, "bc250: IB1 holds %u IB2 calls and %u copied IBs\n", calls, copies);
+         amdgpu_wddm_log("bc250: IB1 holds %u IB2 calls and %u copied IBs\n", calls, copies);
       /* Slices of the unclamped preamble and the main CS, when the IB1 is their copy. 163 is
        * the first ACQUIRE_MEM, 176 the main IB, 216 the dispatch. */
       if (calls)
          dw = NULL;
       if (dw && bytes >= 176u * 4u) {
-         fprintf(stderr, "bc250: IB +158 %08x %08x %08x %08x %08x %08x %08x %08x\n",
+         amdgpu_wddm_log("bc250: IB +158 %08x %08x %08x %08x %08x %08x %08x %08x\n",
                  dw[158], dw[159], dw[160], dw[161], dw[162], dw[163], dw[164], dw[165]);
-         fprintf(stderr, "bc250: IB +166 %08x %08x %08x %08x %08x %08x %08x %08x\n",
+         amdgpu_wddm_log("bc250: IB +166 %08x %08x %08x %08x %08x %08x %08x %08x\n",
                  dw[166], dw[167], dw[168], dw[169], dw[170], dw[171], dw[172], dw[173]);
-         fprintf(stderr, "bc250: IB +174 %08x %08x\n", dw[174], dw[175]);
+         amdgpu_wddm_log("bc250: IB +174 %08x %08x\n", dw[174], dw[175]);
       }
       if (dw && bytes >= 216u * 4u) {
-         fprintf(stderr, "bc250: IB +176 %08x %08x %08x %08x %08x %08x %08x %08x\n",
+         amdgpu_wddm_log("bc250: IB +176 %08x %08x %08x %08x %08x %08x %08x %08x\n",
                  dw[176], dw[177], dw[178], dw[179], dw[180], dw[181], dw[182], dw[183]);
-         fprintf(stderr, "bc250: IB +184 %08x %08x %08x %08x %08x %08x %08x %08x\n",
+         amdgpu_wddm_log("bc250: IB +184 %08x %08x %08x %08x %08x %08x %08x %08x\n",
                  dw[184], dw[185], dw[186], dw[187], dw[188], dw[189], dw[190], dw[191]);
-         fprintf(stderr, "bc250: IB +192 %08x %08x %08x %08x %08x %08x %08x %08x\n",
+         amdgpu_wddm_log("bc250: IB +192 %08x %08x %08x %08x %08x %08x %08x %08x\n",
                  dw[192], dw[193], dw[194], dw[195], dw[196], dw[197], dw[198], dw[199]);
-         fprintf(stderr, "bc250: IB +200 %08x %08x %08x %08x %08x %08x %08x %08x\n",
+         amdgpu_wddm_log("bc250: IB +200 %08x %08x %08x %08x %08x %08x %08x %08x\n",
                  dw[200], dw[201], dw[202], dw[203], dw[204], dw[205], dw[206], dw[207]);
-         fprintf(stderr, "bc250: IB +208 %08x %08x %08x %08x %08x %08x %08x %08x\n",
+         amdgpu_wddm_log("bc250: IB +208 %08x %08x %08x %08x %08x %08x %08x %08x\n",
                  dw[208], dw[209], dw[210], dw[211], dw[212], dw[213], dw[214], dw[215]);
       }
       if (dw && bytes >= 240u * 4u) {
-         fprintf(stderr, "bc250: IB +216 %08x %08x %08x %08x %08x %08x %08x %08x\n",
+         amdgpu_wddm_log("bc250: IB +216 %08x %08x %08x %08x %08x %08x %08x %08x\n",
                  dw[216], dw[217], dw[218], dw[219], dw[220], dw[221], dw[222], dw[223]);
-         fprintf(stderr, "bc250: IB +224 %08x %08x %08x %08x %08x %08x %08x %08x\n",
+         amdgpu_wddm_log("bc250: IB +224 %08x %08x %08x %08x %08x %08x %08x %08x\n",
                  dw[224], dw[225], dw[226], dw[227], dw[228], dw[229], dw[230], dw[231]);
-         fprintf(stderr, "bc250: IB +232 %08x %08x %08x %08x %08x %08x %08x %08x\n",
+         amdgpu_wddm_log("bc250: IB +232 %08x %08x %08x %08x %08x %08x %08x %08x\n",
                  dw[232], dw[233], dw[234], dw[235], dw[236], dw[237], dw[238], dw[239]);
       }
    }
@@ -1315,12 +1316,12 @@ radv_wddm2_progress_repair(struct radv_wddm2_winsys *ws, struct radv_wddm2_queue
    }
    if (NT_SUCCESS(status)) {
       p_atomic_inc(&ws->deferred.progress_repairs);
-      fprintf(stderr,
+      amdgpu_wddm_log(
               "bc250: repair signal of progress %" PRIu64 " queued on context 0x%x after a failed submission\n",
               value, queue->context_h);
    } else {
       p_atomic_inc(&ws->deferred.progress_repairs_failed);
-      fprintf(stderr,
+      amdgpu_wddm_log(
               "bc250: the repair signal of progress %" PRIu64 " on context 0x%x failed 0x%X: that value stays "
               "unproven\n",
               value, queue->context_h, (unsigned)status);
@@ -1347,10 +1348,10 @@ radv_wddm2_cs_submit(struct radeon_winsys_ctx *_ctx,
    if (ws->bc250 && submit->ip_type == AMD_IP_COMPUTE && !queue->context_h) {
       if (radv_wddm2_queue_init(ws, AMD_IP_COMPUTE, ctx->priority, NULL, queue) != VK_SUCCESS ||
           !queue->context_h) {
-         fprintf(stderr, "bc250: no context on the compute node: the compute queue is lost\n");
+         amdgpu_wddm_log("bc250: no context on the compute node: the compute queue is lost\n");
          return VK_ERROR_DEVICE_LOST;
       }
-      fprintf(stderr, "bc250: compute queue context 0x%x on node %u\n", queue->context_h, BC250_COMPUTE_NODE);
+      amdgpu_wddm_log("bc250: compute queue context 0x%x on node %u\n", queue->context_h, BC250_COMPUTE_NODE);
    }
 
    assert(queue->context_h != 0 && "Unsupported IP type");
@@ -1393,7 +1394,7 @@ radv_wddm2_cs_submit(struct radeon_winsys_ctx *_ctx,
       STACK_ARRAY_FINISH(values);
 
       if (!NT_SUCCESS(status)) {
-         fprintf(stderr, "bc250: GPU wait refused: NTSTATUS=0x%X, %u fences, ip %u\n", (unsigned)status,
+         amdgpu_wddm_log("bc250: GPU wait refused: NTSTATUS=0x%X, %u fences, ip %u\n", (unsigned)status,
                  wait_count, (unsigned)submit->ip_type);
          return VK_ERROR_DEVICE_LOST;
       }
@@ -1410,7 +1411,7 @@ radv_wddm2_cs_submit(struct radeon_winsys_ctx *_ctx,
       if (queue->bc250_submit_failed)
          return VK_ERROR_DEVICE_LOST;
       if (ctx->ws->bc250_trace_submits || pending_value == 0)
-         fprintf(stderr, "bc250: progress before submit previous=%" PRIu64 " observed=%" PRIu64
+         amdgpu_wddm_log("bc250: progress before submit previous=%" PRIu64 " observed=%" PRIu64
                          " slot=%u retire=%" PRIu64 " waits=%u signals=%u\n",
                          pending_value, observed, queue->bc250_gather_index,
                          slot->retire_value, wait_count, signal_count);
@@ -1428,7 +1429,7 @@ radv_wddm2_cs_submit(struct radeon_winsys_ctx *_ctx,
       radv_wddm2_deferred_drain(ws);
       status = radv_wddm2_bc250_submit(ctx, queue, submit);
       if (!NT_SUCCESS(status)) {
-         fprintf(stderr, "bc250: native submit failed NTSTATUS=0x%X cs_count=%u\n", status, submit->cs_count);
+         amdgpu_wddm_log("bc250: native submit failed NTSTATUS=0x%X cs_count=%u\n", status, submit->cs_count);
          /* R6: the IB never reached the kernel, so nothing will signal the value published above. */
          radv_wddm2_progress_repair(ws, queue, next_value);
          return VK_ERROR_DEVICE_LOST;
@@ -1442,7 +1443,7 @@ radv_wddm2_cs_submit(struct radeon_winsys_ctx *_ctx,
       };
       status = BC250_WDDM_CALL(&ws->host, SignalSynchronizationObjectFromGpu2, &progress_signal);
       if (!NT_SUCCESS(status)) {
-         fprintf(stderr, "bc250: progress signal refused: NTSTATUS=0x%X, value %" PRIu64 "\n", (unsigned)status,
+         amdgpu_wddm_log("bc250: progress signal refused: NTSTATUS=0x%X, value %" PRIu64 "\n", (unsigned)status,
                  next_value);
          queue->bc250_submit_failed = true; // accepted IB has no retirement value: never reuse its slot
          /* R6: the IB runs, but no signal of this value was queued behind it: ask again, on the same
@@ -1502,7 +1503,7 @@ radv_wddm2_cs_submit(struct radeon_winsys_ctx *_ctx,
          status = BC250_WDDM_CALL(&ws->host, SubmitCommand, &wddm2_submit);          
       }
       if (!NT_SUCCESS(status)) {
-         fprintf(stderr, "SubmitCommand: VK_ERROR_DEVICE_LOST\n");
+         amdgpu_wddm_log("SubmitCommand: VK_ERROR_DEVICE_LOST\n");
          return VK_ERROR_DEVICE_LOST;
       }
    }
@@ -1552,7 +1553,7 @@ radv_wddm2_cs_submit(struct radeon_winsys_ctx *_ctx,
       STACK_ARRAY_FINISH(values);
 
       if (!NT_SUCCESS(status)) {
-         fprintf(stderr, "bc250: GPU signal refused: NTSTATUS=0x%X, %u fences, ip %u\n", (unsigned)status,
+         amdgpu_wddm_log("bc250: GPU signal refused: NTSTATUS=0x%X, %u fences, ip %u\n", (unsigned)status,
                  signal_count, (unsigned)submit->ip_type);
          return VK_ERROR_DEVICE_LOST;
       }
@@ -1588,11 +1589,11 @@ radv_wddm2_cs_init_functions(struct radv_wddm2_winsys *ws)
       ws->bc250_ib_dwords_cap = cap && cap[0] ? strtoul(cap, NULL, 0) : 0;
       ws->bc250_gather_copy = (nocopy && !strcmp(nocopy, "0")) || ws->bc250_ib_dwords_cap;
       if (!ws->bc250_gather_copy)
-         fprintf(stderr, "bc250: IB submission: IB2 calls from the gather slot (BC250_IB_NOCOPY=0 copies every IB)\n");
+         amdgpu_wddm_log("bc250: IB submission: IB2 calls from the gather slot (BC250_IB_NOCOPY=0 copies every IB)\n");
       else if (nocopy && !strcmp(nocopy, "0"))
-         fprintf(stderr, "bc250: IB submission fallback: every IB copied into the gather slot (BC250_IB_NOCOPY=0)\n");
+         amdgpu_wddm_log("bc250: IB submission fallback: every IB copied into the gather slot (BC250_IB_NOCOPY=0)\n");
       else
-         fprintf(stderr, "bc250: IB submission fallback: every IB copied into the gather slot (BC250_IB_DWORDS=%lu"
+         amdgpu_wddm_log("bc250: IB submission fallback: every IB copied into the gather slot (BC250_IB_DWORDS=%lu"
                          " clamps the copied stream)\n", ws->bc250_ib_dwords_cap);
 #else
       /* The release flavour reads no diagnostic variable (BD-167): IB2 calls and no cap, as with both unset. */

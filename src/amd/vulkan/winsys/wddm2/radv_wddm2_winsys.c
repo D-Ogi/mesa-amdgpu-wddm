@@ -43,6 +43,7 @@
 #include "tools/radv_debug.h"
 #include "radv_wddm2_bo.h"
 #include "radv_wddm2_cs.h"
+#include "util/amdgpu_wddm_stdio.h"
 #include "radv_wddm2_wsi.h"
 #include "radv_wddm2_winsys_public.h"
 #include "vk_dxcore.h"
@@ -126,7 +127,7 @@ kmd_to_amdgpu_vram_type(uint32_t kmd_type)
    case 6:
       return AMDGPU_VRAM_TYPE_GDDR6;
    default:
-      fprintf(stderr, "Unknown KMD VRAM type: %u\n", kmd_type);
+      amdgpu_wddm_log("Unknown KMD VRAM type: %u\n", kmd_type);
       return AMDGPU_VRAM_TYPE_UNKNOWN;
    }
 }
@@ -191,7 +192,7 @@ radv_wddm2_try_bc250(struct radv_wddm2_winsys *ws, struct drm_amdgpu_info_device
    /* Preserve a successful OS GTT query, including zero; only failure uses captured caps. */
    if (!NT_SUCCESS(segment_status)) {
       mem->gtt.total_heap_size = bc250_rd64(blob, BC250_OFF_MEMORY + 2 * 32);
-      fprintf(stderr, "bc250: GETSEGMENTSIZE failed (NTSTATUS 0x%08x); using captured GTT size\n",
+      amdgpu_wddm_log("bc250: GETSEGMENTSIZE failed (NTSTATUS 0x%08x); using captured GTT size\n",
               (unsigned)segment_status);
    }
 
@@ -241,7 +242,7 @@ radv_wddm2_try_bc250(struct radv_wddm2_winsys *ws, struct drm_amdgpu_info_device
    info->mec_fw_feature = bc250_rd32(blob, BC250_OFF_FW_MEC + 4);
 
    if (!ac_identify_chip(info, dev)) {
-      fprintf(stderr, "bc250: ac_identify_chip refused the caps blob\n");
+      amdgpu_wddm_log("bc250: ac_identify_chip refused the caps blob\n");
       return false;
    }
 
@@ -269,7 +270,7 @@ radv_wddm2_try_bc250(struct radv_wddm2_winsys *ws, struct drm_amdgpu_info_device
    info->max_gflops = (info->gfx_level >= GFX11 ? 256 : 128) * info->num_cu * info->max_gpu_freq_mhz / 1000;
 
    ws->bc250 = true;
-   fprintf(stderr, "bc250: caps blob, device 0x%x family %u gfx %u, compute node %s, compute queues %u\n",
+   amdgpu_wddm_log("bc250: caps blob, device 0x%x family %u gfx %u, compute node %s, compute queues %u\n",
            dev->device_id, info->family, info->gfx_level, info->has_bc250_compute_node ? "open" : "absent",
            info->ip[AMD_IP_COMPUTE].num_queues);
    return true;
@@ -304,7 +305,7 @@ radv_wddm2_fill_gpu_info(struct radv_wddm2_winsys *ws,
 
       dev.device_id = query_ids.DeviceIds.DeviceID;
       dev.pci_rev = query_ids.DeviceIds.RevisionID;
-      fprintf(stderr, "phys adapter = %i device = %x rev %x\n", adapter_info->physical_adapter_index, dev.device_id,
+      amdgpu_wddm_log("phys adapter = %i device = %x rev %x\n", adapter_info->physical_adapter_index, dev.device_id,
               dev.pci_rev);
    }
 
@@ -356,7 +357,7 @@ radv_wddm2_fill_gpu_info(struct radv_wddm2_winsys *ws,
          };
          if (NT_SUCCESS(query_adapter_info(ws, KMTQAITYPE_NODEMETADATA,
                                            &metadata, sizeof(metadata)))) {
-            fprintf(stderr, "node %i (type: %i) = %ls, flags = %x\n",
+            amdgpu_wddm_log("node %i (type: %i) = %ls, flags = %x\n",
                     i, metadata.NodeData.EngineType, metadata.NodeData.FriendlyName,
                     metadata.NodeData.Flags.Value);
             if (metadata.NodeData.EngineType == DXGK_ENGINE_TYPE_3D)
@@ -702,7 +703,7 @@ radv_wddm2_winsys_destroy(struct radeon_winsys *_ws)
    if (ws->host.dispatch) {
       struct bc250_host_paging paging = { .queue = ws->paging_queue_h };
       status = ws->host.dispatch(ws->host.userdata, BC250_HOST_DESTROY_PAGING, &paging);
-      fprintf(stderr, "BC250 hosted paging destroy identity=%p queue=%x status=%08x\n", ws->host.identity, paging.queue, status);
+      amdgpu_wddm_log("BC250 hosted paging destroy identity=%p queue=%x status=%08x\n", ws->host.identity, paging.queue, status);
    } else {
       status = WDDM2_DISPATCH(DestroyPagingQueue(&destroy_paging_queue));
    }
@@ -758,13 +759,13 @@ radv_wddm2_winsys_query_gpuvm_fault(struct radeon_winsys *rws, struct radv_winsy
       .StateType = D3DKMT_DEVICESTATE_PAGE_FAULT,
    };
    status = BC250_WDDM_CALL(&ws->host, GetDeviceState, &get_state);
-   fprintf(stderr, "GetDeviceState: 0x%X\n", status);
+   amdgpu_wddm_log("GetDeviceState: 0x%X\n", status);
    if (unlikely(!NT_SUCCESS(status)))
       return false;
 
    D3DKMT_DEVICEPAGEFAULT_STATE fault = get_state.PageFaultState;
 
-   fprintf(stderr, "faulted VA: 0x%" PRIx64 ", error: 0x%x (vendor specific: %i)\n",
+   amdgpu_wddm_log("faulted VA: 0x%" PRIx64 ", error: 0x%x (vendor specific: %i)\n",
            fault.FaultedVirtualAddress, fault.FaultErrorCode.GeneralErrorCode, fault.FaultErrorCode.DeviceSpecificCode);
    if (!fault.FaultedVirtualAddress)
       return false;
@@ -783,7 +784,7 @@ radv_wddm2_winsys_create(const struct vk_dx_adapter_info *adapter_info,
    VkResult result = VK_SUCCESS;
    struct radv_wddm2_winsys *ws = NULL;
    NTSTATUS status;
-   fprintf(stderr, "radv_wddm2_winsys_create\n");
+   amdgpu_wddm_log("radv_wddm2_winsys_create\n");
 
    const void *key = host ? host->identity : &adapter_info->adapter_luid;
    if (host && memcmp(&host->adapter_luid, &adapter_info->adapter_luid, sizeof(uint64_t)))
@@ -795,7 +796,7 @@ radv_wddm2_winsys_create(const struct vk_dx_adapter_info *adapter_info,
       *cache = host ? _mesa_pointer_hash_table_create(NULL) :
                      _mesa_hash_table_create(NULL, radv_wddm2_luid_hash, radv_wddm2_luid_equal);
    if (!*cache) {
-      fprintf(stderr, "radv/amdgpu: failed to alloc winsys hash table.\n");
+      amdgpu_wddm_log("radv/amdgpu: failed to alloc winsys hash table.\n");
       result = VK_ERROR_OUT_OF_HOST_MEMORY;
       goto fail;
    }
@@ -841,11 +842,11 @@ radv_wddm2_winsys_create(const struct vk_dx_adapter_info *adapter_info,
    D3DKMT_OPENADAPTERFROMLUID open_adapter = {
       .AdapterLuid = ws->adapter_luid,
    };
-   fprintf(stderr, "OpenAdapterFromLuid 0x%x 0x%x\n",
+   amdgpu_wddm_log("OpenAdapterFromLuid 0x%x 0x%x\n",
            adapter_info->adapter_luid.HighPart, adapter_info->adapter_luid.LowPart);
    status = WDDM2_DISPATCH(OpenAdapterFromLuid(&open_adapter));
    if (!NT_SUCCESS(status)) {
-      fprintf(stderr, "Can't open adapter with luid %X%X\n", adapter_info->adapter_luid.LowPart, adapter_info->adapter_luid.HighPart);
+      amdgpu_wddm_log("Can't open adapter with luid %X%X\n", adapter_info->adapter_luid.LowPart, adapter_info->adapter_luid.HighPart);
       result = VK_ERROR_INITIALIZATION_FAILED;
       goto error_ptr_alloc;
    }
@@ -859,7 +860,7 @@ radv_wddm2_winsys_create(const struct vk_dx_adapter_info *adapter_info,
        * inline_gfx_preamble, below; this flag does not do that. */
       ws->chain_ib = false;
    if (!NT_SUCCESS(status)) {
-      fprintf(stderr, "Can't fill info for luid %X%X\n", adapter_info->adapter_luid.LowPart, adapter_info->adapter_luid.HighPart);
+      amdgpu_wddm_log("Can't fill info for luid %X%X\n", adapter_info->adapter_luid.LowPart, adapter_info->adapter_luid.HighPart);
       result = VK_ERROR_INITIALIZATION_FAILED;
       goto error_open_adapter;
    }
@@ -872,7 +873,7 @@ radv_wddm2_winsys_create(const struct vk_dx_adapter_info *adapter_info,
        */
       snprintf(ws->gpu_info.marketing_name, sizeof(ws->gpu_info.marketing_name), "AMD BC-250");
    } else if (!NT_SUCCESS(status)) {
-      fprintf(stderr, "Can't query marketing name\n");
+      amdgpu_wddm_log("Can't query marketing name\n");
       result = VK_ERROR_INITIALIZATION_FAILED;
       goto error_open_adapter;
    }
@@ -886,7 +887,7 @@ radv_wddm2_winsys_create(const struct vk_dx_adapter_info *adapter_info,
    };
    status = host ? STATUS_SUCCESS : WDDM2_DISPATCH(CreateDevice(&create_device));
    if (!NT_SUCCESS(status)) {
-      fprintf(stderr, "Couldn't create device for adapter %i\n", ws->adapter_h);
+      amdgpu_wddm_log("Couldn't create device for adapter %i\n", ws->adapter_h);
       result = VK_ERROR_INITIALIZATION_FAILED;
       goto error_open_adapter;
    }
@@ -905,12 +906,12 @@ radv_wddm2_winsys_create(const struct vk_dx_adapter_info *adapter_info,
       status = host->dispatch(host->userdata, BC250_HOST_CREATE_PAGING, &paging);
       create_paging_queue.hPagingQueue = paging.queue;
       create_paging_queue.hSyncObject = paging.sync;
-      fprintf(stderr, "BC250 hosted paging create identity=%p queue=%x status=%08x\n", host->identity, paging.queue, status);
+      amdgpu_wddm_log("BC250 hosted paging create identity=%p queue=%x status=%08x\n", host->identity, paging.queue, status);
    } else {
       status = WDDM2_DISPATCH(CreatePagingQueue(&create_paging_queue));
    }
    if (!NT_SUCCESS(status)) {
-      fprintf(stderr, "Couldn't create paging queue\n");
+      amdgpu_wddm_log("Couldn't create paging queue\n");
       result = VK_ERROR_INITIALIZATION_FAILED;
       goto error_create_device;
    }

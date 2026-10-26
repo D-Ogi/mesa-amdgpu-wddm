@@ -26,6 +26,7 @@
 #include "tools/radv_spm.h"
 #include "tools/radv_sqtt.h"
 #include "util/u_debug.h"
+#include "util/amdgpu_wddm_stdio.h"
 #include "radv_cs.h"
 #include "radv_device.h"
 #include "radv_entrypoints.h"
@@ -1903,7 +1904,7 @@ radv_CreateDevice(VkPhysicalDevice physicalDevice, const VkDeviceCreateInfo *pCr
        !(device->ws->inline_gfx_preamble && device->ws->inline_gfx_preamble(device->ws)))
       radv_create_gfx_preamble(device);
    else if (device->ws->inline_gfx_preamble && device->ws->inline_gfx_preamble(device->ws))
-      fprintf(stderr, "bc250: gfx preamble inlined (no gfx_init IB)\n");
+      amdgpu_wddm_log("bc250: gfx preamble inlined (no gfx_init IB)\n");
 
    if (device->vk.enabled_features.performanceCounterQueryPools) {
       result = radv_device_init_perf_counter(device);
