@@ -986,6 +986,14 @@ gather_shader_info_fs(enum amd_gfx_level gfx_level, const nir_shader *nir,
    info->ps.writes_stencil = nir->info.outputs_written & BITFIELD64_BIT(FRAG_RESULT_STENCIL);
    info->ps.writes_sample_mask = nir->info.outputs_written & BITFIELD64_BIT(FRAG_RESULT_SAMPLE_MASK);
    info->ps.reads_sample_mask_in = BITSET_TEST(nir->info.system_values_read, SYSTEM_VALUE_SAMPLE_MASK_IN);
+   /* Late-Z memory writers need raw coverage for the helper demote in lower_abi,
+    * even when the API shader does not read SampleMask. Gather discard state here
+    * too: hardware state is derived from this information before ABI lowering.
+    */
+   if (gfx_level == GFX10 && info->ps.writes_memory && !info->ps.early_fragment_test) {
+      info->ps.reads_sample_mask_in = true;
+      info->ps.can_discard = true;
+   }
    info->ps.reads_sample_id = BITSET_TEST(nir->info.system_values_read, SYSTEM_VALUE_SAMPLE_ID);
    info->ps.reads_frag_shading_rate = BITSET_TEST(nir->info.system_values_read, SYSTEM_VALUE_FRAG_SHADING_RATE);
    info->ps.reads_front_face = BITSET_TEST(nir->info.system_values_read, SYSTEM_VALUE_FRONT_FACE) |

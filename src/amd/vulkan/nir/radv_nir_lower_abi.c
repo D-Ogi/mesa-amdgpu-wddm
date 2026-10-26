@@ -559,5 +559,22 @@ radv_nir_lower_abi(nir_shader *shader, enum amd_gfx_level gfx_level, const struc
    }
 
    progress |= nir_shader_intrinsics_pass(shader, lower_abi_instr, nir_metadata_control_flow, &state);
+   /* GFX10 late-Z can leave uncovered lanes in the initial exact mask for memory
+    * writers at 8 samples. Keep those lanes as helpers for derivatives and quad
+    * operations, but exclude their stores and atomics. Use the raw coverage ABI
+    * argument after sample-mask lowering, which can otherwise replace a zero-mask
+    * test with the very helper mask that needs correcting. Do not force early-Z.
+    */
+   if (gfx_level == GFX10 && shader->info.stage == MESA_SHADER_FRAGMENT &&
+       stage->info.ps.writes_memory && stage->info.ps.reads_sample_mask_in &&
+       !stage->info.ps.early_fragment_test) {
+      nir_function_impl *impl = nir_shader_get_entrypoint(shader);
+      nir_builder b = nir_builder_at(nir_before_impl(impl));
+      nir_def *coverage = ac_nir_load_arg(&b, &stage->args.ac, stage->args.ac.sample_coverage);
+      nir_demote_if(&b, nir_ieq_imm(&b, coverage, 0));
+      shader->info.fs.uses_discard = true;
+      progress = true;
+      nir_progress(true, impl, nir_metadata_control_flow);
+   }
    return progress;
 }
