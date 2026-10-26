@@ -12795,7 +12795,12 @@ radv_emit_ps_state(struct radv_cmd_buffer *cmd_buffer)
    if (ps->info.ps.selects_sample_mask_in_dynamically) {
       use_sample_mask_in = radv_hw_rast_samples(cmd_buffer) != 1;
 
-      if (!use_sample_mask_in)
+      /* The API's single-sample mask can be synthesized, but the late-Z helper
+       * demote still consumes raw coverage. Keep its VGPR initialized.
+       */
+      const bool needs_helper_coverage = pdev->info.gfx_level == GFX10 && ps->info.ps.writes_memory &&
+                                         !ps->info.ps.early_fragment_test;
+      if (!use_sample_mask_in && !needs_helper_coverage)
          spi_ps_input_ena &= C_0286CC_SAMPLE_COVERAGE_ENA;
    }
 
