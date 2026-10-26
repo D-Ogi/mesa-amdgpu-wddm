@@ -93,14 +93,21 @@ radv_mesh_enabled(const struct radv_physical_device *pdev)
  * behaviour for an A/B: each extension entry and its mandatory feature are gated together, so the
  * strict arm never advertises an extension whose feature reads VK_FALSE. The maxDrawIndirectCount
  * clamp is not part of the switch: the mesh routes enforce 4096 themselves, so it always applies.
- * The combination "Task exposed and these extensions exposed" has not been measured on hardware;
- * see PORT-NOTES.md.
+ * Descriptor heaps have a separate capability gate: the hybrid Task pipeline
+ * rejects descriptor-set mappings before lowering its private producer. Keep
+ * descriptor buffers available through the existing fast-binding path.
  */
 static bool
 radv_bc250_task_strict_ext(const struct radv_physical_device *pdev)
 {
    return (pdev->bc250_hybrid_task || pdev->bc250_native_task) &&
           BC250_ENV_BOOL(RADV_BC250_TASK_STRICT_EXT, false);
+}
+
+static bool
+radv_bc250_descriptor_heap_exposed(const struct radv_physical_device *pdev)
+{
+   return !pdev->bc250_hybrid_task && !radv_bc250_task_strict_ext(pdev);
 }
 
 static bool
@@ -951,7 +958,7 @@ radv_physical_device_get_supported_extensions(const struct radv_physical_device 
       .EXT_depth_clip_enable = true,
       .EXT_depth_range_unrestricted = true,
       .EXT_descriptor_buffer = radv_bc250_descriptor_buffer_exposed(pdev),
-      .EXT_descriptor_heap = !radv_bc250_task_strict_ext(pdev) && !(RADV_DEBUG(instance, NO_HEAP)),
+      .EXT_descriptor_heap = radv_bc250_descriptor_heap_exposed(pdev) && !(RADV_DEBUG(instance, NO_HEAP)),
       .EXT_descriptor_indexing = true,
       .EXT_device_address_binding_report = true,
       .EXT_device_fault = true,
@@ -1791,8 +1798,8 @@ radv_physical_device_get_features(const struct radv_physical_device *pdev, struc
       .primitiveRestartIndex = true,
 
       /* VK_EXT_descriptor_heap */
-      .descriptorHeap = !radv_bc250_task_strict_ext(pdev),
-      .descriptorHeapCaptureReplay = !radv_bc250_task_strict_ext(pdev),
+      .descriptorHeap = radv_bc250_descriptor_heap_exposed(pdev),
+      .descriptorHeapCaptureReplay = radv_bc250_descriptor_heap_exposed(pdev),
 
       /* VK_KHR_shader_constant_data */
       .shaderConstantData = true,
