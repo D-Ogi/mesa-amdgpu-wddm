@@ -471,6 +471,31 @@ endif
 # These NIR and dispatch contracts do not need DRM or a GPU. Keep them runnable
 # on the Windows build host as well as on Linux.
 if with_tests
+  test(
+    'radv_ray_query_cull_mask',
+    executable(
+      'radv_ray_query_cull_mask',
+      files('nir/tests/ray_query_cull_mask_test.cpp'),
+      cpp_args : [cpp_msvc_compat_args],
+      include_directories : [inc_include, inc_src, inc_compiler, inc_util],
+      dependencies : [dep_thread, idep_nir, idep_mesautil],
+    ),
+    suite : ['compiler', 'nir'],
+  )
+  test(
+    'radv_ray_query_lowering',
+    executable(
+      'radv_ray_query_lowering',
+      files('nir/tests/ray_query_lowering_test.c',
+            'nir/radv_nir_lower_ray_queries.c', 'nir/radv_nir_rt_common.c'),
+      include_directories : [inc_include, inc_src, inc_amd, inc_amd_common,
+                             inc_compiler, inc_util, include_directories('.')],
+      link_with : [libamd_common],
+      dependencies : [dep_thread, idep_nir, idep_mesautil, idep_vulkan_util_headers],
+    ),
+    suite : ['compiler', 'nir'],
+    timeout : 3,
+  )
   # The CPU NIR interpreter reports unsupported operations with exceptions.
   bc250_test_cpp_args = cpp_msvc_compat_args
   if cc.get_argument_syntax() == 'msvc'
