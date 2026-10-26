@@ -118,7 +118,7 @@ struct radv_physical_device {
    /* Whether to enable NGG. */
    bool use_ngg;
 
-   /* Private, unsupported direct-mesh experiment for BC-250 (GFX1013). */
+   /* DirectMesh capability; WDDM admission remains restricted to BC-250 (GFX1013). */
    bool bc250_native_mesh;
    bool bc250_native_task; /* Experimental native TASK capability; submission separately gated. */
    bool bc250_hybrid_task;

@@ -79,6 +79,10 @@ bool radv_bc250_autocull_size_policy(const struct radv_compiler_info *compiler_i
                                    unsigned prims, unsigned wave, unsigned lanes);
 bool radv_bc250_mesh_safe_direct_candidate(struct nir_shader *mesh, bool parallel);
 bool radv_bc250_mesh_safe_direct_candidate_slots(struct nir_shader *mesh, bool parallel, unsigned max_slots);
+struct radv_bc250_mesh_contract;
+bool radv_bc250_mesh_safe_direct_contract_slots(struct nir_shader *mesh,
+                                                const struct radv_bc250_mesh_contract *contract,
+                                                bool parallel, unsigned max_slots);
 /* RADV_BC250_MESH_CLIPCULL_CONST: removes the constant non-negative clip/cull distance stores
  * of a Mesh shader (variables, before the BC250 rewrites). fs: the linked fragment shader
  * (NULL: none); fs_known false: not known (nothing is removed). */

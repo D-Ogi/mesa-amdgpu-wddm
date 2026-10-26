@@ -149,6 +149,9 @@ libradv_files = files(
   'radv_anti_lag.c',
   'radv_buffer.c',
   'radv_bc250.c',
+  'radv_bc250_idx.c',
+  'radv_bc250_idx_cost.c',
+  'radv_bc250_mesh_contract.c',
   'radv_buffer.h',
   'radv_buffer_view.c',
   'radv_buffer_view.h',
@@ -462,5 +465,39 @@ if with_radv_tests
       'LD_PRELOAD=@0@'.format(libamdgpu_noop_drm_shim.full_path()),
       'AMDGPU_GPU_ID=navi21',
     ],
+  )
+endif
+
+# These NIR and dispatch contracts do not need DRM or a GPU. Keep them runnable
+# on the Windows build host as well as on Linux.
+if with_tests
+  # The CPU NIR interpreter reports unsupported operations with exceptions.
+  bc250_test_cpp_args = cpp_msvc_compat_args
+  if cc.get_argument_syntax() == 'msvc'
+    bc250_test_cpp_args += ['/U_HAS_EXCEPTIONS', '/D_HAS_EXCEPTIONS=1']
+  endif
+  test(
+    'radv_bc250_contract_tests',
+    executable(
+      'radv_bc250_contract_tests',
+      files(
+        'radv_bc250_mesh_contract.c',
+        'radv_bc250_idx.c',
+        'radv_bc250_idx_cost.c',
+        'tests/radv_bc250_dispatch_tests.cpp',
+        'tests/radv_bc250_idx_cost_tests.cpp',
+        'tests/radv_bc250_idx_prune_tests.cpp',
+        'tests/radv_bc250_idx_tests.cpp',
+        'tests/radv_bc250_mesh_contract_tests.cpp',
+        'tests/radv_bc250_primitive_tests.cpp',
+      ),
+      cpp_args : [bc250_test_cpp_args],
+      include_directories : [inc_include, inc_src, inc_amd, inc_amd_common,
+                             inc_compiler, inc_util, include_directories('.')],
+      dependencies : [dep_thread, idep_gtest, idep_nir, idep_mesautil,
+                      idep_vulkan_util_headers],
+    ),
+    suite : ['compiler', 'nir', 'bc250'],
+    protocol : 'gtest',
   )
 endif

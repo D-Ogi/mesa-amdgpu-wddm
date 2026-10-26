@@ -1731,6 +1731,7 @@ radv_device_init_compiler_info(struct radv_device *device)
    info.bc250x.lds_cover = bc250_mesh && BC250_ENV_BOOL_P(RADV_BC250_MESH_LDS_COVER, false);
    info.bc250x.merged_check = bc250_mesh && BC250_ENV_BOOL_P(RADV_BC250_MESH_MERGED_CHECK, false);
    info.bc250x.idxpass = bc250_mesh && BC250_ENV_BOOL_P(RADV_BC250_MESH_IDXPASS, false);
+   info.bc250x.corner_alias = bc250_mesh && BC250_ENV_BOOL(RADV_BC250_MESH_CORNER_ALIAS, false);
 
    device->compiler_info = info;
 }
