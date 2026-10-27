@@ -125,7 +125,11 @@ ac_nir_create_gs_copy_shader(const nir_shader *gs_nir, ac_nir_lower_legacy_gs_op
          nir_def *selected = nir_load_buffer_amd(&b, 1, 32, table, zero, zero, zero,
             .base = offsetof(struct bc250_pgp_so_table, rasterized_stream),
             .access = ACCESS_CAN_REORDER | ACCESS_NON_WRITEABLE, .align_mul = 4);
-         nir_push_if(&b, nir_ieq_imm(&b, selected, stream));
+         /* Without a rasterized stream VGT_STRMOUT_CONFIG.RAST_STREAM stays 0 and the rasterizer discards
+          * the primitives, but the vertices of stream 0 still need their position export, as in the copy
+          * shader without the capture. A copy shader that exported no position hung the GPU (TDR). */
+         nir_def *raster_stream = nir_bcsel(&b, nir_ult_imm(&b, selected, 4), selected, zero);
+         nir_push_if(&b, nir_ieq_imm(&b, raster_stream, stream));
       }
       if (stream == 0 || b.shader->info.bc250_pgp_so_capture) {
          nir_def *saved_position[4];
