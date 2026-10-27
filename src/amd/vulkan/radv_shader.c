@@ -564,6 +564,14 @@ radv_shader_spirv_to_nir(const struct radv_compiler_info *compiler_info, struct 
 
       nir_validate_shader(nir, "after spirv_to_nir");
 
+      /* NIR's legacy GS output table is indexed by location, not by stream.
+       * Distinct SPIR-V Position variables must not alias that table. */
+      if (ac_nir_lower_gs_stream_positions(nir) < 0) {
+         vtn_free_specialization(spec);
+         ralloc_free(nir);
+         return NULL;
+      }
+
       vtn_free_specialization(spec);
 
       const struct nir_lower_sysvals_to_varyings_options sysvals_to_varyings = {

@@ -28,6 +28,7 @@
 #include "radv_formats.h"
 #include "radv_physical_device.h"
 #include "radv_tir.h"
+#include "radv_pgp_so.h"
 #include "radv_pipeline_binary.h"
 #include "radv_pipeline_cache.h"
 #include "radv_pipeline_stage_cover.h"
@@ -1345,7 +1346,7 @@ radv_graphics_shaders_link_varyings(struct radv_shader_stage *stages, enum amd_g
       nir_shader *producer = stages[s].nir;
       nir_shader *consumer = stages[next].nir;
 
-      const nir_opt_varyings_progress p = nir_opt_varyings(producer, consumer, true, 0, 0, false);
+      const nir_opt_varyings_progress p = ac_nir_opt_varyings_preserving_gs_raster_map(producer, consumer);
 
       /* Run algebraic optimizations on shaders that changed. */
       if (p & nir_progress_producer) {
@@ -1373,7 +1374,7 @@ radv_graphics_shaders_link_varyings(struct radv_shader_stage *stages, enum amd_g
       nir_shader *producer = stages[s].nir;
       nir_shader *consumer = stages[next].nir;
 
-      const nir_opt_varyings_progress p = nir_opt_varyings(producer, consumer, true, 0, 0, false);
+      const nir_opt_varyings_progress p = ac_nir_opt_varyings_preserving_gs_raster_map(producer, consumer);
 
       /* Run algebraic optimizations on shaders that changed. */
       if (p & nir_progress_producer) {
@@ -3308,6 +3309,25 @@ radv_graphics_shaders_compile(const struct radv_compiler_info *compiler_info, st
    }
 
    /* Determine if shaders uses NGG before linking because it's needed for some NIR pass. */
+   if (gfx_state->bc250_pgp_so_capture) {
+      radv_foreach_stage (s, active_nir_stages) {
+         if (stages[s].nir->xfb_info) {
+            const nir_xfb_info *xfb = stages[s].nir->xfb_info;
+            for (unsigned n = 0; n < xfb->output_count; n++) {
+               const nir_xfb_output_info *o = &xfb->outputs[n];
+               if (o->buffer >= 4 || xfb->buffer_to_stream[o->buffer] != o->buffer ||
+                   xfb->buffers[o->buffer].stride != 512 || (o->offset & 3) ||
+                   o->offset + 4 * util_bitcount(o->component_mask) > 512) {
+                  fprintf(stderr, "stream-output canonical capture refused: stage=%u buffer=%u stream=%u stride=%u offset=%u mask=%x\n",
+                          s, o->buffer, o->buffer < 4 ? xfb->buffer_to_stream[o->buffer] : 0,
+                          o->buffer < 4 ? xfb->buffers[o->buffer].stride : 0, o->offset, o->component_mask);
+                  return VK_ERROR_FEATURE_NOT_PRESENT;
+               }
+            }
+            stages[s].nir->info.bc250_pgp_so_capture = true;
+         }
+      }
+   }
    radv_fill_shader_info_ngg(compiler_info, stages, active_nir_stages);
 
    if (stages[MESA_SHADER_GEOMETRY].nir) {
@@ -3850,6 +3870,24 @@ radv_generate_graphics_pipeline_state(struct radv_device *device, const VkGraphi
 
    gfx_state->no16_logical16 = radv_no16_pipeline_candidate(device, create_flags, libs_info, gfx_state);
 
+   const struct bc250_pgp_so_pipeline *pgp_so = __vk_find_struct((void *)pCreateInfo->pNext, BC250_STRUCTURE_TYPE_PGP_SO);
+   if (pgp_so && (pgp_so->mode == BC250_PGP_SO_LINK || pgp_so->mode == BC250_PGP_SO_FULL)) {
+      if (!bc250_pgp_so_table_valid(pgp_so->table)) {
+         result = VK_ERROR_FEATURE_NOT_PRESENT;
+         goto fail;
+      }
+      struct mesa_blake3 so_hash;
+      _mesa_blake3_init(&so_hash);
+      _mesa_blake3_update(&so_hash, pgp_so->table, sizeof(*pgp_so->table));
+      _mesa_blake3_final(&so_hash, gfx_state->bc250_pgp_so_link_hash);
+      if (gfx_state->vk.rs) {
+         gfx_state->bc250_pgp_so_rs = *gfx_state->vk.rs;
+         gfx_state->bc250_pgp_so_rs.rasterizer_discard_enable =
+            pgp_so->table->rasterized_stream == BC250_PGP_SO_END;
+         gfx_state->vk.rs = &gfx_state->bc250_pgp_so_rs;
+      }
+   }
+
    const struct bc250_tir_pipeline *tir = __vk_find_struct((void *)pCreateInfo->pNext, BC250_STRUCTURE_TYPE_TIR);
    if (tir) {
       /* Version one uses a complete pipeline: no library can lose the private
@@ -3895,6 +3933,9 @@ radv_generate_graphics_pipeline_state(struct radv_device *device, const VkGraphi
    gfx_state->compilation_required = !radv_skip_graphics_pipeline_compile(device, pCreateInfo);
    if (gfx_state->compilation_required) {
       gfx_state->key = radv_generate_graphics_pipeline_key(device, pCreateInfo, &gfx_state->vk, needed_lib_flags);
+      const struct bc250_pgp_so_pipeline *so = __vk_find_struct((void *)pCreateInfo->pNext, BC250_STRUCTURE_TYPE_PGP_SO);
+      gfx_state->key.gfx_state.bc250_pgp_so_capture = so &&
+         (so->mode == BC250_PGP_SO_CAPTURE || so->mode == BC250_PGP_SO_FULL);
       /* In the pipeline hash: an admitted 16-sample request never shares cache entries with another pipeline. */
       gfx_state->key.gfx_state.no16_logical16 = gfx_state->no16_logical16;
       if (tir) {
@@ -3949,6 +3990,9 @@ radv_bc250_graphics_state_hash(const struct radv_device *device,
    radv_pipeline_layout_hash(&layout);
    struct radv_graphics_pipeline_key key =
       radv_generate_graphics_pipeline_key(device, info, &gfx_state->vk, ALL_GRAPHICS_LIB_FLAGS);
+   const struct bc250_pgp_so_pipeline *so = __vk_find_struct((void *)info->pNext, BC250_STRUCTURE_TYPE_PGP_SO);
+   key.gfx_state.bc250_pgp_so_capture = so &&
+      (so->mode == BC250_PGP_SO_CAPTURE || so->mode == BC250_PGP_SO_FULL);
    const struct bc250_tir_pipeline *tir = __vk_find_struct((void *)info->pNext, BC250_STRUCTURE_TYPE_TIR);
    if (tir) {
       key.gfx_state.tir_forced_samples = tir->forced_samples;
@@ -3964,6 +4008,8 @@ radv_bc250_graphics_state_hash(const struct radv_device *device,
    _mesa_blake3_init(&ctx);
    radv_pipeline_hash(device, &layout, &ctx);
    _mesa_blake3_update(&ctx, &key.gfx_state, sizeof(key.gfx_state));
+   if (so && (so->mode == BC250_PGP_SO_LINK || so->mode == BC250_PGP_SO_FULL) && so->table)
+      _mesa_blake3_update(&ctx, so->table, sizeof(*so->table));
    /* Shader keys normalize late fields; whole-pipeline identity must not. */
    if (tir && tir->revision == BC250_TIR_PGP_REVISION) {
       _mesa_blake3_update(&ctx, &tir->output_samples, sizeof(tir->output_samples));
@@ -3982,6 +4028,7 @@ radv_graphics_pipeline_hash(const struct radv_device *device, const struct radv_
    radv_pipeline_hash(device, &gfx_state->layout, &ctx);
 
    _mesa_blake3_update(&ctx, &gfx_state->key.gfx_state, sizeof(gfx_state->key.gfx_state));
+   _mesa_blake3_update(&ctx, gfx_state->bc250_pgp_so_link_hash, sizeof(gfx_state->bc250_pgp_so_link_hash));
    if (gfx_state->tir_pgp_output_samples) {
       _mesa_blake3_update(&ctx, &gfx_state->tir_pgp_output_samples, sizeof(gfx_state->tir_pgp_output_samples));
       _mesa_blake3_update(&ctx, &gfx_state->tir_pgp_output_mask, sizeof(gfx_state->tir_pgp_output_mask));
@@ -4677,9 +4724,35 @@ radv_graphics_pipeline_check_shaders(struct radv_device *device, const struct ra
 }
 
 static VkResult
+radv_pgp_so_pipeline_init(struct radv_graphics_pipeline *pipeline, struct radv_device *device,
+   const VkGraphicsPipelineCreateInfo *pCreateInfo)
+{
+   const struct bc250_pgp_so_pipeline *so = __vk_find_struct((void *)pCreateInfo->pNext, BC250_STRUCTURE_TYPE_PGP_SO);
+   if (so) {
+      const bool library = vk_graphics_pipeline_create_flags(pCreateInfo) & VK_PIPELINE_CREATE_2_LIBRARY_BIT_KHR;
+      if (so->revision != BC250_PGP_SO_REVISION || radv_device_physical(device)->info.gfx_level != GFX10 ||
+          (so->mode != BC250_PGP_SO_CAPTURE && so->mode != BC250_PGP_SO_LINK && so->mode != BC250_PGP_SO_FULL) ||
+          (so->mode == BC250_PGP_SO_CAPTURE && !library) ||
+          ((so->mode == BC250_PGP_SO_LINK || so->mode == BC250_PGP_SO_FULL) && library) ||
+          (so->mode == BC250_PGP_SO_CAPTURE && so->table) ||
+          ((so->mode == BC250_PGP_SO_LINK || so->mode == BC250_PGP_SO_FULL) && !bc250_pgp_so_table_valid(so->table)))
+         return VK_ERROR_FEATURE_NOT_PRESENT;
+      pipeline->bc250_pgp_so_capture = so->mode == BC250_PGP_SO_CAPTURE || so->mode == BC250_PGP_SO_FULL;
+      if (so->mode == BC250_PGP_SO_LINK || so->mode == BC250_PGP_SO_FULL) {
+         pipeline->bc250_pgp_so_table = malloc(sizeof(*so->table));
+         if (!pipeline->bc250_pgp_so_table) return VK_ERROR_OUT_OF_HOST_MEMORY;
+         memcpy(pipeline->bc250_pgp_so_table, so->table, sizeof(*so->table));
+      }
+   }
+   return VK_SUCCESS;
+}
+
+static VkResult
 radv_graphics_pipeline_init(struct radv_graphics_pipeline *pipeline, struct radv_device *device,
                             struct vk_pipeline_cache *cache, const VkGraphicsPipelineCreateInfo *pCreateInfo)
 {
+   VkResult so_result = radv_pgp_so_pipeline_init(pipeline, device, pCreateInfo);
+   if (so_result != VK_SUCCESS) return so_result;
    const struct bc250_tir_pipeline *tir = __vk_find_struct((void *)pCreateInfo->pNext, BC250_STRUCTURE_TYPE_TIR);
    if (tir && tir->revision == BC250_TIR_PGP_REVISION) {
       pipeline->tir_pgp_forced_samples = tir->forced_samples;
@@ -4855,6 +4928,19 @@ radv_graphics_pipeline_init(struct radv_graphics_pipeline *pipeline, struct radv
 
    radv_pipeline_init_shader_stages_state(device, pipeline);
 
+   {
+      const struct radv_shader *producer = pipeline->last_vgt_api_stage < MESA_VULKAN_SHADER_STAGES ?
+         pipeline->base.shaders[pipeline->last_vgt_api_stage] : NULL;
+      if (!!pipeline->bc250_pgp_so_table != !!(producer && producer->info.bc250_pgp_so_capture) ||
+          (pipeline->bc250_pgp_so_table && producer->info.is_ngg)) {
+         fprintf(stderr, "stream-output final producer refused: table=%u stage=%u producer=%u capture=%u ngg=%u\n",
+                 !!pipeline->bc250_pgp_so_table, pipeline->last_vgt_api_stage, !!producer,
+                 producer ? producer->info.bc250_pgp_so_capture : 0, producer ? producer->info.is_ngg : 0);
+         radv_graphics_pipeline_state_finish(device, &gfx_state);
+         return VK_ERROR_FEATURE_NOT_PRESENT;
+      }
+   }
+
    pipeline->uses_out_of_order_rast = gfx_state.vk.rs->rasterization_order_amd == VK_RASTERIZATION_ORDER_RELAXED_AMD;
    pipeline->uses_vrs_attachment = radv_pipeline_uses_vrs_attachment(pipeline, &gfx_state.vk);
    pipeline->ignore_ds_state = gfx_state.vk.rp && !radv_pipeline_has_ds_attachments(gfx_state.vk.rp);
@@ -4936,6 +5022,8 @@ radv_destroy_graphics_pipeline(struct radv_device *device, struct radv_graphics_
          }
       }
    }
+   /* Keep immutable output mapping alive until all pipeline users have joined. */
+   free(pipeline->bc250_pgp_so_table);
    if (pipeline->bc250_task_pipeline)
       radv_DestroyPipeline(radv_device_to_handle(device), pipeline->bc250_task_pipeline, NULL);
    if (pipeline->bc250_idx_cs)
@@ -4969,6 +5057,8 @@ static VkResult
 radv_graphics_lib_pipeline_init(struct radv_graphics_lib_pipeline *pipeline, struct radv_device *device,
                                 struct vk_pipeline_cache *cache, const VkGraphicsPipelineCreateInfo *pCreateInfo)
 {
+   VkResult so_result = radv_pgp_so_pipeline_init(&pipeline->base, device, pCreateInfo);
+   if (so_result != VK_SUCCESS) return so_result;
    VK_FROM_HANDLE(radv_pipeline_layout, pipeline_layout, pCreateInfo->layout);
    VkResult result;
 

@@ -2395,8 +2395,8 @@ public:
    struct {
       FILE* output = stderr;
       bool shorten_messages = false;
-      void (*func)(void* private_data, enum aco_compiler_debug_level level, const char* message);
-      void* private_data;
+      void (*func)(void* private_data, enum aco_compiler_debug_level level, const char* message) = nullptr;
+      void* private_data = nullptr;
    } debug;
 
    void allocateRange(unsigned amount)

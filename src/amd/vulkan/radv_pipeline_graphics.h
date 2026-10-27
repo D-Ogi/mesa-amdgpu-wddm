@@ -138,6 +138,8 @@ struct radv_graphics_pipeline {
    /* Final, declared RTV state. Never inferred from a bound render pass. */
    uint8_t tir_pgp_forced_samples;
    uint8_t tir_pgp_output_samples;
+   bool bc250_pgp_so_capture;
+   struct bc250_pgp_so_table *bc250_pgp_so_table;
 
    uint64_t dynamic_states;
    uint64_t needed_dynamic_state;
@@ -759,6 +761,8 @@ void radv_destroy_graphics_pipeline(struct radv_device *device, struct radv_grap
 void radv_destroy_graphics_lib_pipeline(struct radv_device *device, struct radv_graphics_lib_pipeline *pipeline);
 
 struct radv_graphics_pipeline_state {
+   uint8_t bc250_pgp_so_link_hash[32];
+   struct vk_rasterization_state bc250_pgp_so_rs;
    uint32_t tir_pgp_output_samples;
    uint32_t tir_pgp_output_mask;
    struct vk_graphics_pipeline_state vk;

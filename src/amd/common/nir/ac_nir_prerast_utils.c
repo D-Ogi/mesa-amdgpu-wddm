@@ -6,10 +6,54 @@
 
 #include "ac_nir.h"
 #include "ac_nir_helpers.h"
+#include "ac_pgp_so.h"
 #include "amdgfxregs.h"
 
 #include "nir_builder.h"
 #include "nir_xfb_info.h"
+
+unsigned
+ac_nir_opt_varyings_preserving_gs_raster_map(nir_shader *producer, nir_shader *consumer)
+{
+   /* The final immutable map, not stream zero's signature, chooses which GS
+    * components feed the pixel shader. Inter-stage propagation/compaction would
+    * bake in that wrong signature and relocate the reserved stream positions.
+    * Native Vulkan and all other stage pairs retain ordinary optimization. */
+   if (producer->info.stage == MESA_SHADER_GEOMETRY && producer->info.bc250_pgp_so_capture &&
+       consumer->info.stage == MESA_SHADER_FRAGMENT)
+      return 0;
+   return nir_opt_varyings(producer, consumer, true, 0, 0, false);
+}
+
+int
+ac_nir_lower_gs_stream_positions(nir_shader *nir)
+{
+   if (nir->info.stage != MESA_SHADER_GEOMETRY)
+      return 0;
+
+   bool progress = false;
+   nir_foreach_shader_out_variable(var, nir) {
+      if (var->data.location != VARYING_SLOT_POS || !var->data.stream)
+         continue;
+
+      /* SPIR-V Stream applies to the complete variable. Per-component packed
+       * streams are not produced by the Vulkan frontend. */
+      if (var->data.stream >= 4)
+         return -1;
+      const unsigned slot = VARYING_SLOT_TEX4 + var->data.stream;
+      nir_foreach_shader_out_variable(other, nir) {
+         if (other != var && other->data.location == slot)
+            return -1;
+      }
+      progress = true;
+   }
+   /* Validate the complete mapping before mutating any variable. */
+   nir_foreach_shader_out_variable(var, nir) {
+      if (var->data.location == VARYING_SLOT_POS && var->data.stream)
+         var->data.location = VARYING_SLOT_TEX4 + var->data.stream;
+   }
+   return progress;
+}
 
 void
 ac_nir_store_var_components(nir_builder *b, nir_variable *var, nir_def *value,
@@ -557,9 +601,76 @@ ac_nir_get_sorted_xfb_info(const nir_shader *nir)
    return info;
 }
 
+static nir_def *
+ac_pgp_so_load(nir_builder *b, nir_def *table, nir_def *offset)
+{
+   return nir_load_buffer_amd(b, 1, 32, table, offset, nir_imm_int(b, 0), nir_imm_int(b, 0),
+      .access = ACCESS_CAN_REORDER | ACCESS_NON_WRITEABLE, .align_mul = 4);
+}
+
+static void
+ac_nir_emit_dynamic_streamout(nir_builder *b, unsigned stream, nir_xfb_info *info, ac_nir_prerast_out *out)
+{
+   nir_def *zero = nir_imm_int(b, 0);
+   nir_def *table = nir_load_streamout_buffer_amd(b, .base = 4);
+   nir_def *count = ac_pgp_so_load(b, table, zero);
+   nir_def *tid = nir_load_subgroup_invocation(b);
+   nir_def *vertices = nir_ubfe_imm(b, nir_load_streamout_config_amd(b), 16, 7);
+   nir_push_if(b, nir_ilt(b, tid, vertices));
+   nir_def *vertex = nir_iadd(b, nir_load_streamout_write_index_amd(b), tid);
+   nir_def *buffers[4], *offsets[4];
+   for (unsigned i = 0; i < 4; i++) {
+      buffers[i] = nir_load_streamout_buffer_amd(b, .base = i);
+      nir_def *stride = ac_pgp_so_load(b, table, nir_imm_int(b, offsetof(struct bc250_pgp_so_table, stride) + 4 * i));
+      offsets[i] = nir_iadd(b, nir_imul(b, vertex, stride), nir_imul_imm(b, nir_load_streamout_offset_amd(b, i), 4));
+   }
+   for (unsigned i = 0; i < info->output_count; i++) {
+      const nir_xfb_output_info *o = &info->outputs[i];
+      if (info->buffer_to_stream[o->buffer] != stream)
+         continue;
+      u_foreach_bit(c, o->component_mask) {
+         nir_def *value = out->outputs[o->location][c];
+         if (!value)
+            continue;
+         if (o->data_is_16bit) {
+            value = o->high_16bits ? nir_unpack_32_2x16_split_y(b, value) : nir_unpack_32_2x16_split_x(b, value);
+            if (o->mediump)
+               value = nir_convert_to_bit_size(b, value, o->mediump_upconvert_type, 32);
+         }
+         unsigned source = o->buffer * 128 + (o->offset / 4) + c - o->component_offset;
+         assert(source < BC250_PGP_SO_SOURCES);
+         nir_variable *index = nir_local_variable_create(b->impl, glsl_uint_type(), "pgp_so_destination");
+         nir_store_var(b, index, ac_pgp_so_load(b, table,
+            nir_imm_int(b, offsetof(struct bc250_pgp_so_table, head) + 4 * source)), 1);
+         nir_push_loop(b);
+         nir_def *n = nir_load_var(b, index);
+         nir_push_if(b, nir_uge(b, n, count));
+         nir_jump(b, nir_jump_break);
+         nir_pop_if(b, NULL);
+         nir_def *entry = nir_iadd_imm(b, nir_imul_imm(b, n, sizeof(struct bc250_pgp_so_destination)),
+            offsetof(struct bc250_pgp_so_table, destinations));
+         nir_def *buffer = ac_pgp_so_load(b, table, entry);
+         nir_def *offset = ac_pgp_so_load(b, table, nir_iadd_imm(b, entry, 4));
+         for (unsigned target = 0; target < 4; target++) {
+            nir_push_if(b, nir_ieq_imm(b, buffer, target));
+            nir_store_buffer_amd(b, value, buffers[target], nir_iadd(b, offsets[target], offset), zero, zero,
+               .access = ACCESS_NON_TEMPORAL, .align_mul = 4);
+            nir_pop_if(b, NULL);
+         }
+         nir_store_var(b, index, ac_pgp_so_load(b, table, nir_iadd_imm(b, entry, 8)), 1);
+         nir_pop_loop(b, NULL);
+      }
+   }
+   nir_pop_if(b, NULL);
+}
+
 void
 ac_nir_emit_legacy_streamout(nir_builder *b, unsigned stream, nir_xfb_info *info, ac_nir_prerast_out *out)
 {
+   if (b->shader->info.bc250_pgp_so_capture) {
+      ac_nir_emit_dynamic_streamout(b, stream, info, out);
+      return;
+   }
    nir_def *so_vtx_count = nir_ubfe_imm(b, nir_load_streamout_config_amd(b), 16, 7);
    nir_def *tid = nir_load_subgroup_invocation(b);
 

@@ -19,6 +19,12 @@ extern "C" {
 
 #define AC_MULTIVIEW_MAX_VIEWS 8
 
+/* Vulkan has no legacy TEX varying slots. Keep nonzero GS stream positions
+ * distinct from stream zero without consuming application Location space. */
+/* Returns -1 for an invalid/colliding stream mapping, 0 unchanged, 1 changed. */
+int ac_nir_lower_gs_stream_positions(nir_shader *nir);
+unsigned ac_nir_opt_varyings_preserving_gs_raster_map(nir_shader *producer, nir_shader *consumer);
+
 enum
 {
    /* SPI_PS_INPUT_CNTL_i.OFFSET[0:4] */

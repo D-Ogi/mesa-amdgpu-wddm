@@ -80,5 +80,11 @@ ac_nir_lower_legacy_vs(nir_shader *nir,
                                &out);
    }
 
+   /* Dynamic PGP stream-output lists introduce loop-local variables in this
+    * late pass, after the driver's ordinary variables-to-SSA phase. */
+   if (nir->info.bc250_pgp_so_capture) {
+      nir_lower_vars_to_ssa(nir);
+      nir_opt_dce(nir);
+   }
    return nir_progress(true, impl, nir_metadata_none);
 }

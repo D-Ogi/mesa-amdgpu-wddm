@@ -10,6 +10,7 @@
 
 #include "radv_cmd_buffer.h"
 #include "radv_pgp_view.h"
+#include "radv_pgp_so.h"
 #include "radv_directmesh.h"
 #include "radv_bc250.h"
 #include "radv_s16f8_probe.h"
@@ -4122,6 +4123,8 @@ radv_emit_ps_inputs(struct radv_cmd_buffer *cmd_buffer)
    unsigned num_per_primitive_params = in->num_per_primitive;
    const unsigned ps_offset = in->num;
    uint32_t ps_input_cntl[32];
+   const struct bc250_pgp_so_table *so_table = cmd_buffer->state.graphics_pipeline ?
+      cmd_buffer->state.graphics_pipeline->bc250_pgp_so_table : NULL;
 
    for (unsigned i = 0; i < in->num; i++) {
       const unsigned slot = in->slot[i];
@@ -4129,6 +4132,22 @@ radv_emit_ps_inputs(struct radv_cmd_buffer *cmd_buffer)
       ps_input_cntl[i] = vgt->offset[slot];
       if (vgt->exported_mask & BITFIELD64_BIT(slot))
          ps_input_cntl[i] |= in->cntl[i];
+      /* System varyings share the fixed PARAM space with generic registers.
+       * The mapping belongs to the final pipeline, never the shared shader. */
+      if (so_table) {
+         unsigned system_slot = BC250_PGP_SO_SYSTEM_PARAMS;
+         switch (slot) {
+         case VARYING_SLOT_CLIP_DIST0: system_slot = BC250_PGP_SO_SYSTEM_CLIP0; break;
+         case VARYING_SLOT_CLIP_DIST1: system_slot = BC250_PGP_SO_SYSTEM_CLIP1; break;
+         case VARYING_SLOT_LAYER: system_slot = BC250_PGP_SO_SYSTEM_LAYER; break;
+         case VARYING_SLOT_VIEWPORT: system_slot = BC250_PGP_SO_SYSTEM_VIEWPORT; break;
+         case VARYING_SLOT_PRIMITIVE_ID: system_slot = BC250_PGP_SO_SYSTEM_PRIMITIVE_ID; break;
+         default: break;
+         }
+         if (system_slot < BC250_PGP_SO_SYSTEM_PARAMS &&
+             so_table->raster_system_param[system_slot] != BC250_PGP_SO_END)
+            ps_input_cntl[i] = S_028644_OFFSET(so_table->raster_system_param[system_slot]) | in->cntl[i];
+      }
    }
 
    /* Potentially per-primitive PS inputs */
@@ -7920,9 +7939,19 @@ radv_flush_streamout_descriptors(struct radv_cmd_buffer *cmd_buffer)
    uint64_t desc_va;
    void *so_ptr;
 
+   const struct bc250_pgp_so_table *table = cmd_buffer->state.graphics_pipeline ?
+      cmd_buffer->state.graphics_pipeline->bc250_pgp_so_table : NULL;
+   const unsigned descriptor_size = (MAX_SO_BUFFERS + (table ? 1 : 0)) * 16;
+
    /* Allocate some descriptor state for streamout buffers. */
-   if (!radv_cmd_buffer_upload_alloc(cmd_buffer, MAX_SO_BUFFERS * 16, 4, &desc_va, &so_ptr))
+   if (!radv_cmd_buffer_upload_alloc(cmd_buffer, descriptor_size + (table ? sizeof(*table) : 0), 16, &desc_va, &so_ptr))
       return;
+
+   if (table) {
+      memcpy((char *)so_ptr + descriptor_size, table, sizeof(*table));
+      ac_build_raw_buffer_descriptor(pdev->info.gfx_level, pdev->info.compiler_info.has_desc_resource_level,
+         desc_va + descriptor_size, sizeof(*table), (uint32_t *)so_ptr + MAX_SO_BUFFERS * 4);
+   }
 
    for (uint32_t i = 0; i < MAX_SO_BUFFERS; i++) {
       uint32_t *desc = &((uint32_t *)so_ptr)[i * 4];
@@ -11341,6 +11370,9 @@ radv_bind_graphics_pipeline(struct radv_cmd_buffer *cmd_buffer, struct radv_grap
    radv_bind_gs_copy_shader(cmd_buffer, graphics_pipeline->base.gs_copy_shader);
 
    /* Late output state can change while the same fragment binary stays bound. */
+   if (graphics_pipeline->bc250_pgp_so_table ||
+       (cmd_buffer->state.graphics_pipeline && cmd_buffer->state.graphics_pipeline->bc250_pgp_so_table))
+      cmd_buffer->state.dirty |= RADV_CMD_DIRTY_STREAMOUT_BUFFER | RADV_CMD_DIRTY_STREAMOUT_ENABLE;
    if (graphics_pipeline->tir_pgp_forced_samples ||
        (cmd_buffer->state.graphics_pipeline && cmd_buffer->state.graphics_pipeline->tir_pgp_forced_samples))
       cmd_buffer->state.dirty |= RADV_CMD_DIRTY_RAST_SAMPLES_STATE | RADV_CMD_DIRTY_MSAA_STATE;
@@ -15165,6 +15197,8 @@ radv_emit_streamout_enable_state(struct radv_cmd_buffer *cmd_buffer)
    const struct radv_streamout_state *so = &cmd_buffer->state.streamout;
    const bool streamout_enabled = radv_is_streamout_enabled(cmd_buffer);
    uint32_t enabled_stream_buffers_mask = 0;
+   const struct bc250_pgp_so_table *table = cmd_buffer->state.graphics_pipeline ?
+      cmd_buffer->state.graphics_pipeline->bc250_pgp_so_table : NULL;
 
    assert(pdev->info.gfx_level < GFX11);
 
@@ -15175,13 +15209,21 @@ radv_emit_streamout_enable_state(struct radv_cmd_buffer *cmd_buffer)
 
       enabled_stream_buffers_mask = info->so.enabled_stream_buffers_mask;
 
+      if (table) {
+         enabled_stream_buffers_mask = 0;
+         u_foreach_bit (b, table->buffer_mask)
+            enabled_stream_buffers_mask |= (1u << b) << (4 * table->buffer_stream[b]);
+      }
+
       u_foreach_bit (i, so->enabled_mask) {
-         radeon_set_context_reg(R_028AD4_VGT_STRMOUT_VTX_STRIDE_0 + 16 * i, info->so.strides[i]);
+         radeon_set_context_reg(R_028AD4_VGT_STRMOUT_VTX_STRIDE_0 + 16 * i,
+            table ? table->stride[i] / 4 : info->so.strides[i]);
       }
    }
 
    radeon_opt_set_context_reg2(R_028B94_VGT_STRMOUT_CONFIG, AC_TRACKED_VGT_STRMOUT_CONFIG,
-                               S_028B94_STREAMOUT_0_EN(streamout_enabled) | S_028B94_RAST_STREAM(0) |
+                               S_028B94_STREAMOUT_0_EN(streamout_enabled) |
+                                  S_028B94_RAST_STREAM(table && table->rasterized_stream < 4 ? table->rasterized_stream : 0) |
                                   S_028B94_STREAMOUT_1_EN(streamout_enabled) |
                                   S_028B94_STREAMOUT_2_EN(streamout_enabled) |
                                   S_028B94_STREAMOUT_3_EN(streamout_enabled),

@@ -403,6 +403,15 @@ gather_xfb_info(const nir_shader *nir, struct radv_shader_info *info)
 
    const nir_xfb_info *xfb = nir->xfb_info;
 
+   if (nir->info.bc250_pgp_so_capture) {
+      /* Final declarations can target any buffer. Reserve every hardware
+       * write-offset argument before native compilation. Final metadata,
+       * not these placeholders, controls VGT stream masks and strides. */
+      so->enabled_stream_buffers_mask = 0xffff;
+      for (unsigned b = 0; b < 4; b++) so->strides[b] = 1;
+      return;
+   }
+
    u_foreach_bit (output_buffer, xfb->buffers_written) {
       unsigned stream = xfb->buffer_to_stream[output_buffer];
       so->enabled_stream_buffers_mask |= (1 << output_buffer) << (stream * 4);
@@ -471,6 +480,17 @@ radv_set_vs_output_param(enum amd_gfx_level gfx_level, const struct nir_shader *
 
    if (gfx_state->rs.rasterizer_discard)
       return;
+
+   /* The immutable private raster map selects a source component for each
+    * pixel-input register at bind time. Keep compiled export indices stable
+    * across Generic Program rasterized-stream and signature choices. */
+   if (nir->info.stage == MESA_SHADER_GEOMETRY && nir->info.bc250_pgp_so_capture) {
+      for (unsigned reg = 0; reg < 32; reg++)
+         outinfo->vs_output_param_offset[VARYING_SLOT_VAR0 + reg] = reg;
+      outinfo->param_exports = 32;
+      outinfo->prim_param_exports = 0;
+      return;
+   }
 
    radv_get_output_masks(nir, gfx_state, mesh_layer_per_vertex, info->ms.bc250_pp_direct != 0, &per_vtx_mask,
                          &per_prim_mask);
@@ -1223,6 +1243,7 @@ radv_nir_shader_info_pass(const struct radv_compiler_info *compiler_info, const 
 
    info->bc250_compat_constants = nir->info.bc250_compat_constants;
    info->bc250_pgp_view_data = nir->info.bc250_pgp_view_data;
+   info->bc250_pgp_so_capture = nir->info.bc250_pgp_so_capture;
 
    if (layout->use_dynamic_descriptors) {
       info->loads_dynamic_offsets = true;
@@ -1701,6 +1722,7 @@ radv_nir_shader_info_merge(const struct radv_shader_stage *src, struct radv_shad
    dst_info->desc_set_used_mask |= src_info->desc_set_used_mask;
    dst_info->uses_view_index |= src_info->uses_view_index;
    dst_info->bc250_pgp_view_data |= src_info->bc250_pgp_view_data;
+   dst_info->bc250_pgp_so_capture |= src_info->bc250_pgp_so_capture;
    dst_info->uses_prim_id |= src_info->uses_prim_id;
    dst_info->needs_draw_id |= src_info->needs_draw_id;
    dst_info->inline_push_constant_mask |= src_info->inline_push_constant_mask;
