@@ -15614,9 +15614,16 @@ radv_emit_msaa_state(struct radv_cmd_buffer *cmd_buffer)
                             S_028BE0_COVERED_CENTROID_IS_CENTER(pdev->info.gfx_level >= GFX10_3);
 
          db_eqaa |= S_028804_MAX_ANCHOR_SAMPLES(log_z_samples) | S_028804_PS_ITER_SAMPLES(log_ps_iter_samples) |
-                    S_028804_MASK_EXPORT_NUM_SAMPLES(tir ? util_logbase2(ps->info.ps.tir_output_samples) :
+                    S_028804_MASK_EXPORT_NUM_SAMPLES(tir ? log_samples :
                                                          s16f8_probe ? 3 : log_samples) |
                     S_028804_ALPHA_TO_MASK_NUM_SAMPLES(tir ? util_logbase2(ps->info.ps.tir_output_samples) : log_samples);
+         /* TIR maps one output sample to a cluster containing every input sample.
+          * PAL's relation is log2(shaderExportMaskSamples) - log2(sampleClusters).
+          * Keep input coverage intact in SC; DB expands the cluster after shading.
+          * PROVENANCE: GPUOpen-Drivers/pal, MIT, gfx9MsaaState.cpp.
+          */
+         if (tir && ps->info.ps.tir_forced_samples > 1)
+            db_eqaa |= S_028804_OVERRASTERIZATION_AMOUNT(log_samples);
       }
 
       if (line_rast_mode == VK_LINE_RASTERIZATION_MODE_RECTANGULAR_SMOOTH)

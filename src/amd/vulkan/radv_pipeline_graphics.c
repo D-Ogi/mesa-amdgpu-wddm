@@ -2710,7 +2710,13 @@ radv_tir_mask_intrinsic(nir_builder *b, nir_intrinsic_instr *in, void *data)
    if (in->intrinsic == nir_intrinsic_store_output &&
        nir_intrinsic_io_semantics(in).location == FRAG_RESULT_SAMPLE_MASK) {
       b->cursor = nir_before_instr(&in->instr);
-      nir_src_rewrite(&in->src[0], nir_iand_imm(b, in->src[0].ssa, key->tir_output_mask));
+      nir_def *mask = nir_iand_imm(b, in->src[0].ssa, key->tir_output_mask);
+      if (key->tir_forced_samples > 1) {
+         /* A single output sample controls the whole input-coverage cluster. */
+         mask = nir_bcsel(b, nir_ine_imm(b, mask, 0),
+                         nir_imm_int(b, (1u << key->tir_forced_samples) - 1), nir_imm_int(b, 0));
+      }
+      nir_src_rewrite(&in->src[0], mask);
       return true;
    }
    if (in->intrinsic == nir_intrinsic_load_sample_mask_in && key->tir_forced_samples == 1) {
@@ -2731,7 +2737,9 @@ radv_tir_lower_fs(nir_shader *fs, const struct radv_graphics_state_key *key)
    if (!had_mask) {
       nir_lower_returns(fs);
       b.cursor = nir_after_impl(impl);
-      nir_store_output(&b, nir_imm_int(&b, key->tir_output_mask), nir_imm_int(&b, 0),
+      unsigned export_mask = key->tir_forced_samples > 1 && key->tir_output_mask
+                                ? (1u << key->tir_forced_samples) - 1 : key->tir_output_mask;
+      nir_store_output(&b, nir_imm_int(&b, export_mask), nir_imm_int(&b, 0),
                        .base = fs->num_outputs++, .write_mask = 1,
                        .src_type = nir_type_uint32,
                        .io_semantics = {.location = FRAG_RESULT_SAMPLE_MASK, .num_slots = 1});
