@@ -27,6 +27,7 @@
 #include "radv_entrypoints.h"
 #include "radv_formats.h"
 #include "radv_physical_device.h"
+#include "radv_tir.h"
 #include "radv_pipeline_binary.h"
 #include "radv_pipeline_cache.h"
 #include "radv_pipeline_stage_cover.h"
@@ -2700,6 +2701,46 @@ radv_bc250_mesh_no_split_reason(const struct radv_compiler_info *compiler_info,
    return RADV_BC250_ROUTE_REASON_CANDIDATE_UNPROVEN;
 }
 
+/* The D3D output mask is not the rasterizer input mask. Leave SC coverage
+ * intact for SV_Coverage and centroid, and apply the mask to the PS export. */
+static bool
+radv_tir_mask_intrinsic(nir_builder *b, nir_intrinsic_instr *in, void *data)
+{
+   const struct radv_graphics_state_key *key = data;
+   if (in->intrinsic == nir_intrinsic_store_output &&
+       nir_intrinsic_io_semantics(in).location == FRAG_RESULT_SAMPLE_MASK) {
+      b->cursor = nir_before_instr(&in->instr);
+      nir_src_rewrite(&in->src[0], nir_iand_imm(b, in->src[0].ssa, key->tir_output_mask));
+      return true;
+   }
+   if (in->intrinsic == nir_intrinsic_load_sample_mask_in && key->tir_forced_samples == 1) {
+      b->cursor = nir_after_instr(&in->instr);
+      nir_def_rewrite_uses_after(&in->def, nir_iand_imm(b, &in->def, 1));
+      return true;
+   }
+   return false;
+}
+
+static void
+radv_tir_lower_fs(nir_shader *fs, const struct radv_graphics_state_key *key)
+{
+   const bool had_mask = fs->info.outputs_written & BITFIELD64_BIT(FRAG_RESULT_SAMPLE_MASK);
+   nir_shader_intrinsics_pass(fs, radv_tir_mask_intrinsic, nir_metadata_control_flow, (void *)key);
+   nir_function_impl *impl = nir_shader_get_entrypoint(fs);
+   nir_builder b = nir_builder_create(impl);
+   if (!had_mask) {
+      nir_lower_returns(fs);
+      b.cursor = nir_after_impl(impl);
+      nir_store_output(&b, nir_imm_int(&b, key->tir_output_mask), nir_imm_int(&b, 0),
+                       .base = fs->num_outputs++, .write_mask = 1,
+                       .src_type = nir_type_uint32,
+                       .io_semantics = {.location = FRAG_RESULT_SAMPLE_MASK, .num_slots = 1});
+      fs->info.outputs_written |= BITFIELD64_BIT(FRAG_RESULT_SAMPLE_MASK);
+   }
+   fs->info.fs.sample_mask_out_declared = true;
+   nir_metadata_invalidate(fs);
+}
+
 /* radv_no16.h. Runs after radv_nir_lower_io of the fragment shader of a
  * pipeline that radv_no16_pipeline_candidate admitted (gfx_state->no16_logical16).
  * Selects NATIVE16 or SPLIT16 for the shader, or fails pipeline creation: a
@@ -3314,6 +3355,14 @@ radv_graphics_shaders_compile(const struct radv_compiler_info *compiler_info, st
 
       radv_nir_lower_io(stages[i].nir);
 
+      if (i == MESA_SHADER_FRAGMENT && gfx_state->tir_forced_samples) {
+         if (stages[i].nir->info.fs.uses_sample_shading ||
+             (stages[i].nir->info.outputs_written &
+              (BITFIELD64_BIT(FRAG_RESULT_DEPTH) | BITFIELD64_BIT(FRAG_RESULT_STENCIL))))
+            return VK_ERROR_FEATURE_NOT_PRESENT;
+         radv_tir_lower_fs(stages[i].nir, gfx_state);
+      }
+
       if (i == MESA_SHADER_FRAGMENT && gfx_state->no16_logical16) {
          no16_decision = radv_no16_lower_fs(stages, gfx_state, active_nir_stages, &no16_vs_guard);
          if (no16_decision == RADV_NO16_DRAW_REFUSE)
@@ -3397,7 +3446,7 @@ radv_graphics_shaders_compile(const struct radv_compiler_info *compiler_info, st
        * Default-off; disables the API-visible per-invocation mask adjustment only here.
        * Run with RADV_DEBUG=nocache and a fresh engine shader cache.
        */
-      if (!radv_s16f8_probe_mode())
+      if (!radv_s16f8_probe_mode() && !gfx_state->tir_forced_samples)
          NIR_PASS(_, stages[MESA_SHADER_FRAGMENT].nir, ac_nir_lower_sample_mask_in, &lower_sample_mask_in_options);
    }
 
@@ -3497,6 +3546,12 @@ radv_graphics_shaders_compile(const struct radv_compiler_info *compiler_info, st
    /* radv_no16_lower_fs selected the route of this shader or failed the compile. */
    if (gfx_state->no16_logical16 && stages[MESA_SHADER_FRAGMENT].nir)
       stages[MESA_SHADER_FRAGMENT].info.ps.no16 = no16_decision;
+   if (gfx_state->tir_forced_samples && stages[MESA_SHADER_FRAGMENT].nir) {
+      stages[MESA_SHADER_FRAGMENT].info.ps.tir_forced_samples = gfx_state->tir_forced_samples;
+      stages[MESA_SHADER_FRAGMENT].info.ps.tir_output_samples = gfx_state->tir_output_samples;
+      stages[MESA_SHADER_FRAGMENT].info.ps.tir_output_mask = gfx_state->tir_output_mask;
+      stages[MESA_SHADER_FRAGMENT].info.ps.force_disable_vrs = true;
+   }
    if (no16_vs_guard) {
       /* The pass guard needs the NGG state SGPR (radv_shader_args.c). */
       if (!stages[MESA_SHADER_VERTEX].info.is_ngg)
@@ -3743,6 +3798,24 @@ radv_generate_graphics_pipeline_state(struct radv_device *device, const VkGraphi
 
    gfx_state->no16_logical16 = radv_no16_pipeline_candidate(device, create_flags, libs_info, gfx_state);
 
+   const struct bc250_tir_pipeline *tir = __vk_find_struct((void *)pCreateInfo->pNext, BC250_STRUCTURE_TYPE_TIR);
+   if (tir) {
+      /* Version one uses a complete pipeline: no library can lose the private
+       * state or reuse a fragment shader compiled for another output mask. */
+      const struct radv_physical_device *pdev = radv_device_physical(device);
+      const struct vk_graphics_pipeline_state *vk = &gfx_state->vk;
+      if (!bc250_tir_valid(tir) || pdev->info.gfx_level != GFX10 || libs_info ||
+          (create_flags & VK_PIPELINE_CREATE_2_LIBRARY_BIT_KHR) || !vk->ms || !vk->rp ||
+          !vk->rp->color_attachment_count || vk->ms->rasterization_samples != tir->output_samples ||
+          vk->ms->sample_shading_enable || vk->rp->depth_attachment_format != VK_FORMAT_UNDEFINED ||
+          vk->rp->stencil_attachment_format != VK_FORMAT_UNDEFINED ||
+          BITSET_TEST(vk->dynamic, MESA_VK_DYNAMIC_MS_RASTERIZATION_SAMPLES) ||
+          BITSET_TEST(vk->dynamic, MESA_VK_DYNAMIC_MS_SAMPLE_MASK)) {
+         result = VK_ERROR_FEATURE_NOT_PRESENT;
+         goto fail;
+      }
+   }
+
    if (radv_should_compute_pipeline_hash(device, pipeline_type, fast_linking_enabled))
       radv_pipeline_layout_hash(&gfx_state->layout);
 
@@ -3751,6 +3824,15 @@ radv_generate_graphics_pipeline_state(struct radv_device *device, const VkGraphi
       gfx_state->key = radv_generate_graphics_pipeline_key(device, pCreateInfo, &gfx_state->vk, needed_lib_flags);
       /* In the pipeline hash: an admitted 16-sample request never shares cache entries with another pipeline. */
       gfx_state->key.gfx_state.no16_logical16 = gfx_state->no16_logical16;
+      if (tir) {
+         struct radv_graphics_state_key *key = &gfx_state->key.gfx_state;
+         key->tir_forced_samples = tir->forced_samples;
+         key->tir_output_samples = tir->output_samples;
+         key->tir_output_mask = tir->output_mask & ((1u << tir->output_samples) - 1);
+         key->ms.rasterization_samples = tir->forced_samples == 1 ? 0 : tir->forced_samples;
+         key->vrs_may_be_enabled = false;
+         key->rs.skip_all_ngg_culling = true;
+      }
 
       gfx_state->stages = calloc(MESA_VULKAN_SHADER_STAGES, sizeof(struct radv_shader_stage));
       if (!gfx_state->stages) {
@@ -3790,8 +3872,17 @@ radv_bc250_graphics_state_hash(const struct radv_device *device,
 {
    struct radv_pipeline_layout layout = gfx_state->layout;
    radv_pipeline_layout_hash(&layout);
-   const struct radv_graphics_pipeline_key key =
+   struct radv_graphics_pipeline_key key =
       radv_generate_graphics_pipeline_key(device, info, &gfx_state->vk, ALL_GRAPHICS_LIB_FLAGS);
+   const struct bc250_tir_pipeline *tir = __vk_find_struct((void *)info->pNext, BC250_STRUCTURE_TYPE_TIR);
+   if (tir) {
+      key.gfx_state.tir_forced_samples = tir->forced_samples;
+      key.gfx_state.tir_output_samples = tir->output_samples;
+      key.gfx_state.tir_output_mask = tir->output_mask & ((1u << tir->output_samples) - 1);
+      key.gfx_state.ms.rasterization_samples = tir->forced_samples == 1 ? 0 : tir->forced_samples;
+      key.gfx_state.vrs_may_be_enabled = false;
+      key.gfx_state.rs.skip_all_ngg_culling = true;
+   }
    struct mesa_blake3 ctx;
    _mesa_blake3_init(&ctx);
    radv_pipeline_hash(device, &layout, &ctx);

@@ -23,6 +23,8 @@
 #include "radv_queue.h"
 #include "radv_bc250.h"
 #include "radv_wsi.h"
+#include "radv_physical_device.h"
+#include "radv_tir.h"
 
 #include "util/bitset.h"
 #include "util/u_debug.h"
@@ -520,9 +522,20 @@ radv_bc250_get_host_contract(uint32_t size, struct bc250_host_contract *out)
    return VK_SUCCESS;
 }
 
+static VKAPI_ATTR VkResult VKAPI_CALL
+radv_bc250_tir_query(VkPhysicalDevice physical_device, uint32_t revision, uint32_t structure_size)
+{
+   VK_FROM_HANDLE(radv_physical_device, pdev, physical_device);
+   if (!pdev || revision != BC250_TIR_REVISION || structure_size != sizeof(struct bc250_tir_pipeline))
+      return VK_ERROR_INITIALIZATION_FAILED;
+   return pdev->info.gfx_level == GFX10 ? VK_SUCCESS : VK_ERROR_FEATURE_NOT_PRESENT;
+}
+
 VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL
 radv_GetInstanceProcAddr(VkInstance _instance, const char *pName)
 {
+   if (!_instance && pName && !strcmp(pName, BC250_TIR_QUERY_NAME))
+      return (PFN_vkVoidFunction)radv_bc250_tir_query;
    if (!_instance && pName && !strcmp(pName, BC250_HOST_CONTRACT_QUERY_NAME))
       return (PFN_vkVoidFunction)radv_bc250_get_host_contract;
    VK_FROM_HANDLE(vk_instance, instance, _instance);

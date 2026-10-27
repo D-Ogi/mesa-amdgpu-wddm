@@ -13,6 +13,7 @@
 #include "radv_bc250.h"
 #include "radv_s16f8_probe.h"
 #include "radv_no16.h"
+#include "radv_tir.h"
 #include "meta/radv_meta.h"
 #include "tools/radv_debug_hang.h"
 #include "tools/radv_rmv.h"
@@ -2549,6 +2550,9 @@ static ALWAYS_INLINE unsigned
 radv_get_rasterization_samples(struct radv_cmd_buffer *cmd_buffer)
 {
    const struct radv_dynamic_state *d = &cmd_buffer->state.dynamic;
+   const struct radv_shader *ps = cmd_buffer->state.shaders[MESA_SHADER_FRAGMENT];
+   if (ps && ps->info.ps.tir_forced_samples)
+      return bc250_tir_raster_samples(ps->info.ps.tir_forced_samples, ps->info.ps.tir_output_samples);
 
    const VkLineRasterizationModeEXT line_mode = cmd_buffer->state.line_rast_mode;
 
@@ -5075,7 +5079,17 @@ radv_emit_rast_samples_state(struct radv_cmd_buffer *cmd_buffer)
                        S_028A4C_MULTI_SHADER_ENGINE_PRIM_DISCARD_ENABLE(1) | S_028A4C_FORCE_EOV_CNTDWN_ENABLE(1) |
                        S_028A4C_FORCE_EOV_REZ_ENABLE(1) | S_028A4C_WALK_ALIGN8_PRIM_FITS_ST(walk_align8);
 
-   if (cmd_buffer->state.no16_draw == RADV_NO16_DRAW_SPLIT16)
+   const struct radv_shader *ps = cmd_buffer->state.shaders[MESA_SHADER_FRAGMENT];
+   if (ps && ps->info.ps.tir_forced_samples == 1) {
+      /* Each output sample gets the same center hit. Fill all positions so an
+       * earlier eight-sample pipeline cannot leave stale positions 4-7. */
+      radv_emit_default_sample_locations(pdev, cmd_buffer->cs, 1);
+      radeon_begin(cmd_buffer->cs);
+      radeon_set_context_reg_seq(R_028BF8_PA_SC_AA_SAMPLE_LOCS_PIXEL_X0Y0_0, 16);
+      for (unsigned i = 0; i < 16; ++i)
+         radeon_emit(0);
+      radeon_end();
+   } else if (cmd_buffer->state.no16_draw == RADV_NO16_DRAW_SPLIT16)
       radv_no16_emit_split_sample_locations(pdev, cmd_buffer->cs, cmd_buffer->state.no16_pass,
                                             radv_no16_auto_mode());
    else if (!d->sample_location.count || !d->vk.ms.sample_locations_enable)
@@ -10962,6 +10976,12 @@ radv_bind_fragment_shader(struct radv_cmd_buffer *cmd_buffer, const struct radv_
 
    cmd_buffer->state.dirty |= RADV_CMD_DIRTY_PS_STATE;
 
+   if (!previous_ps || previous_ps->info.ps.tir_forced_samples != ps->info.ps.tir_forced_samples ||
+       previous_ps->info.ps.tir_output_samples != ps->info.ps.tir_output_samples ||
+       previous_ps->info.ps.tir_output_mask != ps->info.ps.tir_output_mask)
+      cmd_buffer->state.dirty |= RADV_CMD_DIRTY_RAST_SAMPLES_STATE | RADV_CMD_DIRTY_MSAA_STATE |
+                                 RADV_CMD_DIRTY_DB_SHADER_CONTROL | RADV_CMD_DIRTY_OCCLUSION_QUERY;
+
    if (!previous_ps || previous_ps->info.ps.reads_fully_covered != ps->info.ps.reads_fully_covered)
       cmd_buffer->state.dirty |= RADV_CMD_DIRTY_MSAA_STATE;
 
@@ -15482,11 +15502,13 @@ radv_emit_msaa_state(struct radv_cmd_buffer *cmd_buffer)
    const struct radv_shader *ps = cmd_buffer->state.shaders[MESA_SHADER_FRAGMENT];
    const bool s16f8_probe = radv_s16f8_probe_active(cmd_buffer);
    const enum radv_no16_draw no16 = cmd_buffer->state.no16_draw;
+   const bool tir = ps && ps->info.ps.tir_forced_samples;
    const unsigned rasterization_samples = s16f8_probe ? 16 : radv_hw_rast_samples(cmd_buffer);
    const struct radv_rendering_state *render = &cmd_buffer->state.render;
    const struct radv_dynamic_state *d = &cmd_buffer->state.dynamic;
    /* A SPLIT16 pass covers the logical samples 8 * pass to 8 * pass + 7. */
-   const uint16_t api_sample_mask = no16 == RADV_NO16_DRAW_SPLIT16
+   const uint16_t api_sample_mask = tir ? (ps->info.ps.tir_output_mask ? 0xffff : 0) :
+                                   no16 == RADV_NO16_DRAW_SPLIT16
                                        ? (d->vk.ms.sample_mask >> (8 * cmd_buffer->state.no16_pass)) & 0xff
                                        : d->vk.ms.sample_mask;
    const uint32_t sample_mask = api_sample_mask | ((uint32_t)api_sample_mask << 16);
@@ -15547,7 +15569,9 @@ radv_emit_msaa_state(struct radv_cmd_buffer *cmd_buffer)
       }
    }
 
-   if (no16 == RADV_NO16_DRAW_SPLIT16) {
+   if (tir && ps->info.ps.tir_forced_samples == 1) {
+      max_sample_dist = 0;
+   } else if (no16 == RADV_NO16_DRAW_SPLIT16) {
       /* The halves of the standard 16-sample pattern (radv_no16_emit_split_sample_locations). */
       max_sample_dist = radv_get_default_max_sample_dist(4);
    } else if (!d->sample_location.count || !d->vk.ms.sample_locations_enable) {
@@ -15568,7 +15592,8 @@ radv_emit_msaa_state(struct radv_cmd_buffer *cmd_buffer)
 
    if (msaa_enable) {
       /* EQAA: 16 coverage samples with at most 8 Z samples (RadeonSI si_state.c). */
-      unsigned z_samples = s16f8_probe || no16 == RADV_NO16_DRAW_NATIVE16
+      unsigned z_samples = tir ? ps->info.ps.tir_output_samples :
+                           s16f8_probe || no16 == RADV_NO16_DRAW_NATIVE16
                               ? 8
                               : MAX2(render->ds_samples, rasterization_samples);
       unsigned ps_iter_samples = radv_get_ps_iter_samples(cmd_buffer);
@@ -15589,8 +15614,9 @@ radv_emit_msaa_state(struct radv_cmd_buffer *cmd_buffer)
                             S_028BE0_COVERED_CENTROID_IS_CENTER(pdev->info.gfx_level >= GFX10_3);
 
          db_eqaa |= S_028804_MAX_ANCHOR_SAMPLES(log_z_samples) | S_028804_PS_ITER_SAMPLES(log_ps_iter_samples) |
-                    S_028804_MASK_EXPORT_NUM_SAMPLES(s16f8_probe ? 3 : log_samples) |
-                    S_028804_ALPHA_TO_MASK_NUM_SAMPLES(log_samples);
+                    S_028804_MASK_EXPORT_NUM_SAMPLES(tir ? util_logbase2(ps->info.ps.tir_output_samples) :
+                                                         s16f8_probe ? 3 : log_samples) |
+                    S_028804_ALPHA_TO_MASK_NUM_SAMPLES(tir ? util_logbase2(ps->info.ps.tir_output_samples) : log_samples);
       }
 
       if (line_rast_mode == VK_LINE_RASTERIZATION_MODE_RECTANGULAR_SMOOTH)
@@ -16349,6 +16375,17 @@ static ALWAYS_INLINE bool
 radv_no16_update_draw(struct radv_cmd_buffer *cmd_buffer, bool dgc)
 {
    const struct radv_shader *ps = cmd_buffer->state.shaders[MESA_SHADER_FRAGMENT];
+   if (ps && ps->info.ps.tir_forced_samples) {
+      /* TIR is a single draw with independent coverage and color counts. It
+       * must not inherit the two-pass no-output route from a preceding draw. */
+      if (cmd_buffer->state.no16_draw != RADV_NO16_DRAW_DEFAULT || cmd_buffer->state.no16_pass) {
+         cmd_buffer->state.no16_draw = RADV_NO16_DRAW_DEFAULT;
+         cmd_buffer->state.no16_pass = 0;
+         cmd_buffer->state.dirty |= RADV_CMD_DIRTY_RAST_SAMPLES_STATE | RADV_CMD_DIRTY_MSAA_STATE |
+                                    RADV_CMD_DIRTY_PS_STATE | RADV_CMD_DIRTY_NGG_STATE;
+      }
+      return true;
+   }
    if (likely(cmd_buffer->state.no16_draw == RADV_NO16_DRAW_DEFAULT && !(ps && ps->info.ps.no16) &&
               cmd_buffer->state.dynamic.vk.ms.rasterization_samples != 16))
       return true;
