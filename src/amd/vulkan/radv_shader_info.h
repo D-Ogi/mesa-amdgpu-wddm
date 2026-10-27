@@ -125,6 +125,7 @@ struct radv_shader_info {
    bool loads_dynamic_offsets : 1;
    bool loads_dynamic_descriptors_offset_addr : 1;
    bool uses_view_index : 1;
+   bool bc250_pgp_view_data : 1;
    bool uses_invocation_id : 1;
    bool uses_prim_id : 1;
    bool needs_draw_id : 1;

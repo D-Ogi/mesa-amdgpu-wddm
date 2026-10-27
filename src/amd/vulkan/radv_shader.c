@@ -14,6 +14,7 @@
 #include "meta/radv_meta.h"
 #include "nir/nir.h"
 #include "nir/nir_builder.h"
+#include "radv_pgp_view_nir.h"
 #include "nir/nir_xfb_info.h"
 #include "nir/radv_meta_nir.h"
 #include "nir/radv_nir.h"
@@ -833,6 +834,11 @@ radv_shader_spirv_to_nir(const struct radv_compiler_info *compiler_info, struct 
                          (nir->options->lower_flrp64 ? 64 : 0);
    if (lower_flrp != 0)
       NIR_PASS(progress, nir, nir_lower_flrp, lower_flrp, false /* always precise */);
+
+   if (!radv_lower_pgp_view_data(nir, compiler_info->hw.address32_hi)) {
+      ralloc_free(nir);
+      return NULL;
+   }
 
    if (stage->key.descriptor_heap) {
       const vk_nir_lower_descriptor_heaps_options heap_options = {

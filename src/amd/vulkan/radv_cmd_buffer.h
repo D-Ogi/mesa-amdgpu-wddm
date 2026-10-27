@@ -301,6 +301,7 @@ struct radv_cond_render_state {
 };
 
 struct radv_cmd_state {
+   uint64_t bc250_pgp_view_va;
    uint64_t dirty;
    uint64_t dirty_dynamic;
 

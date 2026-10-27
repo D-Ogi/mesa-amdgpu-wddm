@@ -659,6 +659,9 @@ declare_shader_args(const struct radv_compiler_info *compiler_info, struct radv_
                RADV_ADD_UD_ARG(state, 2, AC_ARG_CONST_ADDR, ac.num_work_groups, AC_UD_CS_GRID_SIZE);
          }
 
+         if (info->bc250_pgp_view_data)
+            RADV_ADD_UD_ARG(state, 1, AC_ARG_VALUE, ac.view_index, AC_UD_VIEW_INDEX);
+
          if (stage == MESA_SHADER_COMPUTE) {
             if (radv_cs_needs_state_sgpr(info, compiler_info))
                RADV_ADD_UD_ARG(state, 1, AC_ARG_VALUE, cs_state, AC_UD_CS_STATE);

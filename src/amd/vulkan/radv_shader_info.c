@@ -1222,6 +1222,7 @@ radv_nir_shader_info_pass(const struct radv_compiler_info *compiler_info, const 
    struct nir_function *func = (struct nir_function *)exec_list_get_head_const(&nir->functions);
 
    info->bc250_compat_constants = nir->info.bc250_compat_constants;
+   info->bc250_pgp_view_data = nir->info.bc250_pgp_view_data;
 
    if (layout->use_dynamic_descriptors) {
       info->loads_dynamic_offsets = true;
@@ -1699,6 +1700,7 @@ radv_nir_shader_info_merge(const struct radv_shader_stage *src, struct radv_shad
    dst_info->loads_dynamic_descriptors_offset_addr |= src_info->loads_dynamic_descriptors_offset_addr;
    dst_info->desc_set_used_mask |= src_info->desc_set_used_mask;
    dst_info->uses_view_index |= src_info->uses_view_index;
+   dst_info->bc250_pgp_view_data |= src_info->bc250_pgp_view_data;
    dst_info->uses_prim_id |= src_info->uses_prim_id;
    dst_info->needs_draw_id |= src_info->needs_draw_id;
    dst_info->inline_push_constant_mask |= src_info->inline_push_constant_mask;

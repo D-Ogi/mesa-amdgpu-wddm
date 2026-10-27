@@ -25,6 +25,7 @@
 #include "radv_wsi.h"
 #include "radv_physical_device.h"
 #include "radv_tir.h"
+#include "radv_pgp_view.h"
 
 #include "util/bitset.h"
 #include "util/u_debug.h"
@@ -531,9 +532,25 @@ radv_bc250_tir_query(VkPhysicalDevice physical_device, uint32_t revision, uint32
    return pdev->info.gfx_level == GFX10 ? VK_SUCCESS : VK_ERROR_FEATURE_NOT_PRESENT;
 }
 
+static VkResult VKAPI_CALL
+radv_bc250_pgp_view_query(VkPhysicalDevice physical_device, uint32_t revision, uint32_t size,
+                          PFN_bc250_cmd_set_pgp_view *command)
+{
+   if (!command) return VK_ERROR_INITIALIZATION_FAILED;
+   *command = NULL;
+   VK_FROM_HANDLE(radv_physical_device, pdev, physical_device);
+   if (!pdev || revision != BC250_PGP_VIEW_REVISION || size != sizeof(struct bc250_pgp_view_data))
+      return VK_ERROR_INITIALIZATION_FAILED;
+   if (pdev->info.gfx_level != GFX10) return VK_ERROR_FEATURE_NOT_PRESENT;
+   *command = radv_bc250_cmd_set_pgp_view;
+   return VK_SUCCESS;
+}
+
 VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL
 radv_GetInstanceProcAddr(VkInstance _instance, const char *pName)
 {
+   if (!_instance && pName && !strcmp(pName, BC250_PGP_VIEW_QUERY_NAME))
+      return (PFN_vkVoidFunction)radv_bc250_pgp_view_query;
    if (!_instance && pName && !strcmp(pName, BC250_TIR_QUERY_NAME))
       return (PFN_vkVoidFunction)radv_bc250_tir_query;
    if (!_instance && pName && !strcmp(pName, BC250_HOST_CONTRACT_QUERY_NAME))

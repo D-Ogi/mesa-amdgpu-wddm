@@ -5782,6 +5782,8 @@ radv_bc250_prepare_task(struct radv_device *device,
          ms->nir = radv_shader_spirv_to_nir_cached(&device->compiler_info, NULL, ms, &options, false);
       }
       nir_shader *mesh_only = ms->nir;
+      if (!mesh_only)
+         return VK_ERROR_FEATURE_NOT_PRESENT;
       /* RADV_BC250_MESH_CLIPCULL_CONST before the route decision and the split. With
        * RADV_BC250_MESH_REFERENCE (CULLDIST=keep) a Mesh shader the raw route admits keeps its
        * clip/cull distances (POS1), as in the reference driver. */

@@ -9,6 +9,7 @@
  */
 
 #include "radv_cmd_buffer.h"
+#include "radv_pgp_view.h"
 #include "radv_directmesh.h"
 #include "radv_bc250.h"
 #include "radv_s16f8_probe.h"
@@ -1741,6 +1742,50 @@ radv_cmd_buffer_upload_data(struct radv_cmd_buffer *cmd_buffer, unsigned size, u
 
    memcpy(ptr, data, size);
    return true;
+}
+
+VKAPI_ATTR void VKAPI_CALL
+radv_bc250_cmd_set_pgp_view(VkCommandBuffer command_buffer, const struct bc250_pgp_view_data *data)
+{
+   VK_FROM_HANDLE(radv_cmd_buffer, cmd_buffer, command_buffer);
+   const struct radv_physical_device *pdev = radv_device_physical(radv_cmd_buffer_device(cmd_buffer));
+   uint64_t va = 0;
+   cmd_buffer->state.bc250_pgp_view_va = 0;
+   if (!data || data->view_id >= 4 || data->viewport_count > 16 || pdev->info.gfx_level != GFX10) {
+      vk_command_buffer_set_error(&cmd_buffer->vk, VK_ERROR_FEATURE_NOT_PRESENT);
+      return;
+   }
+   /* CPU_UPLOAD uses RADEON_FLAG_32BIT and command-buffer-owned storage. DGC
+    * capture can redirect the allocator: verify rather than truncate its VA. */
+   if (!radv_cmd_buffer_upload_data(cmd_buffer, sizeof(*data), 16, data, &va)) return;
+   if ((va >> 32) != pdev->info.address32_hi || (va & 15)) {
+      vk_command_buffer_set_error(&cmd_buffer->vk, VK_ERROR_FEATURE_NOT_PRESENT);
+      return;
+   }
+   cmd_buffer->state.bc250_pgp_view_va = va;
+}
+
+static void
+radv_emit_pgp_view_data(struct radv_cmd_buffer *cmd_buffer, struct radv_cmd_stream *cs,
+                        const struct radv_shader *shader)
+{
+   if (!shader || !shader->info.bc250_pgp_view_data) return;
+   const uint32_t reg = radv_get_user_sgpr_loc(shader, AC_UD_VIEW_INDEX);
+   if (!reg || !cmd_buffer->state.bc250_pgp_view_va) {
+      vk_command_buffer_set_error(&cmd_buffer->vk, VK_ERROR_FEATURE_NOT_PRESENT);
+      return;
+   }
+   radeon_begin(cs);
+   radeon_set_sh_reg(reg, (uint32_t)cmd_buffer->state.bc250_pgp_view_va);
+   radeon_end();
+}
+
+static void
+radv_emit_pgp_graphics_views(struct radv_cmd_buffer *cmd_buffer)
+{
+   radv_foreach_stage(stage, cmd_buffer->state.active_stages & ~VK_SHADER_STAGE_TASK_BIT_EXT)
+      radv_emit_pgp_view_data(cmd_buffer, cmd_buffer->cs, radv_get_shader(cmd_buffer->state.shaders, stage));
+   radv_emit_pgp_view_data(cmd_buffer, cmd_buffer->cs, cmd_buffer->state.gs_copy_shader);
 }
 
 void
@@ -16232,11 +16277,13 @@ radv_emit_graphics_states(struct radv_cmd_buffer *cmd_buffer, const struct radv_
    if (dynamic_states || (cmd_buffer->state.dirty & dirty_mask) || pdev->info.has_gfx9_scissor_bug) {
       radv_emit_all_graphics_states(cmd_buffer, indexed_draw, draw_vertex_count, instanced_draw, indirect_draw,
                                     count_from_stream_output, dynamic_states);
+      radv_emit_pgp_graphics_views(cmd_buffer);
       return;
    }
 
    radv_emit_draw_registers(cmd_buffer, indexed_draw, draw_vertex_count, instanced_draw, indirect_draw,
                             count_from_stream_output);
+   radv_emit_pgp_graphics_views(cmd_buffer);
 }
 
 static void
@@ -17938,6 +17985,7 @@ radv_before_dispatch(struct radv_cmd_buffer *cmd_buffer, struct radv_compute_pip
 
    if (params)
       radv_emit_userdata_compute(cmd_buffer, compute_shader, info, params);
+   radv_emit_pgp_view_data(cmd_buffer, cs, compute_shader);
 
    radv_gfx12_emit_buffered_regs(device, cs);
 

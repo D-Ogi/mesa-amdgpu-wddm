@@ -4821,6 +4821,12 @@ radv_graphics_pipeline_init(struct radv_graphics_pipeline *pipeline, struct radv
    if (result == VK_SUCCESS)
       result = radv_graphics_pipeline_check_shaders(device, pipeline);
 
+   if (result == VK_SUCCESS && gfx_state.vk.mv && gfx_state.vk.mv->view_mask) {
+      for (unsigned s = 0; s < MESA_VULKAN_SHADER_STAGES; s++)
+         if (pipeline->base.shaders[s] && pipeline->base.shaders[s]->info.bc250_pgp_view_data)
+            result = VK_ERROR_FEATURE_NOT_PRESENT;
+   }
+
    /* radv_no16.h: whatever path produced the shaders of an admitted 16-sample
     * request (compile, binaries, libraries), a fragment shader must carry a
     * route marker, or the pipeline is not created. Without a fragment shader

@@ -46,6 +46,7 @@ enum shader_info_hash_type {
 typedef struct shader_info {
    /* BC250 application constants were lowered through the private block at +24. */
    bool bc250_compat_constants;
+   bool bc250_pgp_view_data;
    const char *name;
 
    /* Descriptive name provided by the client; may be NULL */
