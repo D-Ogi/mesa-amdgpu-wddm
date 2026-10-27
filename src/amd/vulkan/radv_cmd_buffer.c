@@ -2552,7 +2552,9 @@ radv_get_rasterization_samples(struct radv_cmd_buffer *cmd_buffer)
    const struct radv_dynamic_state *d = &cmd_buffer->state.dynamic;
    const struct radv_shader *ps = cmd_buffer->state.shaders[MESA_SHADER_FRAGMENT];
    if (ps && ps->info.ps.tir_forced_samples)
-      return bc250_tir_raster_samples(ps->info.ps.tir_forced_samples, ps->info.ps.tir_output_samples);
+      return bc250_tir_raster_samples(ps->info.ps.tir_forced_samples,
+         ps->info.ps.tir_dynamic_output ? cmd_buffer->state.graphics_pipeline->tir_pgp_output_samples :
+                                         ps->info.ps.tir_output_samples);
 
    const VkLineRasterizationModeEXT line_mode = cmd_buffer->state.line_rast_mode;
 
@@ -11293,6 +11295,10 @@ radv_bind_graphics_pipeline(struct radv_cmd_buffer *cmd_buffer, struct radv_grap
 
    radv_bind_gs_copy_shader(cmd_buffer, graphics_pipeline->base.gs_copy_shader);
 
+   /* Late output state can change while the same fragment binary stays bound. */
+   if (graphics_pipeline->tir_pgp_forced_samples ||
+       (cmd_buffer->state.graphics_pipeline && cmd_buffer->state.graphics_pipeline->tir_pgp_forced_samples))
+      cmd_buffer->state.dirty |= RADV_CMD_DIRTY_RAST_SAMPLES_STATE | RADV_CMD_DIRTY_MSAA_STATE;
    cmd_buffer->state.graphics_pipeline = graphics_pipeline;
 
    cmd_buffer->state.dirty |= RADV_CMD_DIRTY_GRAPHICS_PIPELINE;
@@ -15507,7 +15513,14 @@ radv_emit_msaa_state(struct radv_cmd_buffer *cmd_buffer)
    const struct radv_rendering_state *render = &cmd_buffer->state.render;
    const struct radv_dynamic_state *d = &cmd_buffer->state.dynamic;
    /* A SPLIT16 pass covers the logical samples 8 * pass to 8 * pass + 7. */
-   const uint16_t api_sample_mask = tir ? (ps->info.ps.tir_output_mask ? 0xffff : 0) :
+   const bool tir_dynamic = tir && ps->info.ps.tir_dynamic_output;
+   const unsigned tir_outputs = tir_dynamic ? cmd_buffer->state.graphics_pipeline->tir_pgp_output_samples :
+                                tir ? ps->info.ps.tir_output_samples : 1;
+   const unsigned tir_mask = tir_dynamic ? d->vk.ms.sample_mask & ((1u << tir_outputs) - 1) :
+                             tir ? ps->info.ps.tir_output_mask : 0;
+   const uint16_t api_sample_mask = tir_dynamic ?
+                                      (ps->info.ps.tir_forced_samples == 1 ? tir_mask : (tir_mask & 1 ? 0xffff : 0)) :
+                                   tir ? (ps->info.ps.tir_output_mask ? 0xffff : 0) :
                                    no16 == RADV_NO16_DRAW_SPLIT16
                                        ? (d->vk.ms.sample_mask >> (8 * cmd_buffer->state.no16_pass)) & 0xff
                                        : d->vk.ms.sample_mask;
@@ -15592,7 +15605,7 @@ radv_emit_msaa_state(struct radv_cmd_buffer *cmd_buffer)
 
    if (msaa_enable) {
       /* EQAA: 16 coverage samples with at most 8 Z samples (RadeonSI si_state.c). */
-      unsigned z_samples = tir ? ps->info.ps.tir_output_samples :
+      unsigned z_samples = tir ? tir_outputs :
                            s16f8_probe || no16 == RADV_NO16_DRAW_NATIVE16
                               ? 8
                               : MAX2(render->ds_samples, rasterization_samples);
@@ -15616,7 +15629,7 @@ radv_emit_msaa_state(struct radv_cmd_buffer *cmd_buffer)
          db_eqaa |= S_028804_MAX_ANCHOR_SAMPLES(log_z_samples) | S_028804_PS_ITER_SAMPLES(log_ps_iter_samples) |
                     S_028804_MASK_EXPORT_NUM_SAMPLES(tir ? log_samples :
                                                          s16f8_probe ? 3 : log_samples) |
-                    S_028804_ALPHA_TO_MASK_NUM_SAMPLES(tir ? util_logbase2(ps->info.ps.tir_output_samples) : log_samples);
+                    S_028804_ALPHA_TO_MASK_NUM_SAMPLES(tir ? util_logbase2(tir_outputs) : log_samples);
          /* TIR maps one output sample to a cluster containing every input sample.
           * PAL's relation is log2(shaderExportMaskSamples) - log2(sampleClusters).
           * Keep input coverage intact in SC; DB expands the cluster after shading.

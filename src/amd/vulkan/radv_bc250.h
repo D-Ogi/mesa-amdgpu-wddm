@@ -5,6 +5,7 @@
 #include <stdbool.h>
 #include "radv_bc250_route.h"
 struct radv_device;
+struct radv_pipeline_layout;
 struct radv_graphics_pipeline;
 struct radv_graphics_pipeline_state;
 struct radv_cmd_buffer;
@@ -14,6 +15,10 @@ bool radv_bc250_draw_idx(struct radv_cmd_buffer *cmd_buffer, struct radv_graphic
                          uint32_t x, uint32_t y, uint32_t z);
 bool radv_bc250_draw_idx_indirect(struct radv_cmd_buffer *cmd_buffer, struct radv_graphics_pipeline *pipeline,
                                   uint64_t records, uint32_t max_count, uint32_t stride, uint64_t count_va);
+VkResult radv_bc250_clone_task_library(struct radv_device *device,
+   struct radv_graphics_pipeline *pipeline, const struct radv_graphics_pipeline *source,
+   const struct radv_pipeline_layout *layout);
+
 VkResult radv_bc250_prepare_task(struct radv_device *device,
                                 struct radv_graphics_pipeline *pipeline,
                                 const struct radv_graphics_pipeline_state *gfx_state);

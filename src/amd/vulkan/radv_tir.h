@@ -7,6 +7,7 @@
 
 #define BC250_TIR_QUERY_NAME "bc250GetTargetIndependentRasterizationContract"
 #define BC250_TIR_REVISION 1u
+#define BC250_TIR_PGP_REVISION 2u
 #define BC250_STRUCTURE_TYPE_TIR ((VkStructureType)0x7fbc2503)
 
 struct bc250_tir_pipeline {
@@ -24,7 +25,7 @@ typedef VkResult (VKAPI_PTR *PFN_bc250_tir_query)(VkPhysicalDevice physical_devi
 static inline bool
 bc250_tir_valid(const struct bc250_tir_pipeline *tir)
 {
-   if (!tir || tir->revision != BC250_TIR_REVISION ||
+   if (!tir || (tir->revision != BC250_TIR_REVISION && tir->revision != BC250_TIR_PGP_REVISION) ||
        (tir->forced_samples != 1 && tir->forced_samples != 4 &&
         tir->forced_samples != 8 && tir->forced_samples != 16))
       return false;

@@ -526,7 +526,7 @@ static VKAPI_ATTR VkResult VKAPI_CALL
 radv_bc250_tir_query(VkPhysicalDevice physical_device, uint32_t revision, uint32_t structure_size)
 {
    VK_FROM_HANDLE(radv_physical_device, pdev, physical_device);
-   if (!pdev || revision != BC250_TIR_REVISION || structure_size != sizeof(struct bc250_tir_pipeline))
+   if (!pdev || (revision != BC250_TIR_REVISION && revision != BC250_TIR_PGP_REVISION) || structure_size != sizeof(struct bc250_tir_pipeline))
       return VK_ERROR_INITIALIZATION_FAILED;
    return pdev->info.gfx_level == GFX10 ? VK_SUCCESS : VK_ERROR_FEATURE_NOT_PRESENT;
 }

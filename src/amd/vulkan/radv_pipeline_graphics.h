@@ -135,6 +135,10 @@ struct radv_sqtt_shaders_reloc {
 struct radv_graphics_pipeline {
    struct radv_pipeline base;
 
+   /* Final, declared RTV state. Never inferred from a bound render pass. */
+   uint8_t tir_pgp_forced_samples;
+   uint8_t tir_pgp_output_samples;
+
    uint64_t dynamic_states;
    uint64_t needed_dynamic_state;
 
@@ -755,6 +759,8 @@ void radv_destroy_graphics_pipeline(struct radv_device *device, struct radv_grap
 void radv_destroy_graphics_lib_pipeline(struct radv_device *device, struct radv_graphics_lib_pipeline *pipeline);
 
 struct radv_graphics_pipeline_state {
+   uint32_t tir_pgp_output_samples;
+   uint32_t tir_pgp_output_mask;
    struct vk_graphics_pipeline_state vk;
    void *vk_data;
 

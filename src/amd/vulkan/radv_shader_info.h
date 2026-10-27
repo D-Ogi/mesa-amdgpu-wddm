@@ -252,6 +252,7 @@ struct radv_shader_info {
       /* radv_no16.h route marker: enum radv_no16_draw, NATIVE16 or SPLIT16 for a 16-sample shader. */
       uint8_t no16 : 2;
       uint8_t tir_forced_samples;
+   bool tir_dynamic_output;
       uint8_t tir_output_samples;
       uint16_t tir_output_mask;
    } ps;

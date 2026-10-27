@@ -5579,6 +5579,13 @@ radv_bc250_prepare_task(struct radv_device *device,
                        const struct radv_graphics_pipeline_state *gfx_state)
 {
    struct radv_shader_stage *stages = gfx_state->stages;
+   /* A linked library already owns lowered consumer NIR and private compute executables.
+    * Re-lowering it would redirect the private constants a second time. */
+   if (pipeline->bc250_task_pipeline) {
+      if (pipeline->bc250_task_app && radv_bc250_task_latched_off())
+         return RADV_BC250_CMD_REFUSED;
+      return stages[MESA_SHADER_TASK].stage == MESA_SHADER_NONE ? VK_SUCCESS : VK_ERROR_FEATURE_NOT_PRESENT;
+   }
    /* BD-119: after the witness has latched the hybrid-task path off, a pipeline with an application
     * TASK stage is refused at creation, so no draw of it can be recorded. RADV_BC250_CMD_REFUSED is
     * VK_ERROR_OUT_OF_DEVICE_MEMORY, which vkCreateGraphicsPipelines may return. */
@@ -5924,10 +5931,14 @@ radv_bc250_prepare_task(struct radv_device *device,
       synthetic_task = true;
       fprintf(stderr, "BC250 internal mesh-only amplification enabled\n");
    }
+   const bool task_library = pipeline->base.type == RADV_PIPELINE_GRAPHICS_LIB &&
+      (radv_pipeline_to_graphics_lib(&pipeline->base)->lib_flags &
+       VK_GRAPHICS_PIPELINE_LIBRARY_PRE_RASTERIZATION_SHADERS_BIT_EXT);
    if (!radv_device_physical(device)->bc250_hybrid_task ||
        stages[MESA_SHADER_MESH].stage == MESA_SHADER_NONE ||
-       pipeline->base.type != RADV_PIPELINE_GRAPHICS ||
-       (pipeline->base.create_flags & bc250_refused_create_flags(device)) ||
+       (pipeline->base.type != RADV_PIPELINE_GRAPHICS && !task_library) ||
+       (pipeline->base.create_flags & (bc250_refused_create_flags(device) &
+          ~(task_library ? VK_PIPELINE_CREATE_2_LIBRARY_BIT_KHR : 0))) ||
        (gfx_state->key.gfx_state.has_multiview_view_index && !device->compiler_info.bc250x.task_multiview))
       return VK_ERROR_FEATURE_NOT_PRESENT;
 
@@ -6304,6 +6315,73 @@ radv_bc250_restore_cached_plan(struct radv_device *device, struct radv_graphics_
    pipeline->bc250_split_order_free = plan->flags & RADV_BC250_PLAN_ORDER_FREE;
    pipeline->bc250_direct_split_pieces = plan->direct_pieces;
    pipeline->bc250_plan = *plan;
+   return VK_SUCCESS;
+}
+
+
+/* Each linked pipeline owns fresh wrappers/layout and shader references. No source-library
+ * handle is borrowed, so collection destruction is independent of recorded final programs. */
+VkResult
+radv_bc250_clone_task_library(struct radv_device *device, struct radv_graphics_pipeline *pipeline,
+                              const struct radv_graphics_pipeline *source,
+                              const struct radv_pipeline_layout *layout)
+{
+   VK_FROM_HANDLE(radv_pipeline, producer_pipeline, source->bc250_task_pipeline);
+   VK_FROM_HANDLE(radv_pipeline, setup_pipeline, source->bc250_setup_pipeline);
+   if (!layout || !producer_pipeline || !setup_pipeline || pipeline->bc250_task_pipeline ||
+       pipeline->bc250_setup_pipeline || pipeline->bc250_task_layout ||
+       !source->base.shaders[MESA_SHADER_MESH] || source->base.shaders[MESA_SHADER_MESH]->info.ms.has_task)
+      return VK_ERROR_FEATURE_NOT_PRESENT;
+   struct radv_shader *producer = producer_pipeline->shaders[MESA_SHADER_COMPUTE];
+   struct radv_shader *setup = setup_pipeline->shaders[MESA_SHADER_COMPUTE];
+   if (!producer || !setup || producer->info.stage != MESA_SHADER_COMPUTE ||
+       setup->info.stage != MESA_SHADER_COMPUTE)
+      return VK_ERROR_FEATURE_NOT_PRESENT;
+   VkPushConstantRange range = {.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT,
+                               .size = sizeof(struct bc250_constants)};
+   VkDescriptorSetLayout sets[MAX_SETS];
+   for (unsigned i = 0; i < layout->num_sets; i++)
+      sets[i] = radv_descriptor_set_layout_to_handle(layout->set[i].layout);
+   VkPipelineLayoutCreateInfo info = {
+      .sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
+      .setLayoutCount = layout->num_sets,
+      .pSetLayouts = sets,
+      .pushConstantRangeCount = 1,
+      .pPushConstantRanges = &range,
+   };
+   VkPipelineLayout private_layout;
+   VkResult result = radv_CreatePipelineLayout(radv_device_to_handle(device), &info, NULL, &private_layout);
+   if (result != VK_SUCCESS)
+      return result;
+   VK_FROM_HANDLE(radv_pipeline_layout, compute_layout, private_layout);
+   if (compute_layout->dynamic_shader_stages & VK_SHADER_STAGE_TASK_BIT_EXT)
+      compute_layout->dynamic_shader_stages |= VK_SHADER_STAGE_COMPUTE_BIT;
+
+   struct radv_compute_pipeline *compute[2] = {NULL, NULL};
+   struct radv_shader *shaders[2] = {producer, setup};
+   for (unsigned i = 0; i < 2; i++) {
+      compute[i] = vk_zalloc(&device->vk.alloc, sizeof(*compute[i]), 8, VK_SYSTEM_ALLOCATION_SCOPE_OBJECT);
+      if (!compute[i]) {
+         if (compute[0])
+            radv_DestroyPipeline(radv_device_to_handle(device), radv_pipeline_to_handle(&compute[0]->base), NULL);
+         radv_DestroyPipelineLayout(radv_device_to_handle(device), private_layout, NULL);
+         return VK_ERROR_OUT_OF_HOST_MEMORY;
+      }
+      radv_pipeline_init(device, &compute[i]->base, RADV_PIPELINE_COMPUTE);
+      compute[i]->base.is_internal = true;
+      compute[i]->base.shaders[MESA_SHADER_COMPUTE] = radv_shader_ref(shaders[i]);
+      radv_compute_pipeline_init(compute[i], compute_layout, shaders[i]);
+   }
+   pipeline->bc250_task_pipeline = radv_pipeline_to_handle(&compute[0]->base);
+   pipeline->bc250_setup_pipeline = radv_pipeline_to_handle(&compute[1]->base);
+   pipeline->bc250_task_layout = private_layout;
+   pipeline->active_stages &= ~VK_SHADER_STAGE_TASK_BIT_EXT;
+   pipeline->bc250_payload_stride = source->bc250_payload_stride;
+   pipeline->bc250_ordered = source->bc250_ordered;
+   pipeline->bc250_split_order_free = source->bc250_split_order_free;
+   pipeline->bc250_direct_split_pieces = source->bc250_direct_split_pieces;
+   pipeline->bc250_task_app = source->bc250_task_app;
+   pipeline->bc250_task_gds = source->bc250_task_gds;
    return VK_SUCCESS;
 }
 

@@ -154,6 +154,7 @@ struct radv_graphics_state_key {
 
    /* Private D3D TIR state participates in shader and pipeline cache keys. */
    uint8_t tir_forced_samples;
+   bool tir_dynamic_output;
    uint8_t tir_output_samples;
    uint16_t tir_output_mask;
 

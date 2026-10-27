@@ -2303,6 +2303,11 @@ radv_pipeline_retain_shaders(struct radv_retained_shaders *retained_shaders, str
       struct blob blob;
 
       blob_init(&blob);
+      /* Keep pointer-free BC250 lowering state with the in-memory retained NIR.
+       * No shader/layout pointers or external cache representation are serialized. */
+      blob_write_bytes(&blob, &stages[s].bc250_split_mesh,
+                       offsetof(struct radv_shader_stage, gs_copy_shader) -
+                       offsetof(struct radv_shader_stage, bc250_split_mesh));
       nir_serialize(&blob, stages[s].nir, true);
       blob_finish_get_buffer(&blob, &retained_shaders->stages[s].serialized_nir,
                              &retained_shaders->stages[s].serialized_nir_size);
@@ -2324,6 +2329,8 @@ radv_pipeline_import_retained_shaders(const struct radv_device *device, struct r
    for (uint32_t i = 0; i < lib->stage_count; i++) {
       const VkPipelineShaderStageCreateInfo *sinfo = &lib->stages[i];
       mesa_shader_stage s = vk_to_mesa_shader_stage(sinfo->stage);
+      if (s == MESA_SHADER_TASK && lib->base.bc250_task_pipeline)
+         continue; /* The private compute producer owns the original Task stage. */
 
       radv_pipeline_stage_init(lib->base.base.create_flags, sinfo, &lib->layout, &lib->stage_keys[s], &stages[s]);
    }
@@ -2340,6 +2347,9 @@ radv_pipeline_import_retained_shaders(const struct radv_device *device, struct r
       struct blob_reader blob_reader;
       blob_reader_init(&blob_reader, retained_shaders->stages[s].serialized_nir,
                        retained_shaders->stages[s].serialized_nir_size);
+      blob_copy_bytes(&blob_reader, &stages[s].bc250_split_mesh,
+                      offsetof(struct radv_shader_stage, gs_copy_shader) -
+                      offsetof(struct radv_shader_stage, bc250_split_mesh));
 
       stages[s].stage = s;
       stages[s].nir = nir_deserialize(NULL, options, &blob_reader);
@@ -2347,6 +2357,7 @@ radv_pipeline_import_retained_shaders(const struct radv_device *device, struct r
       stages[s].entrypoint = nir_shader_get_entrypoint(stages[s].nir)->function->name;
       memcpy(stages[s].shader_blake3, retained_shaders->stages[s].shader_blake3, sizeof(stages[s].shader_blake3));
       memcpy(&stages[s].key, &retained_shaders->stages[s].key, sizeof(stages[s].key));
+      stages[s].bc250_imported_nir = true;
 
       radv_shader_layout_init(&lib->layout, s, &stages[s].layout);
 
@@ -2721,7 +2732,9 @@ radv_tir_mask_intrinsic(nir_builder *b, nir_intrinsic_instr *in, void *data)
    }
    if (in->intrinsic == nir_intrinsic_load_sample_mask_in && key->tir_forced_samples == 1) {
       b->cursor = nir_after_instr(&in->instr);
-      nir_def_rewrite_uses_after(&in->def, nir_iand_imm(b, &in->def, 1));
+      nir_def *coverage = key->tir_dynamic_output ?
+         nir_b2i32(b, nir_ine_imm(b, &in->def, 0)) : nir_iand_imm(b, &in->def, 1);
+      nir_def_rewrite_uses_after(&in->def, coverage);
       return true;
    }
    return false;
@@ -3409,6 +3422,30 @@ radv_graphics_shaders_compile(const struct radv_compiler_info *compiler_info, st
       NIR_PASS(_, stages[MESA_SHADER_FRAGMENT].nir, nir_opt_move_to_top,
                nir_move_to_entry_block_only | nir_move_to_top_input_loads_simple);
 
+      /* Adjust application-visible SampleMaskIn before inserting the internal coverage
+       * load used for smooth-line alpha. That load must retain the raw hardware
+       * sample mask, even when the API rasterization sample count is one.
+       */
+      ac_nir_lower_sample_mask_in_options lower_sample_mask_in_options = {0};
+
+      if (stages[MESA_SHADER_FRAGMENT].nir->info.fs.uses_sample_shading || gfx_state->ms.max_sample_shading_enable) {
+         lower_sample_mask_in_options.behavior = ac_nir_lower_samplemask_sample_shading_max;
+      } else if (gfx_state->ms.sample_shading_enable) {
+         lower_sample_mask_in_options.behavior = ac_nir_lower_samplemask_sample_shading_partial;
+         lower_sample_mask_in_options.ps_iter_samples = gfx_state->ms.ps_iter_samples;
+      } else if (!gfx_state->dynamic_rasterization_samples && gfx_state->ms.rasterization_samples == 0) {
+         lower_sample_mask_in_options.behavior = ac_nir_lower_samplemask_1sample_no_vrs;
+      } else {
+         lower_sample_mask_in_options.behavior = ac_nir_lower_samplemask_unknown_states_no_sample_shading;
+      }
+
+      /* Diagnostic raw hardware coverage, including the8-sample positive control.
+       * Default-off; disables the API-visible per-invocation mask adjustment only here.
+       * Run with RADV_DEBUG=nocache and a fresh engine shader cache.
+       */
+      if (!radv_s16f8_probe_mode() && !gfx_state->tir_forced_samples)
+         NIR_PASS(_, stages[MESA_SHADER_FRAGMENT].nir, ac_nir_lower_sample_mask_in, &lower_sample_mask_in_options);
+
       if ((!num_raster_vertices_per_prim || num_raster_vertices_per_prim == 2) &&
           gfx_state->smooth_lines_may_be_enabled)
          NIR_PASS(_, stages[MESA_SHADER_FRAGMENT].nir, nir_lower_poly_line_smooth, RADV_NUM_SMOOTH_AA_SAMPLES);
@@ -3436,26 +3473,6 @@ radv_graphics_shaders_compile(const struct radv_compiler_info *compiler_info, st
 
       NIR_PASS(_, stages[MESA_SHADER_FRAGMENT].nir, radv_nir_lower_opt_fs_frag_pos, vrs_may_be_enabled,
                gfx_state->ms.sample_shading_enable || stages[MESA_SHADER_FRAGMENT].nir->info.fs.uses_sample_shading);
-
-      ac_nir_lower_sample_mask_in_options lower_sample_mask_in_options = {0};
-
-      if (stages[MESA_SHADER_FRAGMENT].nir->info.fs.uses_sample_shading || gfx_state->ms.max_sample_shading_enable) {
-         lower_sample_mask_in_options.behavior = ac_nir_lower_samplemask_sample_shading_max;
-      } else if (gfx_state->ms.sample_shading_enable) {
-         lower_sample_mask_in_options.behavior = ac_nir_lower_samplemask_sample_shading_partial;
-         lower_sample_mask_in_options.ps_iter_samples = gfx_state->ms.ps_iter_samples;
-      } else if (!gfx_state->dynamic_rasterization_samples && gfx_state->ms.rasterization_samples == 0) {
-         lower_sample_mask_in_options.behavior = ac_nir_lower_samplemask_1sample_no_vrs;
-      } else {
-         lower_sample_mask_in_options.behavior = ac_nir_lower_samplemask_unknown_states_no_sample_shading;
-      }
-
-      /* Diagnostic raw hardware coverage, including the8-sample positive control.
-       * Default-off; disables the API-visible per-invocation mask adjustment only here.
-       * Run with RADV_DEBUG=nocache and a fresh engine shader cache.
-       */
-      if (!radv_s16f8_probe_mode() && !gfx_state->tir_forced_samples)
-         NIR_PASS(_, stages[MESA_SHADER_FRAGMENT].nir, ac_nir_lower_sample_mask_in, &lower_sample_mask_in_options);
    }
 
    radv_foreach_stage (i, active_nir_stages) {
@@ -3556,6 +3573,7 @@ radv_graphics_shaders_compile(const struct radv_compiler_info *compiler_info, st
       stages[MESA_SHADER_FRAGMENT].info.ps.no16 = no16_decision;
    if (gfx_state->tir_forced_samples && stages[MESA_SHADER_FRAGMENT].nir) {
       stages[MESA_SHADER_FRAGMENT].info.ps.tir_forced_samples = gfx_state->tir_forced_samples;
+      stages[MESA_SHADER_FRAGMENT].info.ps.tir_dynamic_output = gfx_state->tir_dynamic_output;
       stages[MESA_SHADER_FRAGMENT].info.ps.tir_output_samples = gfx_state->tir_output_samples;
       stages[MESA_SHADER_FRAGMENT].info.ps.tir_output_mask = gfx_state->tir_output_mask;
       stages[MESA_SHADER_FRAGMENT].info.ps.force_disable_vrs = true;
@@ -3757,6 +3775,32 @@ radv_no16_pipeline_candidate(const struct radv_device *device, VkPipelineCreateF
    return admitted;
 }
 
+/* The rev2 pixel library has normalized multisample state for shader reuse.
+ * Only the final output interface owns the actual RTV count and output mask.
+ * Select its immutable state without modifying either imported library. */
+static const struct vk_multisample_state *
+radv_tir_link_multisample(const VkPipelineLibraryCreateInfoKHR *libs,
+                          const struct bc250_tir_pipeline *tir)
+{
+   const struct vk_multisample_state *output = NULL;
+   if (!libs || !bc250_tir_valid(tir))
+      return NULL;
+   for (uint32_t i = 0; i < libs->libraryCount; i++) {
+      VK_FROM_HANDLE(radv_pipeline, base, libs->pLibraries[i]);
+      const struct radv_graphics_lib_pipeline *lib = radv_pipeline_to_graphics_lib(base);
+      if (!(lib->lib_flags & VK_GRAPHICS_PIPELINE_LIBRARY_FRAGMENT_OUTPUT_INTERFACE_BIT_EXT))
+         continue;
+      if (output || !lib->graphics_state.ms)
+         return NULL;
+      output = lib->graphics_state.ms;
+   }
+   const uint32_t mask = (1u << tir->output_samples) - 1;
+   if (!output || output->rasterization_samples != tir->output_samples ||
+       (output->sample_mask & mask) != (tir->output_mask & mask))
+      return NULL;
+   return output;
+}
+
 VkResult
 radv_generate_graphics_pipeline_state(struct radv_device *device, const VkGraphicsPipelineCreateInfo *pCreateInfo,
                                       struct radv_graphics_pipeline_state *gfx_state)
@@ -3812,11 +3856,32 @@ radv_generate_graphics_pipeline_state(struct radv_device *device, const VkGraphi
        * state or reuse a fragment shader compiled for another output mask. */
       const struct radv_physical_device *pdev = radv_device_physical(device);
       const struct vk_graphics_pipeline_state *vk = &gfx_state->vk;
-      if (!bc250_tir_valid(tir) || pdev->info.gfx_level != GFX10 || libs_info ||
-          (create_flags & VK_PIPELINE_CREATE_2_LIBRARY_BIT_KHR) || !vk->ms || !vk->rp ||
-          !vk->rp->color_attachment_count || vk->ms->rasterization_samples != tir->output_samples ||
-          vk->ms->sample_shading_enable || vk->rp->depth_attachment_format != VK_FORMAT_UNDEFINED ||
-          vk->rp->stencil_attachment_format != VK_FORMAT_UNDEFINED ||
+      const bool partial = tir->revision == BC250_TIR_PGP_REVISION;
+      const bool library = create_flags & VK_PIPELINE_CREATE_2_LIBRARY_BIT_KHR;
+      if (partial && !library) {
+         const struct vk_multisample_state *output_ms = radv_tir_link_multisample(libs_info, tir);
+         if (!output_ms) {
+            result = VK_ERROR_FEATURE_NOT_PRESENT;
+            goto fail;
+         }
+         gfx_state->vk.ms = output_ms;
+      }
+      if (partial) {
+         gfx_state->tir_pgp_output_samples = tir->output_samples;
+         gfx_state->tir_pgp_output_mask = tir->output_mask;
+      }
+      /* Rev2 libraries contain the pixel stage only. The separate no-output
+       * library retains attachment-free semantics and has no rev2 contract. */
+      if (partial && library && (!(needed_lib_flags & VK_GRAPHICS_PIPELINE_LIBRARY_FRAGMENT_SHADER_BIT_EXT) ||
+          (needed_lib_flags & VK_GRAPHICS_PIPELINE_LIBRARY_FRAGMENT_OUTPUT_INTERFACE_BIT_EXT))) {
+         result = VK_ERROR_FEATURE_NOT_PRESENT;
+         goto fail;
+      }
+      if (!bc250_tir_valid(tir) || pdev->info.gfx_level != GFX10 || (!partial && (libs_info || library)) || !vk->ms ||
+          ((!partial || !library) && (!vk->rp || !vk->rp->color_attachment_count)) || vk->ms->rasterization_samples != tir->output_samples ||
+          vk->ms->sample_shading_enable || (vk->rp &&
+          (vk->rp->depth_attachment_format != VK_FORMAT_UNDEFINED ||
+           vk->rp->stencil_attachment_format != VK_FORMAT_UNDEFINED)) ||
           BITSET_TEST(vk->dynamic, MESA_VK_DYNAMIC_MS_RASTERIZATION_SAMPLES) ||
           BITSET_TEST(vk->dynamic, MESA_VK_DYNAMIC_MS_SAMPLE_MASK)) {
          result = VK_ERROR_FEATURE_NOT_PRESENT;
@@ -3835,8 +3900,10 @@ radv_generate_graphics_pipeline_state(struct radv_device *device, const VkGraphi
       if (tir) {
          struct radv_graphics_state_key *key = &gfx_state->key.gfx_state;
          key->tir_forced_samples = tir->forced_samples;
-         key->tir_output_samples = tir->output_samples;
-         key->tir_output_mask = tir->output_mask & ((1u << tir->output_samples) - 1);
+         key->tir_dynamic_output = tir->revision == BC250_TIR_PGP_REVISION;
+      key->tir_output_samples = key->tir_dynamic_output ? 1 : tir->output_samples;
+      key->tir_output_mask = key->tir_dynamic_output ?
+         (tir->forced_samples == 1 ? 0xffff : 1) : tir->output_mask & ((1u << tir->output_samples) - 1);
          key->ms.rasterization_samples = tir->forced_samples == 1 ? 0 : tir->forced_samples;
          key->vrs_may_be_enabled = false;
          key->rs.skip_all_ngg_culling = true;
@@ -3885,8 +3952,10 @@ radv_bc250_graphics_state_hash(const struct radv_device *device,
    const struct bc250_tir_pipeline *tir = __vk_find_struct((void *)info->pNext, BC250_STRUCTURE_TYPE_TIR);
    if (tir) {
       key.gfx_state.tir_forced_samples = tir->forced_samples;
-      key.gfx_state.tir_output_samples = tir->output_samples;
-      key.gfx_state.tir_output_mask = tir->output_mask & ((1u << tir->output_samples) - 1);
+      key.gfx_state.tir_dynamic_output = tir->revision == BC250_TIR_PGP_REVISION;
+      key.gfx_state.tir_output_samples = key.gfx_state.tir_dynamic_output ? 1 : tir->output_samples;
+      key.gfx_state.tir_output_mask = key.gfx_state.tir_dynamic_output ?
+         (tir->forced_samples == 1 ? 0xffff : 1) : tir->output_mask & ((1u << tir->output_samples) - 1);
       key.gfx_state.ms.rasterization_samples = tir->forced_samples == 1 ? 0 : tir->forced_samples;
       key.gfx_state.vrs_may_be_enabled = false;
       key.gfx_state.rs.skip_all_ngg_culling = true;
@@ -3895,6 +3964,11 @@ radv_bc250_graphics_state_hash(const struct radv_device *device,
    _mesa_blake3_init(&ctx);
    radv_pipeline_hash(device, &layout, &ctx);
    _mesa_blake3_update(&ctx, &key.gfx_state, sizeof(key.gfx_state));
+   /* Shader keys normalize late fields; whole-pipeline identity must not. */
+   if (tir && tir->revision == BC250_TIR_PGP_REVISION) {
+      _mesa_blake3_update(&ctx, &tir->output_samples, sizeof(tir->output_samples));
+      _mesa_blake3_update(&ctx, &tir->output_mask, sizeof(tir->output_mask));
+   }
    _mesa_blake3_final(&ctx, hash);
 }
 
@@ -3908,6 +3982,10 @@ radv_graphics_pipeline_hash(const struct radv_device *device, const struct radv_
    radv_pipeline_hash(device, &gfx_state->layout, &ctx);
 
    _mesa_blake3_update(&ctx, &gfx_state->key.gfx_state, sizeof(gfx_state->key.gfx_state));
+   if (gfx_state->tir_pgp_output_samples) {
+      _mesa_blake3_update(&ctx, &gfx_state->tir_pgp_output_samples, sizeof(gfx_state->tir_pgp_output_samples));
+      _mesa_blake3_update(&ctx, &gfx_state->tir_pgp_output_mask, sizeof(gfx_state->tir_pgp_output_mask));
+   }
 
    if (gfx_state->stages) {
       for (unsigned s = 0; s < MESA_VULKAN_SHADER_STAGES; s++) {
@@ -4024,6 +4102,11 @@ radv_graphics_pipeline_compile(struct radv_graphics_pipeline *pipeline, const Vk
    struct radv_shader_binary *binaries[MESA_VULKAN_SHADER_STAGES] = {NULL};
    struct radv_shader_binary *gs_copy_binary = NULL;
    bool skip_shaders_cache = radv_pipeline_skip_shaders_cache(device, &pipeline->base);
+   /* GPL Task transport owns private compute executables not serialized by the ordinary
+    * library shader cache. Retained NIR must keep its transport metadata as well. */
+   skip_shaders_cache |= pipeline->bc250_task_pipeline ||
+      (pipeline->base.type == RADV_PIPELINE_GRAPHICS_LIB &&
+       (pipeline->active_stages & VK_SHADER_STAGE_TASK_BIT_EXT));
    const bool bc250_prepare_before_cache = radv_device_physical(device)->bc250_native_mesh &&
       ((pipeline->active_stages & VK_SHADER_STAGE_TASK_BIT_EXT) ||
        (compiler_info->key.bc250_split_mesh && (pipeline->active_stages & VK_SHADER_STAGE_MESH_BIT_EXT)));
@@ -4551,9 +4634,36 @@ radv_pipeline_shader_slots(struct radv_shader *const *shaders)
 }
 
 static VkResult
+radv_graphics_pipeline_import_task_library(struct radv_device *device,
+   struct radv_graphics_pipeline *pipeline, const VkGraphicsPipelineCreateInfo *info,
+   const struct radv_pipeline_layout *layout)
+{
+   const VkPipelineLibraryCreateInfoKHR *libs = vk_find_struct_const(info->pNext, PIPELINE_LIBRARY_CREATE_INFO_KHR);
+   const struct radv_graphics_pipeline *source = NULL;
+   if (!libs)
+      return VK_SUCCESS;
+   for (unsigned i = 0; i < libs->libraryCount; i++) {
+      VK_FROM_HANDLE(radv_pipeline, base, libs->pLibraries[i]);
+      const struct radv_graphics_lib_pipeline *lib = radv_pipeline_to_graphics_lib(base);
+      if (!lib->base.bc250_task_pipeline)
+         continue;
+      if (source)
+         return VK_ERROR_FEATURE_NOT_PRESENT;
+      source = &lib->base;
+   }
+   return source ? radv_bc250_clone_task_library(device, pipeline, source, layout) : VK_SUCCESS;
+}
+
+static VkResult
 radv_graphics_pipeline_check_shaders(struct radv_device *device, const struct radv_graphics_pipeline *pipeline)
 {
    const uint32_t slots = radv_pipeline_shader_slots(pipeline->base.shaders);
+   const struct radv_shader *ps = pipeline->base.shaders[MESA_SHADER_FRAGMENT];
+   if (pipeline->tir_pgp_forced_samples || (ps && ps->info.ps.tir_dynamic_output)) {
+      if (!ps || !ps->info.ps.tir_dynamic_output ||
+          ps->info.ps.tir_forced_samples != pipeline->tir_pgp_forced_samples)
+         return VK_ERROR_FEATURE_NOT_PRESENT;
+   }
 
    /* Every stage the application asked for must resolve to a shader, including through the stage
     * merging of GFX9 and later (radv_pipeline_stage_cover.h). The state setup and the draw read the
@@ -4570,6 +4680,11 @@ static VkResult
 radv_graphics_pipeline_init(struct radv_graphics_pipeline *pipeline, struct radv_device *device,
                             struct vk_pipeline_cache *cache, const VkGraphicsPipelineCreateInfo *pCreateInfo)
 {
+   const struct bc250_tir_pipeline *tir = __vk_find_struct((void *)pCreateInfo->pNext, BC250_STRUCTURE_TYPE_TIR);
+   if (tir && tir->revision == BC250_TIR_PGP_REVISION) {
+      pipeline->tir_pgp_forced_samples = tir->forced_samples;
+      pipeline->tir_pgp_output_samples = tir->output_samples;
+   }
    bool fast_linking_enabled = radv_is_fast_linking_enabled(pCreateInfo);
    struct radv_graphics_pipeline_state gfx_state;
    VkResult result = VK_SUCCESS;
@@ -4606,10 +4721,16 @@ radv_graphics_pipeline_init(struct radv_graphics_pipeline *pipeline, struct radv
    if (result != VK_SUCCESS)
       return result;
 
+   result = radv_graphics_pipeline_import_task_library(device, pipeline, pCreateInfo, &gfx_state.layout);
+   if (result != VK_SUCCESS) {
+      radv_graphics_pipeline_state_finish(device, &gfx_state);
+      return result;
+   }
+
    /* A fast link owns its private handles, even after library destruction.
     * Partial compiled interfaces are refused until their route compatibility
     * has been proven independently. */
-   if (!import_pipeline_binaries && libs_info && device->bc250_env.gpl_binary_link) {
+   if (!import_pipeline_binaries && libs_info && device->bc250_env.gpl_binary_link && !pipeline->bc250_task_pipeline) {
       struct radv_graphics_lib_pipeline *compiled = NULL;
       for (unsigned i = 0; i < libs_info->libraryCount; i++) {
          VK_FROM_HANDLE(radv_pipeline, imported, libs_info->pLibraries[i]);
@@ -4886,6 +5007,10 @@ radv_graphics_lib_pipeline_init(struct radv_graphics_lib_pipeline *pipeline, str
 
    if (pipeline_layout)
       radv_graphics_pipeline_import_layout(&pipeline->layout, pipeline_layout);
+
+   result = radv_graphics_pipeline_import_task_library(device, &pipeline->base, pCreateInfo, &pipeline->layout);
+   if (result != VK_SUCCESS)
+      return result;
 
    if (import_pipeline_binaries) {
       result = radv_graphics_pipeline_import_binaries(device, &pipeline->base, &pipeline->layout, binary_info);
