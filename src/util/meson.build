@@ -276,6 +276,8 @@ if with_tests
 endif
 
 files_xmlconfig = files(
+  'u_ere.c',
+  'u_ere.h',
   'xmlconfig.c',
   'xmlconfig.h',
 )
