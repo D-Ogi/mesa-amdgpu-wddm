@@ -80,14 +80,45 @@ class Device(object):
         for engine in xml.findall('engine'):
             self.engines.append(Engine(engine))
 
+# The elements and attributes that the static table carries, and the children of each element. The
+# static parser (parseStaticConfig in xmlconfig.c) never sees anything else, so a section that depends
+# on it would apply to every device or application. Fail the build instead.
+STATIC_ELEMENTS = {
+    'driconf': (set(), {'device'}),
+    'device': ({'driver', 'device'}, {'application', 'engine'}),
+    'application': ({'name', 'executable', 'executable_regexp', 'blake3',
+                     'application_name_match', 'application_versions'}, {'option'}),
+    'engine': ({'name', 'engine_name_match', 'engine_versions', 'application_versions'}, {'option'}),
+    'option': ({'name', 'value'}, set()),
+}
+
+def static_errors(xmlpath, element):
+    attrs, children = STATIC_ELEMENTS[element.tag]
+    errors = ['%s: <%s> attribute "%s" is not in the static driconf table'
+              % (xmlpath, element.tag, a) for a in sorted(set(element.attrib) - attrs)]
+    for child in element:
+        if child.tag not in children:
+            errors.append('%s: <%s> inside <%s> is not in the static driconf table'
+                          % (xmlpath, child.tag, element.tag))
+        else:
+            errors += static_errors(xmlpath, child)
+    return errors
+
 class DriConf(object):
-    def __init__(self, xmlpaths):
+    def __init__(self, xmlpaths, strict):
         self.devices = []
+        errors = []
         for xmlpath in xmlpaths:
             root = ElementTree.parse(xmlpath).getroot()
+            if root.tag != 'driconf':
+                errors.append('%s: the root element is <%s>, not <driconf>' % (xmlpath, root.tag))
+            else:
+                errors += static_errors(xmlpath, root)
 
             for device in root.findall('device'):
                 self.devices.append(Device(device))
+        if errors and strict:
+            raise SystemExit('\n'.join(errors))
 
 
 template = """\
@@ -237,11 +268,15 @@ parser.add_argument('drirc',
                     help='drirc *.conf file(s) to statically include')
 parser.add_argument('header',
                     help='C header file to output the static configuration to')
+parser.add_argument('--strict', action='store_true',
+                    help='fail when a file has an element or attribute that the static table drops '
+                         '(a build without XML configuration has only the static table)')
 args = parser.parse_args()
 
 xml = args.drirc
 dst = args.header
 
+driconf = DriConf(xml, args.strict)
 with open(dst, 'w', encoding='utf-8') as f:
-    f.write(Template(template).render(driconf=DriConf(xml)))
+    f.write(Template(template).render(driconf=driconf))
 
