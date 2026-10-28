@@ -1378,7 +1378,7 @@ radv_device_init_compiler_info(struct radv_device *device)
             .no_implicit_varying_subgroup_size = pdev->drirc.debug.no_implicit_varying_subgroup_size,
             .force_nan_preserve_min_max = pdev->drirc.debug.force_nan_preserve_min_max,
             .force_exact_glsl_fma = pdev->drirc.debug.force_exact_glsl_fma,
-            .enable_custom_border_on_compute_queue = pdev->drirc.features.enable_custom_border_on_compute_queue,
+            .enable_custom_border_on_compute_queue = radv_custom_border_on_compute_queue(pdev),
             .gfx10_descriptor_alias_robust =
                pdev->drirc.debug.gfx10_descriptor_alias_robust && pdev->info.gfx_level == GFX10,
             .nir_debug_info = RADV_DEBUG(instance, NIR_DEBUG_INFO),
