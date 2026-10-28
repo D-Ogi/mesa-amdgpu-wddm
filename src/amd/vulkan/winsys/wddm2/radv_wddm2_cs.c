@@ -321,12 +321,22 @@ radv_wddm2_queue_init(struct radv_wddm2_winsys *ws, enum amd_ip_type hw_ip,
    queue->hw_ip = hw_ip;
    util_dynarray_init(&queue->sparse_ops, NULL);
 
+   /* amdgpu-wddm BD-256: only a lab build lets the environment move a queue to another engine node. The
+    * release flavour always uses the default nodes: 0 for graphics, 2 for compute. */
    switch (hw_ip) {
    case AMD_IP_GFX:
+#ifdef AMDGPU_WDDM_LAB_FLAVOUR
       node = debug_get_num_option("RADV_DXGI_3D_NODE", 0);
+#else
+      node = 0;
+#endif
       break;
    case AMD_IP_COMPUTE:
+#ifdef AMDGPU_WDDM_LAB_FLAVOUR
       node = debug_get_num_option("RADV_DXGI_COMPUTE_NODE", 2);
+#else
+      node = 2;
+#endif
       break;
    default:
       /* Not supported */
