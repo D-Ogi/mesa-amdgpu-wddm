@@ -268,6 +268,12 @@ radv_wddm2_try_bc250(struct radv_wddm2_winsys *ws, struct drm_amdgpu_info_device
    info->pcie_gen = dev->pcie_gen;
    info->pcie_num_lanes = dev->pcie_num_lanes;
    info->max_gflops = (info->gfx_level >= GFX11 ? 256 : 128) * info->num_cu * info->max_gpu_freq_mhz / 1000;
+   /* ac_query_gpu_info sets this outside the ac_fill_* helpers (ac_gpu_info.c). The SQ fetches up to
+    * SH_MEM_CONFIG.INITIAL_INST_PREFETCH (3) cache lines past the PC, and radv_alloc_shader_memory pads
+    * every shader by this distance. Left at 0, the last shader of a full arena prefetches into the next
+    * VA page, and if that page is unmapped the SQC raises an instruction fetch fault. */
+   info->instr_prefetch_distance = !info->has_graphics && info->family >= CHIP_MI200 ? 16 :
+                                   info->gfx_level >= GFX10 ? 3 : 0;
 
    ws->bc250 = true;
    amdgpu_wddm_log("bc250: caps blob, device 0x%x family %u gfx %u, compute node %s, compute queues %u\n",
@@ -571,6 +577,9 @@ radv_wddm2_fill_gpu_info(struct radv_wddm2_winsys *ws,
    //set_custom_cu_en_mask(info);
    ac_fill_raster_config(info);
    ac_fill_scratch_info(info);
+   /* As in radv_wddm2_try_bc250: shader allocations need the instruction prefetch padding. */
+   info->instr_prefetch_distance = !info->has_graphics && info->family >= CHIP_MI200 ? 16 :
+                                   info->gfx_level >= GFX10 ? 3 : 0;
 
    info->compiler_info.has_image_bvh_intersect_ray = false;
 
@@ -936,6 +945,12 @@ radv_wddm2_winsys_create(const struct vk_dx_adapter_info *adapter_info,
     * set by radv_wddm2_fill_gpu_info above (line 247), which runs before this.
     */
    ws->base.shared_surfaces_are_linear = ws->bc250;
+   /* No GDS on WDDM (BD-119). RADEON_DOMAIN_GDS reaches no heap in fill_alloc_heaps() and the blob
+    * path maps it to BC250_HEAP_GTT, so a "GDS" buffer is ordinary GTT memory, and nothing in this
+    * stack programs GDS_VMID<n>_BASE/SIZE for the submission's VMID (the KMD carries those register
+    * addresses in regs.generated.h and writes neither; driver/contract/bc250_umd_submit.h:109 names
+    * GDS and OA as a WDDM gap). A shader's GDS access would therefore never retire. */
+   ws->base.supports_gds = false;
    radv_wddm2_bo_init_functions(ws);
    radv_wddm2_cs_init_functions(ws);
 

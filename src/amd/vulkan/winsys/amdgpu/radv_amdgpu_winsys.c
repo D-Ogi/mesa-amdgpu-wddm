@@ -283,6 +283,9 @@ radv_amdgpu_winsys_create(int fd, const struct radeon_info *info, const struct r
    ws->base.copy_sync_payloads = vk_drm_syncobj_copy_payloads;
    ws->base.reserve_vmid = radv_amdgpu_winsys_reserve_vmid;
    ws->base.unreserve_vmid = radv_amdgpu_winsys_unreserve_vmid;
+   /* amdgpu takes RADEON_DOMAIN_GDS (AMDGPU_GEM_DOMAIN_GDS) and the kernel programs the submission's
+    * GDS partition from that buffer, so shader GDS access works here. */
+   ws->base.supports_gds = true;
    radv_amdgpu_bo_init_functions(ws);
    radv_amdgpu_cs_init_functions(ws);
 
