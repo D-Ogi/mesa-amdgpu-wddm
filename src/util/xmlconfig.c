@@ -68,6 +68,16 @@ static inline void regfree(regex_t* r) { u_ere_free(r); }
 #include "os_misc.h"
 #include "detect_os.h"
 
+/* amdgpu-wddm: a build without expat on Windows also reads the run-time profile files of u_driconf_file.h, through
+ * the element handlers of the expat path. */
+#if !WITH_XMLCONFIG && defined(_WIN32)
+#define DRICONF_PROFILE_FILES 1
+#include "u_driconf_file.h"
+#include "u_call_once.h"
+#else
+#define DRICONF_PROFILE_FILES 0
+#endif
+
 #if DETECT_OS_LINUX
 #include <strings.h>
 #endif
@@ -696,7 +706,49 @@ struct OptConfData {
 
    driShaderOptionCallback shaderOptionCallback;
    void *shaderOptionCallbackData;
+#if DRICONF_PROFILE_FILES
+   /* The profile file whose elements are given now, and the line of the element; NULL for the static table. */
+   const char *profileFile;
+   unsigned profileLine;
+#endif
 };
+
+/** \brief Set one option from a configuration element.
+ *
+ * amdgpu-wddm: a value of a profile file that does not parse leaves the option as it was, with a log line
+ * (parseValue writes the number before it checks what follows it). The lab flavour logs every value that a profile
+ * file sets. */
+static bool
+setOptionValue(struct OptConfData *data, uint32_t opt, const char *value)
+{
+   driOptionCache *cache = data->cache;
+#if DRICONF_PROFILE_FILES
+   if (data->profileFile) {
+      if (cache->info[opt].type == DRI_STRING) {
+         parseValue(&cache->values[opt], DRI_STRING, value);
+      } else {
+         driOptionValue v = cache->values[opt];
+         if (!parseValue(&v, cache->info[opt].type, value)) {
+            u_driconf_log("%s line %u: the value \"%s\" of %s is not valid; the option is not changed",
+                          data->profileFile, data->profileLine, value, cache->info[opt].name);
+            return false;
+         }
+         cache->values[opt] = v;
+      }
+#ifdef AMDGPU_WDDM_LAB_FLAVOUR
+      u_driconf_log("%s line %u: %s=%s for driver %s, executable %s, application \"%s\", engine \"%s\"",
+                    data->profileFile, data->profileLine, cache->info[opt].name, value, data->driverName,
+                    data->execName, data->applicationName, data->engineName);
+#endif
+      return true;
+   }
+#endif
+   if (!parseValue(&cache->values[opt], cache->info[opt].type, value)) {
+      XML_WARNING("illegal option value: %s.", value);
+      return false;
+   }
+   return true;
+}
 
 /** \brief Parse a list of ranges of type info->type. */
 static unsigned char
@@ -1065,8 +1117,8 @@ parseOptConfAttr(struct OptConfData *data, const char **attr)
                     "ATTENTION: option value of option %s ignored.\n",
                     cache->info[opt].name);
          }
-      } else if (!parseValue(&cache->values[opt], cache->info[opt].type, value))
-         XML_WARNING("illegal option value: %s.", value);
+      } else
+         setOptionValue(data, opt, value);
    }
 }
 
@@ -1097,9 +1149,7 @@ parseShaderOptConfAttr(struct OptConfData *data, const char **attr)
                     "ATTENTION: option value of option %s ignored.\n",
                     cache->info[opt].name);
          }
-      } else if (!parseValue(&cache->values[opt], cache->info[opt].type, value)) {
-         XML_WARNING("illegal option value: %s.", value);
-      } else if (data->shaderOptionCallback != NULL) {
+      } else if (setOptionValue(data, opt, value) && data->shaderOptionCallback != NULL) {
          data->shaderOptionCallback(&data->shaderHash,
                                     data->shaderHashSize,
                                     &cache->info[opt],
@@ -1109,7 +1159,7 @@ parseShaderOptConfAttr(struct OptConfData *data, const char **attr)
    }
 }
 
-#if WITH_XMLCONFIG
+#if WITH_XMLCONFIG || DRICONF_PROFILE_FILES
 
 /** \brief Elements in configuration files. */
 enum OptConfElem {
@@ -1238,6 +1288,9 @@ optConfEndElem(void *userData, const char *name)
       /* unknown element, warning was produced on start tag */;
    }
 }
+#endif /* WITH_XMLCONFIG || DRICONF_PROFILE_FILES */
+
+#if WITH_XMLCONFIG
 
 static void
 _parseOneConfigFile(XML_Parser p)
@@ -1441,6 +1494,284 @@ parseStaticConfig(struct OptConfData *data)
       data->inApp--;
    }
 }
+
+#if DRICONF_PROFILE_FILES
+/* amdgpu-wddm: the run-time profile files (u_driconf_file.h, docs/design/app-profiles.md in amdgpu-wddm).
+ *
+ * The expat path warns about an unknown element or attribute and goes on; a section with such an attribute then
+ * applies to every application. A profile file is read whole and checked first, and a file that breaks one rule
+ * below gives nothing at all:
+ *  - only the elements driconf, device, application, engine, shader and option, nested as driconf.dtd says;
+ *  - only the attributes that the handlers read, and the ones that they need (option: name and value);
+ *  - an application has executable, executable_regexp, blake3 or application_name_match, and an engine has
+ *    engine_name_match: a section without one would apply to every application (upstream applies it so);
+ *  - every regular expression compiles, every version range and screen number parses, and every hash has its
+ *    form.
+ * An option that this driver does not have is ignored, as upstream does. A value that does not parse for this
+ * driver leaves the option as it was, with a log line (setOptionValue). */
+
+static const char *const profileAllowed[OC_COUNT][7] = {
+   [OC_DRICONF] = {NULL},
+   [OC_DEVICE] = {"driver", "screen", "kernel_driver", "device", "device_version_regexp", NULL},
+   [OC_APPLICATION] = {"name", "executable", "executable_regexp", "blake3", "application_name_match",
+                       "application_versions", NULL},
+   [OC_ENGINE] = {"name", "engine_name_match", "engine_versions", "application_versions", NULL},
+   [OC_SHADER] = {"type", "hash", NULL},
+   [OC_OPTION] = {"name", "value", NULL},
+};
+
+static const char *
+profileAttr(const char **attr, const char *name)
+{
+   for (unsigned i = 0; attr[i]; i += 2) {
+      if (!strcmp(attr[i], name))
+         return attr[i + 1];
+   }
+   return NULL;
+}
+
+static bool
+profileHex(const char *s, size_t min, size_t max)
+{
+   size_t n = strlen(s);
+   if (n < min || n > max)
+      return false;
+   return strspn(s, "0123456789abcdefABCDEF") == n;
+}
+
+/* One element: its attributes. why gets the reason of a refusal. */
+static bool
+checkProfileElement(enum OptConfElem elem, const char **attr, char *why, size_t size)
+{
+   for (unsigned i = 0; attr[i]; i += 2) {
+      bool known = false;
+      for (unsigned j = 0; profileAllowed[elem][j]; j++)
+         known = known || !strcmp(attr[i], profileAllowed[elem][j]);
+      if (!known) {
+         snprintf(why, size, "<%s> has the unknown attribute %s", OptConfElems[elem], attr[i]);
+         return false;
+      }
+   }
+   static const char *const patterns[] = {"device_version_regexp", "executable_regexp", "application_name_match",
+                                          "engine_name_match"};
+   for (unsigned i = 0; i < ARRAY_SIZE(patterns); i++) {
+      const char *pattern = profileAttr(attr, patterns[i]);
+      regex_t re;
+      if (!pattern)
+         continue;
+      if (regcomp(&re, pattern, REG_EXTENDED | REG_NOSUB) != 0) {
+         snprintf(why, size, "%s=\"%s\" is not a regular expression that this driver can match", patterns[i], pattern);
+         return false;
+      }
+      regfree(&re);
+   }
+   static const char *const ranges[] = {"application_versions", "engine_versions"};
+   for (unsigned i = 0; i < ARRAY_SIZE(ranges); i++) {
+      const char *range = profileAttr(attr, ranges[i]);
+      driOptionInfo info = {.type = DRI_INT};
+      if (range && !parseRange(&info, range)) {
+         snprintf(why, size, "%s=\"%s\" is not a version range", ranges[i], range);
+         return false;
+      }
+   }
+   switch (elem) {
+   case OC_DRICONF:
+      if (attr[0]) {
+         snprintf(why, size, "<driconf> has attributes");
+         return false;
+      }
+      break;
+   case OC_DEVICE: {
+      const char *screen = profileAttr(attr, "screen");
+      driOptionValue v;
+      if (screen && !parseValue(&v, DRI_INT, screen)) {
+         snprintf(why, size, "screen=\"%s\" is not a number", screen);
+         return false;
+      }
+      break;
+   }
+   case OC_APPLICATION: {
+      const char *blake3 = profileAttr(attr, "blake3");
+      if (!profileAttr(attr, "executable") && !profileAttr(attr, "executable_regexp") && !blake3 &&
+          !profileAttr(attr, "application_name_match")) {
+         snprintf(why, size, "<application> has no executable, executable_regexp, blake3 or application_name_match, "
+                  "so it would apply to every application");
+         return false;
+      }
+      if (blake3 && !profileHex(blake3, BLAKE3_HEX_LEN - 1, BLAKE3_HEX_LEN - 1)) {
+         snprintf(why, size, "blake3=\"%s\" is not %u hexadecimal digits", blake3, BLAKE3_HEX_LEN - 1);
+         return false;
+      }
+      break;
+   }
+   case OC_ENGINE:
+      if (!profileAttr(attr, "engine_name_match")) {
+         snprintf(why, size, "<engine> has no engine_name_match, so it would apply to every application");
+         return false;
+      }
+      break;
+   case OC_SHADER: {
+      const char *type = profileAttr(attr, "type"), *hash = profileAttr(attr, "hash");
+      if (!type || !hash) {
+         snprintf(why, size, "<shader> needs type and hash");
+         return false;
+      }
+      bool spirv = !strcmp(type, "spirv");
+      if (!spirv && strcmp(type, "dxbc") && strcmp(type, "dxil")) {
+         snprintf(why, size, "<shader> type \"%s\" is not spirv, dxbc or dxil", type);
+         return false;
+      }
+      if (spirv ? !profileHex(hash, BLAKE3_HEX_LEN - 1, BLAKE3_HEX_LEN - 1) : !profileHex(hash, 1, 16)) {
+         snprintf(why, size, "<shader> hash \"%s\" does not have the form of a %s hash", hash, type);
+         return false;
+      }
+      break;
+   }
+   case OC_OPTION:
+      if (!profileAttr(attr, "name") || !profileAttr(attr, "value")) {
+         snprintf(why, size, "<option> needs name and value");
+         return false;
+      }
+      break;
+   default:
+      break;
+   }
+   return true;
+}
+
+/* The driconf rules on the events of one file. */
+static bool
+checkProfileEvents(const struct u_driconf_xml *xml, char *why, size_t size)
+{
+   enum OptConfElem stack[U_DRICONF_XML_MAX_DEPTH];
+   unsigned depth = 0;
+   char reason[384];
+   for (unsigned i = 0; i < xml->count; i++) {
+      const struct u_driconf_xml_event *e = &xml->events[i];
+      enum OptConfElem elem = bsearchStr(e->name, OptConfElems, OC_COUNT);
+      if (!e->attr) {
+         depth--;
+         continue;
+      }
+      if (elem == OC_COUNT) {
+         snprintf(why, size, "line %u: the element <%s> is not a driconf element", e->line, e->name);
+         return false;
+      }
+      enum OptConfElem parent = depth ? stack[depth - 1] : OC_COUNT;
+      bool placed;
+      switch (elem) {
+      case OC_DRICONF: placed = depth == 0; break;
+      case OC_DEVICE: placed = parent == OC_DRICONF; break;
+      case OC_APPLICATION:
+      case OC_ENGINE: placed = parent == OC_DEVICE; break;
+      case OC_SHADER: placed = parent == OC_APPLICATION || parent == OC_ENGINE; break;
+      case OC_OPTION: placed = parent == OC_APPLICATION || parent == OC_ENGINE || parent == OC_SHADER; break;
+      default: placed = false; break;
+      }
+      if (!placed) {
+         snprintf(why, size, "line %u: <%s> may not be %s%s%s", e->line, e->name, depth ? "inside <" : "the root",
+                  depth ? OptConfElems[parent] : "", depth ? ">" : "");
+         return false;
+      }
+      if (!checkProfileElement(elem, e->attr, reason, sizeof(reason))) {
+         snprintf(why, size, "line %u: %s", e->line, reason);
+         return false;
+      }
+      stack[depth++] = elem;
+   }
+   return true;
+}
+
+struct profileFile {
+   char *path;
+   struct u_driconf_xml xml;
+};
+static struct profileFile *profileFiles;
+static unsigned profileFileCount;
+
+static void
+loadProfileFile(void *unused, const char *path, const char *text, size_t size)
+{
+   struct u_driconf_xml xml;
+   char why[512];
+   if (!u_driconf_xml_parse(text, size, &xml, why, sizeof(why)) || !checkProfileEvents(&xml, why, sizeof(why))) {
+      u_driconf_log("%s is not read: %s", path, why);
+      u_driconf_xml_fini(&xml);
+      return;
+   }
+   struct profileFile *files = realloc(profileFiles, (profileFileCount + 1) * sizeof(*files));
+   char *copy = strdup(path);
+   if (!files || !copy) {
+      if (files)
+         profileFiles = files;
+      free(copy);
+      u_driconf_xml_fini(&xml);
+      u_driconf_log("%s is not read: out of memory", path);
+      return;
+   }
+   profileFiles = files;
+   profileFiles[profileFileCount++] = (struct profileFile){copy, xml};
+#ifdef AMDGPU_WDDM_LAB_FLAVOUR
+   u_driconf_log("%s: read, %u tags", path, xml.count);
+#endif
+}
+
+static void
+loadProfileFiles(void)
+{
+   u_driconf_profile_files(loadProfileFile, NULL);
+}
+
+#ifdef U_DRICONF_FILE_TEST
+/* Host tests: every call reads the files again. */
+void driconfProfileTestReload(void);
+void
+driconfProfileTestReload(void)
+{
+   for (unsigned i = 0; i < profileFileCount; i++) {
+      free(profileFiles[i].path);
+      u_driconf_xml_fini(&profileFiles[i].xml);
+   }
+   free(profileFiles);
+   profileFiles = NULL;
+   profileFileCount = 0;
+   loadProfileFiles();
+}
+#endif
+
+/* The checked files, in name order, after the static table: a later value wins, as with /usr/share/drirc.d. The
+ * files are read once in a process; a change applies at the next start of the application. */
+static void
+parseProfileConfig(struct OptConfData *data)
+{
+#ifndef U_DRICONF_FILE_TEST
+   static util_once_flag once = UTIL_ONCE_FLAG_INIT;
+   util_call_once(&once, loadProfileFiles);
+#endif
+   for (unsigned i = 0; i < profileFileCount; i++) {
+      const struct profileFile *f = &profileFiles[i];
+      data->name = f->path;
+      data->profileFile = f->path;
+      data->ignoringDevice = 0;
+      data->ignoringApp = 0;
+      data->inDriConf = 0;
+      data->inDevice = 0;
+      data->inApp = 0;
+      data->inShader = 0;
+      data->inOption = 0;
+      data->shaderHashSize = 0;
+      for (unsigned j = 0; j < f->xml.count; j++) {
+         const struct u_driconf_xml_event *e = &f->xml.events[j];
+         data->profileLine = e->line;
+         if (e->attr)
+            optConfStartElem(data, e->name, e->attr);
+         else
+            optConfEndElem(data, e->name);
+      }
+   }
+   data->profileFile = NULL;
+}
+#endif /* DRICONF_PROFILE_FILES */
 #endif /* WITH_XMLCONFIG */
 
 /** \brief Initialize an option cache based on info */
@@ -1581,6 +1912,9 @@ driParseConfigFiles(driOptionCache *cache, const driOptionCache *info,
    }
 #else
    parseStaticConfig(&userData);
+#if DRICONF_PROFILE_FILES
+   parseProfileConfig(&userData);
+#endif
 #endif /* WITH_XMLCONFIG */
 
    if (params->logNonDefaultOptions)

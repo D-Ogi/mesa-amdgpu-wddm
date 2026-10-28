@@ -280,6 +280,8 @@ endif
 files_xmlconfig = files(
   'u_ere.c',
   'u_ere.h',
+  'u_driconf_file.c',
+  'u_driconf_file.h',
   'xmlconfig.c',
   'xmlconfig.h',
 )
