@@ -140,18 +140,39 @@ __getProgramName()
    return progname;
 }
 #elif DETECT_OS_WINDOWS
+/* The full path of the executable into a heap buffer. The path can be longer than MAX_PATH (a
+ * long-path-aware process or an application in a deep directory), and GetModuleFileNameA truncates
+ * it without an error code that all Windows versions set, so the buffer grows until the path fits,
+ * up to the longest path Windows has (32767 characters). NULL when the path cannot be read.
+ */
+static char *
+win32_get_exec_path(void)
+{
+   for (DWORD size = MAX_PATH; size <= 65536; size *= 2) {
+      char *buf = malloc(size);
+      if (!buf)
+         return NULL;
+      DWORD n = GetModuleFileNameA(NULL, buf, size);
+      if (n && n < size)
+         return buf;
+      free(buf);
+      if (!n)
+         return NULL;
+   }
+   return NULL;
+}
+
 static char *
 __getProgramName()
 {
-   char *progname;
-   static char buf[MAX_PATH];
-   GetModuleFileNameA(NULL, buf, sizeof(buf));
-   progname = strrchr(buf, '\\');
-   if (progname)
-      progname++;
-   else
-      progname = buf;
-   return strdup(progname);
+   char *path = win32_get_exec_path();
+   if (!path)
+      return strdup("");
+   const char *progname = strrchr(path, '\\');
+   progname = progname ? progname + 1 : path;
+   char *name = strdup(progname);
+   free(path);
+   return name;
 }
 #elif DETECT_OS_HAIKU
 #  include <kernel/OS.h>
@@ -223,7 +244,11 @@ size_t
 util_get_process_exec_path(char* process_path, size_t len)
 {
 #if DETECT_OS_WINDOWS
-   return GetModuleFileNameA(NULL, process_path, len);
+   /* A path that does not fit is truncated by GetModuleFileNameA: return 0
+    * for it, as the POSIX branch does, never a cut path. */
+   const DWORD size = len > MAXDWORD ? MAXDWORD : (DWORD)len;
+   const DWORD n = GetModuleFileNameA(NULL, process_path, size);
+   return n < size ? n : 0;
 #elif DETECT_OS_APPLE
    uint32_t bufSize = len;
    int result = _NSGetExecutablePath(process_path, &bufSize);
