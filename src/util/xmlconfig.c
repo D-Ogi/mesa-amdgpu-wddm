@@ -45,13 +45,17 @@
 #include <sys/stat.h>
 #endif
 #ifdef NO_REGEX
-typedef int regex_t;
-#define REG_EXTENDED 0
-#define REG_NOSUB 0
-#define REG_NOMATCH 1
-static inline int regcomp(regex_t *r, const char *s, int f) { return 0; }
-static inline int regexec(regex_t *r, const char *s, int n, void *p, int f) { return REG_NOMATCH; }
-static inline void regfree(regex_t* r) {}
+/* No <regex.h> (Windows): use the small POSIX extended regular expression matcher of u_ere.h. Without it, no
+ * engine_name_match, executable_regexp, application_name_match or device_version_regexp section can apply.
+ */
+#include "u_ere.h"
+typedef struct u_ere regex_t;
+#define REG_EXTENDED U_ERE_EXTENDED
+#define REG_NOSUB U_ERE_NOSUB
+#define REG_NOMATCH U_ERE_NOMATCH
+static inline int regcomp(regex_t *r, const char *s, int f) { return u_ere_comp(r, s, f); }
+static inline int regexec(regex_t *r, const char *s, int n, void *p, int f) { return u_ere_exec(r, s); }
+static inline void regfree(regex_t* r) { u_ere_free(r); }
 #else
 #include <regex.h>
 #endif
@@ -783,8 +787,10 @@ parseDeviceAttr(struct OptConfData *data, const char **attr)
             if (regexec(&re, device_version_str, 0, NULL, 0) == REG_NOMATCH)
                data->ignoringDevice = data->inDevice;
             regfree(&re);
-         } else
+         } else {
             XML_WARNING("Invalid device_version_regexp=\"%s\".", device_version_regexp);
+            data->ignoringDevice = data->inDevice;
+         }
       }
    } else if (screen) {
       driOptionValue screenNum;
@@ -893,8 +899,10 @@ parseAppAttr(struct OptConfData *data, const char **attr)
          if (regexec(&re, data->execName, 0, NULL, 0) == REG_NOMATCH)
             data->ignoringApp = data->inApp;
          regfree(&re);
-      } else
+      } else {
          XML_WARNING("Invalid executable_regexp=\"%s\".", exec_regexp);
+         data->ignoringApp = data->inApp;
+      }
    } else if (blake3) {
       /* BLAKE3_HEX_LEN includes terminating null byte */
       if (strlen(blake3) != (BLAKE3_HEX_LEN - 1)) {
@@ -924,8 +932,10 @@ parseAppAttr(struct OptConfData *data, const char **attr)
          if (regexec(&re, data->applicationName, 0, NULL, 0) == REG_NOMATCH)
             data->ignoringApp = data->inApp;
          regfree(&re);
-      } else
+      } else {
          XML_WARNING("Invalid application_name_match=\"%s\".", application_name_match);
+         data->ignoringApp = data->inApp;
+      }
    }
    if (application_versions) {
       driOptionValue v = { ._int = data->applicationVersion };
@@ -965,8 +975,10 @@ parseEngineAttr(struct OptConfData *data, const char **attr)
          if (regexec(&re, data->engineName, 0, NULL, 0) == REG_NOMATCH)
             data->ignoringApp = data->inApp;
          regfree(&re);
-      } else
+      } else {
          XML_WARNING("Invalid engine_name_match=\"%s\".", engine_name_match);
+         data->ignoringApp = data->inApp;
+      }
    }
    if (engine_versions) {
       driOptionValue v = { ._int = data->engineVersion };
