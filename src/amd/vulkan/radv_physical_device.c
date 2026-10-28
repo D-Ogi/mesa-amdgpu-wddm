@@ -32,6 +32,7 @@
 #include "radv_physical_device.h"
 #include "radv_bc250.h"
 #include "radv_bc250_dgc_stages.h"
+#include "radv_bc250_indirect.h"
 #include "radv_no16.h"
 #include "radv_pipeline_rt.h"
 #include "radv_video.h"
@@ -2040,10 +2041,15 @@ radv_get_physical_device_properties(struct radv_physical_device *pdev)
       .maxDrawIndexedIndexValue = UINT32_MAX,
       /* DirectMesh clamps this to 4096 under hybrid Task (its chunked Task producer). The clamp must
        * not depend on the RADV_BC250_TASK_STRICT_EXT A/B switch: radv_bc250_draw_task_indirect() and
-       * radv_bc250_draw_split_indirect() refuse more than 4096 records on every mesh route, so an
-       * unclamped limit would promise a draw the driver then fails. The split route needs it without
-       * hybrid Task, hence bc250_native_mesh. These flags are only ever set on a GFX1013 board. */
-      .maxDrawIndirectCount = (pdev->bc250_native_mesh || pdev->bc250_hybrid_task) ? 4096 : UINT32_MAX,
+       * radv_bc250_draw_split_indirect() record at most this many records on every mesh route (a direct
+       * draw above it is refused, a count variant's maxDrawCount is clamped to it: radv_bc250_indirect.h),
+       * so an unclamped limit would promise a draw the driver then fails. It stays below the 65535 that
+       * Vulkan requires with multiDrawIndirect: the Task route records each record on the CPU, so every
+       * ExecuteIndirect with a large MaxCommandCount would record that many draws whatever its count.
+       * The split route needs it without hybrid Task, hence bc250_native_mesh. These flags are only ever
+       * set on a GFX1013 board. */
+      .maxDrawIndirectCount =
+         (pdev->bc250_native_mesh || pdev->bc250_hybrid_task) ? RADV_BC250_MAX_DRAW_INDIRECT_COUNT : UINT32_MAX,
       .maxSamplerLodBias = 16,
       .maxSamplerAnisotropy = 16,
       .maxViewports = MAX_VIEWPORTS,

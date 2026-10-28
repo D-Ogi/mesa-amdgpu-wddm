@@ -499,6 +499,17 @@ if with_tests
     timeout : 3,
   )
   test(
+    'radv_bc250_indirect_test',
+    executable(
+      'radv_bc250_indirect_test',
+      files('tests/radv_bc250_indirect_test.c'),
+      c_args : [c_msvc_compat_args],
+      include_directories : [include_directories('.')],
+    ),
+    suite : ['amd', 'bc250'],
+    timeout : 3,
+  )
+  test(
     'radv_compute_border_color_test',
     executable(
       'radv_compute_border_color_test',

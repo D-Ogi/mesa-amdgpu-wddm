@@ -10,6 +10,7 @@
 #include "radv_bc250_idx.h"
 #include "radv_bc250_mesh_contract.h"
 #include "radv_bc250_dispatch.h"
+#include "radv_bc250_indirect.h"
 #include "radv_descriptor_set.h"
 #include "meta/radv_meta.h"
 #include "nir/nir_builder.h"
@@ -7223,9 +7224,9 @@ void
 radv_bc250_draw_task_indirect(struct radv_cmd_buffer *cmd_buffer, uint64_t address,
                              uint32_t draw_count, uint32_t stride, uint64_t count_address)
 {
-   /* Mesh indirect records are bounded by maxDrawIndirectCount (4096),
-    * independently of the EXT_multi_draw maxMultiDrawCount property. */
-   if (draw_count > 4096) {
+   /* Mesh indirect records are bounded by maxDrawIndirectCount, independently of the EXT_multi_draw
+    * maxMultiDrawCount property; a count variant's maxDrawCount is clamped (radv_bc250_indirect.h). */
+   if (!radv_bc250_indirect_records(draw_count, count_address != 0, &draw_count)) {
       vk_command_buffer_set_error(&cmd_buffer->vk, RADV_BC250_CMD_REFUSED);
       return;
    }
@@ -7598,7 +7599,8 @@ radv_bc250_draw_split_indirect(struct radv_cmd_buffer *cmd_buffer, uint64_t inpu
 {
    if (!records)
       return;
-   if (records > 4096) {
+   /* A count variant's maxDrawCount above maxDrawIndirectCount is clamped (radv_bc250_indirect.h). */
+   if (!radv_bc250_indirect_records(records, count != 0, &records)) {
       vk_command_buffer_set_error(&cmd_buffer->vk, RADV_BC250_CMD_REFUSED);
       return;
    }
