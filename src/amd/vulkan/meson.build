@@ -498,6 +498,21 @@ if with_tests
     suite : ['compiler', 'nir'],
     timeout : 3,
   )
+  test(
+    'radv_compute_border_color_test',
+    executable(
+      'radv_compute_border_color_test',
+      files('tests/radv_compute_border_color_test.c'),
+      c_args : [radv_flags, c_msvc_compat_args],
+      include_directories : [inc_include, inc_src, inc_amd, inc_amd_common, inc_radv_winsys_common,
+                             inc_compiler, inc_util, include_directories('.', 'nir', '../compiler')],
+      link_with : [libamd_common],
+      dependencies : [dep_thread, idep_nir, idep_mesautil, idep_vulkan_runtime_headers,
+                      idep_amd_generated_headers, idep_vulkan_util_headers, idep_vulkan_wsi_headers, radv_deps],
+    ),
+    suite : ['amd'],
+    timeout : 3,
+  )
   # The CPU NIR interpreter reports unsupported operations with exceptions.
   bc250_test_cpp_args = cpp_msvc_compat_args
   if cc.get_argument_syntax() == 'msvc'

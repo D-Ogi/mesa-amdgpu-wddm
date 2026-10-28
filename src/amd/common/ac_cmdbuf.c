@@ -168,6 +168,11 @@ ac_init_compute_preamble_state(const struct ac_preamble_state *state,
 {
    const struct radeon_info *info = pm4->info;
 
+   if (state->cs_idle_before_border_color) {
+      ac_pm4_cmd_add(pm4, PKT3(PKT3_EVENT_WRITE, 0, 0));
+      ac_pm4_cmd_add(pm4, EVENT_TYPE(V_028A90_CS_PARTIAL_FLUSH) | EVENT_INDEX(4));
+   }
+
    if (!info->has_graphics) {
       cdna_init_compute_preamble_state(state, pm4);
    } else if (info->gfx_level >= GFX12) {
