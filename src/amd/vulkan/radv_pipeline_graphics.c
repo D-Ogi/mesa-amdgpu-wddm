@@ -3821,6 +3821,15 @@ radv_tir_link_multisample(const VkPipelineLibraryCreateInfoKHR *libs,
    return output;
 }
 
+static bool
+radv_pgp_so_compiles_capture(const struct bc250_pgp_so_pipeline *so)
+{
+   if (!so || so->revision != BC250_PGP_SO_REVISION)
+      return false;
+   return so->mode == BC250_PGP_SO_CAPTURE || so->mode == BC250_PGP_SO_FULL ||
+      (so->mode == BC250_PGP_SO_LINK && bc250_pgp_so_table_valid(so->table));
+}
+
 VkResult
 radv_generate_graphics_pipeline_state(struct radv_device *device, const VkGraphicsPipelineCreateInfo *pCreateInfo,
                                       struct radv_graphics_pipeline_state *gfx_state)
@@ -3934,8 +3943,10 @@ radv_generate_graphics_pipeline_state(struct radv_device *device, const VkGraphi
    if (gfx_state->compilation_required) {
       gfx_state->key = radv_generate_graphics_pipeline_key(device, pCreateInfo, &gfx_state->vk, needed_lib_flags);
       const struct bc250_pgp_so_pipeline *so = __vk_find_struct((void *)pCreateInfo->pNext, BC250_STRUCTURE_TYPE_PGP_SO);
-      gfx_state->key.gfx_state.bc250_pgp_so_capture = so &&
-         (so->mode == BC250_PGP_SO_CAPTURE || so->mode == BC250_PGP_SO_FULL);
+      gfx_state->key.gfx_state.bc250_pgp_so_capture = radv_pgp_so_compiles_capture(so);
+      /* A final link may recompile retained producer NIR (for example a GS
+       * linked with a nonconstant PS). It still uses canonical capture and
+       * the immutable runtime raster map, just like the source library. */
       /* In the pipeline hash: an admitted 16-sample request never shares cache entries with another pipeline. */
       gfx_state->key.gfx_state.no16_logical16 = gfx_state->no16_logical16;
       if (tir) {
@@ -3991,8 +4002,7 @@ radv_bc250_graphics_state_hash(const struct radv_device *device,
    struct radv_graphics_pipeline_key key =
       radv_generate_graphics_pipeline_key(device, info, &gfx_state->vk, ALL_GRAPHICS_LIB_FLAGS);
    const struct bc250_pgp_so_pipeline *so = __vk_find_struct((void *)info->pNext, BC250_STRUCTURE_TYPE_PGP_SO);
-   key.gfx_state.bc250_pgp_so_capture = so &&
-      (so->mode == BC250_PGP_SO_CAPTURE || so->mode == BC250_PGP_SO_FULL);
+   key.gfx_state.bc250_pgp_so_capture = radv_pgp_so_compiles_capture(so);
    const struct bc250_tir_pipeline *tir = __vk_find_struct((void *)info->pNext, BC250_STRUCTURE_TYPE_TIR);
    if (tir) {
       key.gfx_state.tir_forced_samples = tir->forced_samples;
