@@ -278,6 +278,8 @@ if with_tests
 endif
 
 files_xmlconfig = files(
+  'u_ere.c',
+  'u_ere.h',
   'xmlconfig.c',
   'xmlconfig.h',
 )
@@ -286,9 +288,10 @@ files_xmlconfig += custom_target(
   'driconf_static.h',
   input: ['driconf_static.py'] + files_drirc,
   output: 'driconf_static.h',
+  # Without XML configuration, the static table is the only driconf: fail on what it drops.
   command: [
     prog_python, '@INPUT@', '@OUTPUT@',
-  ],
+  ] + (use_xmlconfig ? [] : ['--strict']),
 )
 
 format_srgb = custom_target(

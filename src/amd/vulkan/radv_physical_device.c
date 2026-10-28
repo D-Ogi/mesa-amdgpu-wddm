@@ -2774,6 +2774,18 @@ radv_init_dri_options(struct radv_physical_device *pdev)
    const uint32_t device_version = radv_get_driconf_device_version(pdev);
    struct radv_drirc *drirc = &pdev->drirc;
 
+#ifdef AMDGPU_WDDM_LAB_FLAVOUR
+   /* amdgpu-wddm: a lab build prints the application info that drirc matches, and then the drirc: lines of the
+    * options it changes. With AMDGPU_WDDM_LOG=file:<path>, both go to that file. */
+   amdgpu_wddm_log("radv: drirc application \"%s\" version %u, engine \"%s\" version %u.%u.%u, device version %u\n",
+                   instance->vk.app_info.app_name ? instance->vk.app_info.app_name : "",
+                   instance->vk.app_info.app_version,
+                   instance->vk.app_info.engine_name ? instance->vk.app_info.engine_name : "",
+                   VK_API_VERSION_MAJOR(instance->vk.app_info.engine_version),
+                   VK_API_VERSION_MINOR(instance->vk.app_info.engine_version),
+                   VK_API_VERSION_PATCH(instance->vk.app_info.engine_version), device_version);
+#endif
+
    radv_parse_dri_options(drirc, &(driConfigFileParseParams){
                                     .driverName = "radv",
                                     .deviceVersion = device_version,
@@ -2781,6 +2793,10 @@ radv_init_dri_options(struct radv_physical_device *pdev)
                                     .applicationVersion = instance->vk.app_info.app_version,
                                     .engineName = instance->vk.app_info.engine_name,
                                     .engineVersion = instance->vk.app_info.engine_version,
+#ifdef AMDGPU_WDDM_LAB_FLAVOUR
+                                    /* amdgpu-wddm: a lab build prints each option that drirc changed. */
+                                    .logNonDefaultOptions = true,
+#endif
                                  });
 
    if (instance->vk.app_info.engine_name && !strcmp(instance->vk.app_info.engine_name, "DXVK")) {
