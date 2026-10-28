@@ -2378,7 +2378,7 @@ struct radv_wddm2_summary_deferred {
 
 struct radv_wddm2_summary_submit {
    uint64_t submits, progress_separate, progress_merged, signal_calls, signal_objects;
-   uint64_t wait_objects, wait_dropped, wait_calls, wait_skipped, gather_waits, gather_wait_ns, gather_wait_max_ns;
+   uint64_t wait_objects, wait_dropped, wait_calls, wait_skipped, gather_busy, gather_spares, gather_dropped;
    uint64_t progress_gpu, kernel_queues, progress_repairs, progress_repairs_failed;
 };
 
@@ -2471,9 +2471,9 @@ radv_wddm2_summary_write(struct radv_wddm2_winsys *ws, uint64_t now, uint64_t du
       .wait_dropped = p_atomic_read(&ws->submit_stats.wait_dropped),
       .wait_calls = p_atomic_read(&ws->submit_stats.wait_calls),
       .wait_skipped = p_atomic_read(&ws->submit_stats.wait_skipped),
-      .gather_waits = p_atomic_read(&ws->submit_stats.gather_waits),
-      .gather_wait_ns = p_atomic_read(&ws->submit_stats.gather_wait_ns),
-      .gather_wait_max_ns = p_atomic_read(&ws->submit_stats.gather_wait_max_ns),
+      .gather_busy = p_atomic_read(&ws->submit_stats.gather_busy),
+      .gather_spares = p_atomic_read(&ws->submit_stats.gather_spares),
+      .gather_dropped = p_atomic_read(&ws->submit_stats.gather_dropped),
       .progress_gpu = p_atomic_read(&ws->submit_stats.progress_gpu),
       .kernel_queues = p_atomic_read(&ws->submit_stats.kernel_queues),
       .progress_repairs = p_atomic_read(&ws->submit_stats.progress_repairs),
@@ -2536,14 +2536,14 @@ radv_wddm2_summary_write(struct radv_wddm2_winsys *ws, uint64_t now, uint64_t du
          radv_wddm2_deferred_line("periodic %s t=%" PRIu64 "s submit: submits=%" PRIu64 " progress_separate=%" PRIu64
                                   " progress_merged=%" PRIu64 " signal_calls=%" PRIu64 " signal_objects=%" PRIu64
                                   " wait_objects=%" PRIu64 " wait_dropped=%" PRIu64 " wait_calls=%" PRIu64
-                                  " wait_skipped=%" PRIu64 " gather_slots=%u gather_waits=%" PRIu64
-                                  " gather_wait_ms=%" PRIu64 " gather_wait_max_us=%" PRIu64 " coalesce=%s"
+                                  " wait_skipped=%" PRIu64 " gather_slots=%u gather_busy=%" PRIu64
+                                  " gather_spares=%" PRIu64 " gather_dropped=%" PRIu64 " coalesce=%s"
                                   " progress_fence=%s progress_gpu=%" PRIu64 " kernel_queues=%" PRIu64
                                   " progress_repairs=%" PRIu64 " progress_repairs_failed=%" PRIu64,
                                   tag, t, s.submits, s.progress_separate, s.progress_merged, s.signal_calls,
                                   s.signal_objects, s.wait_objects, s.wait_dropped, s.wait_calls, s.wait_skipped,
-                                  ws->bc250_gather_slots, s.gather_waits, radv_wddm2_ms(s.gather_wait_ns),
-                                  s.gather_wait_max_ns / 1000u, radv_wddm2_coalesce_name(ws),
+                                  ws->bc250_gather_slots, s.gather_busy, s.gather_spares, s.gather_dropped,
+                                  radv_wddm2_coalesce_name(ws),
                                   ws->bc250_progress_gpu ? "gpu" : "kernel", s.progress_gpu, s.kernel_queues,
                                   s.progress_repairs, s.progress_repairs_failed);
          memcpy(ws->summary.submit_snapshot, &s, sizeof(s));
