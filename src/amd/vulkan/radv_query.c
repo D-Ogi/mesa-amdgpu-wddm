@@ -1801,6 +1801,25 @@ radv_create_query_pool(struct radv_device *device, const VkQueryPoolCreateInfo *
    /* The number of task shader invocations needs to be queried on ACE. */
    pool->uses_ace = (pool->vk.pipeline_statistics & VK_QUERY_PIPELINE_STATISTIC_TASK_SHADER_INVOCATIONS_BIT_EXT);
 
+   /* BD-119: below GFX11 the emulated counters live in GDS, written by the shader with a GDS atomic
+    * and read back by the CP with a COPY_DATA from GDS (gfx10_copy_shader_query_gfx with use_gds).
+    * On a winsys that programs no GDS partition a submission that performs a GDS access does not
+    * retire, so this pool must not emulate anything: the affected statistic then reads 0, which is
+    * the better of the two outcomes. radv_get_ngg_state_query() keeps the shader side off to match.
+    * This is the rule radeon_winsys::supports_gds states, applied to its other user. */
+   if (!device->ws->supports_gds && pdev->info.gfx_level < GFX11 &&
+       (pool->uses_emulated_queries || pool->uses_ace)) {
+      static bool said;
+      if (!said) {
+         said = true;
+         fprintf(stderr, "radv/bc250: this winsys has no GDS; emulated pipeline-statistics counters are "
+                         "not kept and read 0 (BD-119). The alternative is a submission that does not "
+                         "retire.\n");
+      }
+      pool->uses_emulated_queries = false;
+      pool->uses_ace = false;
+   }
+
    pool->uses_shader_query_buf =
       pdev->info.gfx_level >= GFX11 && (pool->vk.query_type == VK_QUERY_TYPE_PRIMITIVES_GENERATED_EXT ||
                                         pool->vk.query_type == VK_QUERY_TYPE_TRANSFORM_FEEDBACK_STREAM_EXT);

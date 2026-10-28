@@ -571,6 +571,22 @@ struct radeon_winsys {
     * work waits on the GPU for a signal that only a later submission of the application gives. When it is
     * clear, the caller waits for the queue first. */
    bool destroy_defers_to_queued_work;
+
+   /* True when RADEON_DOMAIN_GDS allocations give the submission a real GDS partition, so a shader
+    * may execute a DS instruction with the GDS bit (nir_gds_atomic_add_amd) and a COPY_DATA may read
+    * GDS. The amdgpu winsys has it: the kernel programs GDS_VMID<n>_BASE/SIZE for the submission's
+    * VMID from the GDS BO. Our WDDM winsys does not: RADEON_DOMAIN_GDS reaches no heap in
+    * fill_alloc_heaps() and lands in GTT, and nothing in the WDDM stack programs a GDS partition
+    * (driver/contract/bc250_umd_submit.h:109 "GDS and OA are a gap on WDDM").
+    *
+    * What that costs is the BD-119 hang: a submission whose shader performs a GDS access does not
+    * retire, the CP parks in a partial flush and the fence times out. The most likely mechanism is a
+    * GDS access into an unprogrammed partition that never returns its acknowledgement, so the wave
+    * waits at s_waitcnt lgkmcnt forever; that step is an inference from the register state and from
+    * upstream's own note that streamout hangs without GDS (radv_queue.c), not a measurement. Either
+    * way the rule is the same: every GDS user must consult this flag, and it is false unless the
+    * winsys sets it. */
+   bool supports_gds;
 };
 
 static inline uint64_t

@@ -14165,6 +14165,15 @@ radv_get_ngg_state_query(struct radv_cmd_buffer *cmd_buffer)
    const struct radv_physical_device *pdev = radv_device_physical(device);
    enum radv_shader_query_state shader_query_state = radv_shader_query_none;
 
+   /* BD-119: below GFX11 every emulated shader-query counter is a GDS atomic
+    * (radv_nir_lower_abi.c, nir_gds_atomic_add_amd), and a submission that performs a GDS access on a
+    * winsys without a GDS partition does not retire (radeon_winsys::supports_gds). Leaving the state
+    * at none means the shader takes no such branch, so the affected statistic reads 0 instead of
+    * hanging the GPU. This covers the inherited-statistics route as well, which can enable the state
+    * with no query pool of ours involved. */
+   if (!device->ws->supports_gds && pdev->info.gfx_level < GFX11)
+      return shader_query_state;
+
    /* By default shader queries are disabled but they are enabled if the command buffer has active GDS
     * queries or if it's a secondary command buffer that inherits the number of generated
     * primitives.

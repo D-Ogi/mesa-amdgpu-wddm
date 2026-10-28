@@ -1006,6 +1006,12 @@ radv_wddm2_winsys_create(const struct vk_dx_adapter_info *adapter_info,
    ws->base.query_gpuvm_fault = radv_wddm2_winsys_query_gpuvm_fault;
    ws->base.init_wsi = radv_wddm2_wsi_init;
    ws->base.inline_gfx_preamble = radv_wddm2_inline_gfx_preamble;
+   /* No GDS on WDDM (BD-119). RADEON_DOMAIN_GDS reaches no heap in fill_alloc_heaps() and the blob
+    * path maps it to BC250_HEAP_GTT, so a "GDS" buffer is ordinary GTT memory, and nothing in this
+    * stack programs GDS_VMID<n>_BASE/SIZE for the submission's VMID (the KMD carries those register
+    * addresses in regs.generated.h and writes neither; driver/contract/bc250_umd_submit.h:109 names
+    * GDS and OA as a WDDM gap). A shader's GDS access would therefore never retire. */
+   ws->base.supports_gds = false;
    radv_wddm2_bo_init_functions(ws);
    radv_wddm2_cs_init_functions(ws);
 
