@@ -278,6 +278,21 @@ radv_dedicated_sparse_queue_enabled(const struct radv_physical_device *pdev)
    return pdev->info.has_timeline_syncobj && radv_sparse_enabled(pdev);
 }
 
+/* Upstream replaces a custom border color by transparent black in task, compute and RT shaders on the
+ * compute queue: TA_CS_BC_BASE_ADDR has one copy for all MEC queues, so parallel compute queues of other
+ * processes overwrite the palette address. The BC-250 WDDM kernel driver gives user mode one MEC queue
+ * (WDDM node 2). It runs one DMA buffer at a time, each to its end (DMA buffer boundary preemption), and
+ * each RADV submission starts with the preamble that writes the address of its own palette. The compute
+ * queue preamble then waits for the earlier dispatches of the queue before that write
+ * (ac_preamble_state::cs_idle_before_border_color), so no job samples through the palette address of
+ * another job. D3D12 requires the custom border color on every queue type.
+ */
+static inline bool
+radv_custom_border_on_compute_queue(const struct radv_physical_device *pdev)
+{
+   return pdev->drirc.features.enable_custom_border_on_compute_queue || pdev->info.has_bc250_compute_node;
+}
+
 static inline bool
 radv_has_shader_buffer_float_minmax(const struct radv_physical_device *pdev, unsigned bitsize)
 {
