@@ -1003,9 +1003,18 @@ ac_nir_pack_ngg_prim_exp_arg(nir_builder *b, unsigned num_vertices_per_primitive
 void
 ac_nir_clamp_vertex_color_outputs(nir_builder *b, ac_nir_prerast_out *out)
 {
-   /* Clamp color outputs. */
+   /* Clamp color outputs. Only the components that have the clamp semantic
+    * get a clamp. Vulkan sets no clamp semantic, and the geometry streams 1-3
+    * keep their clip and cull distances in the COL and BFC slots. Thus do not
+    * load the clamp state when no component uses it. */
    if (!(b->shader->info.outputs_written & (VARYING_BIT_COL0 | VARYING_BIT_COL1 |
                                             VARYING_BIT_BFC0 | VARYING_BIT_BFC1)))
+      return;
+
+   bool clamp_any = false;
+   for (unsigned slot = 0; slot < NUM_TOTAL_VARYING_SLOTS; slot++)
+      clamp_any |= out->infos[slot].clamp_components_mask != 0;
+   if (!clamp_any)
       return;
 
    unsigned i = 0;
