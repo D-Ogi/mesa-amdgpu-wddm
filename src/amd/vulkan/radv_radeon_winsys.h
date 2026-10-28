@@ -580,6 +580,20 @@ struct radeon_winsys {
     * discriminator is wave state (BD-119 LAB-PLAN.md arm E). Either way the rule is the same: every
     * GDS user must consult this flag, and it is false unless the winsys sets it. */
    bool supports_gds;
+
+   /* True when buffer_destroy (and cs_destroy, which destroys the IB buffers of its stream the same way)
+    * may be called for an ordinary BO, one that is neither virtual nor RADEON_FLAG_REPLAYABLE, while
+    * submissions that were already handed to the kernel still use it: the release of its memory and of its
+    * address waits for that work by itself. The amdgpu kernel keeps the pages and the mapping until the
+    * fences of the BO signal. The wddm2 winsys releases such a BO with DestroyAllocation2 and flags 0 alone,
+    * and VidMm defers that destruction until the commands queued before the request finish (R1 of BD-201,
+    * radv_wddm2_bo_destroy_now_status).
+    *
+    * radv_update_preamble_cs reads it (BD-254): when it is set, a replaced preamble is destroyed with no
+    * wait for the queue. A CPU wait there is inside vkQueueSubmit, and it never ends when the queue's older
+    * work waits on the GPU for a signal that only a later submission of the application gives. When it is
+    * clear, the caller waits for the queue first. */
+   bool destroy_defers_to_queued_work;
 };
 
 static inline uint64_t

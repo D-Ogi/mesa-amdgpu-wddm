@@ -3565,6 +3565,11 @@ radv_wddm2_bo_init_functions(struct radv_wddm2_winsys *ws)
    ws->base.buffer_create = radv_wddm2_bo_create_placed;
    ws->base.device_is_lost = radv_wddm2_device_is_lost;
    ws->base.buffer_destroy = radv_wddm2_bo_destroy;
+   /* R1: an ordinary BO goes to DestroyAllocation2 with flags 0 alone, with no Evict and no
+    * FreeGpuVirtualAddress, so VidMm defers it behind the queued work (radv_wddm2_bo_destroy_now_status).
+    * That holds with the deferred hold on or off: the hold is for the ranges this driver owns
+    * (radv_wddm2_bo_owns_va), and no ordinary BO has one. */
+   ws->base.destroy_defers_to_queued_work = true;
    ws->base.buffer_map = radv_wddm2_bo_map;
    ws->base.buffer_unmap = radv_wddm2_bo_unmap;
    ws->base.buffer_make_resident = radv_wddm2_bo_make_resident;

@@ -6383,6 +6383,106 @@ test_compute_bound(void)
    contract();
 }
 
+/* BD-254: radv_update_preamble_cs destroys a replaced queue preamble with no queue wait when the winsys
+ * sets destroy_defers_to_queued_work. This test is that claim, on what a replacement destroys: a real
+ * preamble stream and an ordinary scratch BO that the stream names, while the submission that runs them
+ * waits on the GPU for a value that nothing has signalled yet. That submission cannot finish before the
+ * application submits again, so a CPU wait for it in the destroy path would never end. The claim must
+ * hold with the deferred hold on and off: the hold is for the ranges this driver owns, and these BOs own
+ * none. */
+static void
+test_preamble_destroy_defers(void)
+{
+   static const struct bc250_host_policy_values hold_off = {
+      .present = 1,
+      .specified = BC250_HOST_POLICY_HAS_DEFERRED_DESTROY,
+      .deferred_destroy = 0,
+   };
+   void *const cookie = (void *)(uintptr_t)0xA0;
+   clear_deferred_env();
+   clear_ib_env();
+
+   for (unsigned pass = 0; pass < 2; pass++) {
+      const char *hold = pass ? "off" : "on";
+      ws_policy = pass ? &hold_off : NULL;
+      /* cs_create reads the IB rules through query_info. */
+      struct radv_wddm2_winsys *ws = make_ib_ws();
+      ws_policy = NULL;
+      check(ws->deferred.enabled == !pass, "the deferred hold is %s", hold);
+      check(ws->base.destroy_defers_to_queued_work, "hold %s: the winsys says a destroy waits for queued work",
+            hold);
+      struct radeon_winsys_ctx *a = new_ctx(ws);
+      check(bind(ws, a, cookie) == VK_SUCCESS, "the queue binds");
+      struct radv_wddm2_queue *q = gfx(a);
+
+      struct ac_cmdbuf *preamble = ws->base.cs_create(&ws->base, AMD_IP_GFX, false);
+      if (!preamble) {
+         check(false, "a real GFX stream");
+         return;
+      }
+      struct radeon_winsys_bo *scratch = plain_bo(ws);
+      const uint32_t scratch_h = scratch->handle;
+      preamble->reserved_dw = 16;
+      for (unsigned i = 0; i < 3; i++)
+         preamble->buf[preamble->cdw++] = NOP_1DW;
+      ws->base.cs_add_buffer(preamble, scratch);
+      ws->base.cs_finalize(preamble);
+      const struct radv_winsys_cs *pcs = radv_winsys_cs(preamble);
+      uint32_t ib_h[4];
+      unsigned ibs = 0;
+      if (pcs->ib_buffer)
+         ib_h[ibs++] = pcs->ib_buffer->handle;
+      for (unsigned i = 0; i < pcs->num_ib_buffers && ibs < ARRAY_SIZE(ib_h); i++) {
+         if (pcs->ib_buffers[i].bo && pcs->ib_buffers[i].bo != pcs->ib_buffer)
+            ib_h[ibs++] = pcs->ib_buffers[i].bo->handle;
+      }
+      check(ibs >= 1, "hold %s: the stream has %u IB buffer(s)", hold, ibs);
+
+      /* The submission waits on the GPU for 2 of a fence that nothing has signalled, as a D3D12 queue Wait
+       * for a value that a later ExecuteCommandLists signals. */
+      struct vk_wddm2_monitored_fence timeline;
+      app_fence(&timeline);
+      const struct vk_sync_wait wait2 = {.sync = &timeline.base, .wait_value = 2};
+      const struct vk_sync_signal signal3 = {.sync = &timeline.base, .signal_value = 3};
+      unsigned mark = h.n_ev;
+      check(submit(ws, a, 1, &preamble, 1, &wait2, 1, &signal3) == VK_SUCCESS,
+            "hold %s: the preamble's submission waits for 2 and signals 3", hold);
+      check(event_is(find_op(mark, BC250_HOST_WaitForSynchronizationObjectFromGpu, 0),
+                     BC250_HOST_WaitForSynchronizationObjectFromGpu, q->context_h, timeline.handle, 2),
+            "hold %s: the wait is on the GPU, not in the submit", hold);
+      check(q->bc250_progress.wait_value && *q->bc250_progress.value_map < q->bc250_progress.wait_value,
+            "hold %s: its progress value %llu is in flight (completed %llu)", hold,
+            (unsigned long long)q->bc250_progress.wait_value, (unsigned long long)*q->bc250_progress.value_map);
+
+      /* The replacement: the old scratch, then the old stream with its IB buffers. */
+      mark = h.n_ev;
+      ws->base.buffer_destroy(&ws->base, scratch);
+      ws->base.cs_destroy(preamble);
+      check(!count_op(mark, BC250_HOST_WaitForSynchronizationObjectFromCpu),
+            "hold %s: the destroy makes no CPU wait for the queue", hold);
+      check(!count_op(mark, BC250_HOST_Evict) && !count_op(mark, BC250_HOST_FreeGpuVirtualAddress),
+            "hold %s: and no Evict and no VA free under the queued work", hold);
+      bool released = !alloc_live(scratch_h) && event_is(find_destroy(mark, scratch_h),
+                                                         BC250_HOST_DestroyAllocation2, 0, 0, scratch_h);
+      for (unsigned i = 0; i < ibs; i++)
+         released &= !alloc_live(ib_h[i]) &&
+                     event_is(find_destroy(mark, ib_h[i]), BC250_HOST_DestroyAllocation2, 0, 0, ib_h[i]);
+      check(released && !ws->deferred.count,
+            "hold %s: the scratch and the stream's IB buffers go to DestroyAllocation2 at once, nothing held", hold);
+      check(*q->bc250_progress.value_map < q->bc250_progress.wait_value,
+            "hold %s: while the submission that names them is still in flight", hold);
+
+      /* The application's later signal, and the queue goes idle. */
+      retire(timeline.handle, 2);
+      retire(q->bc250_progress.handle, q->bc250_progress.wait_value);
+      check(unbind(ws, a, cookie) == VK_SUCCESS, "hold %s: the queue unbinds", hold);
+      ws->base.ctx_destroy(a);
+      check(!live(h.allocs, h.n_allocs, false), "hold %s: no allocation left (%u live)", hold,
+            live(h.allocs, h.n_allocs, false));
+      contract();
+   }
+}
+
 static const struct {
    const char *name;
    void (*run)(void);
@@ -6447,6 +6547,7 @@ static const struct {
    {"compute_refused", test_compute_refused},
    {"compute_bound", test_compute_bound},
    {"compute_wait_before_signal", test_compute_wait_before_signal},
+   {"preamble_destroy_defers", test_preamble_destroy_defers},
 };
 
 int
