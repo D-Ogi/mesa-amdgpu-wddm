@@ -32,9 +32,11 @@
 #include <limits.h>
 #include <stdlib.h>
 
-#if DETECT_OS_WINDOWS && !defined(PATH_MAX)
+#if DETECT_OS_WINDOWS
 #include <windows.h>
+#if !defined(PATH_MAX)
 #define PATH_MAX MAX_PATH
+#endif
 #endif
 
 static bool error = false;
@@ -105,11 +107,108 @@ test_util_get_process_exec_path (void)
    free(build_path);
 }
 
+#if DETECT_OS_WINDOWS
+/* In the copy of this test in a directory deeper than MAX_PATH: the process
+ * name is still the file name, and a buffer too short for the path gives 0,
+ * not a cut path.
+ */
+static void
+test_long_path_child(void)
+{
+   expect_equal_str("process_test.exe", util_get_process_name(),
+                    "util_get_process_name (long path)");
+   char short_path[PATH_MAX];
+   if (util_get_process_exec_path(short_path, sizeof(short_path)) != 0) {
+      fprintf(stderr, "util_get_process_exec_path (long path): a cut path for a short buffer\n");
+      error = true;
+   }
+   static char long_path[32768];
+   if (util_get_process_exec_path(long_path, sizeof(long_path)) <= MAX_PATH) {
+      fprintf(stderr, "util_get_process_exec_path (long path): no path longer than MAX_PATH\n");
+      error = true;
+   }
+}
+
+/* Copies this executable into a directory whose path is longer than MAX_PATH
+ * and runs the copy with PROCESS_TEST_LONG_PATH_CHILD set. A host that cannot
+ * start a process from such a path (long paths disabled) skips the test.
+ */
+static void
+test_long_path(void)
+{
+   static wchar_t self[32768], dir[32768], copy[32768];
+   DWORD n = GetModuleFileNameW(NULL, self, ARRAYSIZE(self));
+   if (!n || n >= ARRAYSIZE(self)) {
+      error = true;
+      return;
+   }
+   wchar_t *slash = wcsrchr(self, L'\\');
+   if (!slash) {
+      error = true;
+      return;
+   }
+   _snwprintf(dir, ARRAYSIZE(dir), L"\\\\?\\%.*ls\\process_test_long_path", (int)(slash - self), self);
+   const size_t base = wcslen(dir);
+   CreateDirectoryW(dir, NULL);
+   unsigned depth = 0;
+   while (wcslen(dir) < base + MAX_PATH) {
+      wcscat(dir, L"\\directory_name_of_forty_characters_long");
+      CreateDirectoryW(dir, NULL);
+      depth++;
+   }
+   _snwprintf(copy, ARRAYSIZE(copy), L"%ls\\process_test.exe", dir);
+   bool skip = false;
+   if (!CopyFileW(self, copy, FALSE)) {
+      fprintf(stderr, "long path: cannot copy the test (error %lu)\n", GetLastError());
+      error = true;
+   } else {
+      STARTUPINFOW si = { .cb = sizeof(si) };
+      PROCESS_INFORMATION pi;
+      SetEnvironmentVariableA("PROCESS_TEST_LONG_PATH_CHILD", "1");
+      if (CreateProcessW(copy, NULL, NULL, NULL, FALSE, 0, NULL, NULL, &si, &pi)) {
+         DWORD code = 1;
+         WaitForSingleObject(pi.hProcess, INFINITE);
+         GetExitCodeProcess(pi.hProcess, &code);
+         CloseHandle(pi.hThread);
+         CloseHandle(pi.hProcess);
+         if (code != 0) {
+            fprintf(stderr, "long path: the copy failed (exit %lu)\n", code);
+            error = true;
+         }
+      } else {
+         fprintf(stderr, "long path: SKIP, cannot start a process from a long path (error %lu)\n",
+                 GetLastError());
+         skip = true;
+      }
+      SetEnvironmentVariableA("PROCESS_TEST_LONG_PATH_CHILD", NULL);
+      DeleteFileW(copy);
+   }
+   for (; depth > 0; depth--) {
+      RemoveDirectoryW(dir);
+      *wcsrchr(dir, L'\\') = 0;
+   }
+   RemoveDirectoryW(dir);
+   if (!skip && !error)
+      printf("long path: ok\n");
+}
+#endif
+
 int
 main (void)
 {
+#if DETECT_OS_WINDOWS
+   if (os_get_option("PROCESS_TEST_LONG_PATH_CHILD")) {
+      test_long_path_child();
+      return error ? 1 : 0;
+   }
+#endif
    test_util_get_process_name();
    test_util_get_process_exec_path();
+#if DETECT_OS_WINDOWS
+   /* The copy would see the name override instead of its file name. */
+   if (!os_get_option("MESA_PROCESS_NAME"))
+      test_long_path();
+#endif
 
    return error ? 1 : 0;
 }
