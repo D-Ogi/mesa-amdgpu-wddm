@@ -3625,6 +3625,15 @@ test_gather_slots(void)
    }
 }
 
+/* Makes the next submission or tick write the periodic summary, and restarts the summary clock: the lines print
+ * whole seconds since summary.start_ns, and the checks expect t=0s also on a slow or loaded host. */
+static void
+summary_due_now(struct radv_wddm2_winsys *ws)
+{
+   ws->summary.start_ns = os_time_get_nano();
+   ws->summary.next_ns = 1;
+}
+
 /* The periodic summary: two lines when the period has passed, each only when its counters changed, both
  * again at teardown. The tests force the deadline (summary.next_ns = 1) instead of sleeping, but once. */
 static void
@@ -3655,7 +3664,7 @@ test_summary(void)
    check(ws->deferred.count == 1 && ws->deferred.borrowed == 1, "one BO held, one host import destroyed");
 
    /* The deadline passes: the next submission writes both lines first. */
-   ws->summary.next_ns = 1;
+   summary_due_now(ws);
    lm = log_mark();
    submit_one(ws, a);
    char line[4096];
@@ -3682,14 +3691,14 @@ test_summary(void)
          "the next one is due a period after this one");
 
    /* Only the submission counters changed: their line alone. */
-   ws->summary.next_ns = 1;
+   summary_due_now(ws);
    lm = log_mark();
    submit_one(ws, a);
    check(log_lines(lm, "periodic #2 ", NULL, 0) == 1 && log_lines(lm, "periodic #2 t=0s submit: submits=5 ", NULL, 0) == 1,
          "only the submit counters changed: one line, #2");
-   ws->summary.next_ns = 1;
+   summary_due_now(ws);
    radv_wddm2_summary_tick(ws);
-   ws->summary.next_ns = 1;
+   summary_due_now(ws);
    lm = log_mark();
    radv_wddm2_summary_tick(ws);
    check(!log_lines(lm, "periodic", NULL, 0) && ws->summary.lines == 3, "a tick with nothing changed writes nothing");
@@ -3707,8 +3716,9 @@ test_summary(void)
    ws->base.ctx_destroy(a);
    lm = log_mark();
    radv_wddm2_deferred_finish(ws);
+   /* The final lines name the seconds since creation, and deferred_finish can take a second on a loaded host. */
    check(log_lines(lm, "periodic final t=", NULL, 0) == 2 &&
-            log_lines(lm, "periodic final t=0s deferred: held=0 held_kib=0 held_va_kib=0 held_va_32bit=0 peak=1 ",
+            log_lines(lm, "s deferred: held=0 held_kib=0 held_va_kib=0 held_va_32bit=0 peak=1 ",
                       line, sizeof(line)) == 1 &&
             has(line, " released=1 ") && has(line, " borrowed=1 "),
          "teardown writes both lines, final: %.300s", line);
@@ -3742,7 +3752,8 @@ test_summary(void)
    Sleep(1100);
    lm = log_mark();
    submit_one(ws, a);
-   check(log_lines(lm, "periodic #1 t=1s submit: submits=1 ", NULL, 0) == 1,
+   check(log_lines(lm, "s submit: submits=1 ", line, sizeof(line)) == 1 && has(line, "periodic #1 t=") &&
+            !has(line, "periodic #1 t=0s"),
          "BC250_DEFERRED_SUMMARY_S=1: the first submission after 1.1 s writes #1");
    retire(gfx(a)->bc250_progress.handle, gfx(a)->bc250_progress.wait_value);
    unbind(ws, a, cookie);
@@ -4054,7 +4065,7 @@ test_progress_gpu(void)
          "counted: 7 submissions, 7 values written by the GPU, none signalled by the kernel, 3 calls of 35 fences");
 
    /* The summary's submit line. */
-   ws->summary.next_ns = 1;
+   summary_due_now(ws);
    const long lm = log_mark();
    cs[0] = fake_cs(&fa, bo[0], bo[0]->va, 16);
    submit(ws, c, 1, cs, 0, NULL, 0, NULL);
@@ -4725,7 +4736,7 @@ test_draw_stats(void)
       counts[i] = i + 1 < RADV_DRAW_STAT_COUNT;
    ws->base.draw_stats_add(&ws->base, counts);
 
-   ws->summary.next_ns = 1;
+   summary_due_now(ws);
    lm = log_mark();
    radv_wddm2_summary_tick(ws);
    static const char *const names[] = {
@@ -4757,16 +4768,16 @@ test_draw_stats(void)
    check(!log_lines(lm, "periodic #1 t=0s deferred:", NULL, 0) && !log_lines(lm, "periodic #1 t=0s submit:", NULL, 0),
          "nothing else changed: the draw, sync and track lines alone");
 
-   ws->summary.next_ns = 1;
+   summary_due_now(ws);
    lm = log_mark();
    radv_wddm2_summary_tick(ws);
    check(!log_lines(lm, "periodic", NULL, 0), "unchanged: no line");
 
    lm = log_mark();
    radv_wddm2_deferred_finish(ws);
-   check(log_lines(lm, "periodic final t=0s draw: cmdbufs=2 passes=3 ", NULL, 0) == 1 &&
-            log_lines(lm, "periodic final t=0s sync: fl_emits=", NULL, 0) == 1 &&
-            log_lines(lm, "periodic final t=0s track: rw_vs_none=", NULL, 0) == 1,
+   check(log_lines(lm, "periodic final t=", NULL, 0) >= 3 && log_lines(lm, "s draw: cmdbufs=2 passes=3 ", NULL, 0) == 1 &&
+            log_lines(lm, "s sync: fl_emits=", NULL, 0) == 1 &&
+            log_lines(lm, "s track: rw_vs_none=", NULL, 0) == 1,
          "teardown writes them again, final");
    contract();
 }
