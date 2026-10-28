@@ -217,8 +217,6 @@ extern RADV_BC250_THREAD bool radv_bc250_owned_lds_direct;
 /* RADV_BC250_TASK_GRID_FOLD: set only around the Task-route split. */
 extern RADV_BC250_THREAD bool radv_bc250_split_task_grid_fold;
 void radv_bc250_directmesh_env(void);
-/* Reserved for a measured automatic hybrid policy. The current preset leaves it false. */
-extern bool radv_bc250_directmesh_hybrid;
 bool radv_bc250_bary_cid_slot(const struct nir_shader *producer, const struct nir_shader *fs, int *slot);
 bool radv_bc250_split_mesh(struct nir_shader *mesh, struct nir_shader *task, struct nir_shader *fs, bool direct_split,
                            bool piece_select, bool balanced_slices, bool parallel_cull, bool output_regions,
