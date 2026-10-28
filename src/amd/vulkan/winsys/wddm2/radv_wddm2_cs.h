@@ -46,6 +46,9 @@ struct vk_wddm2_fence {
 #define BC250_GATHER_SLOTS_MIN     4u
 #define BC250_GATHER_SLOTS_DEFAULT 16u
 #define BC250_GATHER_SLOTS_MAX     32u
+/* BD-254: gather BOs whose job had not retired when their slot came round again, kept until it has
+ * (radv_wddm2_gather_replace_busy). Past this many per queue, such a BO is released at once instead. */
+#define BC250_GATHER_SPARES_MAX 64u
 _Static_assert(BC250_GATHER_SLOTS_MIN == BC250_HOST_POLICY_GATHER_SLOTS_MIN &&
                   BC250_GATHER_SLOTS_MAX == BC250_HOST_POLICY_GATHER_SLOTS_MAX,
                "the host policy contract and the winsys agree on the gather-slot range");
@@ -70,6 +73,8 @@ struct radv_wddm2_queue {
    struct radv_wddm2_winsys *bc250_ws;
    struct bc250_gather_slot bc250_gather[BC250_GATHER_SLOTS_MAX];
    unsigned bc250_gather_index;
+   struct bc250_gather_slot bc250_gather_spare[BC250_GATHER_SPARES_MAX];
+   unsigned bc250_gather_spare_count;
    bool bc250_submit_failed;
    struct bc250_submit_ib *bc250_ibs;
    unsigned bc250_ib_capacity;

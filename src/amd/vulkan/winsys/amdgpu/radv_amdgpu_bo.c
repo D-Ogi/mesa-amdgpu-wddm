@@ -1314,6 +1314,8 @@ radv_amdgpu_bo_init_functions(struct radv_amdgpu_winsys *ws)
 {
    ws->base.buffer_create = radv_amdgpu_winsys_bo_create;
    ws->base.buffer_destroy = radv_amdgpu_winsys_bo_destroy;
+   /* The kernel keeps a freed BO's pages and VA mapping until its fences signal. */
+   ws->base.destroy_defers_to_queued_work = true;
    ws->base.buffer_map = radv_amdgpu_winsys_bo_map;
    ws->base.buffer_unmap = radv_amdgpu_winsys_bo_unmap;
    ws->base.buffer_from_ptr = radv_amdgpu_winsys_bo_from_ptr;
