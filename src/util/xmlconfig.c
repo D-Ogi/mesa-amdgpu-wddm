@@ -97,6 +97,21 @@ be_verbose(void)
    return strstr(s, "silent") == NULL;
 }
 
+/* amdgpu-wddm BD-256: an environment variable with the name of a driver option (radv_..., zink_...) overrides
+ * the built-in value and every driconf section. Only a lab build reads it. A release build takes the built-in
+ * values, the driconf sections and the profile files only, so that a stray variable cannot remove a workaround
+ * that a section sets for a game. */
+static const char *
+option_from_environment(const char *name)
+{
+#ifdef AMDGPU_WDDM_LAB_FLAVOUR
+   return os_get_option(name);
+#else
+   (void)name;
+   return NULL;
+#endif
+}
+
 /** \brief Locale-independent 64-bit integer parser.
  *
  * Works similar to strtol. Leading space is NOT skipped. If the sign
@@ -442,7 +457,7 @@ driParseOptionInfo(driOptionCache *info,
       /* Built-in default values should always be valid. */
       assert(checkValue(optval, optinfo));
 
-      const char *envVal = os_get_option(name);
+      const char *envVal = option_from_environment(name);
       if (envVal != NULL) {
          driOptionValue v;
 
@@ -1110,7 +1125,7 @@ parseOptConfAttr(struct OptConfData *data, const char **attr)
          /* don't use XML_WARNING, drirc defines options for all drivers,
           * but not all drivers support them */
          return;
-      else if (os_get_option(cache->info[opt].name)) {
+      else if (option_from_environment(cache->info[opt].name)) {
          /* don't use XML_WARNING, we want the user to see this! */
          if (be_verbose()) {
             fprintf(stderr,
@@ -1142,7 +1157,7 @@ parseShaderOptConfAttr(struct OptConfData *data, const char **attr)
          /* don't use XML_WARNING, drirc defines options for all drivers,
           * but not all drivers support them */
          return;
-      else if (os_get_option(cache->info[opt].name)) {
+      else if (option_from_environment(cache->info[opt].name)) {
          /* don't use XML_WARNING, we want the user to see this! */
          if (be_verbose()) {
             fprintf(stderr,

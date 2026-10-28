@@ -48,10 +48,16 @@
 
 #include "aco_interface.h"
 
+/* amdgpu-wddm BD-256: the trap handler is a debugging aid that upstream calls experimental. Only a lab build
+ * lets the environment enable it. */
 static bool
 radv_trap_handler_enabled()
 {
+#ifdef AMDGPU_WDDM_LAB_FLAVOUR
    return !!os_get_option("RADV_TRAP_HANDLER");
+#else
+   return false;
+#endif
 }
 
 VKAPI_ATTR VkResult VKAPI_CALL
