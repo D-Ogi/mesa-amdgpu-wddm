@@ -66,6 +66,7 @@ FORBIDDEN = (
     # variable.
     'BC250_IB_DWORDS',               # cuts the IB the CP executes
     'BC250_TRACE_SUBMITS',           # writes a line for every submission
+    'AMDGPU_WDDM_PROFILE_DIR',       # reads the run-time driver configuration files from another directory
 )
 SCAN = ('src',)
 EXTENSIONS = ('.c', '.cc', '.cpp', '.h', '.hpp')
