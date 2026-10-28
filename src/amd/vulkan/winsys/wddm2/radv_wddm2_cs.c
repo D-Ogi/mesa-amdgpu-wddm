@@ -1415,8 +1415,10 @@ bc250_emit_progress_write(uint8_t *dst, uint64_t va, uint64_t value)
  *
  * The IB2 calls leave the command streams in use until this submission retires. That holds
  * as for any Vulkan submission: a command buffer stays pending until the application's
- * signal, which is queued after this IB1 on the same context, and RADV destroys a replaced
- * queue preamble only after ctx_wait_idle (radv_update_preamble_cs).
+ * signal, which is queued after this IB1 on the same context. A replaced queue preamble is
+ * destroyed with no queue wait (radv_update_preamble_cs, BD-254): its stream's IB buffers are
+ * ordinary BOs, released with DestroyAllocation2 and flags 0, which VidMm defers until this
+ * submission, handed to the OS before that destroy, has finished (R1 of BD-201).
  *
  * progress_value (BC250_PROGRESS_FENCE=gpu, nonzero) ends the IB1 with the write of that value to
  * the queue's progress fence (bc250_emit_progress_write). Every submission then goes through the
