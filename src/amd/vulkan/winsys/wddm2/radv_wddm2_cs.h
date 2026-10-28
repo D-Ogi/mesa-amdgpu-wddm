@@ -43,6 +43,9 @@ struct vk_wddm2_fence {
 };
 
 #define BC250_GATHER_SLOTS 7u
+/* BD-254: gather BOs whose job had not retired when their slot came round again, kept until it has
+ * (radv_wddm2_gather_replace_busy). Past this many per queue, such a BO is released at once instead. */
+#define BC250_GATHER_SPARES_MAX 64u
 struct bc250_gather_slot {
    struct radeon_winsys_bo *bo;
    uint8_t *map;
@@ -61,6 +64,8 @@ struct radv_wddm2_queue {
    struct radv_wddm2_winsys *bc250_ws;
    struct bc250_gather_slot bc250_gather[BC250_GATHER_SLOTS];
    unsigned bc250_gather_index;
+   struct bc250_gather_slot bc250_gather_spare[BC250_GATHER_SPARES_MAX];
+   unsigned bc250_gather_spare_count;
    bool bc250_submit_failed;
    struct radv_winsys_ib *bc250_ibs;
    unsigned bc250_ib_capacity;
