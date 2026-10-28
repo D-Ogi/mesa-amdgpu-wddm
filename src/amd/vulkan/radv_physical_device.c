@@ -32,6 +32,7 @@
 #include "radv_physical_device.h"
 #include "radv_bc250.h"
 #include "radv_bc250_dgc_stages.h"
+#include "radv_bc250_indirect.h"
 #include "radv_no16.h"
 #include "radv_pipeline_rt.h"
 #include "radv_video.h"
@@ -2040,10 +2041,15 @@ radv_get_physical_device_properties(struct radv_physical_device *pdev)
       .maxDrawIndexedIndexValue = UINT32_MAX,
       /* DirectMesh clamps this to 4096 under hybrid Task (its chunked Task producer). The clamp must
        * not depend on the RADV_BC250_TASK_STRICT_EXT A/B switch: radv_bc250_draw_task_indirect() and
-       * radv_bc250_draw_split_indirect() refuse more than 4096 records on every mesh route, so an
-       * unclamped limit would promise a draw the driver then fails. The split route needs it without
-       * hybrid Task, hence bc250_native_mesh. These flags are only ever set on a GFX1013 board. */
-      .maxDrawIndirectCount = (pdev->bc250_native_mesh || pdev->bc250_hybrid_task) ? 4096 : UINT32_MAX,
+       * radv_bc250_draw_split_indirect() record at most this many records on every mesh route (a direct
+       * draw above it is refused, a count variant's maxDrawCount is clamped to it: radv_bc250_indirect.h),
+       * so an unclamped limit would promise a draw the driver then fails. It stays below the 65535 that
+       * Vulkan requires with multiDrawIndirect: the Task route records each record on the CPU, so every
+       * ExecuteIndirect with a large MaxCommandCount would record that many draws whatever its count.
+       * The split route needs it without hybrid Task, hence bc250_native_mesh. These flags are only ever
+       * set on a GFX1013 board. */
+      .maxDrawIndirectCount =
+         (pdev->bc250_native_mesh || pdev->bc250_hybrid_task) ? RADV_BC250_MAX_DRAW_INDIRECT_COUNT : UINT32_MAX,
       .maxSamplerLodBias = 16,
       .maxSamplerAnisotropy = 16,
       .maxViewports = MAX_VIEWPORTS,
@@ -3059,10 +3065,7 @@ radv_physical_device_try_create(struct radv_instance *instance, drmDevicePtr drm
       radv_compute_queue_enabled(pdev) &&
       (BC250_ENV_BOOL(BC250_NATIVE_TASK_COMPILE, false) ||
        BC250_ENV_BOOL_P(RADV_BC250_NATIVE_TASK, false));
-   /* RADV_DIRECTMESH=1: DXVK (D3D9-11, no Mesh shaders) keeps GPL, shader objects and pipeline binaries
-    * instead of the preset's hybrid Task. An explicit RADV_BC250_HYBRID_TASK still applies.
-    *
-    * Hybrid Task is on by default with native mesh. It is the only task stage GFX10.1 has, and a D3D12
+   /* Hybrid Task is on by default with native mesh. It is the only task stage GFX10.1 has, and a D3D12
     * runtime reports MeshShaderTier 1 only when taskShader is true as well as meshShader
     * (vkd3d-proton d3d12_device_determine_mesh_shader_tier), so without it no D3D12 application can
     * use mesh shaders at all. Its one hardware need that WDDM cannot meet, the GDS partition of the
@@ -3071,11 +3074,7 @@ radv_physical_device_try_create(struct radv_instance *instance, drmDevicePtr drm
     * the sequence that the internal mesh-only amplification producer runs as well. The progress
     * witness still latches the path off, and takes taskShader away, if a submission does not retire.
     * RADV_BC250_HYBRID_TASK=0 turns it off. */
-   const bool bc250_dxvk = instance->vk.app_info.engine_name && !strcmp(instance->vk.app_info.engine_name, "DXVK");
-   pdev->bc250_hybrid_task = pdev->bc250_native_mesh &&
-      BC250_ENV_BOOL(RADV_BC250_HYBRID_TASK, true) && !(bc250_dxvk && radv_bc250_directmesh_hybrid);
-   if (pdev->bc250_native_mesh && bc250_dxvk && radv_bc250_directmesh_hybrid && BC250_GETENV(BC250_TRACE_COMPILE))
-      fprintf(stderr, "radv/bc250: DXVK: hybrid Task off, GPL/shader objects/pipeline binaries kept\n");
+   pdev->bc250_hybrid_task = pdev->bc250_native_mesh && BC250_ENV_BOOL(RADV_BC250_HYBRID_TASK, true);
    /* On by default with native mesh: VK_EXT_device_generated_commands stays exposed as upstream, and
     * a layout with a mesh draw must take radv_bc250_dgc, because the generic DGC shader emits no mesh
     * draw. RADV_BC250_EXPOSE_DGC=0 turns the route off (a mesh DGC layout then fails closed). */

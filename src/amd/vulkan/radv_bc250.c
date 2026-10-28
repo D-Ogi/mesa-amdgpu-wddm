@@ -10,6 +10,7 @@
 #include "radv_bc250_idx.h"
 #include "radv_bc250_mesh_contract.h"
 #include "radv_bc250_dispatch.h"
+#include "radv_bc250_indirect.h"
 #include "radv_descriptor_set.h"
 #include "meta/radv_meta.h"
 #include "nir/nir_builder.h"
@@ -149,7 +150,6 @@ radv_bc250_device_env_init(struct radv_device *device, const struct radv_physica
    /* RADV_BC250_SUBMIT_PROFILE and RADV_BC250_SUBMIT_KNOWN_SIGNALS are not ported: their counters
     * live in the amdgpu winsys and in vk_queue/vk_sync, which this port leaves alone (our Win32
     * semaphore work is in the same code). */
-   env->submit_profile = false;
    /* BD-119. The witness watches the first hybrid-task draws of this device; it costs nothing on any
     * other path. RADV_BC250_TASK_WITNESS=0 turns it off, and the two numbers are how long a draw may
     * stay short of DONE before the path latches off, and how many draws are watched. The default
@@ -168,8 +168,10 @@ radv_bc250_device_env_init(struct radv_device *device, const struct radv_physica
 #endif
    simple_mtx_init(&device->bc250_task_witness_mtx, mtx_plain);
    device->bc250_task_witness_armed = env->task_witness ? env->task_witness_draws : 0;
+#ifdef AMDGPU_WDDM_LAB_FLAVOUR
    if (env->local_bos)
       fprintf(stderr, "radv/bc250: submission switches local_bos=%d\n", env->local_bos);
+#endif
 }
 
 /* Report final shaders, including cache/binary imports. This is an observer:
@@ -7223,9 +7225,9 @@ void
 radv_bc250_draw_task_indirect(struct radv_cmd_buffer *cmd_buffer, uint64_t address,
                              uint32_t draw_count, uint32_t stride, uint64_t count_address)
 {
-   /* Mesh indirect records are bounded by maxDrawIndirectCount (4096),
-    * independently of the EXT_multi_draw maxMultiDrawCount property. */
-   if (draw_count > 4096) {
+   /* Mesh indirect records are bounded by maxDrawIndirectCount, independently of the EXT_multi_draw
+    * maxMultiDrawCount property; a count variant's maxDrawCount is clamped (radv_bc250_indirect.h). */
+   if (!radv_bc250_indirect_records(draw_count, count_address != 0, &draw_count)) {
       vk_command_buffer_set_error(&cmd_buffer->vk, RADV_BC250_CMD_REFUSED);
       return;
    }
@@ -7598,7 +7600,8 @@ radv_bc250_draw_split_indirect(struct radv_cmd_buffer *cmd_buffer, uint64_t inpu
 {
    if (!records)
       return;
-   if (records > 4096) {
+   /* A count variant's maxDrawCount above maxDrawIndirectCount is clamped (radv_bc250_indirect.h). */
+   if (!radv_bc250_indirect_records(records, count != 0, &records)) {
       vk_command_buffer_set_error(&cmd_buffer->vk, RADV_BC250_CMD_REFUSED);
       return;
    }
@@ -7860,7 +7863,6 @@ radv_bc250_draw_merge_indirect(struct radv_cmd_buffer *cmd_buffer, unsigned merg
  * fill in the BC-250 base settings and every validated direct-path switch that is not already set
  * (explicitly set variables always win). The base configuration passed Mesh CTS 3,558/3,558;
  * additions require their own release validation. The switches themselves only act on GFX1013. */
-bool radv_bc250_directmesh_hybrid;
 
 /* The two PCI device ids of the BC-250 board (Cyan Skillfish, GFX1013). Nothing here is a
  * capability of "an AMD GPU": the preset only applies to a positively identified BC-250, every

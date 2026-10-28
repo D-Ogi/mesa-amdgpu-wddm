@@ -182,9 +182,6 @@ struct radv_bc250_device_env {
     * buffers (command buffer IBs, upload buffers, shader arenas, query pools, rings) become
     * VM_ALWAYS_VALID kernel objects and leave the per-submission BO list (radv_create_winsys). */
    bool local_bos;
-   /* RADV_BC250_SUBMIT_PROFILE=1: per-queue submission cost (runtime, driver, BO list, CS ioctl,
-    * timer, present) printed every 5 s (radv_bc250_submit_profile_*). */
-   bool submit_profile;
    /* BD-119, RADV_BC250_TASK_WITNESS (default on with hybrid task): the first
     * task_witness_draws hybrid-task draws of this device write a GPU phase word. Nothing waits for
     * it: the word is read without blocking after the submit that carried the draw, and again at the
