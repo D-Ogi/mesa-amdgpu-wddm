@@ -80,6 +80,7 @@ FORBIDDEN = (
     'BC250_DRAW_STATS',              # counts what the application records, for the summary
     'BC250_BARRIER_TRACK',           # turns the barrier tracking off
     'AMDGPU_WDDM_LOG_PDD',           # dumps the private driver data of every submission as hex
+    'AMDGPU_WDDM_PROFILE_DIR',       # reads the run-time driver configuration files from another directory
 )
 SCAN = ('src',)
 EXTENSIONS = ('.c', '.cc', '.cpp', '.h', '.hpp')
