@@ -663,6 +663,10 @@ radv_emit_compute(struct radv_device *device, struct radv_cmd_stream *cs, bool i
 
    const struct ac_preamble_state preamble_state = {
       .border_color_va = border_color_va,
+      /* The BC-250 compute node: every compute queue preamble waits, also when this device keeps the
+       * transparent black replacement, because its write of the address changes the palette of the job
+       * before it (radv_custom_border_on_compute_queue). */
+      .cs_idle_before_border_color = is_compute_queue && pdev->info.has_bc250_compute_node,
       .gfx11 =
          {
             .compute_dispatch_interleave = 64,

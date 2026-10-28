@@ -794,6 +794,12 @@ struct ac_tracked_regs {
 struct ac_preamble_state {
    uint64_t border_color_va;
 
+   /* Compute queue only: wait for the earlier dispatches of the queue before the compute preamble writes
+    * TA_CS_BC_BASE_ADDR. The register has one copy for all MEC queues, so an earlier job of another process
+    * on the same queue must not sample its custom border colors through the new address.
+    */
+   bool cs_idle_before_border_color;
+
    struct {
       bool cache_cb_gl2;
       bool cache_db_gl2;
