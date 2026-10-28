@@ -73,22 +73,7 @@
 #endif
 
 #include "radv_wddm2_mem_overflow.h"
-
-/* One REG_SZ value of HKLM\subkey into buf. NULL when the value is absent, "invalid" when it is there but
- * not a short string (never guess a policy from it), as radv_wddm2_wsi_read_route does for WsiRoute. */
-static const char *
-radv_wddm2_read_hklm_sz(const char *subkey, const char *value, char *buf, DWORD size)
-{
-   const DWORD capacity = size;
-   const LSTATUS status = RegGetValueA(HKEY_LOCAL_MACHINE, subkey, value, RRF_RT_REG_SZ, NULL, buf, &size);
-   if (status == ERROR_SUCCESS) {
-      buf[capacity - 1] = 0;
-      return buf;
-   }
-   if (status == ERROR_FILE_NOT_FOUND || status == ERROR_PATH_NOT_FOUND)
-      return NULL;
-   return "invalid";
-}
+#include "radv_wddm2_registry.h"
 
 /* BD-096: the memory overflow policy of this process (radv_wddm2_mem_overflow.h), as the MakeResident
  * flags of the application's allocations and of the driver's own, with one log line that names the value
@@ -96,15 +81,10 @@ radv_wddm2_read_hklm_sz(const char *subkey, const char *value, char *buf, DWORD 
 static unsigned
 radv_wddm2_read_mem_overflow(unsigned *out_internal)
 {
-   char exe_path[MAX_PATH], app_key[MAX_PATH + 64], app_buf[64], reg_buf[64];
+   char exe_name[MAX_PATH], app_key[MAX_PATH + 64], app_buf[64], reg_buf[64];
    const char *exe = NULL, *app = NULL;
-   const DWORD len = GetModuleFileNameA(NULL, exe_path, sizeof(exe_path));
-   if (len && len < sizeof(exe_path)) {
-      exe = exe_path;
-      for (const char *p = exe_path; *p; p++) {
-         if (*p == '\\' || *p == '/')
-            exe = p + 1;
-      }
+   if (radv_wddm2_exe_name(exe_name, sizeof(exe_name))) {
+      exe = exe_name;
       if (radv_wddm2_mem_overflow_app_key(exe, app_key, sizeof(app_key)))
          app = radv_wddm2_read_hklm_sz(app_key, RADV_WDDM2_MEM_OVERFLOW_VALUE, app_buf, sizeof(app_buf));
    }
