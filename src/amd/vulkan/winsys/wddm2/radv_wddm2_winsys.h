@@ -108,8 +108,9 @@ struct radv_wddm2_winsys {
       uint64_t wait_dropped;      /* of them, complete on the CPU's read: no GPU wait */
       uint64_t wait_calls;        /* WaitForSynchronizationObjectFromGpu calls made */
       uint64_t wait_skipped;      /* calls left out, every wait of the submission being complete */
-      uint64_t gather_waits;      /* CPU waits for a gather slot to retire before its reuse */
-      uint64_t gather_wait_ns, gather_wait_max_ns;
+      uint64_t gather_busy;       /* gather slots whose job had not retired at their reuse (BD-254) */
+      uint64_t gather_spares;     /* of them, the BO kept as a spare until its job retires */
+      uint64_t gather_dropped;    /* of them, the BO released at once because the spares were full */
    } submit_stats;
 
    uint32_t adapter_h;

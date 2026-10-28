@@ -9,6 +9,7 @@
  */
 
 #include "radv_queue.h"
+#include "util/os_time.h"
 #include "tools/radv_debug_hang.h"
 #include "tools/radv_debug_nir.h"
 #include "tools/radv_rmv.h"
@@ -867,24 +868,42 @@ radv_init_graphics_state(struct radv_cmd_stream *cs, struct radv_device *device)
    }
 }
 
-/* BD-201 lab case (DESIGN.md 6.6 and 6.7): the idle wait in radv_update_preambles is today the only
- * completion gate on the replaced preamble objects, so it also hides what R1 has to be right about. The
- * lab flavour can skip it, which destroys the old scratch, rings and descriptors while the submissions
- * that use them still run: R1 alone, the work really pending. The release flavour reads no such variable
- * (BD-167), so there it always waits. */
-static bool
-radv_preamble_no_idle_wait(void)
+/* Whether radv_update_preamble_cs waits for the queue before it destroys the replaced preamble objects.
+ *
+ * BD-254: not when the winsys releases an ordinary BO only after the work queued before the destroy
+ * (destroy_defers_to_queued_work). The wait is a CPU wait inside vkQueueSubmit. When the queue's older work
+ * waits on the GPU for a fence value that the application signals only in a later submission (a D3D12
+ * queue Wait, a timeline wait-before-signal), the wait never ends and the submitting thread stops. Every
+ * replaced object is an ordinary BO (scratch, rings, descriptors, and the IB buffers of the preamble
+ * streams), and the destroy runs on the thread that handed every older submission of this queue to the OS
+ * already, under vk_queue::lock, so the deferred release covers all the work that can use it.
+ *
+ * The lab flavour has two switches. BC250_PREAMBLE_NO_IDLE_WAIT=1 skips the wait on every winsys: the
+ * BD-201 lab case (DESIGN.md 6.6 and 6.7) uses it to destroy the old objects under running work. Else
+ * BC250_PREAMBLE_IDLE_WAIT=1 puts the wait back on every winsys, which is the BD-254 stall's negative
+ * control. The release flavour reads neither (BD-167). */
+enum radv_preamble_wait {
+   RADV_PREAMBLE_WAIT,
+   RADV_PREAMBLE_WAIT_SKIPPED_BY_WINSYS,
+   RADV_PREAMBLE_WAIT_SKIPPED_BY_SWITCH,
+};
+
+static enum radv_preamble_wait
+radv_preamble_idle_wait(const struct radeon_winsys *ws)
 {
 #if defined(AMDGPU_WDDM_LAB_FLAVOUR)
    static int mode = -1; /* benign race: every thread computes the same value */
    if (mode < 0) {
-      const char *value = getenv("BC250_PREAMBLE_NO_IDLE_WAIT");
-      mode = value && !strcmp(value, "1");
+      const char *skip = getenv("BC250_PREAMBLE_NO_IDLE_WAIT");
+      const char *wait = getenv("BC250_PREAMBLE_IDLE_WAIT");
+      mode = skip && !strcmp(skip, "1") ? 1 : wait && !strcmp(wait, "1") ? 2 : 0;
    }
-   return mode == 1;
-#else
-   return false;
+   if (mode == 1)
+      return RADV_PREAMBLE_WAIT_SKIPPED_BY_SWITCH;
+   if (mode == 2)
+      return RADV_PREAMBLE_WAIT;
 #endif
+   return ws->destroy_defers_to_queued_work ? RADV_PREAMBLE_WAIT_SKIPPED_BY_WINSYS : RADV_PREAMBLE_WAIT;
 }
 
 static VkResult
@@ -1145,19 +1164,43 @@ radv_update_preamble_cs(struct radv_queue_state *queue, struct radv_device *devi
          goto fail;
    }
 
-   /* WDDM: the winsys unmaps and destroys a BO at once, not when the GPU is done with it as the amdgpu
-    * kernel driver does. Submissions in flight on this queue still use the old scratch, rings and
-    * descriptors, so wait for them before anything below is destroyed. If the wait fails, keep the old
-    * objects (a leak) rather than unmap pages under running waves. */
-   const bool no_wait = radv_preamble_no_idle_wait();
+   /* Submissions in flight on this queue still use the old scratch, rings, descriptors and preamble
+    * streams. A winsys that defers the release of a BO behind that work needs no wait here
+    * (radv_preamble_idle_wait, BD-254). For any other winsys, wait for the queue before anything below is
+    * destroyed, and if the wait fails, keep the old objects (a leak) rather than release pages under
+    * running waves. */
+   const enum radv_preamble_wait wait = radv_preamble_idle_wait(ws);
+   const bool no_wait = wait != RADV_PREAMBLE_WAIT;
+#if defined(AMDGPU_WDDM_LAB_FLAVOUR)
+   const int64_t wait_start = os_time_get_nano();
+#endif
    const bool old_idle = no_wait || !queue->initial_full_flush_preamble_cs || ws->ctx_wait_idle(hw_ctx, ip, 0);
+#if defined(AMDGPU_WDDM_LAB_FLAVOUR)
+   const uint64_t wait_ns = os_time_get_nano() - wait_start;
+   /* The destroys below must return at once when the winsys skips the wait: the release of a BO that
+    * queued work still uses is deferred by the kernel, not done on this thread. A long destroy here means
+    * the queue wait moved into the destroy call, and the BD-254 deadlock is possible again. */
+   uint64_t destroy_ns = 0, destroy_max_ns = 0;
+   unsigned destroy_count = 0;
+#define RADV_PREAMBLE_DESTROY(call)                                                                                    \
+   do {                                                                                                                \
+      const int64_t start_ = os_time_get_nano();                                                                      \
+      call;                                                                                                            \
+      const uint64_t ns_ = os_time_get_nano() - start_;                                                               \
+      destroy_ns += ns_;                                                                                               \
+      destroy_max_ns = MAX2(destroy_max_ns, ns_);                                                                      \
+      destroy_count++;                                                                                                 \
+   } while (0)
+#else
+#define RADV_PREAMBLE_DESTROY(call) call
+#endif
    if (!old_idle)
       fprintf(stderr, "radv: queue not idle, keeping the replaced preamble objects\n");
 
 #if defined(AMDGPU_WDDM_LAB_FLAVOUR)
    /* One line per replacement, which is what the BD-201 lab case (DESIGN.md 6.6) has to see happen: the
-    * sizes before and after, the bytes of the compute scratch the queue gives up, and whether the wait
-    * that normally retires that memory first was skipped. */
+    * sizes before and after, the bytes of the compute scratch the queue gives up, and whether the queue
+    * wait was skipped, and why (radv_preamble_idle_wait). */
    if (scratch_bo != queue->scratch_bo || compute_scratch_bo != queue->compute_scratch_bo ||
        esgs_ring_bo != queue->esgs_ring_bo || gsvs_ring_bo != queue->gsvs_ring_bo ||
        descriptor_bo != queue->descriptor_bo)
@@ -1169,17 +1212,21 @@ radv_update_preamble_cs(struct radv_queue_state *queue, struct radv_device *devi
               (unsigned long long)(compute_scratch_bo != queue->compute_scratch_bo && queue->compute_scratch_bo
                                       ? queue->compute_scratch_bo->size
                                       : 0),
-              old_idle ? "destroyed" : "kept", no_wait ? ", queue wait skipped" : "");
+              old_idle ? "destroyed" : "kept",
+              wait == RADV_PREAMBLE_WAIT_SKIPPED_BY_SWITCH   ? ", queue wait skipped by BC250_PREAMBLE_NO_IDLE_WAIT"
+              : wait == RADV_PREAMBLE_WAIT_SKIPPED_BY_WINSYS ? ", queue wait skipped: the release waits for the queued work"
+                                                             : "");
+   fflush(stderr);
 #endif
 
    if (queue->initial_full_flush_preamble_cs && old_idle)
-      radv_destroy_cmd_stream(device, queue->initial_full_flush_preamble_cs);
+      RADV_PREAMBLE_DESTROY(radv_destroy_cmd_stream(device, queue->initial_full_flush_preamble_cs));
 
    if (queue->initial_preamble_cs && old_idle)
-      radv_destroy_cmd_stream(device, queue->initial_preamble_cs);
+      RADV_PREAMBLE_DESTROY(radv_destroy_cmd_stream(device, queue->initial_preamble_cs));
 
    if (queue->continue_preamble_cs && old_idle)
-      radv_destroy_cmd_stream(device, queue->continue_preamble_cs);
+      RADV_PREAMBLE_DESTROY(radv_destroy_cmd_stream(device, queue->continue_preamble_cs));
 
    queue->initial_full_flush_preamble_cs = dest_cs[0];
    queue->initial_preamble_cs = dest_cs[1];
@@ -1188,7 +1235,7 @@ radv_update_preamble_cs(struct radv_queue_state *queue, struct radv_device *devi
    if (scratch_bo != queue->scratch_bo) {
       if (queue->scratch_bo && old_idle) {
          radv_rmv_log_command_buffer_bo_destroy(device, queue->scratch_bo);
-         radv_bo_destroy(device, NULL, queue->scratch_bo);
+         RADV_PREAMBLE_DESTROY(radv_bo_destroy(device, NULL, queue->scratch_bo));
       }
       queue->scratch_bo = scratch_bo;
    }
@@ -1196,7 +1243,7 @@ radv_update_preamble_cs(struct radv_queue_state *queue, struct radv_device *devi
    if (compute_scratch_bo != queue->compute_scratch_bo) {
       if (queue->compute_scratch_bo && old_idle) {
          radv_rmv_log_command_buffer_bo_destroy(device, queue->compute_scratch_bo);
-         radv_bo_destroy(device, NULL, queue->compute_scratch_bo);
+         RADV_PREAMBLE_DESTROY(radv_bo_destroy(device, NULL, queue->compute_scratch_bo));
       }
       queue->compute_scratch_bo = compute_scratch_bo;
    }
@@ -1204,7 +1251,7 @@ radv_update_preamble_cs(struct radv_queue_state *queue, struct radv_device *devi
    if (esgs_ring_bo != queue->esgs_ring_bo) {
       if (queue->esgs_ring_bo && old_idle) {
          radv_rmv_log_command_buffer_bo_destroy(device, queue->esgs_ring_bo);
-         radv_bo_destroy(device, NULL, queue->esgs_ring_bo);
+         RADV_PREAMBLE_DESTROY(radv_bo_destroy(device, NULL, queue->esgs_ring_bo));
       }
       queue->esgs_ring_bo = esgs_ring_bo;
    }
@@ -1212,16 +1259,28 @@ radv_update_preamble_cs(struct radv_queue_state *queue, struct radv_device *devi
    if (gsvs_ring_bo != queue->gsvs_ring_bo) {
       if (queue->gsvs_ring_bo && old_idle) {
          radv_rmv_log_command_buffer_bo_destroy(device, queue->gsvs_ring_bo);
-         radv_bo_destroy(device, NULL, queue->gsvs_ring_bo);
+         RADV_PREAMBLE_DESTROY(radv_bo_destroy(device, NULL, queue->gsvs_ring_bo));
       }
       queue->gsvs_ring_bo = gsvs_ring_bo;
    }
 
    if (descriptor_bo != queue->descriptor_bo) {
       if (queue->descriptor_bo && old_idle)
-         radv_bo_destroy(device, NULL, queue->descriptor_bo);
+         RADV_PREAMBLE_DESTROY(radv_bo_destroy(device, NULL, queue->descriptor_bo));
       queue->descriptor_bo = descriptor_bo;
    }
+#undef RADV_PREAMBLE_DESTROY
+
+#if defined(AMDGPU_WDDM_LAB_FLAVOUR)
+   if (destroy_count || wait_ns >= 1000000) {
+      fprintf(stderr,
+              "radv: preamble replaced: queue wait %llu us, %u old objects destroyed in %llu us, longest destroy "
+              "%llu us\n",
+              (unsigned long long)(wait_ns / 1000), destroy_count, (unsigned long long)(destroy_ns / 1000),
+              (unsigned long long)(destroy_max_ns / 1000));
+      fflush(stderr);
+   }
+#endif
 
    queue->tess_rings_bo = tess_rings_bo;
    queue->task_rings_bo = task_rings_bo;
