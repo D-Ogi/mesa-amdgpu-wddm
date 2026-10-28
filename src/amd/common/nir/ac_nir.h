@@ -19,8 +19,19 @@ extern "C" {
 
 #define AC_MULTIVIEW_MAX_VIEWS 8
 
-/* Vulkan has no legacy TEX varying slots. Keep nonzero GS stream positions
- * distinct from stream zero without consuming application Location space. */
+/* Vulkan has no legacy COL, BFC and TEX varying slots. The builtin outputs of
+ * geometry streams 1-3 go to these slots, so that they stay distinct from
+ * stream zero without consuming application Location space:
+ * - Position: TEX4 + stream.
+ * - Layer (x), ViewportIndex (y) and PrimitiveId (z): TEX0 + stream - 1.
+ * - ClipDistance, then CullDistance, as one packed array: two slots from
+ *   COL0 (stream 1), BFC0 (stream 2) or TEX3 (stream 3).
+ * gs.stream_clip_cull, gs.stream_layer_mask and gs.stream_viewport_mask
+ * record the moved outputs. */
+#define AC_NIR_GS_STREAM_POS_SLOT(stream) (VARYING_SLOT_TEX4 + (stream))
+#define AC_NIR_GS_STREAM_MISC_SLOT(stream) (VARYING_SLOT_TEX0 + (stream) - 1)
+#define AC_NIR_GS_STREAM_CLIP_SLOT(stream) \
+   ((stream) == 1 ? VARYING_SLOT_COL0 : (stream) == 2 ? VARYING_SLOT_BFC0 : VARYING_SLOT_TEX3)
 /* Returns -1 for an invalid/colliding stream mapping, 0 unchanged, 1 changed. */
 int ac_nir_lower_gs_stream_positions(nir_shader *nir);
 unsigned ac_nir_opt_varyings_preserving_gs_raster_map(nir_shader *producer, nir_shader *consumer);

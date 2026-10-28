@@ -1287,6 +1287,24 @@ radv_nir_shader_info_pass(const struct radv_compiler_info *compiler_info, const 
       outinfo->writes_layer_per_primitive = per_prim_mask & VARYING_BIT_LAYER;
       outinfo->writes_primitive_shading_rate_per_primitive = per_prim_mask & VARYING_BIT_PRIMITIVE_SHADING_RATE;
       outinfo->export_prim_id_per_primitive = per_prim_mask & VARYING_BIT_PRIMITIVE_ID;
+
+      /* The capture copy shader exports the builtins of the rasterized stream
+       * (ac_nir_gs_alias_raster_builtins). Streams 1-3 keep them in private
+       * slots, so the masks of stream 0 alone are not sufficient. */
+      if (nir->info.stage == MESA_SHADER_GEOMETRY && nir->info.bc250_pgp_so_capture) {
+         const uint8_t *sizes = nir->info.gs.stream_clip_cull;
+         outinfo->writes_layer |= nir->info.gs.stream_layer_mask != 0;
+         outinfo->writes_viewport_index |= nir->info.gs.stream_viewport_mask != 0;
+         if (sizes[1] || sizes[2] || sizes[3]) {
+            unsigned max_clip = 0, max_cull = 0;
+            for (unsigned s = 0; s < 4; s++) {
+               max_clip = MAX2(max_clip, sizes[s] & 15);
+               max_cull = MAX2(max_cull, sizes[s] >> 4);
+            }
+            outinfo->clip_dist_mask = BITFIELD_MASK(max_clip);
+            outinfo->cull_dist_mask = BITFIELD_RANGE(max_clip, max_cull);
+         }
+      }
    }
 
    info->needs_draw_id |= BITSET_TEST(nir->info.system_values_read, SYSTEM_VALUE_DRAW_ID);
