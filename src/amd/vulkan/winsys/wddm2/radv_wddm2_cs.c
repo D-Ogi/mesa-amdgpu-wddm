@@ -211,6 +211,7 @@ radv_wddm2_queue_holds(const struct radv_wddm2_queue *queue)
    bool holds = queue->bc250_progress.handle || queue->vm_fence.handle || queue->context_h || queue->handle;
    for (unsigned i = 0; i < BC250_GATHER_SLOTS; i++)
       holds |= queue->bc250_gather[i].bo != NULL;
+   holds |= queue->bc250_gather_spare_count != 0;
    return holds;
 }
 
@@ -272,6 +273,9 @@ radv_wddm2_queue_release(struct radv_wddm2_queue *queue, bool in_scope, bool *re
       queue->bc250_gather[i].bo = NULL;
       queue->bc250_gather[i].map = NULL;
    }
+   for (unsigned i = 0; i < queue->bc250_gather_spare_count; i++)
+      ws->base.buffer_destroy(&ws->base, queue->bc250_gather_spare[i].bo);
+   queue->bc250_gather_spare_count = 0;
    radv_wddm2_release_sync(ws, &queue->vm_fence.handle);
    if (queue->context_h && (in_scope || !queue->bc250_queue_context)) {
       D3DKMT_DESTROYCONTEXT context_destroy = {
@@ -1333,6 +1337,42 @@ radv_wddm2_progress_repair(struct radv_wddm2_winsys *ws, struct radv_wddm2_queue
    }
 }
 
+/* BD-254: the slot's gather BO is still in use, by a job that has not retired (observed is below the slot's
+ * retirement value). A CPU wait for that job here would run inside vkQueueSubmit, behind GPU work that may
+ * wait for a fence the application signals only in a later submission of this thread: the wait could then
+ * never end. So the slot takes a free BO instead: a spare whose job has retired, or else none, and the
+ * submission creates a new one. The busy BO goes to the spares until its job retires. When the spares are
+ * full, the busy BO is released at once: it is an ordinary BO, so VidMm defers its destruction until the
+ * commands queued before the destroy finish (R1 of BD-201), and its job was queued before this. Nothing here
+ * waits. */
+static void
+radv_wddm2_gather_replace_busy(struct radv_wddm2_winsys *ws, struct radv_wddm2_queue *queue,
+                               struct bc250_gather_slot *slot, uint64_t observed)
+{
+   if (!slot->bo) {
+      /* A direct submission used no gather BO: there is nothing to keep. */
+      slot->retire_value = 0;
+      return;
+   }
+   for (unsigned i = 0; i < queue->bc250_gather_spare_count; i++) {
+      struct bc250_gather_slot *spare = &queue->bc250_gather_spare[i];
+      if (spare->retire_value <= observed) {
+         const struct bc250_gather_slot busy = *slot;
+         *slot = *spare;
+         *spare = busy;
+         return;
+      }
+   }
+   if (queue->bc250_gather_spare_count < BC250_GATHER_SPARES_MAX) {
+      queue->bc250_gather_spare[queue->bc250_gather_spare_count++] = *slot;
+   } else {
+      ws->base.buffer_destroy(&ws->base, slot->bo);
+   }
+   slot->bo = NULL;
+   slot->map = NULL;
+   slot->retire_value = 0;
+}
+
 static VkResult
 radv_wddm2_cs_submit(struct radeon_winsys_ctx *_ctx,
                      const struct radv_winsys_submit_info *submit,
@@ -1393,9 +1433,10 @@ radv_wddm2_cs_submit(struct radeon_winsys_ctx *_ctx,
    }
 
    if (submit->cs_count > 0 && ctx->ws->bc250) {
-      /* Independent of application signals: retire only the slot being reused,
-       * not the immediately preceding job. Seven BOs match the bounded KMD
-       * completion capacity; CP consumption alone never permits CPU reuse. */
+      /* Independent of application signals: the slot being reused must have retired, not the
+       * immediately preceding job; CP consumption alone never permits CPU reuse. The CPU mapping of
+       * the progress fence tells, with no wait: a slot whose job has not retired takes another BO
+       * (radv_wddm2_gather_replace_busy, BD-254). */
       struct bc250_gather_slot *slot = &queue->bc250_gather[queue->bc250_gather_index];
       uint64_t pending_value = queue->bc250_progress.wait_value;
       uint64_t observed = p_atomic_read(queue->bc250_progress.value_map);
@@ -1407,10 +1448,8 @@ radv_wddm2_cs_submit(struct radeon_winsys_ctx *_ctx,
                          " slot=%u retire=%" PRIu64 " waits=%u signals=%u\n",
                          pending_value, observed, queue->bc250_gather_index,
                          slot->retire_value, wait_count, signal_count);
-      struct vk_wddm2_fence reuse = queue->bc250_progress;
-      reuse.wait_value = slot->retire_value;
-      if (reuse.wait_value && !vk_wddm2_fence_wait(ctx->ws, &reuse))
-         return VK_ERROR_DEVICE_LOST;
+      if (slot->retire_value && observed < slot->retire_value)
+         radv_wddm2_gather_replace_busy(ws, queue, slot, observed);
       if (queue->bc250_progress.wait_value >= UINT64_MAX-1) return VK_ERROR_DEVICE_LOST;
       uint64_t next_value = queue->bc250_progress.wait_value + 1;
       /* BD-201: published before the IB reaches the kernel, so a BO destroyed from now on, on any

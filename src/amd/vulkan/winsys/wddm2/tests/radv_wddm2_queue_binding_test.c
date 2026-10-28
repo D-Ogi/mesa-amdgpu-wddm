@@ -780,18 +780,18 @@ test_signal_wait(void)
    check(!count_op(0, BC250_HOST_WaitForSynchronizationObjectFromCpu), "no CPU wait so far");
 
    /* Gather slots retire on the queue's own progress fence. The fake GPU
-    * completes nothing on its own, so reusing A's first slot needs a CPU
-    * wait for A's value 1. */
+    * completes nothing on its own, so A's first slot comes round again
+    * before A's value 1 retires. It holds no BO (one IB is the IB itself),
+    * so nothing is kept and nothing waits (BD-254). */
    for (unsigned i = 1; i < BC250_GATHER_SLOTS; i++)
       submit_one(ws, a);
    check(!count_op(0, BC250_HOST_WaitForSynchronizationObjectFromCpu), "A's first %u submissions need no CPU wait",
          BC250_GATHER_SLOTS);
    mark = h.n_ev;
    check(submit_one(ws, a) == VK_SUCCESS, "A's submission %u", BC250_GATHER_SLOTS + 1);
-   int cpu = find_op(mark, BC250_HOST_WaitForSynchronizationObjectFromCpu, 0);
-   check(event_is(cpu, BC250_HOST_WaitForSynchronizationObjectFromCpu, 0, qa->bc250_progress.handle, 1) &&
-            count_op(mark, BC250_HOST_WaitForSynchronizationObjectFromCpu) == 1,
-         "reusing A's first slot waits for A's progress value 1, once");
+   check(!count_op(mark, BC250_HOST_WaitForSynchronizationObjectFromCpu) && !qa->bc250_gather_spare_count &&
+            qa->bc250_gather[0].retire_value == BC250_GATHER_SLOTS + 1,
+         "A's busy first slot needs no CPU wait and keeps no spare; it retires on %u now", BC250_GATHER_SLOTS + 1);
    check(names_only(mark, qa->context_h) && !names_sync(mark, qb->bc250_progress.handle),
          "A's slot reuse never waits on B");
    mark = h.n_ev;
@@ -881,6 +881,81 @@ test_gather_teardown(void)
    check(!live(h.contexts, h.n_contexts, false) && !live(h.syncs, h.n_syncs, false) &&
             !live(h.allocs, h.n_allocs, false),
          "nothing left");
+   contract();
+}
+
+/* BD-254: a submission never waits on the CPU for its gather slot. More submissions than slots and spares
+ * together are queued behind a GPU wait for an application fence that nothing has signalled yet. A busy slot
+ * takes a new BO, the busy one waits among the queue's spares, and once the spares are full it is released at
+ * once (R1: the OS defers it behind the queued work). After some of the work retires, a busy slot takes a
+ * retired spare and creates nothing. */
+static void
+test_gather_busy_no_wait(void)
+{
+   void *const cookie = (void *)(uintptr_t)0xA4;
+   const uint32_t CPU_WAIT = BC250_HOST_WaitForSynchronizationObjectFromCpu;
+   struct radv_wddm2_winsys *ws = make_ws();
+   const unsigned slots = BC250_GATHER_SLOTS, spares = BC250_GATHER_SPARES_MAX, dropped = 20;
+   const unsigned total = slots + spares + dropped;
+   struct radeon_winsys_ctx *c = new_ctx(ws);
+   bind(ws, c, cookie);
+   struct radv_wddm2_queue *q = gfx(c);
+   const uint32_t progress = q->bc250_progress.handle;
+   struct radeon_winsys_bo *src[2] = {NULL, NULL};
+   for (unsigned i = 0; i < 2; i++)
+      ws->base.buffer_create(&ws->base, 4096, 4096, RADEON_DOMAIN_GTT,
+                             RADEON_FLAG_CPU_ACCESS | RADEON_FLAG_NO_INTERPROCESS_SHARING, 0, 0, NULL, &src[i]);
+   check(src[0] && src[1], "two command BOs");
+   /* Two IBs: every submission is packed into a gather BO. */
+   struct fake_cs f0, f1;
+   struct ac_cmdbuf *two[2] = {fake_cs(&f0, src[0], src[0]->va, 16), fake_cs(&f1, src[1], src[1]->va, 16)};
+   struct vk_wddm2_monitored_fence f;
+   app_fence(&f);
+   const struct vk_sync_wait wait = {.sync = &f.base, .wait_value = 1};
+
+   unsigned mark = h.n_ev;
+   bool all_ok = submit(ws, c, 2, two, 1, &wait, 0, NULL) == VK_SUCCESS;
+   for (unsigned i = 1; i < total; i++)
+      all_ok &= submit(ws, c, 2, two, 0, NULL, 0, NULL) == VK_SUCCESS;
+   check(all_ok && count_op(mark, BC250_HOST_SubmitCommand) == total && q->bc250_progress.wait_value == total,
+         "%u submissions behind an unsignalled GPU wait all go out (%u slots, %u spares)", total, slots, spares);
+   check(find_op(mark, BC250_HOST_WaitForSynchronizationObjectFromGpu, f.handle) >= 0 && !*f.value_map &&
+            !find(h.syncs, h.n_syncs, progress)->value,
+         "the first waits for the application fence on the GPU, which nothing signals: no work retires");
+   unsigned cpu_waits = 0;
+   bool paging_only = true;
+   for (unsigned i = mark; i < h.n_ev; i++) {
+      if (h.ev[i].op == CPU_WAIT) {
+         cpu_waits++;
+         paging_only &= h.ev[i].sync == ws->paging_fence_h;
+      }
+   }
+   check(paging_only && find_op(mark, CPU_WAIT, progress) < 0 && find_op(mark, CPU_WAIT, f.handle) < 0,
+         "no CPU wait for the queue's progress or the application fence (%u waits, each for the paging fence of "
+         "a new gather BO)",
+         cpu_waits);
+   check(q->bc250_gather_spare_count == spares && q->bc250_gather_spare[0].retire_value == 1 &&
+            q->bc250_gather_spare[spares - 1].retire_value == spares,
+         "the first %u busy BOs wait among the spares, for progress 1 to %u", spares, spares);
+   check(count_op(mark, BC250_HOST_DestroyAllocation2) == dropped && !count_op(mark, BC250_HOST_Evict) &&
+            !count_op(mark, BC250_HOST_FreeGpuVirtualAddress),
+         "the %u busy BOs past the spares go to DestroyAllocation2 at once, with no Evict and no VA free", dropped);
+
+   /* Progress 10 retires: the next busy slot takes a retired spare and allocates nothing. */
+   find(h.syncs, h.n_syncs, progress)->value = 10;
+   mark = h.n_ev;
+   check(submit(ws, c, 2, two, 0, NULL, 0, NULL) == VK_SUCCESS && !count_op(mark, BC250_HOST_CreateAllocation2) &&
+            !count_op(mark, CPU_WAIT) && q->bc250_gather_spare_count == spares,
+         "after progress 10, a busy slot swaps with a retired spare: no allocation, no CPU wait");
+
+   *f.value_map = 1;
+   find(h.syncs, h.n_syncs, progress)->value = q->bc250_progress.wait_value;
+   check(unbind(ws, c, cookie) == VK_SUCCESS && live(h.allocs, h.n_allocs, false) == 2,
+         "the unbind releases every gather BO and spare");
+   ws->base.ctx_destroy(c);
+   for (unsigned i = 0; i < 2; i++)
+      ws->base.buffer_destroy(&ws->base, src[i]);
+   check(!live(h.allocs, h.n_allocs, false) && !live(h.syncs, h.n_syncs, false), "nothing left");
    contract();
 }
 
@@ -1087,8 +1162,9 @@ test_rebind(void)
    unsigned reuse_waits = 0;
    for (unsigned i = 0; i < h.n_ev; i++)
       reuse_waits += h.ev[i].op == BC250_HOST_WaitForSynchronizationObjectFromCpu && h.ev[i].sync == old_progress;
-   check(reuse_waits == 1 && gfx(q)->bc250_progress.wait_value == BC250_GATHER_SLOTS + 1,
-         "and wraps the gather slots (%llu submissions, one reuse wait)",
+   check(!reuse_waits && gfx(q)->bc250_progress.wait_value == BC250_GATHER_SLOTS + 1 &&
+            gfx(q)->bc250_gather_spare_count == 1,
+         "and wraps the gather slots (%llu submissions, no reuse wait, the busy gather BO kept as a spare)",
          (unsigned long long)gfx(q)->bc250_progress.wait_value);
    check(unbind(ws, q, cookie_a) == VK_SUCCESS && live(h.allocs, h.n_allocs, false) == 2,
          "unbind releases the gather BO with the rest");
@@ -1236,8 +1312,9 @@ test_hosted_map(void)
 
 /* The innocent-wait tests (K225, lab trial D1 of KMD 0.7.216.17). Another
  * device hangs the engine; this queue's work waits behind it, and the
- * engine reset resubmits it. The queue's slot reuse waits on the CPU for
- * that work, longer than one wait slice.
+ * engine reset resubmits it. The queue's idle wait waits on the CPU for
+ * that work, longer than one wait slice. (Until BD-254 a submission's slot
+ * reuse waited too; no submission waits on the CPU any more.)
  *
  * A GPU thread of the test plays the scheduler. It waits until the winsys
  * has made its kernel wait, sleeps, and then completes the work, loses the
@@ -1281,15 +1358,14 @@ gpu_thread(void *arg)
    return 0;
 }
 
-/* Fills the queue's gather slots so that the next submission reuses slot 0
- * and waits on the CPU for progress value 1, with that wait held. Returns
- * the submission's result and its time in ms. */
-static VkResult
-held_reuse(struct radv_wddm2_winsys *ws, struct radeon_winsys_ctx *c, enum gpu_action action, DWORD delay_ms,
-           uint64_t slice_ms, uint64_t total_ms, unsigned *mark, double *elapsed_ms)
+/* One submission, then the queue's idle wait (radv_wddm2_ctx_wait_idle) for
+ * its progress value 1, with that CPU wait held. Returns whether the idle
+ * wait succeeded and its time in ms. */
+static bool
+held_idle(struct radv_wddm2_winsys *ws, struct radeon_winsys_ctx *c, enum gpu_action action, DWORD delay_ms,
+          uint64_t slice_ms, uint64_t total_ms, unsigned *mark, double *elapsed_ms)
 {
-   for (unsigned i = 0; i < BC250_GATHER_SLOTS; i++)
-      submit_one(ws, c);
+   submit_one(ws, c);
    radv_wddm2_fence_wait_slice_ns = slice_ms * 1000000ull;
    radv_wddm2_fence_wait_total_ns = total_ms * 1000000ull;
    const char *old = getenv("BC250_TEST_OLD_BOUND");
@@ -1307,10 +1383,10 @@ held_reuse(struct radv_wddm2_winsys *ws, struct radeon_winsys_ctx *c, enum gpu_a
    QueryPerformanceFrequency(&f);
    *mark = h.n_ev;
    QueryPerformanceCounter(&t0);
-   VkResult result = submit_one(ws, c);
+   const bool result = ws->base.ctx_wait_idle(c, AMD_IP_GFX, 0);
    QueryPerformanceCounter(&t1);
    h.hold_cpu_wait = false;
-   if (gpu.action == GPU_NOTHING || result != VK_SUCCESS)
+   if (gpu.action == GPU_NOTHING || !result)
       SetEvent(h.held_armed); /* a GPU thread that never saw the wait ends too */
    WaitForSingleObject(t, INFINITE);
    CloseHandle(t);
@@ -1338,9 +1414,8 @@ test_innocent_wait(void)
    double ms;
    /* The work completes after about 15 slices, as DWM's did after 14.6 s
     * behind a 10 s wait in trial D1. */
-   VkResult result = held_reuse(ws, c, GPU_COMPLETE, 300, 20, 5000, &mark, &ms);
-   check(result == VK_SUCCESS, "the slot reuse outlives about 15 wait slices and submits (result %d, %.0f ms)",
-         result, ms);
+   const bool result = held_idle(ws, c, GPU_COMPLETE, 300, 20, 5000, &mark, &ms);
+   check(result, "the idle wait outlives about 15 wait slices and succeeds (%.0f ms)", ms);
    check(ms >= 280.0, "it waited for the work (%.0f ms, completes at 300)", ms);
    check(count_op(mark, BC250_HOST_WaitForSynchronizationObjectFromCpu) == 1,
          "one kernel wait, waited on again per slice and not issued again (%u)",
@@ -1349,8 +1424,9 @@ test_innocent_wait(void)
          count_op(mark, BC250_HOST_CHECK_STATUS));
    check(!count_op(mark, BC250_HOST_REPORT_LOST) && !count_op(mark, BC250_HOST_GetDeviceState),
          "no loss is reported and the hosted device is not asked for GetDeviceState");
-   check(gfx(c)->bc250_progress.wait_value == BC250_GATHER_SLOTS + 1, "the submission took progress value %u",
-         BC250_GATHER_SLOTS + 1);
+   check(gfx(c)->bc250_progress.wait_value == 1 &&
+            find(h.syncs, h.n_syncs, gfx(c)->bc250_progress.handle)->value == 1,
+         "the queue's progress value 1 retired");
    restore_bounds();
    check(unbind(ws, c, cookie) == VK_SUCCESS, "the queue unbinds: its work retired");
    ws->base.ctx_destroy(c);
@@ -1375,13 +1451,11 @@ test_lost_during_wait(void)
       bind(ws, c, cookie);
       unsigned mark;
       double ms;
-      VkResult result = held_reuse(ws, c, cases[i].action, 100, 20, 5000, &mark, &ms);
-      check(result == VK_ERROR_DEVICE_LOST, "%s during the wait: the submission reports the loss (%d)",
-            cases[i].what, result);
+      const bool result = held_idle(ws, c, cases[i].action, 100, 20, 5000, &mark, &ms);
+      check(!result, "%s during the wait: the idle wait fails", cases[i].what);
       check(ms < 1000.0, "at the next slice, not at the total bound (%.0f ms, bound 5000)", ms);
       check(cases[i].action != GPU_FENCE_MAX || count_op(mark, BC250_HOST_REPORT_LOST) >= 1,
             "a UINT64_MAX fence is reported to the host");
-      check(!count_op(mark, BC250_HOST_SubmitCommand), "nothing is submitted");
       restore_bounds();
       check(unbind(ws, c, cookie) == VK_ERROR_DEVICE_LOST, "unbind reports the unretired work");
       InterlockedExchange((volatile LONG *)&h.status, 0);
@@ -1399,11 +1473,9 @@ test_wait_bound(void)
    bind(ws, c, cookie);
    unsigned mark;
    double ms;
-   VkResult result = held_reuse(ws, c, GPU_NOTHING, 0, 20, 300, &mark, &ms);
-   check(result == VK_ERROR_DEVICE_LOST, "work that never completes on a live device ends at the total bound (%d)",
-         result);
+   const bool result = held_idle(ws, c, GPU_NOTHING, 0, 20, 300, &mark, &ms);
+   check(!result, "work that never completes on a live device ends the idle wait at the total bound");
    check(ms >= 280.0 && ms < 2000.0, "after the total bound (%.0f ms, bound 300)", ms);
-   check(!count_op(mark, BC250_HOST_SubmitCommand), "nothing is submitted");
    restore_bounds();
    /* The held wait is gone; the fake GPU completes the unbind's wait. */
    check(unbind(ws, c, cookie) == VK_SUCCESS, "the queue still unbinds once its work retires");
@@ -1422,6 +1494,7 @@ static const struct {
    {"second_queue", test_second_queue},
    {"signal_wait", test_signal_wait},
    {"gather_teardown", test_gather_teardown},
+   {"gather_busy_no_wait", test_gather_busy_no_wait},
    {"device_loss", test_device_loss},
    {"abandon", test_abandon},
    {"outside_scope", test_outside_scope},
