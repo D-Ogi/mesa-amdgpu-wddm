@@ -117,6 +117,13 @@ struct wsi_win32_swapchain {
    VkFormat format;
    bool retired;
    ID3D12Fence              **d3d12_blit_fences;
+   /* The frame rate limit of the per-application settings (wsi_win32_present_policy.h): the
+    * release time of the previous frame (QueryPerformanceCounter ticks) and the waitable timer
+    * (NULL until the first wait, or when none could be made).
+    */
+   uint64_t                   limit_last;
+   HANDLE                     limit_timer;
+   bool                       limit_timer_tried;
    struct wsi_win32_image     images[0];
 };
 
@@ -849,6 +856,9 @@ wsi_win32_swapchain_destroy(struct wsi_swapchain *drv_chain,
       vk_free(allocator, chain->d3d12_blit_fences);
    }
 
+   if (chain->limit_timer)
+      CloseHandle(chain->limit_timer);
+
    wsi_swapchain_finish(&chain->base);
 
    u_cnd_monotonic_destroy(&chain->acquire_cond);
@@ -1005,6 +1015,60 @@ wsi_win32_acquire_next_image(struct wsi_swapchain *drv_chain,
    return VK_SUCCESS;
 }
 
+#ifndef CREATE_WAITABLE_TIMER_HIGH_RESOLUTION
+#define CREATE_WAITABLE_TIMER_HIGH_RESOLUTION 0x00000002 /* Windows 10 1803; older builds refuse it */
+#endif
+
+/* FrameRateLimit: before the present, wait until one interval of the limit has passed since the
+ * previous frame of this chain. A high-resolution timer sleep to about 1 ms before the target, then
+ * short yields, as the frame limiter of the D3D shells does.
+ */
+static void
+wsi_win32_limit_frame_rate(struct wsi_win32_swapchain *chain)
+{
+   const uint32_t rate = chain->base.wsi->win32.present_settings.frame_rate_limit;
+   LARGE_INTEGER frequency = {}, now = {};
+
+   if (!rate)
+      return;
+   QueryPerformanceFrequency(&frequency);
+   QueryPerformanceCounter(&now);
+   if (frequency.QuadPart <= 0)
+      return;
+   if (!chain->limit_timer_tried) {
+      chain->limit_timer_tried = true;
+      chain->limit_timer = CreateWaitableTimerExW(NULL, NULL, CREATE_WAITABLE_TIMER_HIGH_RESOLUTION,
+                                                  TIMER_ALL_ACCESS);
+      if (!chain->limit_timer)
+         chain->limit_timer = CreateWaitableTimerExW(NULL, NULL, 0, TIMER_ALL_ACCESS);
+   }
+   const uint64_t freq = (uint64_t)frequency.QuadPart;
+   const uint64_t target = wsi_win32_limiter_target((uint64_t)now.QuadPart, freq / rate,
+                                                    &chain->limit_last);
+   if (!target)
+      return;
+   for (;;) {
+      QueryPerformanceCounter(&now);
+      const uint64_t at = (uint64_t)now.QuadPart;
+      if (at >= target)
+         return;
+      const uint64_t left = (target - at) * 10000000ull / freq; /* 100 ns units */
+      if (left > 20000) {
+         LARGE_INTEGER due = {};
+         due.QuadPart = -(LONGLONG)(left - 10000);
+         if (chain->limit_timer &&
+             SetWaitableTimerEx(chain->limit_timer, &due, 0, NULL, NULL, NULL, 0))
+            WaitForSingleObject(chain->limit_timer, 1);
+         else
+            Sleep(1);
+      } else if (left > 2000) {
+         Sleep(0);
+      } else {
+         YieldProcessor();
+      }
+   }
+}
+
 static VkResult
 wsi_win32_queue_present_dxgi(struct wsi_win32_swapchain *chain,
                              struct wsi_win32_image *image,
@@ -1123,6 +1187,9 @@ wsi_win32_queue_present(struct wsi_swapchain *drv_chain,
 
    assert(image->state == WSI_IMAGE_DRAWING);
 
+   /* The frame rate limit of the per-application settings, before the frame is handed on. */
+   wsi_win32_limit_frame_rate(chain);
+
    if (chain->dxgi) {
       VkResult result = wsi_win32_queue_present_dxgi(chain, image, damage);
       if (result == VK_SUCCESS && present_id && FAILED(DwmFlush()))
@@ -1175,7 +1242,15 @@ wsi_win32_queue_present(struct wsi_swapchain *drv_chain,
       DeleteDC(memory_dc);
    if (window_dc)
       ReleaseDC(chain->wnd, window_dc);
-   if (result == VK_SUCCESS && FAILED(DwmFlush()))
+   /* This path offers FIFO only, and FIFO waits for DWM's next composition. VSync 0 of the
+    * per-application settings skips that wait: the BitBlt (with GdiFlush) has already copied the
+    * frame into the window's redirection surface, so the image is free, as IMMEDIATE does on the
+    * GDI route of the x64 system ICD. MaxFrameLatency needs nothing here: each present copies a
+    * finished frame before it returns, so one frame at most is ever queued.
+    */
+   const struct wsi_win32_present_settings *settings = &chain->base.wsi->win32.present_settings;
+   const bool vsync_off = settings->vsync_set && !settings->vsync;
+   if (result == VK_SUCCESS && !vsync_off && FAILED(DwmFlush()))
       result = VK_ERROR_SURFACE_LOST_KHR;
 
    wsi_win32_set_image_idle(chain, image);
@@ -1381,6 +1456,13 @@ wsi_win32_surface_create_swapchain(
    chain->base.wait_for_present = wsi_win32_wait_for_present;
    chain->base.wait_for_present2 = wsi_win32_wait_for_present;
    chain->base.present_mode = wsi_swapchain_get_present_mode(wsi_device, create_info);
+   /* A VSync setting replaces the mode of a DXGI chain, which offers FIFO and IMMEDIATE; the GDI
+    * path offers FIFO only and applies VSync 0 in its present (wsi_win32_queue_present).
+    */
+   if (image_params->image_type == WSI_IMAGE_TYPE_DXGI)
+      chain->base.present_mode =
+         wsi_win32_settings_present_mode(&wsi_device->win32.present_settings,
+                                         chain->base.present_mode);
    chain->extent = create_info->imageExtent;
    chain->format = create_info->imageFormat;
 

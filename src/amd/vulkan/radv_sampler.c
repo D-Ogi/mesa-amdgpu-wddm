@@ -134,7 +134,13 @@ radv_tex_filter_mode(VkSamplerReductionMode mode)
 static uint32_t
 radv_get_max_anisotropy(const struct radv_compiler_info *compiler_info, const struct vk_sampler_state *sampler_state)
 {
-   if (compiler_info->key.force_aniso >= 0)
+   /* A forced value (RADV_TEX_ANISO, or the control application's Anisotropy setting) changes only
+    * the samplers with a linear minification filter, as the D3D11 and D3D12 shells of this driver
+    * apply the setting: not one with a point minification filter, and not one with unnormalized
+    * coordinates, where Vulkan forbids anisotropy.
+    */
+   if (compiler_info->key.force_aniso >= 0 && !sampler_state->unnormalized_coordinates &&
+       sampler_state->min_filter == VK_FILTER_LINEAR)
       return compiler_info->key.force_aniso;
 
    if (sampler_state->anisotropy_enable && sampler_state->max_anisotropy > 1.0f)
