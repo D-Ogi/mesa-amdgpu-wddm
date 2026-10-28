@@ -439,6 +439,16 @@ typedef struct shader_info {
 
          /** The streams used in this shaders (max. 4) */
          uint8_t active_stream_mask:4;
+
+         /** Streams 1-3 with a Layer or ViewportIndex output in a private slot
+          * (ac_nir_lower_gs_stream_positions). */
+         uint8_t stream_layer_mask:4;
+         uint8_t stream_viewport_mask:4;
+
+         /** For each stream: the ClipDistance count in bits 0-3 and the
+          * CullDistance count in bits 4-7 (ac_nir_lower_gs_stream_positions).
+          * Zero for streams 1-3 when the streams cannot share one layout. */
+         uint8_t stream_clip_cull[4];
       } gs;
 
       struct {

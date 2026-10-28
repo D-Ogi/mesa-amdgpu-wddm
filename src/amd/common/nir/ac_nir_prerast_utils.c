@@ -25,34 +25,146 @@ ac_nir_opt_varyings_preserving_gs_raster_map(nir_shader *producer, nir_shader *c
    return nir_opt_varyings(producer, consumer, true, 0, 0, false);
 }
 
+static unsigned
+gs_output_array_length(const nir_variable *var)
+{
+   return glsl_type_is_array(var->type) ? glsl_get_length(var->type) : 1;
+}
+
+/* The slots that a shader output variable occupies. */
+static uint64_t
+gs_output_slots(const nir_variable *var)
+{
+   if (var->data.location < 0 || var->data.location >= 64)
+      return 0;
+   const unsigned count = var->data.compact ?
+      DIV_ROUND_UP(var->data.location_frac + gs_output_array_length(var), 4) :
+      glsl_count_attribute_slots(var->type, false);
+   return BITFIELD64_RANGE(var->data.location, MIN2(count, 64 - var->data.location));
+}
+
+/* Returns true for a builtin output of streams 1-3 that this pass moves:
+ * these builtins share one slot for all streams, but NIR keeps one stream,
+ * one transform feedback buffer and one value table entry for each slot. */
+static bool
+gs_stream_output_moves(const nir_variable *var)
+{
+   if (!var->data.stream)
+      return false;
+   switch (var->data.location) {
+   case VARYING_SLOT_POS:
+   case VARYING_SLOT_LAYER:
+   case VARYING_SLOT_VIEWPORT:
+   case VARYING_SLOT_PRIMITIVE_ID:
+      return true;
+   case VARYING_SLOT_CLIP_DIST0:
+   case VARYING_SLOT_CULL_DIST0:
+      return var->data.compact;
+   default:
+      return false;
+   }
+}
+
 int
 ac_nir_lower_gs_stream_positions(nir_shader *nir)
 {
    if (nir->info.stage != MESA_SHADER_GEOMETRY)
       return 0;
 
+   nir_variable *clip[4] = {0}, *cull[4] = {0};
+   uint64_t reserved = 0;
    bool progress = false;
    nir_foreach_shader_out_variable(var, nir) {
-      if (var->data.location != VARYING_SLOT_POS || !var->data.stream)
+      if (var->data.compact && var->data.location == VARYING_SLOT_CLIP_DIST0 && var->data.stream < 4)
+         clip[var->data.stream] = var;
+      if (var->data.compact && var->data.location == VARYING_SLOT_CULL_DIST0 && var->data.stream < 4)
+         cull[var->data.stream] = var;
+      if (!gs_stream_output_moves(var))
          continue;
 
       /* SPIR-V Stream applies to the complete variable. Per-component packed
        * streams are not produced by the Vulkan frontend. */
-      if (var->data.stream >= 4)
+      if (var->data.stream >= 4 || (!var->data.compact && var->data.location_frac))
          return -1;
-      const unsigned slot = VARYING_SLOT_TEX4 + var->data.stream;
-      nir_foreach_shader_out_variable(other, nir) {
-         if (other != var && other->data.location == slot)
+      const unsigned stream = var->data.stream;
+      if (var->data.location == VARYING_SLOT_POS) {
+         reserved |= BITFIELD64_BIT(AC_NIR_GS_STREAM_POS_SLOT(stream));
+      } else if (var->data.compact) {
+         reserved |= BITFIELD64_RANGE(AC_NIR_GS_STREAM_CLIP_SLOT(stream), 2);
+      } else {
+         if (!glsl_type_is_32bit(var->type) || !glsl_type_is_scalar(var->type))
             return -1;
+         reserved |= BITFIELD64_BIT(AC_NIR_GS_STREAM_MISC_SLOT(stream));
       }
       progress = true;
    }
+   if (!progress)
+      return 0;
+
+   uint8_t sizes[4] = {0};
+   unsigned max_clip = 0, max_cull = 0;
+   for (unsigned stream = 0; stream < 4; stream++) {
+      const unsigned clip_size = clip[stream] ? gs_output_array_length(clip[stream]) : 0;
+      const unsigned cull_size = cull[stream] ? gs_output_array_length(cull[stream]) : 0;
+      if (clip_size + cull_size > 8)
+         return -1;
+      sizes[stream] = clip_size | cull_size << 4;
+      max_clip = MAX2(max_clip, clip_size);
+      max_cull = MAX2(max_cull, cull_size);
+   }
+
    /* Validate the complete mapping before mutating any variable. */
    nir_foreach_shader_out_variable(var, nir) {
-      if (var->data.location == VARYING_SLOT_POS && var->data.stream)
-         var->data.location = VARYING_SLOT_TEX4 + var->data.stream;
+      if (!gs_stream_output_moves(var) && (gs_output_slots(var) & reserved))
+         return -1;
    }
-   return progress;
+
+   nir_foreach_shader_out_variable(var, nir) {
+      if (!gs_stream_output_moves(var))
+         continue;
+      const unsigned stream = var->data.stream;
+      switch (var->data.location) {
+      case VARYING_SLOT_POS:
+         var->data.location = AC_NIR_GS_STREAM_POS_SLOT(stream);
+         break;
+      case VARYING_SLOT_LAYER:
+         var->data.location = AC_NIR_GS_STREAM_MISC_SLOT(stream);
+         var->data.location_frac = 0;
+         nir->info.gs.stream_layer_mask |= BITFIELD_BIT(stream);
+         break;
+      case VARYING_SLOT_VIEWPORT:
+         var->data.location = AC_NIR_GS_STREAM_MISC_SLOT(stream);
+         var->data.location_frac = 1;
+         nir->info.gs.stream_viewport_mask |= BITFIELD_BIT(stream);
+         break;
+      case VARYING_SLOT_PRIMITIVE_ID:
+         var->data.location = AC_NIR_GS_STREAM_MISC_SLOT(stream);
+         var->data.location_frac = 2;
+         break;
+      case VARYING_SLOT_CLIP_DIST0:
+         var->data.location = AC_NIR_GS_STREAM_CLIP_SLOT(stream);
+         var->data.location_frac = 0;
+         break;
+      case VARYING_SLOT_CULL_DIST0: {
+         /* The same packing as nir_merge_clip_cull_distance_vars. */
+         const unsigned clip_size = sizes[stream] & 15;
+         var->data.location = AC_NIR_GS_STREAM_CLIP_SLOT(stream) + clip_size / 4;
+         var->data.location_frac = clip_size % 4;
+         break;
+      }
+      default:
+         UNREACHABLE("not a moved output");
+      }
+   }
+
+   /* The copy shader gives every rasterized stream max_clip clip distances,
+    * then max_cull cull distances. When they do not fit, the streams 1-3
+    * keep their own values for stream output only, and a rasterized stream
+    * 1-3 then applies no clip or cull distance. */
+   if (max_clip + max_cull > 8)
+      sizes[1] = sizes[2] = sizes[3] = 0;
+   memcpy(nir->info.gs.stream_clip_cull, sizes, sizeof(sizes));
+   return 1;
 }
 
 void

@@ -50,6 +50,69 @@ ac_nir_export_gs_raster_parameters(nir_builder *b, unsigned stream,
    }
 }
 
+/* Gives the position export of a capture copy shader the Layer, ViewportIndex,
+ * ClipDistance and CullDistance values of the rasterized stream. Streams 1-3
+ * keep these builtins in private slots (ac_nir_lower_gs_stream_positions).
+ * When one stream writes Layer or ViewportIndex, every stream exports it, with
+ * zero when the stream does not write it. When a stream 1-3 writes clip or cull
+ * distances, every stream exports the largest clip count of all streams, then
+ * the largest cull count, with zero for a distance that the stream does not
+ * write: radv_nir_shader_info_pass programs the same layout. Returns the slots
+ * that the position export must read. */
+static uint64_t
+ac_nir_gs_alias_raster_builtins(nir_builder *b, const nir_shader *gs_nir, unsigned stream,
+                                ac_nir_prerast_out *out)
+{
+   const struct shader_info *info = &gs_nir->info;
+   uint64_t slots = 0;
+
+   const struct {
+      unsigned slot, component, mask;
+   } misc[] = {
+      {VARYING_SLOT_LAYER, 0, info->gs.stream_layer_mask},
+      {VARYING_SLOT_VIEWPORT, 1, info->gs.stream_viewport_mask},
+   };
+   for (unsigned i = 0; i < ARRAY_SIZE(misc); i++) {
+      if (!(info->outputs_written & BITFIELD64_BIT(misc[i].slot)) && !misc[i].mask)
+         continue;
+      nir_def *value = out->outputs[misc[i].slot][0];
+      if (stream) {
+         value = (misc[i].mask & BITFIELD_BIT(stream)) ?
+            out->outputs[AC_NIR_GS_STREAM_MISC_SLOT(stream)][misc[i].component] : NULL;
+      }
+      out->outputs[misc[i].slot][0] = value ? value : nir_imm_int(b, 0);
+      out->infos[misc[i].slot].as_sysval_mask |= 1;
+      slots |= BITFIELD64_BIT(misc[i].slot);
+   }
+
+   const uint8_t *sizes = info->gs.stream_clip_cull;
+   if (!sizes[1] && !sizes[2] && !sizes[3])
+      return slots;
+   unsigned max_clip = 0, max_cull = 0;
+   for (unsigned s = 0; s < 4; s++) {
+      max_clip = MAX2(max_clip, sizes[s] & 15);
+      max_cull = MAX2(max_cull, sizes[s] >> 4);
+   }
+   const unsigned clip = sizes[stream] & 15, cull = sizes[stream] >> 4;
+   const unsigned source = stream ? AC_NIR_GS_STREAM_CLIP_SLOT(stream) : VARYING_SLOT_CLIP_DIST0;
+   nir_def *values[8] = {0};
+   for (unsigned i = 0; i < max_clip + max_cull; i++) {
+      const bool is_clip = i < max_clip;
+      const unsigned index = is_clip ? i : clip + i - max_clip;
+      const bool written = is_clip ? i < clip : i - max_clip < cull;
+      nir_def *value = written ? out->outputs[source + index / 4][index % 4] : NULL;
+      values[i] = value ? value : nir_imm_float(b, 0);
+   }
+   for (unsigned i = 0; i < 8; i++) {
+      out->outputs[VARYING_SLOT_CLIP_DIST0 + i / 4][i % 4] = values[i];
+      if (values[i]) {
+         out->infos[VARYING_SLOT_CLIP_DIST0 + i / 4].as_sysval_mask |= BITFIELD_BIT(i % 4);
+         slots |= BITFIELD64_BIT(VARYING_SLOT_CLIP_DIST0 + i / 4);
+      }
+   }
+   return slots;
+}
+
 nir_shader *
 ac_nir_create_gs_copy_shader(const nir_shader *gs_nir, ac_nir_lower_legacy_gs_options *options,
                              ac_nir_prerast_out *out)
@@ -140,6 +203,19 @@ ac_nir_create_gs_copy_shader(const nir_shader *gs_nir, ac_nir_lower_legacy_gs_op
              * raster position export aliases the selected stream's position. */
             memcpy(out->outputs[VARYING_SLOT_POS], out->outputs[position_slot], sizeof(saved_position));
          }
+         static const unsigned aliased_slots[] = {
+            VARYING_SLOT_LAYER, VARYING_SLOT_VIEWPORT, VARYING_SLOT_CLIP_DIST0, VARYING_SLOT_CLIP_DIST1,
+         };
+         nir_def *saved_outputs[ARRAY_SIZE(aliased_slots)][4];
+         ac_nir_prerast_per_output_info saved_infos[ARRAY_SIZE(aliased_slots)];
+         uint64_t raster_outputs = stream_outputs | VARYING_BIT_POS;
+         if (b.shader->info.bc250_pgp_so_capture) {
+            for (unsigned i = 0; i < ARRAY_SIZE(aliased_slots); i++) {
+               memcpy(saved_outputs[i], out->outputs[aliased_slots[i]], sizeof(saved_outputs[i]));
+               saved_infos[i] = out->infos[aliased_slots[i]];
+            }
+            raster_outputs |= ac_nir_gs_alias_raster_builtins(&b, gs_nir, stream, out);
+         }
          unsigned clip_mask = 0;
          for (unsigned c = 0; c < 8; c++) {
             if (out->outputs[VARYING_SLOT_CLIP_DIST0 + c / 4][c % 4])
@@ -148,10 +224,16 @@ ac_nir_create_gs_copy_shader(const nir_shader *gs_nir, ac_nir_lower_legacy_gs_op
          ac_nir_export_position(&b, options->gfx_level, options->export_clipdist_mask & clip_mask, false,
                                 options->write_pos_to_clipvertex,
                                 !(options->has_param_exports || b.shader->info.bc250_pgp_so_capture),
-                                options->force_vrs, stream_outputs | VARYING_BIT_POS,
+                                options->force_vrs, raster_outputs,
                                 out, NULL);
 
          memcpy(out->outputs[VARYING_SLOT_POS], saved_position, sizeof(saved_position));
+         if (b.shader->info.bc250_pgp_so_capture) {
+            for (unsigned i = 0; i < ARRAY_SIZE(aliased_slots); i++) {
+               memcpy(out->outputs[aliased_slots[i]], saved_outputs[i], sizeof(saved_outputs[i]));
+               out->infos[aliased_slots[i]] = saved_infos[i];
+            }
+         }
 
          if (b.shader->info.bc250_pgp_so_capture && info) {
             ac_nir_export_gs_raster_parameters(&b, stream, info, out);
