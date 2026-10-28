@@ -245,6 +245,17 @@ struct wsi_win32_swapchain {
    struct wsi_iflip_geometry  iflip_geometry;
    /* The driver's reading of the scan-out plane's formats the plan was made from (BD-197). */
    const char                *iflip_plane;
+   /* The present overrides of the per-application graphics settings (wsi_win32_present_policy.h):
+    * the release time of the previous frame of the frame rate limit (QueryPerformanceCounter ticks),
+    * its waitable timer (NULL until the first wait, or when none could be made), the presents that
+    * MaxFrameLatency may wait for, the event of that wait, and one-line budgets of their logs.
+    */
+   uint64_t                   limit_last;
+   HANDLE                     limit_timer;
+   bool                       limit_timer_tried;
+   struct wsi_win32_latency   latency;
+   HANDLE                     latency_event;
+   bool                       latency_logged;
    struct wsi_win32_image     images[0];
 };
 
@@ -1736,6 +1747,12 @@ wsi_win32_swapchain_destroy(struct wsi_swapchain *drv_chain,
       vk_free(allocator, chain->d3d12_blit_fences);
    }
 
+   /* After the fences: a fence that still had this event to signal is gone. */
+   if (chain->latency_event)
+      CloseHandle(chain->latency_event);
+   if (chain->limit_timer)
+      CloseHandle(chain->limit_timer);
+
    if (chain->present_log) {
       fclose(chain->present_log);
       chain->present_log = NULL;
@@ -2066,6 +2083,115 @@ wsi_iflip_after_present(struct wsi_win32_swapchain *chain)
    }
 }
 
+#ifndef CREATE_WAITABLE_TIMER_HIGH_RESOLUTION
+#define CREATE_WAITABLE_TIMER_HIGH_RESOLUTION 0x00000002 /* Windows 10 1803; older builds refuse it */
+#endif
+
+/* FrameRateLimit: before the present, wait until one interval of the limit has passed since the
+ * previous frame of this chain. A high-resolution timer sleep to about 1 ms before the target, then
+ * short yields, as the frame limiter of the D3D shells does.
+ */
+static void
+wsi_win32_limit_frame_rate(struct wsi_win32_swapchain *chain)
+{
+   const uint32_t rate = chain->base.wsi->win32.present_settings.frame_rate_limit;
+   LARGE_INTEGER frequency = {}, now = {};
+
+   if (!rate)
+      return;
+   QueryPerformanceFrequency(&frequency);
+   QueryPerformanceCounter(&now);
+   if (frequency.QuadPart <= 0)
+      return;
+   if (!chain->limit_timer_tried) {
+      chain->limit_timer_tried = true;
+      chain->limit_timer = CreateWaitableTimerExW(NULL, NULL, CREATE_WAITABLE_TIMER_HIGH_RESOLUTION,
+                                                  TIMER_ALL_ACCESS);
+      if (!chain->limit_timer)
+         chain->limit_timer = CreateWaitableTimerExW(NULL, NULL, 0, TIMER_ALL_ACCESS);
+   }
+   const uint64_t freq = (uint64_t)frequency.QuadPart;
+   const uint64_t target = wsi_win32_limiter_target((uint64_t)now.QuadPart, freq / rate,
+                                                    &chain->limit_last);
+   if (!target)
+      return;
+   for (;;) {
+      QueryPerformanceCounter(&now);
+      const uint64_t at = (uint64_t)now.QuadPart;
+      if (at >= target)
+         return;
+      const uint64_t left = (target - at) * 10000000ull / freq; /* 100 ns units */
+      if (left > 20000) {
+         LARGE_INTEGER due = {};
+         due.QuadPart = -(LONGLONG)(left - 10000);
+         if (chain->limit_timer &&
+             SetWaitableTimerEx(chain->limit_timer, &due, 0, NULL, NULL, NULL, 0))
+            WaitForSingleObject(chain->limit_timer, 1);
+         else
+            Sleep(1);
+      } else if (left > 2000) {
+         Sleep(0);
+      } else {
+         YieldProcessor();
+      }
+   }
+}
+
+/* MaxFrameLatency on the DXGI route: after a present is queued, wait for the copy of the present
+ * that many presents back to complete on the GPU, so that at most that many frames are queued ahead
+ * of it. The bound of the wait is one second: a copy that never completes is the route's deadlines'
+ * to report (wsi_win32_deadline.h), and this wait does not add a hang of its own. On the GDI route
+ * every present copies a finished frame before it returns, so one frame at most is ever queued and
+ * the limit holds without a wait.
+ */
+static void
+wsi_win32_limit_frame_latency(struct wsi_win32_swapchain *chain, uint32_t image_index)
+{
+   const uint32_t latency = chain->base.wsi->win32.present_settings.max_frame_latency;
+   uint32_t image = 0;
+   uint64_t value = 0;
+
+   if (!latency)
+      return;
+   if (!chain->d3d12_blit_fences || !chain->base.blit.timeline_values) {
+      if (!chain->latency_logged) {
+         chain->latency_logged = true;
+         wsi_win32_route_log(chain, "chain %p: MaxFrameLatency=%u not applied: the chain has no "
+                             "blit fences", (void *)chain, latency);
+      }
+      return;
+   }
+   wsi_win32_latency_push(&chain->latency, image_index,
+                          chain->base.blit.timeline_values[image_index]);
+   if (!wsi_win32_latency_target(&chain->latency, latency, &image, &value) ||
+       image >= chain->base.image_count || !chain->d3d12_blit_fences[image])
+      return;
+   ID3D12Fence *fence = chain->d3d12_blit_fences[image];
+   if (!chain->latency_event)
+      chain->latency_event = CreateEventW(NULL, FALSE, FALSE, NULL);
+   if (!chain->latency_event)
+      return;
+   /* The fence value is what decides; the event only wakes the thread. A signal left on the
+    * auto-reset event by an earlier wait that gave up is read as a wake and checked again.
+    */
+   const ULONGLONG deadline = GetTickCount64() + 1000;
+   while (fence->GetCompletedValue() < value) {
+      const ULONGLONG at = GetTickCount64();
+      if (at >= deadline) {
+         if (!chain->latency_logged) {
+            chain->latency_logged = true;
+            wsi_win32_route_log(chain, "chain %p: MaxFrameLatency=%u: the copy of image %u (fence "
+                                "value %" PRIu64 ") did not complete in 1 s; the present goes on",
+                                (void *)chain, latency, image, value);
+         }
+         return;
+      }
+      if (FAILED(fence->SetEventOnCompletion(value, chain->latency_event)))
+         return;
+      WaitForSingleObject(chain->latency_event, (DWORD)(deadline - at));
+   }
+}
+
 static VkResult
 wsi_win32_queue_present_dxgi(struct wsi_win32_swapchain *chain,
                              uint32_t image_index,
@@ -2123,6 +2249,7 @@ wsi_win32_queue_present_dxgi(struct wsi_win32_swapchain *chain,
    }
 
    wsi_iflip_after_present(chain);
+   wsi_win32_limit_frame_latency(chain, image_index);
 
    /* Present1 took the frame. That is a QUEUED present and nothing more: neither the GPU copy this
     * route asked for before it nor the flip need have run, so the route is not proved here and the
@@ -2242,6 +2369,11 @@ wsi_win32_queue_present(struct wsi_swapchain *drv_chain,
 
    assert(image->state == WSI_IMAGE_DRAWING);
 
+   /* The frame rate limit of the per-application settings, on both routes, before the frame is
+    * handed on.
+    */
+   wsi_win32_limit_frame_rate(chain);
+
    const uint64_t t_enter = chain->present_log ? os_time_get_nano() : 0;
 
    if (chain->is_dxgi) {
@@ -2320,9 +2452,11 @@ wsi_win32_set_present_mode(struct wsi_swapchain *drv_chain, VkPresentModeKHR mod
     * (wsi_iflip_may_tear). The flag can only be given at creation, so a switch to IMMEDIATE on a
     * chain that was not created tearing-capable presents without tearing, which is MAILBOX
     * behaviour: interval 0 and no torn frame. Everything else about a mode switch is still only the
-    * arguments of the next Present1.
+    * arguments of the next Present1. A VSync setting replaces the mode the application asks for here
+    * too (wsi_win32_settings_present_mode).
     */
-   drv_chain->present_mode = mode;
+   drv_chain->present_mode =
+      wsi_win32_settings_present_mode(&drv_chain->wsi->win32.present_settings, mode);
 }
 
 static void
@@ -3003,6 +3137,17 @@ wsi_win32_surface_create_swapchain_dxgi(
    return VK_SUCCESS;
 }
 
+/* The present mode of a new chain: the application's, unless a VSync setting replaces it. The plan
+ * (whether the chain may tear) and the chain both take this mode.
+ */
+static VkPresentModeKHR
+wsi_win32_chain_present_mode(struct wsi_device *wsi_device,
+                             const VkSwapchainCreateInfoKHR *create_info)
+{
+   return wsi_win32_settings_present_mode(&wsi_device->win32.present_settings,
+                                          wsi_swapchain_get_present_mode(wsi_device, create_info));
+}
+
 /* Creates one chain on the route given. On failure the chain is gone and *swapchain_out is unset. */
 static VkResult
 wsi_win32_create_chain(wsi_win32_surface *surface,
@@ -3046,7 +3191,7 @@ wsi_win32_create_chain(wsi_win32_surface *surface,
       wsi_device->win32.scanout_plane_formats(wsi_device->pdevice, &plane_reading);
    const struct wsi_iflip_inputs inputs =
       wsi_iflip_inputs_of(wsi_device, create_info, &geometry, hwnd_target,
-                          wsi_swapchain_get_present_mode(wsi_device, create_info),
+                          wsi_win32_chain_present_mode(wsi_device, create_info),
                           plan_format ? (uint32_t)plan_format->buffer : 0u,
                           use_dxgi ? wsi_iflip_system_tearing(wsi->dxgi.factory) : false,
                           own_copy, plane_formats);
@@ -3111,7 +3256,7 @@ wsi_win32_create_chain(wsi_win32_surface *surface,
       return result;
    }
 
-   chain->base.present_mode = wsi_swapchain_get_present_mode(wsi_device, create_info);
+   chain->base.present_mode = wsi_win32_chain_present_mode(wsi_device, create_info);
 
    chain->present_log = NULL;
    chain->present_log_lines = 0;

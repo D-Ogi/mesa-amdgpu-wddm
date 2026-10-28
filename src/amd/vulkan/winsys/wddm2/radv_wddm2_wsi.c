@@ -22,6 +22,7 @@
  */
 
 #include "radv_wddm2_wsi.h"
+#include "radv_wddm2_app_settings.h"
 #include "radv_wddm2_winsys.h"
 #include "radv_wddm2_wsi_route.h"
 
@@ -32,6 +33,7 @@
 
 #include <stdlib.h>
 #include <string.h>
+#include <wchar.h>
 
 #include "radv_device.h"
 #include "radv_device_memory.h"
@@ -39,6 +41,7 @@
 #include "radv_physical_device.h"
 #include "radv_shared_layout.h"
 #include "util/amdgpu_wddm_stdio.h"
+#include "util/u_call_once.h"
 #include "util/u_win32_library.h"
 #include "vk_dxgi.h"
 #include "wsi_common.h"
@@ -417,6 +420,125 @@ radv_wddm2_wsi_check_blit_image(VkDevice _device, VkImage _image, VkDeviceMemory
    return VK_SUCCESS;
 }
 
+/* ---- the per-application graphics settings (radv_wddm2_app_settings.h) ---- */
+
+static enum radv_wddm2_setting_read
+radv_wddm2_settings_system_registry(void *context, const wchar_t *application, const wchar_t *value,
+                                    uint32_t *out)
+{
+   wchar_t key[RADV_WDDM2_SETTINGS_MAX_APP + 64];
+   DWORD type = 0, size = sizeof(uint32_t);
+   uint32_t data = 0;
+   (void)context;
+
+   if (application) {
+      if (wcschr(application, L'\\') || wcschr(application, L'/'))
+         return RADV_WDDM2_SETTING_READ_ABSENT;
+      if (swprintf(key, ARRAY_SIZE(key), L"%ls\\%ls", radv_wddm2_settings_applications_key(),
+                   application) < 0)
+         return RADV_WDDM2_SETTING_READ_ABSENT;
+   } else {
+      radv_wddm2_settings_wcopy(key, ARRAY_SIZE(key), radv_wddm2_settings_global_key());
+   }
+   /* The 64-bit view on both images: the control application writes there. */
+   const LSTATUS status = RegGetValueW(HKEY_LOCAL_MACHINE, key, value,
+                                       RRF_RT_ANY | RRF_NOEXPAND | RRF_SUBKEY_WOW6464KEY, &type,
+                                       &data, &size);
+   if (status == ERROR_MORE_DATA)
+      return RADV_WDDM2_SETTING_READ_WRONG_TYPE;
+   /* Absent, or a key this process may not read (an AppContainer): as if no value were there. */
+   if (status != ERROR_SUCCESS)
+      return RADV_WDDM2_SETTING_READ_ABSENT;
+   if (type != REG_DWORD || size != sizeof(uint32_t))
+      return RADV_WDDM2_SETTING_READ_WRONG_TYPE;
+   *out = data;
+   return RADV_WDDM2_SETTING_READ_VALUE;
+}
+
+static bool
+radv_wddm2_settings_system_environment(void *context, const char *name, char *text, size_t size)
+{
+   (void)context;
+   if (!size)
+      return false;
+   text[0] = 0;
+   const DWORD n = GetEnvironmentVariableA(name, text, (DWORD)size);
+   if (!n)
+      return false;
+   /* Too long for any accepted value: the log line says that, not the value. */
+   if (n >= size)
+      radv_wddm2_settings_copy(text, size, "(too long)");
+   return true;
+}
+
+/* The file name of the process image (game.exe), or "" when it cannot be read. */
+static void
+radv_wddm2_settings_image_name(wchar_t *out, size_t size)
+{
+   static wchar_t path[32768];
+   const DWORD n = GetModuleFileNameW(NULL, path, ARRAY_SIZE(path));
+   const wchar_t *base = path;
+
+   out[0] = 0;
+   if (!n || n >= ARRAY_SIZE(path))
+      return;
+   for (const wchar_t *p = path; *p; ++p) {
+      if (*p == L'\\' || *p == L'/')
+         base = p + 1;
+   }
+   radv_wddm2_settings_wcopy(out, size, base);
+}
+
+static struct radv_wddm2_settings radv_wddm2_process_settings;
+static util_once_flag radv_wddm2_process_settings_once = UTIL_ONCE_FLAG_INIT;
+
+static void
+radv_wddm2_read_process_settings(void)
+{
+   static wchar_t name[RADV_WDDM2_SETTINGS_MAX_APP];
+   const struct radv_wddm2_setting_sources sources = {
+      NULL, radv_wddm2_settings_system_registry, radv_wddm2_settings_system_environment};
+   char line[512];
+
+   radv_wddm2_settings_image_name(name, ARRAY_SIZE(name));
+   radv_wddm2_settings_resolve(name, &sources, &radv_wddm2_process_settings);
+   for (unsigned i = 0; i < radv_wddm2_process_settings.rejection_count; ++i) {
+      if (radv_wddm2_settings_format_rejection(&radv_wddm2_process_settings.rejections[i], line,
+                                               sizeof(line)) > 0)
+         amdgpu_wddm_log("%s\n", line);
+   }
+   if (radv_wddm2_settings_format_effective(&radv_wddm2_process_settings, 0, line, sizeof(line)) > 0)
+      amdgpu_wddm_log("%s\n", line);
+}
+
+/* Read once per process, at the first call, with the log lines of that reading. Every route of
+ * this ICD applies all four settings, so the effective line marks none of them not-applied.
+ */
+const struct radv_wddm2_settings *
+radv_wddm2_app_settings(void)
+{
+   util_call_once(&radv_wddm2_process_settings_once, radv_wddm2_read_process_settings);
+   return &radv_wddm2_process_settings;
+}
+
+/* The present overrides of the settings, for both routes (wsi_win32_present_policy.h). */
+static void
+radv_wddm2_wsi_present_settings(struct wsi_device *wsi)
+{
+   const struct radv_wddm2_settings *s = radv_wddm2_app_settings();
+   struct wsi_win32_present_settings *p = &wsi->win32.present_settings;
+
+   memset(p, 0, sizeof(*p));
+   if (radv_wddm2_settings_has(s, RADV_WDDM2_SETTING_VSYNC)) {
+      p->vsync_set = true;
+      p->vsync = s->values[RADV_WDDM2_SETTING_VSYNC].value != 0;
+   }
+   if (radv_wddm2_settings_has(s, RADV_WDDM2_SETTING_FRAME_RATE_LIMIT))
+      p->frame_rate_limit = s->values[RADV_WDDM2_SETTING_FRAME_RATE_LIMIT].value;
+   if (radv_wddm2_settings_has(s, RADV_WDDM2_SETTING_MAX_FRAME_LATENCY))
+      p->max_frame_latency = s->values[RADV_WDDM2_SETTING_MAX_FRAME_LATENCY].value;
+}
+
 static void
 radv_wddm2_wsi_route_log(VkDevice _device, const char *line)
 {
@@ -455,6 +577,10 @@ void
 radv_wddm2_wsi_init(struct radeon_winsys *_ws, struct wsi_device *wsi)
 {
    struct radv_wddm2_winsys *ws = radv_wddm2_winsys(_ws);
+
+   /* A hosted device never presents: its shell applies the settings. */
+   if (ws->host.dispatch == NULL)
+      radv_wddm2_wsi_present_settings(wsi);
 
    if (ws->bc250) {
       const struct radv_wddm2_wsi_route_choice choice = radv_wddm2_wsi_read_route();

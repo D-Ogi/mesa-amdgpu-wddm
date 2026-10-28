@@ -37,6 +37,7 @@
 #include "vk_pipeline_cache.h"
 #include "vk_util.h"
 #ifdef _WIN32
+#include "winsys/wddm2/radv_wddm2_app_settings.h"
 #include "winsys/wddm2/radv_wddm2_winsys_public.h"
 #else
 #include "winsys/amdgpu/radv_amdgpu_winsys_public.h"
@@ -1703,14 +1704,24 @@ radv_CreateDevice(VkPhysicalDevice physicalDevice, const VkDeviceCreateInfo *pCr
 
 #ifdef AMDGPU_WDDM_LAB_FLAVOUR
    device->force_aniso = MIN2(16, (int)debug_get_num_option("RADV_TEX_ANISO", -1));
-#else
-   /* amdgpu-wddm BD-167: the release flavour forces no anisotropy filter. The control application's Anisotropy
-    * setting reaches the D3D11 and D3D12 engines through their own options, never through this variable. */
-   device->force_aniso = -1;
-#endif
    if (device->force_aniso >= 0) {
       fprintf(stderr, "radv: Forcing anisotropy filter to %ix\n", 1 << util_logbase2(device->force_aniso));
    }
+#else
+   /* amdgpu-wddm BD-167: the release flavour reads no RADV_TEX_ANISO. */
+   device->force_aniso = -1;
+#endif
+#ifdef _WIN32
+   /* The Anisotropy setting of the control application (radv_wddm2_app_settings.h), for a device
+    * of this ICD that a Vulkan or OpenGL application made. A hosted device belongs to a D3D shell,
+    * which gives the setting to its own engine. The variable above wins in the lab flavour.
+    */
+   if (device->force_aniso < 0 && !instance->bc250_host.dispatch) {
+      const struct radv_wddm2_settings *settings = radv_wddm2_app_settings();
+      if (radv_wddm2_settings_has(settings, RADV_WDDM2_SETTING_ANISOTROPY))
+         device->force_aniso = (int)settings->values[RADV_WDDM2_SETTING_ANISOTROPY].value;
+   }
+#endif
 
    device->vk.sync = device->ws->get_sync_provider(device->ws);
 

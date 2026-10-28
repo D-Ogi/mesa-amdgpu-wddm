@@ -33,6 +33,7 @@
 #include "vk_util.h"
 #include <vulkan/vulkan.h>
 #include <vulkan/vk_icd.h>
+#include "wsi_win32_present_policy.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -180,6 +181,11 @@ struct wsi_device {
        */
       const char *init_failure;
       long init_hr;
+      /* The present overrides of the per-application graphics settings, on both routes: VSync,
+       * FrameRateLimit and MaxFrameLatency (wsi_win32_present_policy.h). All zero keeps the
+       * application's own presentation.
+       */
+      struct wsi_win32_present_settings present_settings;
    } win32;
 
    struct {
