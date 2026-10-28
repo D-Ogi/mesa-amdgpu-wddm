@@ -20,8 +20,9 @@
 static INIT_ONCE bc250_config_once = INIT_ONCE_STATIC_INIT;
 static struct Bc250Config bc250_config;
 
-/* The trial environment is read only by a lab build (BD-167). The release flavour reads none of its variables
- * and behaves as with every one unset; its configuration is the registry's. */
+/* The trial environment is read only by a lab build (BD-167), and so are the registry values IcdPath,
+ * DiagnosticsDirectory and Diagnostics under BC250_HOSTED_UMD_KEY (BD-256). The release flavour reads none of
+ * them: it loads the ICD next to this DLL, and its diagnostics are off. */
 #if defined(AMDGPU_WDDM_LAB_FLAVOUR)
 /* A present environment variable that fits the buffer. */
 static bool
@@ -45,7 +46,6 @@ EnvSaysOff(const char *name)
    char value[8] = {};
    return EnvValue(name, value, sizeof value) && !strcmp(value, "0");
 }
-#endif
 
 static bool
 RegistryDword(const wchar_t *name, DWORD *value)
@@ -64,6 +64,7 @@ RegistryString(const wchar_t *name, wchar_t *out, DWORD chars)
    return RegGetValueW(HKEY_LOCAL_MACHINE, BC250_HOSTED_UMD_KEY, name, RRF_RT_REG_SZ,
                        NULL, out, &size) == ERROR_SUCCESS && out[0];
 }
+#endif
 
 /* The directory of this DLL, whatever its registered path. */
 static bool
@@ -112,13 +113,13 @@ ResolveIcd(struct Bc250Config *c)
          c->icd_status = HRESULT_FROM_WIN32(ERROR_NO_UNICODE_TRANSLATION);
          return;
       }
-   } else
-#endif
-   if (RegistryString(L"IcdPath", path, MAX_PATH)) {
+   } else if (RegistryString(L"IcdPath", path, MAX_PATH)) {
       c->icd_source = "registry";
       c->icd_status = AnsiPath(path, c->icd_path, sizeof c->icd_path);
       if (FAILED(c->icd_status)) return;
-   } else {
+   } else
+#endif
+   {
       c->icd_source = "module-directory";
       if (!c->module_directory[0] ||
           _snwprintf_s(path, MAX_PATH, _TRUNCATE, L"%ls\\%ls", c->module_directory, BC250_HOSTED_ICD_FILE) < 0) {
@@ -139,16 +140,13 @@ ResolveIcd(struct Bc250Config *c)
    }
 }
 
+#if defined(AMDGPU_WDDM_LAB_FLAVOUR)
 /* With diagnostics on, stderr (shared with the ICD through the UCRT) goes to a per-process file. */
 static void
 OpenDiagnosticsLog(struct Bc250Config *c)
 {
    wchar_t directory[MAX_PATH] = {};
-#if defined(AMDGPU_WDDM_LAB_FLAVOUR)
    const bool fromEnvironment = EnvValueW(L"BC250_UMD_DIAG_DIR", directory, MAX_PATH);
-#else
-   const bool fromEnvironment = false;
-#endif
    if (!fromEnvironment && !RegistryString(L"DiagnosticsDirectory", directory, MAX_PATH)) {
       if (!c->module_directory[0] ||
           _snwprintf_s(directory, MAX_PATH, _TRUNCATE, L"%ls\\logs", c->module_directory) < 0)
@@ -171,6 +169,7 @@ OpenDiagnosticsLog(struct Bc250Config *c)
       c->log_path[0] = 0;
    }
 }
+#endif
 
 static BOOL CALLBACK
 ResolveConfig(PINIT_ONCE, PVOID, PVOID *)
@@ -186,24 +185,25 @@ ResolveConfig(PINIT_ONCE, PVOID, PVOID *)
    if (!ModuleDirectory(c->module_directory, MAX_PATH))
       c->module_directory[0] = 0;
 
-   DWORD registry = 0;
 #if defined(AMDGPU_WDDM_LAB_FLAVOUR)
+   DWORD registry = 0;
    char env[8] = {};
    if (EnvValue("BC250_UMD_DIAG", env, sizeof env))
       c->diagnostics = !strcmp(env, "1");
-   else
-#endif
-   if (RegistryDword(L"Diagnostics", &registry))
+   else if (RegistryDword(L"Diagnostics", &registry))
       c->diagnostics = registry != 0;
-#if defined(AMDGPU_WDDM_LAB_FLAVOUR)
    /* Full entrypoint tracing implies diagnostics: without them it would have nowhere to go. */
    if (EnvValue("BC250_UMD_VERBOSE", env, sizeof env) && !strcmp(env, "1"))
       c->diagnostics = true;
+#else
+   c->diagnostics = false;
 #endif
 
    bc250_diag_enabled = c->diagnostics;
+#if defined(AMDGPU_WDDM_LAB_FLAVOUR)
    if (c->diagnostics)
       OpenDiagnosticsLog(c);
+#endif
 
    ResolveIcd(c);
    BC250_DIAG("BC250 hosted UMD config pid=%lu hosted_render=%u runtime_probe=%u icd_source=%s icd=%s icd_status=%08lx\n",
