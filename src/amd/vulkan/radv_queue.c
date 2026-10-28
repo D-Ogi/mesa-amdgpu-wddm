@@ -1255,7 +1255,29 @@ radv_update_preamble_cs(struct radv_queue_state *queue, struct radv_device *devi
     * running waves. */
    const enum radv_preamble_wait wait = radv_preamble_idle_wait(ws);
    const bool no_wait = wait != RADV_PREAMBLE_WAIT;
+#if defined(AMDGPU_WDDM_LAB_FLAVOUR)
+   const int64_t wait_start = os_time_get_nano();
+#endif
    const bool old_idle = no_wait || !queue->initial_full_flush_preamble_cs || ws->ctx_wait_idle(hw_ctx, ip, 0);
+#if defined(AMDGPU_WDDM_LAB_FLAVOUR)
+   const uint64_t wait_ns = os_time_get_nano() - wait_start;
+   /* The destroys below must return at once when the winsys skips the wait: the release of a BO that
+    * queued work still uses is deferred by the kernel, not done on this thread. A long destroy here means
+    * the queue wait moved into the destroy call, and the BD-254 deadlock is possible again. */
+   uint64_t destroy_ns = 0, destroy_max_ns = 0;
+   unsigned destroy_count = 0;
+#define RADV_PREAMBLE_DESTROY(call)                                                                                    \
+   do {                                                                                                                \
+      const int64_t start_ = os_time_get_nano();                                                                      \
+      call;                                                                                                            \
+      const uint64_t ns_ = os_time_get_nano() - start_;                                                               \
+      destroy_ns += ns_;                                                                                               \
+      destroy_max_ns = MAX2(destroy_max_ns, ns_);                                                                      \
+      destroy_count++;                                                                                                 \
+   } while (0)
+#else
+#define RADV_PREAMBLE_DESTROY(call) call
+#endif
    if (!old_idle)
       fprintf(stderr, "radv: queue not idle, keeping the replaced preamble objects\n");
 
@@ -1278,16 +1300,17 @@ radv_update_preamble_cs(struct radv_queue_state *queue, struct radv_device *devi
               wait == RADV_PREAMBLE_WAIT_SKIPPED_BY_SWITCH   ? ", queue wait skipped by BC250_PREAMBLE_NO_IDLE_WAIT"
               : wait == RADV_PREAMBLE_WAIT_SKIPPED_BY_WINSYS ? ", queue wait skipped: the release waits for the queued work"
                                                              : "");
+   fflush(stderr);
 #endif
 
    if (queue->initial_full_flush_preamble_cs && old_idle)
-      radv_destroy_cmd_stream(device, queue->initial_full_flush_preamble_cs);
+      RADV_PREAMBLE_DESTROY(radv_destroy_cmd_stream(device, queue->initial_full_flush_preamble_cs));
 
    if (queue->initial_preamble_cs && old_idle)
-      radv_destroy_cmd_stream(device, queue->initial_preamble_cs);
+      RADV_PREAMBLE_DESTROY(radv_destroy_cmd_stream(device, queue->initial_preamble_cs));
 
    if (queue->continue_preamble_cs && old_idle)
-      radv_destroy_cmd_stream(device, queue->continue_preamble_cs);
+      RADV_PREAMBLE_DESTROY(radv_destroy_cmd_stream(device, queue->continue_preamble_cs));
 
    queue->initial_full_flush_preamble_cs = dest_cs[0];
    queue->initial_preamble_cs = dest_cs[1];
@@ -1296,7 +1319,7 @@ radv_update_preamble_cs(struct radv_queue_state *queue, struct radv_device *devi
    if (scratch_bo != queue->scratch_bo) {
       if (queue->scratch_bo && old_idle) {
          radv_rmv_log_command_buffer_bo_destroy(device, queue->scratch_bo);
-         radv_bo_destroy(device, NULL, queue->scratch_bo);
+         RADV_PREAMBLE_DESTROY(radv_bo_destroy(device, NULL, queue->scratch_bo));
       }
       queue->scratch_bo = scratch_bo;
    }
@@ -1304,7 +1327,7 @@ radv_update_preamble_cs(struct radv_queue_state *queue, struct radv_device *devi
    if (compute_scratch_bo != queue->compute_scratch_bo) {
       if (queue->compute_scratch_bo && old_idle) {
          radv_rmv_log_command_buffer_bo_destroy(device, queue->compute_scratch_bo);
-         radv_bo_destroy(device, NULL, queue->compute_scratch_bo);
+         RADV_PREAMBLE_DESTROY(radv_bo_destroy(device, NULL, queue->compute_scratch_bo));
       }
       queue->compute_scratch_bo = compute_scratch_bo;
    }
@@ -1312,7 +1335,7 @@ radv_update_preamble_cs(struct radv_queue_state *queue, struct radv_device *devi
    if (esgs_ring_bo != queue->esgs_ring_bo) {
       if (queue->esgs_ring_bo && old_idle) {
          radv_rmv_log_command_buffer_bo_destroy(device, queue->esgs_ring_bo);
-         radv_bo_destroy(device, NULL, queue->esgs_ring_bo);
+         RADV_PREAMBLE_DESTROY(radv_bo_destroy(device, NULL, queue->esgs_ring_bo));
       }
       queue->esgs_ring_bo = esgs_ring_bo;
    }
@@ -1320,16 +1343,28 @@ radv_update_preamble_cs(struct radv_queue_state *queue, struct radv_device *devi
    if (gsvs_ring_bo != queue->gsvs_ring_bo) {
       if (queue->gsvs_ring_bo && old_idle) {
          radv_rmv_log_command_buffer_bo_destroy(device, queue->gsvs_ring_bo);
-         radv_bo_destroy(device, NULL, queue->gsvs_ring_bo);
+         RADV_PREAMBLE_DESTROY(radv_bo_destroy(device, NULL, queue->gsvs_ring_bo));
       }
       queue->gsvs_ring_bo = gsvs_ring_bo;
    }
 
    if (descriptor_bo != queue->descriptor_bo) {
       if (queue->descriptor_bo && old_idle)
-         radv_bo_destroy(device, NULL, queue->descriptor_bo);
+         RADV_PREAMBLE_DESTROY(radv_bo_destroy(device, NULL, queue->descriptor_bo));
       queue->descriptor_bo = descriptor_bo;
    }
+#undef RADV_PREAMBLE_DESTROY
+
+#if defined(AMDGPU_WDDM_LAB_FLAVOUR)
+   if (destroy_count || wait_ns >= 1000000) {
+      fprintf(stderr,
+              "radv: preamble replaced: queue wait %llu us, %u old objects destroyed in %llu us, longest destroy "
+              "%llu us\n",
+              (unsigned long long)(wait_ns / 1000), destroy_count, (unsigned long long)(destroy_ns / 1000),
+              (unsigned long long)(destroy_max_ns / 1000));
+      fflush(stderr);
+   }
+#endif
 
    queue->tess_rings_bo = tess_rings_bo;
    queue->task_rings_bo = task_rings_bo;
