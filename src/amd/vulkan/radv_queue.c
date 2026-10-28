@@ -979,7 +979,21 @@ radv_update_preamble_cs(struct radv_queue_state *queue, struct radv_device *devi
       radv_rmv_log_command_buffer_bo_create(device, ge_rings_bo, 0, 0, pdev->info.total_attribute_pos_prim_ring_size);
    }
 
-   if (!queue->ring_info.gds && needs->gds) {
+   if (!queue->ring_info.gds && needs->gds && !ws->supports_gds) {
+      /* BD-119: RADEON_DOMAIN_GDS is not GDS on this winsys. The allocation succeeds as ordinary GTT
+       * memory and the submission still runs with a zero-size GDS partition, so a shader's GDS access
+       * would wait forever. Allocate nothing and say so once. Nothing in the preamble reads this
+       * buffer: it exists only so that a kernel that programs the partition sees it. The emulated
+       * pipeline-statistics queries of radv_query.c, the only users on gfx1013, are off without GDS. */
+      static bool said;
+      if (!said) {
+         said = true;
+         fprintf(stderr, "radv/bc250: this winsys has no GDS; no GDS buffer is allocated. A shader that "
+                         "still executes a GDS access here would not retire (BD-119).\n");
+      }
+   }
+
+   if (!queue->ring_info.gds && needs->gds && ws->supports_gds) {
       assert(pdev->info.gfx_level == GFX10 || pdev->info.gfx_level == GFX10_3);
 
       /* 4 streamout GDS counters.
@@ -998,7 +1012,18 @@ radv_update_preamble_cs(struct radv_queue_state *queue, struct radv_device *devi
          goto fail;
    }
 
-   if (!queue->ring_info.gds_oa && needs->gds_oa) {
+   if (!queue->ring_info.gds_oa && needs->gds_oa && !ws->supports_gds) {
+      /* BD-119: RADEON_DOMAIN_OA is the ordered-append side of the same gap, and nothing writes
+       * GDS_OA_VMID<n>. Nothing on gfx1013 reaches here today (gds_oa comes from GFX11 NGG streamout);
+       * the guard keeps it from becoming the next BD-119. */
+      static bool said;
+      if (!said) {
+         said = true;
+         fprintf(stderr, "radv/bc250: this winsys has no GDS OA; no OA buffer is allocated (BD-119).\n");
+      }
+   }
+
+   if (!queue->ring_info.gds_oa && needs->gds_oa && ws->supports_gds) {
       assert(pdev->info.gfx_level >= GFX10 && pdev->info.gfx_level < GFX12);
 
       result = radv_bo_create(device, NULL, 1, 1, RADEON_DOMAIN_OA, ring_bo_flags, RADV_BO_PRIORITY_SCRATCH, 0, true,
