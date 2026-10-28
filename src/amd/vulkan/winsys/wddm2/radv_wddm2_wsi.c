@@ -28,7 +28,12 @@
 #include <unknwn.h>
 #include <directx/d3d12.h>
 
+#include <stdlib.h>
+
 #include "radv_device.h"
+#include "radv_wddm2_registry.h"
+#include "radv_wddm2_wsi_x86_route.h"
+#include "util/amdgpu_wddm_stdio.h"
 #include "vk_dxgi.h"
 #include "wsi_common.h"
 
@@ -67,10 +72,29 @@ radv_wddm2_wsi_needs_blits(VkDevice _device)
    return true;
 }
 
+/* The route switch of the x64 system ICD, read here so that the log line says what was asked
+ * (radv_wddm2_wsi_x86_route.h). This ICD presents through GDI whatever the switch says.
+ */
+static void
+radv_wddm2_wsi_log_route(void)
+{
+   char reg[64];
+   const char *reg_value =
+      radv_wddm2_read_hklm_sz("SOFTWARE\\amdgpu-wddm\\Vulkan", "WsiRoute", reg, sizeof(reg));
+   const struct radv_wddm2_wsi_x86_route r =
+      radv_wddm2_wsi_x86_route_choose(getenv("AMDGPU_WDDM_VK_WSI"), reg_value);
+   amdgpu_wddm_log("BC250 WSI: route=gdi asked=%s source=%s%s reason=%s\n",
+                   radv_wddm2_wsi_x86_asked_name(r.asked), r.source, r.invalid ? " (invalid value)" : "",
+                   r.reason);
+}
+
 void
 radv_wddm2_wsi_init(struct radeon_winsys *ws, struct wsi_device *wsi)
 {
    if (radv_wddm2_winsys(ws)->bc250) {
+      /* A hosted device never presents: no line for it, as on x64. */
+      if (!radv_wddm2_winsys(ws)->host.dispatch)
+         radv_wddm2_wsi_log_route();
       wsi->sw = true;
       wsi->blit = NULL;
       return;
