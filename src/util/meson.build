@@ -284,9 +284,10 @@ files_xmlconfig += custom_target(
   'driconf_static.h',
   input: ['driconf_static.py'] + files_drirc,
   output: 'driconf_static.h',
+  # Without XML configuration, the static table is the only driconf: fail on what it drops.
   command: [
     prog_python, '@INPUT@', '@OUTPUT@',
-  ],
+  ] + (use_xmlconfig ? [] : ['--strict']),
 )
 
 format_srgb = custom_target(
