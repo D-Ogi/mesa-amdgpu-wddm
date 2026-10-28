@@ -33,6 +33,7 @@
 #include "vk_util.h"
 #include <vulkan/vulkan.h>
 #include <vulkan/vk_icd.h>
+#include "wsi_win32_present_policy.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -151,6 +152,11 @@ struct wsi_device {
       VkResult (*create_image_memory)(VkDevice device, void *resource,
                                       const VkAllocationCallbacks *alloc,
                                       VkDeviceMemory *out);
+      /* The present overrides of the per-application graphics settings (the amdgpu-wddm BC-250
+       * port): VSync, FrameRateLimit and MaxFrameLatency (wsi_win32_present_policy.h). All zero
+       * keeps the application's own presentation.
+       */
+      struct wsi_win32_present_settings present_settings;
    } win32;
 
    struct {
