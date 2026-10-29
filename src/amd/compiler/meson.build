@@ -114,7 +114,7 @@ if get_option('build-aco-dot4-count')
     include_directories : [inc_include, inc_src, inc_amd, inc_amd_common],
     link_with : [libamd_common, libamd_common_llvm],
     dependencies : [
-      idep_aco, idep_nir, idep_mesautil, idep_amd_generated_headers, dep_llvm, dep_thread,
+      idep_aco, idep_nir, idep_vtn, idep_mesautil, idep_amd_generated_headers, dep_llvm, dep_thread,
       dep_valgrind,
     ],
     cpp_args : [cpp_args_aco, cpp_msvc_compat_args],
