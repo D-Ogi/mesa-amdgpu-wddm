@@ -1798,6 +1798,7 @@ visit_alu_instr(isel_context* ctx, nir_alu_instr* instr)
       }
       break;
    }
+   case nir_op_imul24:
    case nir_op_imul24_relaxed: {
       if (dst.regClass() == s1) {
          emit_sop2_instruction(ctx, instr, aco_opcode::s_mul_i32, dst, false, 0x3);
@@ -1805,6 +1806,22 @@ visit_alu_instr(isel_context* ctx, nir_alu_instr* instr)
          emit_vop2_instruction(ctx, instr, aco_opcode::v_mul_i32_i24, dst, true);
       } else {
          isel_err(&instr->instr, "Unimplemented NIR instr bit size");
+      }
+      break;
+   }
+   case nir_op_imad24_ir3: {
+      if (dst.regClass() == v1) {
+         emit_vop3a_instruction(ctx, instr, aco_opcode::v_mad_i32_i24, dst, false, 3);
+      } else if (dst.regClass() == s1) {
+         /* EXP-007 creates this op only from sign-extended i8 sources, so a
+          * full scalar multiply has the same product as signed MAD24. */
+         Temp src0 = get_alu_src(ctx, instr->src[0]);
+         Temp src1 = get_alu_src(ctx, instr->src[1]);
+         Temp src2 = get_alu_src(ctx, instr->src[2]);
+         Temp product = bld.sop2(aco_opcode::s_mul_i32, bld.def(s1), src0, src1);
+         bld.sop2(aco_opcode::s_add_u32, Definition(dst), bld.def(s1, scc), product, src2);
+      } else {
+         isel_err(&instr->instr, "EXP-007 MAD24 diagnostic only supports a 32-bit result");
       }
       break;
    }
