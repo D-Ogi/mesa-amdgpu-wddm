@@ -178,6 +178,20 @@ print_hex_data(FILE *fp, const void *data, uint32_t size)
    abort();
 }
 
+/* BD-226: the local budget query of radv_wddm2_winsys.c, which this test does
+ * not link, on the lines whose command streams can go to CPU-visible VRAM. It
+ * fails, so radv_wddm2_cs_domain answers GTT; a line without the query does not
+ * reference it. */
+bool radv_wddm2_query_local(struct radeon_winsys *ws, uint64_t *budget, uint64_t *usage);
+bool
+radv_wddm2_query_local(struct radeon_winsys *ws, uint64_t *budget, uint64_t *usage)
+{
+   (void)ws;
+   *budget = 0;
+   *usage = 0;
+   return false;
+}
+
 /* The application fences of a queue carry these types; no test makes one. */
 const struct vk_sync_type vk_wddm2_monitored_fence_type = {0};
 const struct vk_sync_type vk_wddm2_monitored_fence_hosted_type = {0};
