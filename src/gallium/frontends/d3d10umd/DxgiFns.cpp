@@ -215,40 +215,31 @@ HRESULT Bc250EnsureSurface(Device *device, Resource *resource)
    return S_OK;
 }
 
-HRESULT APIENTRY
-_Present(DXGI_DDI_ARG_PRESENT *pPresentData)
+/*
+ * The two steps every present of this driver takes around Bc250EnsureSurface:
+ * the virtual context the present callback is submitted on, created at the
+ * first present, and the flush that puts the present after the rendering it
+ * shows. On the hosted path the order is a GPU wait the present context makes
+ * (Bc250QueuePresentWait), which Bc250SignalPresent closes after the callback;
+ * on the CPU path the rendering is finished on the CPU. _Present and
+ * Bc250PresentMultiplaneOverlay share them, so the two cannot drift apart.
+ */
+static HRESULT
+Bc250PresentContext(Device *device)
 {
+   if (device->hContext) return S_OK;
+   D3DDDICB_CREATECONTEXTVIRTUAL create = {};
+   create.EngineAffinity = 1;
+   HRESULT hr = device->KTCallbacks.pfnCreateContextVirtualCb(device->hDevice, &create);
+   DebugPrintf("BC250 CreateContextVirtual %08lx\n", hr);
+   if (FAILED(hr)) return hr;
+   device->hContext = create.hContext;
+   return S_OK;
+}
 
-   LOG_ENTRYPOINT();
-
-   struct Device *device = CastDevice(pPresentData->hDevice);
-   Resource *pSrcResource = CastResource(pPresentData->hSurfaceToPresent);
-
-   /* E26 software baseline: use the runtime's WDDM callbacks, not GetDC.
-    * LB7A is the existing linear-surface contract in bc250kmd/wddm.c.
-    * This path remains diagnostic until sharing, residency and flips pass. */
-   if (!device->KTCallbacks.pfnCreateContextVirtualCb ||
-       !device->KTCallbacks.pfnLock2Cb || !device->KTCallbacks.pfnUnlock2Cb)
-      return E_NOTIMPL;
-   if (!device->hContext) {
-      D3DDDICB_CREATECONTEXTVIRTUAL create = {};
-      create.EngineAffinity = 1;
-      HRESULT hr = device->KTCallbacks.pfnCreateContextVirtualCb(device->hDevice, &create);
-      DebugPrintf("BC250 CreateContextVirtual %08lx\n", hr);
-      if (FAILED(hr)) return hr;
-      device->hContext = create.hContext;
-   }
-   struct pipe_resource *resource = pSrcResource->resource;
-   UINT width = resource->width0, height = resource->height0;
-   if (!width || !height || width > 8192 || height > 8192) return E_INVALIDARG;
-   if (resource->format != PIPE_FORMAT_B8G8R8A8_UNORM &&
-       resource->format != PIPE_FORMAT_B8G8R8X8_UNORM &&
-       resource->format != PIPE_FORMAT_R8G8B8A8_UNORM &&
-       resource->format != PIPE_FORMAT_R8G8B8X8_UNORM) return E_NOTIMPL;
-   HRESULT allocated = Bc250EnsureSurface(device, pSrcResource);
-   if (FAILED(allocated)) return allocated;
-   LARGE_INTEGER renderStart, renderEnd;
-   QueryPerformanceCounter(&renderStart);
+static HRESULT
+Bc250FlushForPresent(Device *device)
+{
    if (device->hosted_state) {
       device->pipe->flush(device->pipe, NULL, 0);
       if (device->pipe->get_device_reset_status &&
@@ -265,6 +256,39 @@ _Present(DXGI_DDI_ARG_PRESENT *pPresentData)
       if (!rendered) return E_FAIL;
       MemoryBarrier();
    }
+   return S_OK;
+}
+
+HRESULT APIENTRY
+_Present(DXGI_DDI_ARG_PRESENT *pPresentData)
+{
+
+   LOG_ENTRYPOINT();
+
+   struct Device *device = CastDevice(pPresentData->hDevice);
+   Resource *pSrcResource = CastResource(pPresentData->hSurfaceToPresent);
+
+   /* E26 software baseline: use the runtime's WDDM callbacks, not GetDC.
+    * LB7A is the existing linear-surface contract in bc250kmd/wddm.c.
+    * This path remains diagnostic until sharing, residency and flips pass. */
+   if (!device->KTCallbacks.pfnCreateContextVirtualCb ||
+       !device->KTCallbacks.pfnLock2Cb || !device->KTCallbacks.pfnUnlock2Cb)
+      return E_NOTIMPL;
+   HRESULT contextHr = Bc250PresentContext(device);
+   if (FAILED(contextHr)) return contextHr;
+   struct pipe_resource *resource = pSrcResource->resource;
+   UINT width = resource->width0, height = resource->height0;
+   if (!width || !height || width > 8192 || height > 8192) return E_INVALIDARG;
+   if (resource->format != PIPE_FORMAT_B8G8R8A8_UNORM &&
+       resource->format != PIPE_FORMAT_B8G8R8X8_UNORM &&
+       resource->format != PIPE_FORMAT_R8G8B8A8_UNORM &&
+       resource->format != PIPE_FORMAT_R8G8B8X8_UNORM) return E_NOTIMPL;
+   HRESULT allocated = Bc250EnsureSurface(device, pSrcResource);
+   if (FAILED(allocated)) return allocated;
+   LARGE_INTEGER renderStart, renderEnd;
+   QueryPerformanceCounter(&renderStart);
+   HRESULT flushed = Bc250FlushForPresent(device);
+   if (FAILED(flushed)) return flushed;
    QueryPerformanceCounter(&renderEnd);
    HRESULT hr;
    DXGIDDICB_PRESENT present = {};
@@ -313,6 +337,79 @@ _Present(DXGI_DDI_ARG_PRESENT *pPresentData)
    device->profileDrawTicks=device->profileDrawMax=device->profileDrawCalls=0;
 
    DebugPrintf("BC250 PresentCb %08lx\n", hr);
+   return hr;
+}
+
+
+/*
+ * Bc250PresentMultiplaneOverlay --
+ *
+ *    The multiplane-overlay present of the WDDM 1.3 DXGI table, for the
+ *    bc250-win router's front (driver/umd/router/front-dxgi.cpp). This
+ *    driver publishes the D3D10.0 DXGI table only, which has no such entry,
+ *    so the front resolves this export and calls it from its own
+ *    pfnPresentMultiplaneOverlay. The caller must hold a device created
+ *    through a DXGI 1.3 or later runtime: only that runtime's
+ *    DXGI_DDI_BASE_CALLBACKS has pfnPresentMultiplaneOverlayCb.
+ *
+ *    It is one present to dxgkrnl, made as _Present makes its own: the
+ *    context, the surface of every enabled plane (Bc250EnsureSurface), the
+ *    flush and the present order, then one pfnPresentMultiplaneOverlayCb,
+ *    then the present signal. The plane attributes go from the DXGI runtime
+ *    to dxgkrnl and the kernel driver decides; this driver maps none of them
+ *    and carries no private data. AllocationInfo has one entry per plane, in
+ *    the order of pPresentPlanes; a disabled plane carries its allocation if
+ *    it names a resource, and zero if it does not.
+ *
+ * ----------------------------------------------------------------------
+ */
+
+extern "C" HRESULT APIENTRY
+Bc250PresentMultiplaneOverlay(DXGI_DDI_ARG_PRESENTMULTIPLANEOVERLAY *args)
+{
+   LOG_ENTRYPOINT();
+
+   if (!args || !args->hDevice || !args->PresentPlaneCount || !args->pPresentPlanes ||
+       args->PresentPlaneCount > DXGI_DDI_MAX_MULTIPLANE_OVERLAY_ALLOCATIONS)
+      return E_INVALIDARG;
+   struct Device *device = CastDevice(args->hDevice);
+   if (!device->pDXGIBaseCallbacks || !device->pDXGIBaseCallbacks->pfnPresentMultiplaneOverlayCb)
+      return DXGI_ERROR_UNSUPPORTED;
+   if (!device->KTCallbacks.pfnCreateContextVirtualCb ||
+       !device->KTCallbacks.pfnLock2Cb || !device->KTCallbacks.pfnUnlock2Cb)
+      return E_NOTIMPL;
+   HRESULT hr = Bc250PresentContext(device);
+   if (FAILED(hr)) return hr;
+
+   DXGIDDICB_PRESENT_MULTIPLANE_OVERLAY present = {};
+   UINT enabled = 0;
+   for (UINT i = 0; i < args->PresentPlaneCount; ++i) {
+      const DXGI_DDI_PRESENT_MULTIPLANE_OVERLAY &plane = args->pPresentPlanes[i];
+      Resource *resource = plane.hResource ? CastResource(plane.hResource) : NULL;
+      if (plane.Enabled && !resource) return E_INVALIDARG;
+      if (resource) {
+         hr = Bc250EnsureSurface(device, resource);
+         if (FAILED(hr)) return hr;
+         present.AllocationInfo[i].PresentAllocation = resource->allocation;
+         present.AllocationInfo[i].SubResourceIndex = plane.SubResourceIndex;
+      }
+      if (plane.Enabled) ++enabled;
+   }
+   /* A present of no enabled plane shows nothing, and dxgkrnl has no plane
+    * to flip. It is refused rather than sent. */
+   if (!enabled) return E_INVALIDARG;
+   present.AllocationInfoCount = args->PresentPlaneCount;
+
+   hr = Bc250FlushForPresent(device);
+   if (FAILED(hr)) return hr;
+   present.pDXGIContext = args->pDXGIContext;
+   present.hContext = device->hContext;
+   hr = device->pDXGIBaseCallbacks->pfnPresentMultiplaneOverlayCb(device->hDevice, &present);
+   if (device->hosted_state && SUCCEEDED(hr)) hr = Bc250SignalPresent(device);
+   ++device->profilePresents;
+   Bc250AuditPresent(device);
+   BC250_REPORT(FAILED(hr), "BC250 PresentMultiplaneOverlay planes=%u enabled=%u hr=%08lx\n",
+                args->PresentPlaneCount, enabled, hr);
    return hr;
 }
 

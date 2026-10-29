@@ -43,4 +43,8 @@ HRESULT APIENTRY _QueryResourceResidency( DXGI_DDI_ARG_QUERYRESOURCERESIDENCY * 
 HRESULT APIENTRY _RotateResourceIdentities( DXGI_DDI_ARG_ROTATE_RESOURCE_IDENTITIES * );
 HRESULT APIENTRY _Blt( DXGI_DDI_ARG_BLT * );
 
+/* The multiplane-overlay present the bc250-win router's front calls by name
+ * (DxgiFns.cpp); exported from the DLL, not part of the D3D10.0 DXGI table. */
+extern "C" HRESULT APIENTRY Bc250PresentMultiplaneOverlay( DXGI_DDI_ARG_PRESENTMULTIPLANEOVERLAY * );
+
 #endif

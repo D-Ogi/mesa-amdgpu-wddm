@@ -106,7 +106,9 @@ static void APIENTRY SetErrorCb(D3D10DDI_HRTCORELAYER, HRESULT) {}
 
 // A pipe screen that imports a given number of failures, then succeeds, and
 // keeps the last handle it was given.
-static struct pipe_screen screen;
+// pipe_screen has a const member (caps), so C++ gives it no default constructor: the double is zeroed
+// storage.
+static struct pipe_screen &screen = *(struct pipe_screen *)calloc(1, sizeof(struct pipe_screen));
 static struct pipe_context pipe;
 static UINT importCalls, importFailures;
 static struct winsys_handle lastImport;
