@@ -2048,6 +2048,9 @@ radv_queue_submit_normal(struct radv_queue *queue, struct vk_queue_submit *submi
       if (radv_device_fault_detection_enabled(device)) {
          *step = "hang-check";
          result = radv_check_gpu_hangs(queue, &submit);
+         /* The lost-submit note names this step, not the one after it. */
+         if (result != VK_SUCCESS)
+            goto fail;
       }
       *step = "host-memory";
 
