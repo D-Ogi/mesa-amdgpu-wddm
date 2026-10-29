@@ -472,7 +472,7 @@ sdot_4x8_a_b_madconst = ('imad24_ir3',
                       ('extract_i8', b, 1),
                       ('imul24_relaxed', ('extract_i8', a, 0), ('extract_i8', b, 0)))))
 
-# EXP-035B2: preserve a non-constant accumulator in a direct MAD24 chain.
+# The accumulator is the addend of the first MAD24 of the chain.
 sdot_4x8_a_b_madacc = ('imad24_ir3',
                     ('extract_i8', a, 3),
                     ('extract_i8', b, 3),
@@ -493,19 +493,23 @@ udot_2x16_a_b = ('iadd', ('umul24_relaxed', ('extract_u16', a, 0), ('extract_u16
                          ('umul24_relaxed', ('extract_u16', a, 1), ('extract_u16', b, 1)))
 
 optimizations.extend([
-   # EXP-035B2: fuse through FSR4's explicit iadd(0, OpSDot) wrapper before
-   # the ordinary no-hardware-dot fallback gets a chance to lower the child.
+   # A shader translated from DXIL can add an OpSDot result to 0 and then to
+   # the accumulator. Fuse the two adds into the dot product before the
+   # lowering below lowers it with a zero accumulator. The rule for
+   # iadd(sdot_4x8_iadd(a, b, 0), c) above cannot see through the iadd with 0.
    (('iadd', ('iadd(is_used_once)', 0, ('sdot_4x8_iadd(is_used_once)', '#a', 'b(is_not_const)', 0)), c),
     ('sdot_4x8_iadd', a, b, c), '!options->has_sdot_4x8'),
    (('iadd', ('iadd(is_used_once)', 0, ('sdot_4x8_iadd(is_used_once)', 'a(is_not_const)', '#b', 0)), c),
     ('sdot_4x8_iadd', a, b, c), '!options->has_sdot_4x8'),
 
-   # BC-250/GFX1013: constant x data SDot benefits from a signed MAD24 chain.
-   # Keep data x data on EXP028's balanced MUL24 tree (important for ED7).
-   (('sdot_4x8_iadd', '#a', b, 'c(is_not_const)'), sdot_4x8_a_b_madacc, '!options->has_sdot_4x8'),
-   (('sdot_4x8_iadd', a, '#b', 'c(is_not_const)'), sdot_4x8_a_b_madacc, '!options->has_sdot_4x8'),
-   (('sdot_4x8_iadd', '#a', b, '#c'), ('iadd', sdot_4x8_a_b_madconst, c), '!options->has_sdot_4x8'),
-   (('sdot_4x8_iadd', a, '#b', '#c'), ('iadd', sdot_4x8_a_b_madconst, c), '!options->has_sdot_4x8'),
+   # With a constant operand, a chain of signed MAD24 that ends in the
+   # accumulator. Only for a backend that selects imad24_ir3 (and the imul24
+   # that the imad24_ir3 rules make). Two run-time operands keep the shapes
+   # below.
+   (('sdot_4x8_iadd', '#a', b, 'c(is_not_const)'), sdot_4x8_a_b_madacc, '!options->has_sdot_4x8 && options->has_imad24_ir3'),
+   (('sdot_4x8_iadd', a, '#b', 'c(is_not_const)'), sdot_4x8_a_b_madacc, '!options->has_sdot_4x8 && options->has_imad24_ir3'),
+   (('sdot_4x8_iadd', '#a', b, '#c'), ('iadd', sdot_4x8_a_b_madconst, c), '!options->has_sdot_4x8 && options->has_imad24_ir3'),
+   (('sdot_4x8_iadd', a, '#b', '#c'), ('iadd', sdot_4x8_a_b_madconst, c), '!options->has_sdot_4x8 && options->has_imad24_ir3'),
    (('sdot_4x8_iadd', a, b, c),
     dot_4x8_iadd('imul24_relaxed', 'extract_i8', 'extract_i8', a, b, c),
     '!options->has_sdot_4x8'),
