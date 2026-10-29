@@ -1059,11 +1059,11 @@ radv_wddm2_tracker_page_done_locked(struct radv_wddm2_tracker *tracker)
    tracker->value_map = NULL;
 }
 
-void
+bool
 radv_wddm2_tracker_detach(struct radv_wddm2_winsys *ws, struct radv_wddm2_tracker *tracker, bool retired)
 {
    if (!tracker)
-      return;
+      return false;
    simple_mtx_lock(&ws->deferred.lock);
    assert(tracker->attached);
    /* A CPU waiter holds the fence handle: the queue may not destroy it under the waiter. */
@@ -1095,6 +1095,7 @@ radv_wddm2_tracker_detach(struct radv_wddm2_winsys *ws, struct radv_wddm2_tracke
       radv_wddm2_tracker_unref_locked(tracker);
    }
    simple_mtx_unlock(&ws->deferred.lock);
+   return unretired;
 }
 
 /* BD-212: drops the reference an abandoned tracker kept, once its published work retired. Only the
