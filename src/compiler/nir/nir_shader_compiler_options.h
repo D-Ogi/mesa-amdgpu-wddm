@@ -623,6 +623,12 @@ typedef struct nir_shader_compiler_options {
     */
    bool has_mul24_relaxed;
 
+   /** Backend supports imad24_ir3 and imul24. If set, nir_opt_algebraic may
+    * lower a packed signed dot product with a constant operand to a chain of
+    * imad24_ir3. ir3 creates imad24_ir3 in its own passes and does not need it.
+    */
+   bool has_imad24_ir3;
+
    /** Backend supports umul_16x16. */
    bool has_umul_16x16;
 
