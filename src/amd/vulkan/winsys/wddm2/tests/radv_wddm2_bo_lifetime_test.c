@@ -1370,9 +1370,22 @@ contract(void)
    v2_req(!h.r1_evict && !h.r1_va_free,
           "rule 1 (R1): an internal BO is released by DestroyAllocation2 alone (%u Evicts, %u address frees)",
           h.r1_evict, h.r1_va_free);
+#if BD201_V2
+   /* The decided design (6.7) needs no handoff wait: every submission that
+    * names an internal BO is handed to the OS before the BO's destroy (per-queue
+    * order I1 and the client lifetime contract I2 of the order proof). No
+    * submission of this test names a BO it destroys, so a DestroyAllocation2
+    * while another submission is inside SubmitCommand is legal here. An Evict
+    * or an address free there is still a breach of rule 1 above. */
+   if (h.in_window)
+      note("%u release call(s) came while a submission that does not name the BO had not returned from the "
+           "host's SubmitCommand (legal under I1 and I2)",
+           h.in_window);
+#else
    check(!h.in_window,
          "rule 1: nothing was released while a submission had not returned from the host's SubmitCommand (%u)",
          h.in_window);
+#endif
    check(!h.unexpected && !h.dead_alloc_use && !h.dead_fence_use,
          "no unknown host call, no call naming a destroyed object (%u unknown, %u allocations, %u fences, first "
          "fence handle 0x%X)",
@@ -2256,7 +2269,16 @@ test_virtual_bo(void)
  * returned. They do not meet the other R1 clause, because they release the BO
  * later with an Evict and an address free. A version that destroyed the
  * allocation at once, as both do whenever they cannot record an entry, would
- * fail the two clauses here, which is what they are for. */
+ * fail the two clauses here, which is what they are for.
+ *
+ * The decided design (6.7, after the order proof and its review) dropped the
+ * handoff wait: on every line a submission is handed to the OS inline, under
+ * the queue lock, before its vkQueueSubmit returns (I1), and the client may
+ * destroy a BO only after the submissions that name it completed (I2). The
+ * parked submission here names no BO of the test, so under BD201_V2 a
+ * DestroyAllocation2 inside its window is legal and is a note; the destroy
+ * must still capture the value the kernel is holding, and an Evict or an
+ * address free inside the window is still a breach. */
 struct parker {
    struct radv_wddm2_winsys *ws;
    struct radeon_winsys_ctx *ctx;
@@ -2307,10 +2329,14 @@ test_handoff_race(void)
          "the destroy evicts nothing and frees no VA while that submission is in the kernel");
    note("the allocation is %s and the destroy %s the OS", alloc_live(handle) ? "live" : "gone",
         s->released ? "was handed to" : "was not handed to");
-   v2_req(!s->released,
-          "6.2: no DestroyAllocation2 of it either until that submit call returns (released %d)", s->released);
+#if BD201_V2
+   note("6.7: the parked submission does not name this BO, so its DestroyAllocation2 may go to the OS now "
+        "(released %d, %u calls inside the submit window)",
+        s->released, h.in_window - window_before);
+#else
    check(h.in_window == window_before, "6.2: nothing of it was released inside the submit window (%u calls)",
          h.in_window - window_before);
+#endif
 
    SetEvent(h.park_release);
    if (WaitForSingleObject(t, 30000) != WAIT_OBJECT_0)
@@ -2351,12 +2377,21 @@ test_handoff_race(void)
    const unsigned attempts = disarm_allocator();
    fail_cpu_waits(false);
    note("that destroy made %u allocation attempts, all refused, with the kernel holding a submission", attempts);
+#if BD201_V2
+   check(!q->evicted && !q->va_freed,
+         "a destroy that can record nothing evicts nothing and frees no address there (%d/%d)", q->evicted,
+         q->va_freed);
+   note("6.7: its DestroyAllocation2 %s inside the submit window (%u calls), legal for a BO the parked "
+        "submission does not name",
+        q->released ? "went to the OS" : "did not go to the OS", h.in_window - window_starved);
+#else
    check(h.in_window == window_starved,
          "a destroy that can record nothing still releases nothing inside the submit window (%u calls)",
          h.in_window - window_starved);
    check(!q->evicted && !q->va_freed && !q->released,
          "no Evict, no address free and no DestroyAllocation2 of it there (%d/%d/%d)", q->evicted, q->va_freed,
          q->released);
+#endif
    SetEvent(h.park_release);
    if (WaitForSingleObject(t2, 30000) != WAIT_OBJECT_0)
       abort();
