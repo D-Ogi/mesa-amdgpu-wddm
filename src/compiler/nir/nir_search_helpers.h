@@ -266,6 +266,52 @@ is_ult_0xfffc07fc(UNUSED const nir_search_state *state, const nir_alu_instr *ins
    return is_ult(instr, src, num_components, swizzle, 0xfffc07fcU);
 }
 
+/**
+ * Is the constant accumulator of a saturating packed dot product one that can
+ * never saturate?
+ *
+ * The dot product itself is a sum of four products of 8-bit values, so it lies
+ * in a small interval [lo, hi] around zero that no 32-bit arithmetic can
+ * overflow. Adding a constant accumulator leaves int32 only if the constant is
+ * within hi of INT32_MAX or within -lo of INT32_MIN; everywhere else the
+ * saturation never fires and the plain dot product gives the same result.
+ */
+static inline bool
+is_dot_iadd_sat_noop(const nir_alu_instr *instr, unsigned src, unsigned num_components,
+                     const uint8_t *swizzle, int64_t lo, int64_t hi)
+{
+   /* only constant srcs: */
+   if (!nir_src_is_const(instr->src[src].src))
+      return false;
+
+   for (unsigned i = 0; i < num_components; i++) {
+      const int64_t val = nir_src_comp_as_int(instr->src[src].src, swizzle[i]);
+
+      if (val + hi > INT32_MAX || val + lo < INT32_MIN)
+         return false;
+   }
+
+   return true;
+}
+
+/** Signed 4x8: the dot product is in [-4*128*127, 4*128*128] = [-0xfe00, 0x10000]. */
+static inline bool
+is_sdot_4x8_iadd_sat_noop(UNUSED const nir_search_state *state, const nir_alu_instr *instr,
+                          unsigned src, unsigned num_components,
+                          const uint8_t *swizzle)
+{
+   return is_dot_iadd_sat_noop(instr, src, num_components, swizzle, -0xfe00, 0x10000);
+}
+
+/** Mixed 4x8: the dot product is in [-4*128*255, 4*127*255] = [-0x1fe00, 0x1fa04]. */
+static inline bool
+is_sudot_4x8_iadd_sat_noop(UNUSED const nir_search_state *state, const nir_alu_instr *instr,
+                           unsigned src, unsigned num_components,
+                           const uint8_t *swizzle)
+{
+   return is_dot_iadd_sat_noop(instr, src, num_components, swizzle, -0x1fe00, 0x1fa04);
+}
+
 /** Is the first 5 bits of value unsigned greater than or equal 2? */
 static inline bool
 is_first_5_bits_uge_2(UNUSED const nir_search_state *state, const nir_alu_instr *instr,
