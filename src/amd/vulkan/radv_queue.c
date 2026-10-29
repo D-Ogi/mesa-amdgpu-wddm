@@ -1849,7 +1849,7 @@ radv_get_shader_upload_sync_wait(struct radv_device *device, uint64_t shader_upl
 }
 
 static VkResult
-radv_queue_submit_normal(struct radv_queue *queue, struct vk_queue_submit *submission)
+radv_queue_submit_normal(struct radv_queue *queue, struct vk_queue_submit *submission, const char **step)
 {
    struct radv_device *device = radv_queue_device(queue);
    struct radeon_winsys_ctx *ctx = queue->hw_ctx;
@@ -1860,16 +1860,20 @@ radv_queue_submit_normal(struct radv_queue *queue, struct vk_queue_submit *submi
    uint32_t wait_count = submission->wait_count;
    struct vk_sync_wait *waits = submission->waits;
 
+   /* amdgpu-wddm: *step names the step that ran last, for radv_queue_note_lost_submit. */
+   *step = "preambles";
    result = radv_update_preambles(&queue->state, device, submission->command_buffers, submission->command_buffer_count,
                                   &use_perf_counters, &use_ace, submission->is_protected);
    if (result != VK_SUCCESS)
       return result;
 
    if (use_ace) {
+      *step = "gang-preambles";
       result = radv_update_gang_preambles(queue, submission->is_protected);
       if (result != VK_SUCCESS)
          return result;
    }
+   *step = "host-memory";
 
    const unsigned cmd_buffer_count = submission->command_buffer_count;
    const unsigned max_cs_submission = radv_device_fault_detection_enabled(device) ? 1 : cmd_buffer_count;
@@ -2034,6 +2038,7 @@ radv_queue_submit_normal(struct radv_queue *queue, struct vk_queue_submit *submi
       submit.continue_preamble_count = submit_ace ? num_continue_preambles : num_1q_continue_preambles;
       submit.postamble_count = submit_ace ? num_postambles : num_1q_postambles;
 
+      *step = "cs_submit";
       result = device->ws->cs_submit(ctx, &submit, j == 0 ? wait_count : 0, waits,
                                      last_submit ? submission->signal_count : 0, submission->signals);
 
@@ -2041,8 +2046,10 @@ radv_queue_submit_normal(struct radv_queue *queue, struct vk_queue_submit *submi
          goto fail;
 
       if (radv_device_fault_detection_enabled(device)) {
+         *step = "hang-check";
          result = radv_check_gpu_hangs(queue, &submit);
       }
+      *step = "host-memory";
 
       if (device->tma_bo) {
          radv_check_trap_handler(queue);
@@ -2091,11 +2098,28 @@ radv_queue_handle_fault_state(struct radv_queue *queue)
    radv_report_gpuvm_fault(device);
 }
 
+/* amdgpu-wddm (explorer spin, tester.34): one line for each submission that loses the device, at most 16 for each
+ * process, in both flavours: the call, the step that failed and its own VkResult, before radv_queue_set_lost turns it
+ * into VK_ERROR_DEVICE_LOST. The winsys names its own failures inside cs_submit; a failure outside it (sparse binding,
+ * an empty submission, the preambles, a host allocation, the hang check) lost the device with no line. The line goes
+ * to the amdgpu-wddm stream (amdgpu_wddm_log, u_amdgpu_wddm_stdio.c), which writes only where the process asked for
+ * those lines: the control app's timed switch in both flavours, or AMDGPU_WDDM_LOG in the lab flavour. */
+static void
+radv_queue_note_lost_submit(struct radv_queue *queue, const char *call, const char *step, VkResult result)
+{
+   static uint32_t notes;
+   if (p_atomic_inc_return(&notes) > 16)
+      return;
+   amdgpu_wddm_log("radv/bc250: %s lost the device: step=%s result=%d queue=%p family=%d\n", call, step,
+                   (int)result, (void *)queue, (int)queue->state.qf);
+}
+
 static VkResult
 radv_queue_sparse_submit(struct vk_queue *vqueue, struct vk_queue_submit *submission)
 {
    struct radv_queue *queue = (struct radv_queue *)vqueue;
    struct radv_device *device = radv_queue_device(queue);
+   const char *step = "bind-sparse";
    VkResult result;
 
    /* BD-201 (DESIGN.md 6.7): the winsys hands every submission to the OS inline, under this queue's
@@ -2115,6 +2139,7 @@ radv_queue_sparse_submit(struct vk_queue *vqueue, struct vk_queue_submit *submis
       struct vk_queue_submit queued = *submission;
       if (radv_queue_has_sparse_binds(submission))
          queued.wait_count = 0;
+      step = "empty-submit";
       result = radv_queue_submit_empty(queue, &queued);
       goto fail;
    }
@@ -2122,12 +2147,14 @@ radv_queue_sparse_submit(struct vk_queue *vqueue, struct vk_queue_submit *submis
    /* We do a CPU wait here, in part to avoid more winsys mechanisms. In the likely kernel explicit
     * sync mechanism, we'd need to do a CPU wait anyway. Haven't seen this be a perf issue yet, but
     * we have to make sure the queue always has its submission thread enabled. */
+   step = "cpu-wait";
    result = vk_sync_wait_many(&device->vk, submission->wait_count, submission->waits, 0, UINT64_MAX);
    if (result != VK_SUCCESS)
       goto fail;
 
    /* Ignore all the commandbuffers. They're necessarily empty anyway. */
 
+   step = "cpu-signal";
    for (unsigned i = 0; i < submission->signal_count; ++i) {
       result = vk_sync_signal(&device->vk, submission->signals[i].sync, submission->signals[i].signal_value);
       if (result != VK_SUCCESS)
@@ -2136,6 +2163,7 @@ radv_queue_sparse_submit(struct vk_queue *vqueue, struct vk_queue_submit *submis
 
 fail:
    if (result != VK_SUCCESS) {
+      radv_queue_note_lost_submit(queue, "vkQueueBindSparse", step, result);
       /* When something bad happened during the submission, such as
        * an out of memory issue, it might be hard to recover from
        * this inconsistent state. To avoid this sort of problem, we
@@ -2193,6 +2221,7 @@ radv_queue_submit(struct vk_queue *vqueue, struct vk_queue_submit *submission)
    if (radv_queue_is_unbound(queue))
       return vk_errorf(queue, VK_ERROR_VALIDATION_FAILED, "vkQueueSubmit() on an unbound queue");
 
+   const char *step = "bind-sparse";
    VkResult result = radv_queue_submit_bind_sparse_memory(queue, submission);
    if (result != VK_SUCCESS)
       goto fail;
@@ -2209,9 +2238,10 @@ radv_queue_submit(struct vk_queue *vqueue, struct vk_queue_submit *submission)
       return VK_SUCCESS;
 
    if (!submission->command_buffer_count) {
+      step = "empty-submit";
       result = radv_queue_submit_empty(queue, submission);
    } else {
-      result = radv_queue_submit_normal(queue, submission);
+      result = radv_queue_submit_normal(queue, submission, &step);
    }
 
    if (trace_submit)
@@ -2248,6 +2278,7 @@ radv_queue_submit(struct vk_queue *vqueue, struct vk_queue_submit *submission)
 
 fail:
    if (result != VK_SUCCESS) {
+      radv_queue_note_lost_submit(queue, "vkQueueSubmit", step, result);
       /* When something bad happened during the submission, such as
        * an out of memory issue, it might be hard to recover from
        * this inconsistent state. To avoid this sort of problem, we
