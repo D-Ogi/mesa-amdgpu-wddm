@@ -204,13 +204,18 @@ radv_wddm2_queue_destroy(struct radv_wddm2_queue *queue)
          vk_wddm2_fence_wait(queue->bc250_ws, &queue->bc250_progress);
       /* BD-201: the progress fence goes next, so held BOs stop waiting on it first, and the drain
        * releases those whose work this wait retired. */
-      radv_wddm2_tracker_detach(ws, queue->bc250_tracker, true);
+      const bool kept = radv_wddm2_tracker_detach(ws, queue->bc250_tracker, true);
       queue->bc250_tracker = NULL;
       radv_wddm2_deferred_drain(ws);
-      D3DKMT_DESTROYSYNCHRONIZATIONOBJECT destroy_progress = {
-         .hSyncObject = queue->bc250_progress.handle,
-      };
-      BC250_WDDM_CALL(&ws->host, DestroySynchronizationObject, &destroy_progress);
+      /* BD-212: a tracker that stays for unretired work reads this fence's value page and waits on
+       * its handle until the work retires, so the fence stays with the device. Destroying it here
+       * unmaps the page under the tracker. */
+      if (!kept) {
+         D3DKMT_DESTROYSYNCHRONIZATIONOBJECT destroy_progress = {
+            .hSyncObject = queue->bc250_progress.handle,
+         };
+         BC250_WDDM_CALL(&ws->host, DestroySynchronizationObject, &destroy_progress);
+      }
       queue->bc250_progress.handle = 0;
    }
    free(queue->bc250_ibs);

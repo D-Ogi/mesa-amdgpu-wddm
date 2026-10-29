@@ -116,8 +116,10 @@ struct radv_wddm2_tracker {
 struct radv_wddm2_tracker *radv_wddm2_tracker_attach(struct radv_wddm2_winsys *ws, uint32_t fence,
                                                      const uint64_t *value_map, uint32_t context);
 /* retired: every value the queue signalled has retired, and its fence may go after this call.
- * Otherwise the fence stays with the device and held BOs keep waiting on it. */
-void radv_wddm2_tracker_detach(struct radv_wddm2_winsys *ws, struct radv_wddm2_tracker *tracker, bool retired);
+ * Otherwise the fence stays with the device and held BOs keep waiting on it. Returns true when the
+ * tracker stays for a value that has not retired (BD-212): it still reads the fence's value page and
+ * waits on its handle, so the caller must not destroy the fence. */
+bool radv_wddm2_tracker_detach(struct radv_wddm2_winsys *ws, struct radv_wddm2_tracker *tracker, bool retired);
 
 static inline void
 radv_wddm2_tracker_publish(struct radv_wddm2_tracker *tracker, uint64_t value)
