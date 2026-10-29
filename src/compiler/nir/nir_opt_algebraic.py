@@ -504,12 +504,13 @@ optimizations.extend([
 
    # With a constant operand, a chain of signed MAD24 that ends in the
    # accumulator. Only for a backend that selects imad24_ir3 (and the imul24
-   # that the imad24_ir3 rules make). Two run-time operands keep the shapes
-   # below.
-   (('sdot_4x8_iadd', '#a', b, 'c(is_not_const)'), sdot_4x8_a_b_madacc, '!options->has_sdot_4x8 && options->has_imad24_ir3'),
-   (('sdot_4x8_iadd', a, '#b', 'c(is_not_const)'), sdot_4x8_a_b_madacc, '!options->has_sdot_4x8 && options->has_imad24_ir3'),
-   (('sdot_4x8_iadd', '#a', b, '#c'), ('iadd', sdot_4x8_a_b_madconst, c), '!options->has_sdot_4x8 && options->has_imad24_ir3'),
-   (('sdot_4x8_iadd', a, '#b', '#c'), ('iadd', sdot_4x8_a_b_madconst, c), '!options->has_sdot_4x8 && options->has_imad24_ir3'),
+   # that the imad24_ir3 rules make), and only when at least three such dot
+   # products share the run-time operand (is_shared_sdot_data says why). Two
+   # run-time operands keep the shapes below.
+   (('sdot_4x8_iadd', '#a', 'b(is_shared_sdot_data)', 'c(is_not_const)'), sdot_4x8_a_b_madacc, '!options->has_sdot_4x8 && options->has_imad24_ir3'),
+   (('sdot_4x8_iadd', 'a(is_shared_sdot_data)', '#b', 'c(is_not_const)'), sdot_4x8_a_b_madacc, '!options->has_sdot_4x8 && options->has_imad24_ir3'),
+   (('sdot_4x8_iadd', '#a', 'b(is_shared_sdot_data)', '#c'), ('iadd', sdot_4x8_a_b_madconst, c), '!options->has_sdot_4x8 && options->has_imad24_ir3'),
+   (('sdot_4x8_iadd', 'a(is_shared_sdot_data)', '#b', '#c'), ('iadd', sdot_4x8_a_b_madconst, c), '!options->has_sdot_4x8 && options->has_imad24_ir3'),
    (('sdot_4x8_iadd', a, b, c),
     dot_4x8_iadd('imul24_relaxed', 'extract_i8', 'extract_i8', a, b, c),
     '!options->has_sdot_4x8'),
