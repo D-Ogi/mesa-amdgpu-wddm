@@ -23,6 +23,9 @@
  *   into a few accumulator chains and high register pressure. Each row reports
  *   the whole shader: instructions, VGPRs, spills, scratch and occupancy.
  *
+ * A corpus mode (--spirv <file>) measures one real compute shader per run,
+ * from SPIR-V, through a copy of RADV's compute path. See "corpus mode" below.
+ *
  * Two NIR pipelines:
  *
  * - simple (the default for basic): the NIR optimiser to a fixed point, then
@@ -46,8 +49,10 @@
 #include "common/amd_family.h"
 #include "common/nir/ac_nir.h"
 
+#include "compiler/spirv/nir_spirv.h"
 #include "nir.h"
 #include "nir_builder.h"
+#include "sid.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -222,6 +227,9 @@ struct Pressure {
    unsigned scratch_bytes_per_wave = 0;
    unsigned lds_bytes = 0;
    unsigned waves_per_simd = 0;
+   /* ACO's own estimates (aco_statistics.cpp), only in the corpus mode. */
+   unsigned latency = 0;
+   unsigned inv_throughput = 0;
 };
 
 /* Replicates aco_interface.cpp's aco_postprocess_shader(), which is file-local
@@ -248,6 +256,8 @@ postprocess(Program* program, Pressure* p)
    live_var_analysis(program);
    p->presched_vgpr = program->max_reg_demand.vgpr;
    p->presched_sgpr = program->max_reg_demand.sgpr;
+   if (program->collect_statistics)
+      collect_presched_stats(program);
    spill(program);
 
    schedule_program(program);
@@ -274,6 +284,9 @@ postprocess(Program* program, Pressure* p)
    insert_NOPs(program);
    if (program->gfx_level >= GFX10)
       form_hard_clauses(program);
+
+   if (program->collect_statistics)
+      collect_preasm_stats(program);
 }
 
 static Counts
@@ -669,6 +682,22 @@ init_target(Target* t)
    require_no_hw_dot(t->rad_info, t->nir_options);
 }
 
+/* What the ACO call gets besides the shader. The defaults are those of the
+ * synthetic suites; the corpus mode sets them as RADV does for the shader.
+ */
+struct AcoParams {
+   unsigned wave_size = 64;
+   unsigned workgroup_size = 64;
+   unsigned lds_size = 0;
+   bool wgp_mode = false;
+   bool full_subgroups = false;
+   bool stats = false;
+   uint32_t address32_hi = 0;
+   const ac_shader_args* args = NULL;
+};
+
+static Result compile_aco(Target& t, nir_shader* shader, const AcoParams& ap, bool print_ir);
+
 static Result
 compile(Target& t, nir_shader* shader, bool use_radv, bool print_ir)
 {
@@ -677,6 +706,12 @@ compile(Target& t, nir_shader* shader, bool use_radv, bool print_ir)
    else
       simple_pipeline(shader);
 
+   return compile_aco(t, shader, AcoParams(), print_ir);
+}
+
+static Result
+compile_aco(Target& t, nir_shader* shader, const AcoParams& ap, bool print_ir)
+{
    nir_validate_shader(shader, "aco_dot4_count");
    nir_lower_continue_constructs(shader);
 
@@ -702,23 +737,30 @@ compile(Target& t, nir_shader* shader, bool use_radv, bool print_ir)
    ac_shader_config config = {};
    aco_shader_info info = {};
    info.hw_stage = AC_HW_COMPUTE_SHADER;
-   info.wave_size = 64;
-   info.workgroup_size = 64;
+   info.wave_size = ap.wave_size;
+   info.workgroup_size = ap.workgroup_size;
+   info.lds_size = ap.lds_size;
+   info.cs.uses_full_subgroups = ap.full_subgroups;
 
    aco_compiler_options options = {};
    options.family = t.rad_info.family;
    options.gfx_level = t.rad_info.gfx_level;
    options.compiler_info = &t.rad_info.compiler_info;
+   options.wgp_mode = ap.wgp_mode;
+   options.address32_hi = ap.address32_hi;
+   options.record_stats = ap.stats;
 
-   ac_shader_args args = {};
+   ac_shader_args empty_args = {};
+   const ac_shader_args* args = ap.args ? ap.args : &empty_args;
    nir_shader* shaders[1] = {shader};
 
    Program program;
-   program.collect_statistics = false;
+   program.collect_statistics = ap.stats;
+   memset(&program.statistics, 0, sizeof(program.statistics));
    program.debug.func = NULL;
    program.debug.private_data = NULL;
 
-   select_program(&program, 1, shaders, &config, &options, &info, &args);
+   select_program(&program, 1, shaders, &config, &options, &info, args);
    postprocess(&program, &res.pressure);
 
    if (!validate_ir(&program)) {
@@ -748,6 +790,10 @@ compile(Target& t, nir_shader* shader, bool use_radv, bool print_ir)
    const unsigned alloc = MAX2(granule, DIV_ROUND_UP(p.vgprs, granule) * granule);
    p.waves_per_simd = MIN2((unsigned)program.dev.max_waves_per_simd,
                            (unsigned)program.dev.physical_vgprs / alloc);
+   if (ap.stats) {
+      p.latency = program.statistics.latency;
+      p.inv_throughput = program.statistics.invthroughput;
+   }
    return res;
 }
 
@@ -1057,6 +1103,835 @@ run_dense(Target& t, const char* only, bool print_ir)
    }
 }
 
+/* ------------------------------------------------------------ corpus mode */
+
+/* The corpus mode measures real compute shaders: one SPIR-V file per run (for
+ * example an FSR 4 INT8 pass, translated from DXIL by dxil-spirv). The file
+ * goes through a copy of the compute path of radv_shader_spirv_to_nir(),
+ * radv_compile_cs() and radv_postprocess_nir(), then through ACO with the
+ * shader arguments that radv_declare_shader_args() gives a compute shader.
+ *
+ * Differences from RADV, which are the same for the trees that are compared:
+ * - Descriptors: one set layout per set, binding n at byte offset 32 * n,
+ *   buffers 16 bytes, images 32 bytes, samplers 16 bytes, no immutable
+ *   samplers, no dynamic buffers, no inline uniform blocks. Only the SMEM
+ *   offsets differ from a real layout.
+ * - Not run: radv_nir_opt_tid_function, radv_nir_lower_abi and
+ *   nir_lower_non_uniform_access (they are RADV-internal; the run stops with
+ *   exit 3 when the shader has a non-uniform access).
+ * - Push constants are not supported (exit 3). Without --root-constant,
+ *   dxil-spirv gives constant buffers as uniform buffers.
+ * - Compute-queue border colours: the BC-250 enables them
+ *   (has_bc250_compute_node), so no cs_state argument is declared.
+ */
+
+static bool corpus_defer_sdot = false;
+
+#define CORPUS_ADDRESS32_HI 0xffff8000u
+#define CORPUS_MAX_SETS     32
+
+struct CorpusShader {
+   ac_shader_args args;
+   struct ac_arg sets[CORPUS_MAX_SETS];
+   uint32_t set_mask;
+   bool uses_block_id[3];
+   bool uses_grid_size;
+   bool uses_local_invocation_idx;
+   unsigned wave_size;
+   unsigned workgroup_size;
+   bool tg4_trunc_coord_fix;
+};
+
+static void
+corpus_fail(const char* what)
+{
+   fprintf(stderr, "UNSUPPORTED: %s\n", what);
+   exit(3);
+}
+
+/* radv_shader.c shared_var_info(). */
+static void
+corpus_shared_var_info(const struct glsl_type* type, unsigned* size, unsigned* align)
+{
+   uint32_t comp_size = glsl_type_is_boolean(type) ? 4 : glsl_get_bit_size(type) / 8;
+   unsigned length = glsl_get_vector_elements(type);
+   *size = comp_size * length;
+   *align = comp_size;
+}
+
+/* radv_optimize_nir(), with the variable passes. The skip set of
+ * NIR_LOOP_PASS only saves time: it skips a pass that cannot make progress.
+ */
+static void
+corpus_optimize_nir(nir_shader* s)
+{
+   nir_lower_alu_width(s, vectorize_vec2_16bit, NULL);
+   nir_opt_fp_math_ctrl(s);
+
+   bool progress;
+   do {
+      progress = false;
+      progress |= nir_split_array_vars(s, nir_var_function_temp);
+      progress |= nir_shrink_vec_array_vars(s, nir_var_function_temp | nir_var_mem_shared);
+      progress |= nir_opt_copy_prop_vars(s);
+      progress |= nir_opt_dead_write_vars(s);
+
+      nir_lower_phis_to_scalar(s, ac_nir_lower_phis_to_scalar_cb, NULL);
+      progress |= nir_opt_copy_prop(s);
+      progress |= nir_opt_remove_phis(s);
+      progress |= nir_opt_dce(s);
+      progress |= nir_opt_dead_cf(s);
+      if (nir_opt_loop(s)) {
+         progress = true;
+         nir_opt_copy_prop(s);
+         nir_opt_remove_phis(s);
+         nir_opt_dce(s);
+      }
+      progress |= nir_opt_if(s, nir_opt_if_optimize_phi_true_false);
+      progress |= nir_opt_cse(s);
+      nir_opt_uub_options uub = {};
+      progress |= nir_opt_uub(s, &uub);
+      nir_opt_peephole_select_options ps = {};
+      ps.limit = 8;
+      ps.indirect_load_ok = true;
+      ps.expensive_alu_ok = true;
+      ps.discard_ok = true;
+      progress |= nir_opt_peephole_select(s, &ps);
+      progress |= nir_opt_constant_folding(s);
+      progress |= nir_opt_intrinsics(s);
+      progress |= nir_opt_algebraic(s);
+      progress |= nir_opt_phi_to_bool(s);
+      progress |= nir_opt_phi_precision(s);
+      progress |= nir_opt_undef(s);
+      if (s->options->max_unroll_iterations && nir_opt_loop_unroll(s)) {
+         progress = true;
+         nir_opt_remove_phis(s);
+      }
+   } while (progress);
+
+   nir_opt_shrink_vectors(s, true);
+   nir_remove_dead_variables(s,
+                             (nir_variable_mode)(nir_var_function_temp | nir_var_shader_in |
+                                                 nir_var_shader_out | nir_var_mem_shared),
+                             NULL);
+   nir_opt_move(s, nir_move_load_ubo);
+   nir_shader_gather_info(s, nir_shader_get_entrypoint(s));
+}
+
+static nir_lower_subgroups_options
+corpus_subgroup_options(nir_shader* s)
+{
+   nir_lower_subgroups_options o = {};
+   o.subgroup_size = s->info.api_subgroup_size;
+   o.ballot_bit_size = s->info.api_subgroup_size;
+   o.ballot_components = 1;
+   o.lower_to_scalar = 1;
+   o.lower_subgroup_masks = 1;
+   o.lower_relative_shuffle = 1;
+   o.lower_rotate_to_shuffle = 0;
+   o.lower_shuffle_to_32bit = 1;
+   o.lower_vote_feq = 1;
+   o.lower_vote_ieq = 1;
+   o.lower_vote_bool_eq = 1;
+   o.lower_quad_broadcast_dynamic = 1;
+   o.lower_quad_broadcast_dynamic_to_const = 0;
+   o.lower_shuffle_to_swizzle_amd = 1;
+   o.lower_ballot_bit_count_to_mbcnt_amd = 1;
+   o.lower_boolean_reduce = 1;
+   o.lower_boolean_shuffle = true;
+   return o;
+}
+
+/* radv_shader_spirv_to_nir() for a compute shader, then the first part of
+ * radv_compile_cs().
+ */
+static nir_shader*
+corpus_front_end(Target& t, const std::vector<uint32_t>& words, const char* entry,
+                 unsigned wave_override)
+{
+   spirv_to_nir_options so = {};
+   so.environment = NIR_SPIRV_VULKAN;
+   so.amd_gcn_shader = true;
+   so.amd_shader_ballot = true;
+   so.amd_shader_explicit_vertex_parameter = true;
+   so.amd_trinary_minmax = true;
+   so.capabilities = NULL; /* every implemented capability */
+   so.ubo_addr_format = nir_address_format_vec2_index_32bit_offset;
+   so.ssbo_addr_format = nir_address_format_vec2_index_32bit_offset;
+   so.phys_ssbo_addr_format = nir_address_format_64bit_global;
+   so.push_const_addr_format = nir_address_format_logical;
+   so.shared_addr_format = nir_address_format_32bit_offset;
+   so.constant_addr_format = nir_address_format_64bit_global;
+   so.max_vector_components = 1024;
+   so.sampler_descriptor_size = 16;
+   so.sampler_descriptor_alignment = 16;
+   so.image_descriptor_size = 32;
+   so.image_descriptor_alignment = 32;
+   so.buffer_descriptor_size = 16;
+   so.buffer_descriptor_alignment = 16;
+   so.skip_os_break_in_debug_build = true;
+
+   nir_shader* s = spirv_to_nir(words.data(), words.size(), NULL, MESA_SHADER_COMPUTE, entry, &so,
+                                &t.nir_options);
+   if (!s)
+      corpus_fail("spirv_to_nir failed");
+   nir_validate_shader(s, "after spirv_to_nir");
+
+   nir_lower_variable_initializers(s, nir_var_function_temp);
+   nir_lower_returns(s);
+   if (nir_inline_functions(s)) {
+      nir_remove_non_cmat_call_entrypoints(s);
+      nir_opt_copy_prop_vars(s);
+      nir_opt_copy_prop(s);
+   } else {
+      nir_remove_non_cmat_call_entrypoints(s);
+   }
+   nir_opt_deref(s);
+   nir_lower_variable_initializers(s, nir_var_shader_out);
+   nir_lower_variable_initializers(s, (nir_variable_mode)~0);
+
+   /* radv_shader_choose_subgroup_size(): no required size, the default compute
+    * wave size of RADV is 64, and a workgroup of 32 or fewer runs as wave32.
+    */
+   const unsigned local_size =
+      s->info.workgroup_size[0] * s->info.workgroup_size[1] * s->info.workgroup_size[2];
+   unsigned wave = wave_override ? wave_override : (local_size <= 32 ? 32 : 64);
+   if (!s->info.api_subgroup_size)
+      s->info.api_subgroup_size = wave;
+   s->info.max_subgroup_size = wave;
+   s->info.min_subgroup_size = wave;
+
+   nir_lower_disordered_control_barriers(s);
+   nir_split_var_copies(s);
+   nir_split_per_member_structs(s);
+   nir_remove_dead_variables(s,
+                             (nir_variable_mode)(nir_var_shader_in | nir_var_shader_out |
+                                                 nir_var_system_value | nir_var_mem_shared),
+                             NULL);
+   nir_lower_global_vars_to_local(s);
+   nir_lower_vars_to_ssa(s);
+   nir_propagate_invariant(s, true);
+   nir_lower_doubles(s, NULL, s->options->lower_doubles_options);
+   nir_normalize_sin_cos(s);
+
+   if (s->info.uses_abort)
+      corpus_fail("abort");
+   nir_lower_system_values(s);
+
+   if (s->info.derivative_group == DERIVATIVE_GROUP_QUADS) {
+      nir_lower_compute_system_values_options q = {};
+      q.shuffle_local_ids_for_quad_derivatives = true;
+      q.lower_local_invocation_index = true;
+      nir_opt_cse(s);
+      nir_lower_compute_system_values(s, &q);
+   }
+   nir_lower_compute_system_values_options csv = {};
+   csv.lower_local_invocation_index =
+      s->info.derivative_group == DERIVATIVE_GROUP_QUADS ||
+      ((s->info.workgroup_size[0] == 1) + (s->info.workgroup_size[1] == 1) +
+       (s->info.workgroup_size[2] == 1)) == 2;
+   nir_lower_compute_system_values(s, &csv);
+   s->info.separate_shader = true;
+   nir_shader_gather_info(s, nir_shader_get_entrypoint(s));
+   if (s->info.ray_queries)
+      corpus_fail("ray queries");
+
+   nir_lower_tex_options tex = {};
+   tex.lower_txp = ~0u;
+   tex.lower_txf_offset = true;
+   tex.lower_tg4_offsets = true;
+   tex.lower_txs_cube_array = true;
+   tex.lower_to_fragment_fetch_amd = t.rad_info.gfx_level < GFX11;
+   tex.lower_lod_zero_width = true;
+   tex.lower_invalid_implicit_lod = true;
+   tex.lower_1d = t.rad_info.gfx_level == GFX9;
+   tex.optimize_txd = true;
+   tex.lower_tg4_shadow_to_16bit = t.rad_info.compiler_info.has_fma_mix;
+   nir_lower_tex(s, &tex);
+   nir_lower_image_options img = {};
+   img.lower_cube_size = true;
+   nir_lower_image(s, &img);
+
+   nir_split_var_copies(s);
+   nir_lower_global_vars_to_local(s);
+   nir_remove_dead_variables(s, nir_var_function_temp, NULL);
+
+   nir_lower_subgroups_options sg = corpus_subgroup_options(s);
+   nir_lower_subgroups(s, &sg);
+   nir_lower_load_const_to_scalar(s);
+   nir_opt_shrink_stores(s, true);
+   nir_opt_access_options access = {};
+   access.is_vulkan = true;
+   nir_opt_access(s, &access);
+
+   nir_opt_find_array_copies(s);
+   nir_lower_vars_to_ssa(s);
+   /* --defer-sdot: the first radv_optimize_nir() round keeps the signed packed
+    * dot products, as in a tree with the deferral hunk.
+    */
+   if (corpus_defer_sdot) {
+      const nir_shader_compiler_options* saved = s->options;
+      nir_shader_compiler_options deferred = *saved;
+      deferred.has_sdot_4x8 = true;
+      s->options = &deferred;
+      corpus_optimize_nir(s);
+      s->options = saved;
+   }
+   corpus_optimize_nir(s);
+   nir_opt_scalar_array_vars_to_vec(s, (nir_variable_mode)(nir_var_function_temp | nir_var_mem_shared));
+   nir_opt_memcpy(s);
+   nir_opt_deref(s);
+   nir_lower_var_copies(s);
+   nir_lower_memcpy(s);
+
+   const unsigned lower_flrp = (s->options->lower_flrp16 ? 16 : 0) |
+                               (s->options->lower_flrp32 ? 32 : 0) |
+                               (s->options->lower_flrp64 ? 64 : 0);
+   if (lower_flrp)
+      nir_lower_flrp(s, lower_flrp, false);
+
+   nir_lower_explicit_io(s, nir_var_mem_push_const, nir_address_format_32bit_offset);
+   nir_lower_explicit_io(s, (nir_variable_mode)(nir_var_mem_ubo | nir_var_mem_ssbo),
+                         nir_address_format_vec2_index_32bit_offset);
+
+   nir_opt_shared_vars_to_subgroup_options sts = {};
+   sts.optimize_constant_access_to_uniform = true;
+   sts.optimize_divergent_access_to_shuffle = t.rad_info.gfx_level >= GFX8;
+   sts.linear_workgroup_ids = s->info.derivative_group != DERIVATIVE_GROUP_QUADS;
+   sts.ballot_num_components = 1;
+   sts.ballot_size = s->info.max_subgroup_size;
+   if (nir_opt_shared_vars_to_subgroup(s, &sts)) {
+      nir_opt_dead_write_vars(s);
+      nir_remove_dead_variables(s, nir_var_mem_shared, NULL);
+      nir_lower_subgroups(s, &sg);
+   }
+   nir_lower_vars_to_explicit_types(s, nir_var_mem_shared, corpus_shared_var_info);
+   nir_lower_explicit_io(s, nir_var_mem_shared, nir_address_format_32bit_offset);
+   if (s->info.zero_initialize_shared_memory && s->info.shared_size > 0)
+      nir_zero_initialize_shared_memory(s, align(s->info.shared_size, 16), 16);
+
+   nir_lower_explicit_io(s, (nir_variable_mode)(nir_var_mem_global | nir_var_mem_constant),
+                         nir_address_format_64bit_global);
+   nir_opt_large_constants(s, glsl_get_natural_size_align_bytes, 16);
+
+   /* radv_compile_cs() */
+   ac_nir_lower_indirect_derefs(s);
+   nir_lower_vars_to_ssa(s);
+   corpus_optimize_nir(s);
+   return s;
+}
+
+/* The parts of radv_nir_shader_info_pass() and radv_declare_shader_args()
+ * that a compute shader without push constants needs.
+ */
+static void
+corpus_declare_args(Target& t, nir_shader* s, CorpusShader* cs)
+{
+   memset(cs, 0, sizeof(*cs));
+   nir_foreach_variable_with_modes(var, s, (nir_variable_mode)(nir_var_uniform | nir_var_image))
+   {
+      if (var->data.descriptor_set >= CORPUS_MAX_SETS)
+         corpus_fail("descriptor set index");
+      cs->set_mask |= 1u << var->data.descriptor_set;
+   }
+   nir_foreach_function_impl(impl, s)
+   {
+      nir_foreach_block(block, impl)
+      {
+         nir_foreach_instr(instr, block)
+         {
+            if (instr->type != nir_instr_type_intrinsic)
+               continue;
+            nir_intrinsic_instr* in = nir_instr_as_intrinsic(instr);
+            switch (in->intrinsic) {
+            case nir_intrinsic_vulkan_resource_index:
+               if (nir_intrinsic_desc_set(in) >= CORPUS_MAX_SETS)
+                  corpus_fail("descriptor set index");
+               cs->set_mask |= 1u << nir_intrinsic_desc_set(in);
+               break;
+            case nir_intrinsic_load_workgroup_id: {
+               const unsigned mask = nir_def_components_read(&in->def);
+               for (unsigned i = 0; i < 3; i++)
+                  cs->uses_block_id[i] |= (mask >> i) & 1;
+               break;
+            }
+            case nir_intrinsic_load_push_constant:
+               corpus_fail("push constants");
+               break;
+            default:
+               break;
+            }
+         }
+      }
+   }
+   cs->uses_grid_size = BITSET_TEST(s->info.system_values_read, SYSTEM_VALUE_NUM_WORKGROUPS);
+   cs->uses_local_invocation_idx =
+      BITSET_TEST(s->info.system_values_read, SYSTEM_VALUE_LOCAL_INVOCATION_INDEX) ||
+      BITSET_TEST(s->info.system_values_read, SYSTEM_VALUE_SUBGROUP_ID) ||
+      BITSET_TEST(s->info.system_values_read, SYSTEM_VALUE_NUM_SUBGROUPS);
+   cs->wave_size = s->info.max_subgroup_size;
+   cs->workgroup_size =
+      s->info.workgroup_size[0] * s->info.workgroup_size[1] * s->info.workgroup_size[2];
+   cs->tg4_trunc_coord_fix = !t.rad_info.compiler_info.conformant_trunc_coord;
+
+   ac_shader_args* a = &cs->args;
+   ac_add_arg(a, AC_ARG_SGPR, 2, AC_ARG_CONST_ADDR, &a->ring_offsets);
+   for (unsigned i = 0; i < CORPUS_MAX_SETS; i++) {
+      if (cs->set_mask & (1u << i))
+         ac_add_arg(a, AC_ARG_SGPR, 1, AC_ARG_CONST_ADDR, &cs->sets[i]);
+   }
+   if (a->num_sgprs_used > 16)
+      corpus_fail("more user SGPRs than RADV puts in registers");
+   if (cs->uses_grid_size)
+      ac_add_arg(a, AC_ARG_SGPR, 2, AC_ARG_CONST_ADDR, &a->num_work_groups);
+   for (unsigned i = 0; i < 3; i++) {
+      if (cs->uses_block_id[i])
+         ac_add_arg(a, AC_ARG_SGPR, 1, AC_ARG_VALUE, &a->workgroup_ids[i]);
+   }
+   if (cs->uses_local_invocation_idx)
+      ac_add_arg(a, AC_ARG_SGPR, 1, AC_ARG_VALUE, &a->tg_size);
+   ac_add_arg(a, AC_ARG_SGPR, 1, AC_ARG_VALUE, &a->scratch_offset);
+   if (t.rad_info.compiler_info.local_invocation_ids_packed) {
+      ac_add_arg(a, AC_ARG_VGPR, 1, AC_ARG_VALUE, &a->local_invocation_ids_packed);
+   } else {
+      ac_add_arg(a, AC_ARG_VGPR, 1, AC_ARG_VALUE, &a->local_invocation_id_x);
+      ac_add_arg(a, AC_ARG_VGPR, 1, AC_ARG_VALUE, &a->local_invocation_id_y);
+      ac_add_arg(a, AC_ARG_VGPR, 1, AC_ARG_VALUE, &a->local_invocation_id_z);
+   }
+}
+
+/* radv_nir_lower_descriptors() for the fixed layout above. */
+static nir_def*
+corpus_ptr64(nir_builder* b, nir_def* ptr)
+{
+   return nir_pack_64_2x32_split(b, ptr, nir_imm_int(b, CORPUS_ADDRESS32_HI));
+}
+
+static nir_def*
+corpus_set_ptr(nir_builder* b, const CorpusShader* cs, unsigned set)
+{
+   if (set >= CORPUS_MAX_SETS || !(cs->set_mask & (1u << set)))
+      corpus_fail("descriptor set without an argument");
+   nir_def* res = ac_nir_load_arg(b, &cs->args, cs->sets[set]);
+   nir_intrinsic_set_arg_num_lsb_zero(nir_def_as_intrinsic(res), 2);
+   return res;
+}
+
+static nir_def*
+corpus_buffer_desc(nir_builder* b, nir_def* rsrc, unsigned access)
+{
+   if (access & ACCESS_NON_UNIFORM)
+      corpus_fail("non-uniform buffer access");
+   return ac_nir_load_smem(b, 4, corpus_ptr64(b, nir_channel(b, rsrc, 0)), nir_channel(b, rsrc, 1), 4,
+                           (gl_access_qualifier)0);
+}
+
+static nir_def*
+corpus_sampler_desc(nir_builder* b, const CorpusShader* cs, nir_deref_instr* deref,
+                    unsigned size_dw, bool tg4)
+{
+   nir_variable* var = nir_deref_instr_get_variable(deref);
+   if (!var)
+      corpus_fail("texture or image without a variable");
+   nir_def* index = NULL;
+   while (deref->deref_type != nir_deref_type_var) {
+      if (deref->deref_type != nir_deref_type_array)
+         corpus_fail("texture deref kind");
+      const unsigned array_size = MAX2(glsl_get_aoa_size(deref->type), 1);
+      nir_def* tmp = nir_imul_imm_nuw(b, deref->arr.index.ssa, array_size * 32u);
+      index = index ? nir_iadd_nuw(b, tmp, index) : tmp;
+      deref = nir_deref_instr_parent(deref);
+   }
+   const unsigned offset = var->data.binding * 32u;
+   nir_def* index_offset = index ? nir_iadd_imm_nuw(b, index, offset) : nir_imm_int(b, offset);
+   nir_def* addr = corpus_ptr64(b, corpus_set_ptr(b, cs, var->data.descriptor_set));
+   nir_def* desc = ac_nir_load_smem(b, size_dw, addr, index_offset, size_dw * 4u, (gl_access_qualifier)0);
+   if (tg4 && cs->tg4_trunc_coord_fix) {
+      /* get_sampler_desc(): linear-filter truncation for every gather. */
+      nir_def* rsrc0 = nir_iand_imm(b, nir_channel(b, desc, 0), C_008F30_TRUNC_COORD);
+      desc = nir_vector_insert_imm(b, desc, rsrc0, 0);
+   }
+   return desc;
+}
+
+static bool
+corpus_lower_descriptors_early(nir_builder* b, nir_intrinsic_instr* in, void* data)
+{
+   if (in->intrinsic != nir_intrinsic_load_ubo)
+      return false;
+   b->cursor = nir_before_instr(&in->instr);
+   nir_src_rewrite(&in->src[0], corpus_buffer_desc(b, in->src[0].ssa, nir_intrinsic_access(in)));
+   return true;
+}
+
+static bool
+corpus_lower_descriptors(nir_builder* b, nir_instr* instr, void* data)
+{
+   const CorpusShader* cs = (const CorpusShader*)data;
+   b->cursor = nir_before_instr(instr);
+
+   if (instr->type == nir_instr_type_tex) {
+      nir_tex_instr* tex = nir_instr_as_tex(instr);
+      nir_deref_instr* tdef = NULL;
+      nir_deref_instr* sdef = NULL;
+      for (unsigned i = 0; i < tex->num_srcs; i++) {
+         if (tex->src[i].src_type == nir_tex_src_texture_deref)
+            tdef = nir_src_as_deref(tex->src[i].src);
+         else if (tex->src[i].src_type == nir_tex_src_sampler_deref)
+            sdef = nir_src_as_deref(tex->src[i].src);
+         else if (tex->src[i].src_type == nir_tex_src_plane)
+            corpus_fail("multi-plane texture");
+      }
+      if (!tdef)
+         return false;
+      if (tex->texture_non_uniform || tex->sampler_non_uniform)
+         corpus_fail("non-uniform texture access");
+      if (tex->op == nir_texop_fragment_mask_fetch_amd)
+         corpus_fail("fragment mask fetch");
+      nir_def* image =
+         corpus_sampler_desc(b, cs, tdef, tex->sampler_dim == GLSL_SAMPLER_DIM_BUF ? 4 : 8, false);
+      nir_def* sampler = sdef ? corpus_sampler_desc(b, cs, sdef, 4, tex->op == nir_texop_tg4) : NULL;
+      if (tex->op == nir_texop_descriptor_amd) {
+         nir_def_replace(&tex->def, image);
+         return true;
+      }
+      for (unsigned i = 0; i < tex->num_srcs; i++) {
+         if (tex->src[i].src_type == nir_tex_src_texture_deref) {
+            tex->src[i].src_type = nir_tex_src_texture_handle;
+            nir_src_rewrite(&tex->src[i].src, image);
+         } else if (tex->src[i].src_type == nir_tex_src_sampler_deref) {
+            tex->src[i].src_type = nir_tex_src_sampler_handle;
+            nir_src_rewrite(&tex->src[i].src, sampler);
+         }
+      }
+      return true;
+   }
+
+   if (instr->type != nir_instr_type_intrinsic)
+      return false;
+   nir_intrinsic_instr* in = nir_instr_as_intrinsic(instr);
+   switch (in->intrinsic) {
+   case nir_intrinsic_vulkan_resource_index: {
+      const unsigned stride = 16;
+      nir_def* set_ptr = corpus_set_ptr(b, cs, nir_intrinsic_desc_set(in));
+      nir_def* binding_ptr = nir_imul_imm_nuw(b, in->src[0].ssa, stride);
+      binding_ptr = nir_iadd_imm_nuw(b, binding_ptr, nir_intrinsic_binding(in) * 32u);
+      nir_def_replace(&in->def, nir_vec3(b, set_ptr, binding_ptr, nir_imm_int(b, stride)));
+      return true;
+   }
+   case nir_intrinsic_vulkan_resource_reindex: {
+      nir_def* binding_ptr = nir_channel(b, in->src[0].ssa, 1);
+      nir_def* stride = nir_channel(b, in->src[0].ssa, 2);
+      binding_ptr = nir_iadd_nuw(b, binding_ptr, nir_imul_nuw(b, in->src[1].ssa, stride));
+      nir_def_replace(&in->def, nir_vector_insert_imm(b, in->src[0].ssa, binding_ptr, 1));
+      return true;
+   }
+   case nir_intrinsic_load_vulkan_descriptor:
+      if (nir_intrinsic_desc_type(in) == nir_descriptor_type_acceleration_structure)
+         corpus_fail("acceleration structure");
+      nir_def_rewrite_uses(&in->def, nir_vector_insert_imm(b, in->src[0].ssa, nir_imm_int(b, 0), 2));
+      nir_instr_remove(&in->instr);
+      return true;
+   case nir_intrinsic_load_ssbo:
+   case nir_intrinsic_ssbo_atomic:
+   case nir_intrinsic_ssbo_atomic_swap:
+      nir_src_rewrite(&in->src[0], corpus_buffer_desc(b, in->src[0].ssa, nir_intrinsic_access(in)));
+      return true;
+   case nir_intrinsic_store_ssbo:
+      nir_src_rewrite(&in->src[1], corpus_buffer_desc(b, in->src[1].ssa, nir_intrinsic_access(in)));
+      return true;
+   case nir_intrinsic_ssbo_descriptor_amd:
+      nir_def_replace(&in->def, corpus_buffer_desc(b, in->src[0].ssa, nir_intrinsic_access(in)));
+      return true;
+   case nir_intrinsic_image_deref_load:
+   case nir_intrinsic_image_deref_sparse_load:
+   case nir_intrinsic_image_deref_store:
+   case nir_intrinsic_image_deref_atomic:
+   case nir_intrinsic_image_deref_atomic_swap:
+   case nir_intrinsic_image_deref_size:
+   case nir_intrinsic_image_deref_samples:
+   case nir_intrinsic_image_deref_descriptor_amd: {
+      if (nir_intrinsic_access(in) & ACCESS_NON_UNIFORM)
+         corpus_fail("non-uniform image access");
+      nir_deref_instr* deref = nir_src_as_deref(in->src[0]);
+      const bool buf = glsl_get_sampler_dim(deref->type) == GLSL_SAMPLER_DIM_BUF;
+      nir_def* desc = corpus_sampler_desc(b, cs, deref, buf ? 4 : 8, false);
+      if (in->intrinsic == nir_intrinsic_image_deref_descriptor_amd)
+         nir_def_replace(&in->def, desc);
+      else
+         nir_rewrite_image_intrinsic(in, desc, nir_image_intrinsic_type_bindless);
+      return true;
+   }
+   default:
+      return false;
+   }
+}
+
+/* radv_postprocess_nir() for a compute shader. */
+static void
+corpus_postprocess(Target& t, nir_shader* s, CorpusShader* cs)
+{
+   const amd_gfx_level gfx = t.rad_info.gfx_level;
+   ac_nir_config cfg = {gfx, true};
+
+   ac_nir_flag_smem_for_loads(s, gfx, false);
+   nir_lower_memory_model(s);
+
+   nir_load_store_vectorize_options vec = {};
+   vec.modes = (nir_variable_mode)(nir_var_mem_ssbo | nir_var_mem_ubo | nir_var_mem_push_const |
+                                   nir_var_mem_shared | nir_var_mem_global | nir_var_shader_temp);
+   vec.callback = ac_nir_mem_vectorize_callback;
+   vec.cb_data = &cfg;
+   vec.robust_modes = (nir_variable_mode)0;
+   vec.bounds_checked_modes = (nir_variable_mode)(nir_var_mem_ssbo | nir_var_mem_ubo | nir_var_mem_shared);
+   vec.has_shared2_amd = false;
+   if (nir_opt_load_store_vectorize(s, &vec)) {
+      nir_opt_copy_prop(s);
+      nir_opt_shrink_stores(s, true);
+   }
+
+   const nir_lower_non_uniform_access_type nu = (nir_lower_non_uniform_access_type)(
+      nir_lower_non_uniform_ubo_access | nir_lower_non_uniform_ssbo_access |
+      nir_lower_non_uniform_texture_access | nir_lower_non_uniform_image_access |
+      nir_lower_non_uniform_texture_query | nir_lower_non_uniform_image_query);
+   if (nir_has_non_uniform_access(s, nu))
+      corpus_fail("non-uniform access");
+
+   ac_nir_lower_mem_access_bit_sizes(s, gfx, false);
+
+   ac_nir_lower_tex_coords_options tco = {};
+   tco.gfx_level = gfx;
+   tco.lower_array_layer_round_even = !t.rad_info.compiler_info.conformant_trunc_coord;
+   tco.fix_derivs_in_divergent_cf = false;
+   tco.max_wqm_vgprs = 64;
+   ac_nir_lower_tex_coords(s, &tco);
+   ac_nir_lower_image_tex_options ito = {};
+   ito.gfx_level = gfx;
+   ac_nir_lower_image_tex(s, &ito);
+   if (s->info.uses_resource_info_query)
+      ac_nir_lower_resinfo(s, gfx);
+
+   nir_shader_intrinsics_pass(s, corpus_lower_descriptors_early, nir_metadata_control_flow, cs);
+   nir_shader_instructions_pass(s, corpus_lower_descriptors, nir_metadata_control_flow, cs);
+
+   nir_lower_alu_width(s, ac_nir_opt_vectorize_cb, (void*)&gfx);
+   nir_move_options sink_opts = (nir_move_options)(nir_move_const_undef | nir_move_copies |
+                                                   nir_dont_move_byte_word_vecs |
+                                                   nir_move_load_input | nir_move_load_frag_coord);
+   nir_opt_licm(s, NULL);
+   nir_opt_sink(s, sink_opts);
+   nir_opt_move(s, sink_opts);
+
+   ac_nir_optimize_uniform_atomics(s);
+   nir_lower_subgroups_options us = {};
+   us.subgroup_size = cs->wave_size;
+   us.ballot_bit_size = cs->wave_size;
+   us.ballot_components = 1;
+   us.lower_ballot_bit_count_to_mbcnt_amd = true;
+   nir_opt_uniform_subgroup(s, &us);
+   nir_opt_idiv_const(s, 8);
+   nir_lower_idiv_options idiv = {};
+   idiv.allow_fp16 = gfx >= GFX9;
+   nir_lower_idiv(s, &idiv);
+
+   ac_nir_lower_intrinsics_to_args_options ia = {gfx, false, AC_HW_COMPUTE_SHADER, cs->wave_size,
+                                                 cs->workgroup_size, false, false};
+   ac_nir_lower_intrinsics_to_args(s, &cs->args, &ia);
+
+   nir_opt_dce(s);
+   nir_opt_copy_prop(s);
+   nir_opt_constant_folding(s);
+   nir_opt_cse(s);
+   nir_opt_if(s, nir_opt_if_optimize_phi_true_false);
+   nir_opt_shrink_vectors(s, true);
+   ac_nir_flag_smem_for_loads(s, gfx, false);
+   ac_nir_lower_mem_access_bit_sizes(s, gfx, false);
+   nir_load_store_vectorize_options late = {};
+   late.modes = (nir_variable_mode)(nir_var_mem_global | nir_var_mem_shared | nir_var_shader_out |
+                                    nir_var_mem_task_payload | nir_var_shader_in);
+   late.callback = ac_nir_mem_vectorize_callback;
+   late.cb_data = &cfg;
+   late.robust_modes = (nir_variable_mode)0;
+   late.bounds_checked_modes = (nir_variable_mode)(nir_var_mem_ssbo | nir_var_mem_ubo | nir_var_mem_shared);
+   late.has_shared2_amd = true;
+   nir_opt_load_store_vectorize(s, &late);
+
+   ac_nir_lower_mem_access_bit_sizes(s, gfx, false);
+   ac_nir_lower_global_access(s, gfx);
+   nir_lower_int64(s);
+   nir_opt_uub_options uub = {};
+   nir_opt_uub(s, &uub);
+
+   /* radv_optimize_nir_algebraic(nir, true, true, gfx) */
+   radv_algebraic_early_copy(s);
+   nir_opt_offsets_options off = {};
+   off.uniform_max = 0;
+   off.buffer_max = ~0u;
+   off.shared_max = UINT16_MAX;
+   off.shared_atomic_max = UINT16_MAX;
+   off.allow_offset_wrap_cb = ac_nir_allow_offset_wrap_cb;
+   off.cb_data = &gfx;
+   nir_opt_offsets(s, &off);
+   nir_opt_mqsad(s);
+   nir_opt_reassociate_for_fma(s);
+   radv_algebraic_late_copy(s);
+
+   nir_lower_fp16_casts(s, nir_lower_fp16_split_fp64);
+   if (ac_nir_might_lower_bit_size(s)) {
+      nir_divergence_analysis(s);
+      nir_lower_bit_size(s, ac_nir_lower_bit_size_callback, (void*)&gfx);
+   }
+
+   nir_opt_tex_srcs_options srcs[2] = {};
+   srcs[0].sampler_dims = ~(BITFIELD_BIT(GLSL_SAMPLER_DIM_CUBE) | BITFIELD_BIT(GLSL_SAMPLER_DIM_BUF));
+   srcs[0].src_types = (1 << nir_tex_src_coord) | (1 << nir_tex_src_lod) | (1 << nir_tex_src_bias) |
+                       (1 << nir_tex_src_min_lod) | (1 << nir_tex_src_ms_index);
+   srcs[1].sampler_dims = ~BITFIELD_BIT(GLSL_SAMPLER_DIM_CUBE);
+   srcs[1].src_types = (1 << nir_tex_src_ddx) | (1 << nir_tex_src_ddy);
+   nir_opt_16bit_tex_image_options o16 = {};
+   o16.rounding_mode = nir_rounding_mode_undef;
+   o16.opt_tex_dest_types = (nir_alu_type)(nir_type_float | nir_type_int | nir_type_uint);
+   o16.opt_image_dest_types = (nir_alu_type)(nir_type_float | nir_type_int | nir_type_uint);
+   o16.integer_dest_saturates = true;
+   o16.opt_image_store_data = true;
+   o16.opt_image_srcs = true;
+   o16.opt_srcs_options_count = 2;
+   o16.opt_srcs_options = srcs;
+   if (nir_opt_16bit_tex_image(s, &o16)) {
+      nir_opt_copy_prop(s);
+      nir_opt_dce(s);
+   }
+   nir_opt_vectorize(s, ac_nir_opt_vectorize_cb, (void*)&gfx);
+
+   nir_lower_alu_width(s, ac_nir_opt_vectorize_cb, (void*)&gfx);
+   nir_lower_load_const_to_scalar(s);
+   nir_opt_copy_prop(s);
+   nir_opt_dce(s);
+
+   sink_opts = (nir_move_options)(sink_opts | nir_move_comparisons | nir_move_load_ubo |
+                                  nir_move_load_ssbo | nir_move_alu);
+   nir_opt_sink(s, sink_opts);
+   nir_move_options move_opts =
+      (nir_move_options)(nir_move_const_undef | nir_move_load_ubo | nir_move_load_input |
+                         nir_move_load_frag_coord | nir_move_comparisons | nir_move_copies |
+                         nir_dont_move_byte_word_vecs | nir_move_alu);
+   nir_opt_move(s, move_opts);
+   nir_opt_move(s, nir_move_comparisons);
+}
+
+static unsigned
+count_const_sdots(nir_shader* s, unsigned* total)
+{
+   unsigned n = 0, all = 0;
+   nir_foreach_function_impl(impl, s)
+   {
+      nir_foreach_block(block, impl)
+      {
+         nir_foreach_instr(instr, block)
+         {
+            if (instr->type != nir_instr_type_alu)
+               continue;
+            nir_alu_instr* alu = nir_instr_as_alu(instr);
+            if (alu->op != nir_op_sdot_4x8_iadd && alu->op != nir_op_sdot_4x8_iadd_sat &&
+                alu->op != nir_op_udot_4x8_uadd && alu->op != nir_op_udot_4x8_uadd_sat &&
+                alu->op != nir_op_sudot_4x8_iadd && alu->op != nir_op_sudot_4x8_iadd_sat)
+               continue;
+            all++;
+            if (nir_src_is_const(alu->src[0].src) || nir_src_is_const(alu->src[1].src))
+               n++;
+         }
+      }
+   }
+   *total = all;
+   return n;
+}
+
+static int
+run_corpus(Target& t, const char* path, const char* entry, unsigned wave, bool print_ir,
+           bool header)
+{
+   if (header) {
+      printf("file,dots_spirv,dots_const_spirv,workgroup,wave,instrs,valu,salu,smem,vmem,vop3,sdwa,"
+             "presched_vgpr,vgprs,sgprs,spilled_vgprs,spilled_sgprs,scratch_bytes_per_wave,lds_bytes,"
+             "waves_per_simd,code_bytes,latency,inv_throughput\n");
+      fflush(stdout);
+   }
+   if (!path)
+      return 0;
+
+   FILE* f = fopen(path, "rb");
+   if (!f) {
+      fprintf(stderr, "cannot open %s\n", path);
+      return 1;
+   }
+   std::vector<uint32_t> words;
+   uint32_t w;
+   while (fread(&w, 4, 1, f) == 1)
+      words.push_back(w);
+   fclose(f);
+   if (words.size() < 5 || words[0] != 0x07230203u) {
+      fprintf(stderr, "%s is not a SPIR-V binary\n", path);
+      return 1;
+   }
+
+   nir_shader* s = corpus_front_end(t, words, entry, wave);
+
+   /* The packed dot products as the SPIR-V gave them, before the first
+    * radv_optimize_nir() lowered them: count them on a fresh translation.
+    */
+   unsigned dots = 0, dots_const = 0;
+   {
+      spirv_to_nir_options so = {};
+      so.environment = NIR_SPIRV_VULKAN;
+      so.ubo_addr_format = nir_address_format_vec2_index_32bit_offset;
+      so.ssbo_addr_format = nir_address_format_vec2_index_32bit_offset;
+      so.phys_ssbo_addr_format = nir_address_format_64bit_global;
+      so.push_const_addr_format = nir_address_format_logical;
+      so.shared_addr_format = nir_address_format_32bit_offset;
+      so.constant_addr_format = nir_address_format_64bit_global;
+      so.skip_os_break_in_debug_build = true;
+      nir_shader* raw = spirv_to_nir(words.data(), words.size(), NULL, MESA_SHADER_COMPUTE, entry,
+                                     &so, &t.nir_options);
+      nir_inline_functions(raw);
+      nir_opt_copy_prop(raw);
+      nir_opt_constant_folding(raw);
+      dots_const = count_const_sdots(raw, &dots);
+      ralloc_free(raw);
+   }
+
+   CorpusShader* cs = new CorpusShader;
+   corpus_declare_args(t, s, cs);
+   corpus_postprocess(t, s, cs);
+
+   AcoParams ap;
+   ap.wave_size = cs->wave_size;
+   ap.workgroup_size = cs->workgroup_size;
+   ap.lds_size = s->info.shared_size;
+   ap.wgp_mode = s->info.shared_size == 0; /* radv_should_use_wgp_mode() */
+   ap.full_subgroups = (cs->workgroup_size % cs->wave_size) == 0;
+   ap.stats = true;
+   ap.address32_hi = CORPUS_ADDRESS32_HI;
+   ap.args = &cs->args;
+   Result r = compile_aco(t, s, ap, print_ir);
+
+   const char* base = strrchr(path, '/');
+   const char* base2 = strrchr(path, '\\');
+   if (base2 > base)
+      base = base2;
+   base = base ? base + 1 : path;
+   const Counts& c = r.counts;
+   const Pressure& p = r.pressure;
+   printf("%s,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u\n", base, dots,
+          dots_const, cs->workgroup_size, cs->wave_size, c.all, c.valu, c.salu, c.smem,
+          c.vmem + c.flat, c.vop3, c.sdwa, p.presched_vgpr, p.vgprs, p.sgprs, p.spilled_vgprs,
+          p.spilled_sgprs, p.scratch_bytes_per_wave, p.lds_bytes, p.waves_per_simd, c.code_bytes,
+          p.latency, p.inv_throughput);
+   fflush(stdout);
+   delete cs;
+   ralloc_free(s);
+   return 0;
+}
+
 /* ---------------------------------------------------------------------- main */
 
 int
@@ -1066,8 +1941,20 @@ main(int argc, char** argv)
    bool selftest_gate = false;
    bool dense = false;
    const char* only = NULL;
+   const char* spirv = NULL;
+   const char* entry = "main";
+   unsigned wave = 0;
+   bool corpus_header = false;
    for (int i = 1; i < argc; i++) {
-      if (!strcmp(argv[i], "--ir"))
+      if (!strcmp(argv[i], "--spirv") && i + 1 < argc)
+         spirv = argv[++i];
+      else if (!strcmp(argv[i], "--entry") && i + 1 < argc)
+         entry = argv[++i];
+      else if (!strcmp(argv[i], "--wave") && i + 1 < argc)
+         wave = (unsigned)atoi(argv[++i]);
+      else if (!strcmp(argv[i], "--corpus-header"))
+         corpus_header = true;
+      else if (!strcmp(argv[i], "--ir"))
          print_ir = true;
       else if (!strcmp(argv[i], "--only") && i + 1 < argc)
          only = argv[++i];
@@ -1093,9 +1980,34 @@ main(int argc, char** argv)
       else {
          fprintf(stderr, "usage: aco_dot4_count [--suite basic|dense] [--pipeline simple|radv] "
                          "[--defer-sdot] [--dense-prepass mad3|twochain] [--ir] "
-                         "[--nopow2-weights] [--only <case substring>] [--selftest-gate]\n");
+                         "[--nopow2-weights] [--only <case substring>] [--selftest-gate]\n"
+                         "       aco_dot4_count --spirv <file.spv> [--entry <name>] [--wave 32|64] "
+                         "[--defer-sdot] [--ir] [--corpus-header]\n"
+                         "       aco_dot4_count --corpus-header\n");
          return 1;
       }
+   }
+
+   if (wave && wave != 32 && wave != 64) {
+      fprintf(stderr, "--wave takes 32 or 64\n");
+      return 1;
+   }
+   if (spirv || corpus_header) {
+      if (dense_prepass != Prepass::none || pipeline_set || dense || only) {
+         fprintf(stderr, "--spirv takes only --entry, --wave, --defer-sdot, --ir and --corpus-header\n");
+         return 1;
+      }
+      corpus_defer_sdot = defer_sdot;
+      fprintf(stderr, "corpus file=%s entry=%s wave=%u defer_sdot=%d\n", spirv ? spirv : "-", entry,
+              wave, defer_sdot);
+      aco::init();
+      glsl_type_singleton_init_or_ref();
+      Target* t = new Target;
+      init_target(t);
+      int rc = run_corpus(*t, spirv, entry, wave, print_ir, corpus_header);
+      delete t;
+      glsl_type_singleton_decref();
+      return rc;
    }
 
    /* The negative control for the contract gate: feed it a violating input and
