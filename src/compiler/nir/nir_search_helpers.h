@@ -429,6 +429,47 @@ is_not_const(UNUSED const nir_search_state *state, const nir_alu_instr *instr,
    return !nir_src_is_const(instr->src[src].src);
 }
 
+/**
+ * Is this run-time operand of sdot_4x8_iadd, whose other operand is a
+ * constant, shared by at least three such dot products?
+ *
+ * A signed MAD24 chain needs each byte of the run-time operand as a separate
+ * value (extract_i8), and a three-source instruction cannot select a byte of
+ * its source the way a two-source multiply can. The byte extracts cost four
+ * instructions, which only pay off when several dot products share them: a
+ * chain costs 4 + 4/n instructions per dot product for n users, and the
+ * lowering without MAD24 costs 6, so the chain wins from n = 3. A use by
+ * extract_i8 counts as a quarter of a dot product, so that the count stays the
+ * same while nir_opt_algebraic lowers the users one by one.
+ */
+static inline bool
+is_shared_sdot_data(UNUSED const nir_search_state *state, const nir_alu_instr *instr,
+                    unsigned src, unsigned num_components, const uint8_t *swizzle)
+{
+   if (num_components != 1 || nir_src_is_const(instr->src[src].src))
+      return false;
+
+   const nir_def *def = instr->src[src].src.ssa;
+   unsigned quarters = 0;
+   nir_foreach_use(use, def) {
+      nir_instr *parent = nir_src_use_instr(use);
+      if (parent->type != nir_instr_type_alu)
+         continue;
+      nir_alu_instr *alu = nir_instr_as_alu(parent);
+      for (unsigned i = 0; i < nir_op_infos[alu->op].num_inputs; i++) {
+         if (&alu->src[i].src != use || alu->src[i].swizzle[0] != swizzle[0])
+            continue;
+         if (alu->op == nir_op_extract_i8) {
+            quarters += 1;
+         } else if (alu->op == nir_op_sdot_4x8_iadd && i < 2 &&
+                    nir_src_is_const(alu->src[1 - i].src)) {
+            quarters += 4;
+         }
+      }
+   }
+   return quarters >= 3 * 4;
+}
+
 static inline bool
 is_not_fmul(const nir_search_state *state, const nir_alu_instr *instr, unsigned src,
             UNUSED unsigned num_components, UNUSED const uint8_t *swizzle)
