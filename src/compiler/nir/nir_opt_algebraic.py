@@ -461,12 +461,51 @@ def dot_4x8_iadd(mul, ext_a, ext_b, a, b, c):
    m = [(mul, (ext_a, a, i), (ext_b, b, i)) for i in range(4)]
    return ('iadd', ('iadd', m[0], ('iadd', m[1], m[2])), ('iadd', m[3], c))
 
+sdot_4x8_a_b_madconst = ('imad24_ir3',
+                    ('extract_i8', a, 3),
+                    ('extract_i8', b, 3),
+                    ('imad24_ir3',
+                     ('extract_i8', a, 2),
+                     ('extract_i8', b, 2),
+                     ('imad24_ir3',
+                      ('extract_i8', a, 1),
+                      ('extract_i8', b, 1),
+                      ('imul24_relaxed', ('extract_i8', a, 0), ('extract_i8', b, 0)))))
+
+# EXP-035B2: preserve a non-constant accumulator in a direct MAD24 chain.
+sdot_4x8_a_b_madacc = ('imad24_ir3',
+                    ('extract_i8', a, 3),
+                    ('extract_i8', b, 3),
+                    ('imad24_ir3',
+                     ('extract_i8', a, 2),
+                     ('extract_i8', b, 2),
+                     ('imad24_ir3',
+                      ('extract_i8', a, 1),
+                      ('extract_i8', b, 1),
+                      ('imad24_ir3',
+                       ('extract_i8', a, 0),
+                       ('extract_i8', b, 0),
+                       c))))
+
 sdot_2x16_a_b = ('iadd', ('imul24_relaxed', ('extract_i16', a, 0), ('extract_i16', b, 0)),
                          ('imul24_relaxed', ('extract_i16', a, 1), ('extract_i16', b, 1)))
 udot_2x16_a_b = ('iadd', ('umul24_relaxed', ('extract_u16', a, 0), ('extract_u16', b, 0)),
                          ('umul24_relaxed', ('extract_u16', a, 1), ('extract_u16', b, 1)))
 
 optimizations.extend([
+   # EXP-035B2: fuse through FSR4's explicit iadd(0, OpSDot) wrapper before
+   # the ordinary no-hardware-dot fallback gets a chance to lower the child.
+   (('iadd', ('iadd(is_used_once)', 0, ('sdot_4x8_iadd(is_used_once)', '#a', 'b(is_not_const)', 0)), c),
+    ('sdot_4x8_iadd', a, b, c), '!options->has_sdot_4x8'),
+   (('iadd', ('iadd(is_used_once)', 0, ('sdot_4x8_iadd(is_used_once)', 'a(is_not_const)', '#b', 0)), c),
+    ('sdot_4x8_iadd', a, b, c), '!options->has_sdot_4x8'),
+
+   # BC-250/GFX1013: constant x data SDot benefits from a signed MAD24 chain.
+   # Keep data x data on EXP028's balanced MUL24 tree (important for ED7).
+   (('sdot_4x8_iadd', '#a', b, 'c(is_not_const)'), sdot_4x8_a_b_madacc, '!options->has_sdot_4x8'),
+   (('sdot_4x8_iadd', a, '#b', 'c(is_not_const)'), sdot_4x8_a_b_madacc, '!options->has_sdot_4x8'),
+   (('sdot_4x8_iadd', '#a', b, '#c'), ('iadd', sdot_4x8_a_b_madconst, c), '!options->has_sdot_4x8'),
+   (('sdot_4x8_iadd', a, '#b', '#c'), ('iadd', sdot_4x8_a_b_madconst, c), '!options->has_sdot_4x8'),
    (('sdot_4x8_iadd', a, b, c),
     dot_4x8_iadd('imul24_relaxed', 'extract_i8', 'extract_i8', a, b, c),
     '!options->has_sdot_4x8'),
