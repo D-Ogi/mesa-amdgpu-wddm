@@ -357,9 +357,10 @@ _Present(DXGI_DDI_ARG_PRESENT *pPresentData)
  *    flush and the present order, then one pfnPresentMultiplaneOverlayCb,
  *    then the present signal. The plane attributes go from the DXGI runtime
  *    to dxgkrnl and the kernel driver decides; this driver maps none of them
- *    and carries no private data. AllocationInfo has one entry per plane, in
- *    the order of pPresentPlanes; a disabled plane carries its allocation if
- *    it names a resource, and zero if it does not.
+ *    and carries no private data. AllocationInfo has one entry per enabled
+ *    plane, in the order of pPresentPlanes, and AllocationInfoCount is the
+ *    number of enabled planes: a disabled plane has no allocation, so it
+ *    gets no entry.
  *
  * ----------------------------------------------------------------------
  */
@@ -385,20 +386,19 @@ Bc250PresentMultiplaneOverlay(DXGI_DDI_ARG_PRESENTMULTIPLANEOVERLAY *args)
    UINT enabled = 0;
    for (UINT i = 0; i < args->PresentPlaneCount; ++i) {
       const DXGI_DDI_PRESENT_MULTIPLANE_OVERLAY &plane = args->pPresentPlanes[i];
-      Resource *resource = plane.hResource ? CastResource(plane.hResource) : NULL;
-      if (plane.Enabled && !resource) return E_INVALIDARG;
-      if (resource) {
-         hr = Bc250EnsureSurface(device, resource);
-         if (FAILED(hr)) return hr;
-         present.AllocationInfo[i].PresentAllocation = resource->allocation;
-         present.AllocationInfo[i].SubResourceIndex = plane.SubResourceIndex;
-      }
-      if (plane.Enabled) ++enabled;
+      if (!plane.Enabled) continue;
+      if (!plane.hResource) return E_INVALIDARG;
+      Resource *resource = CastResource(plane.hResource);
+      hr = Bc250EnsureSurface(device, resource);
+      if (FAILED(hr)) return hr;
+      present.AllocationInfo[enabled].PresentAllocation = resource->allocation;
+      present.AllocationInfo[enabled].SubResourceIndex = plane.SubResourceIndex;
+      ++enabled;
    }
    /* A present of no enabled plane shows nothing, and dxgkrnl has no plane
     * to flip. It is refused rather than sent. */
    if (!enabled) return E_INVALIDARG;
-   present.AllocationInfoCount = args->PresentPlaneCount;
+   present.AllocationInfoCount = enabled;
 
    hr = Bc250FlushForPresent(device);
    if (FAILED(hr)) return hr;

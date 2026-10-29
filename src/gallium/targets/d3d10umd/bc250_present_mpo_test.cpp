@@ -155,7 +155,8 @@ int main(void)
          lastPresent.AllocationInfo[0].PresentAllocation, lastPresent.AllocationInfo[0].SubResourceIndex);
 
    // Three planes: the desktop, a disabled one with no resource, the game.
-   // One entry per plane in order; the context is not created again.
+   // One entry per enabled plane in order, and the count is the number of
+   // enabled planes; the context is not created again.
    planes[0].hResource = (DXGI_DDI_HRESOURCE)&desktop; planes[0].SubResourceIndex = 0;
    planes[1].Enabled = FALSE; planes[1].hResource = 0;
    planes[2].Enabled = TRUE; planes[2].hResource = (DXGI_DDI_HRESOURCE)&game; planes[2].SubResourceIndex = 1;
@@ -163,13 +164,23 @@ int main(void)
    hr = Bc250PresentMultiplaneOverlay(&args);
    CHECK(hr == S_OK && presentCalls == 2 && contextCalls == 1, "a three-plane present: %08lx, %u callbacks, %u creates",
          hr, presentCalls, contextCalls);
-   CHECK(lastPresent.AllocationInfoCount == 3 &&
+   CHECK(lastPresent.AllocationInfoCount == 2 &&
          lastPresent.AllocationInfo[0].PresentAllocation == 0x40000208 &&
-         lastPresent.AllocationInfo[1].PresentAllocation == 0 && lastPresent.AllocationInfo[1].SubResourceIndex == 0 &&
-         lastPresent.AllocationInfo[2].PresentAllocation == 0x40000104 && lastPresent.AllocationInfo[2].SubResourceIndex == 1,
+         lastPresent.AllocationInfo[1].PresentAllocation == 0x40000104 && lastPresent.AllocationInfo[1].SubResourceIndex == 1 &&
+         lastPresent.AllocationInfo[2].PresentAllocation == 0 && lastPresent.AllocationInfo[2].SubResourceIndex == 0,
          "a three-plane present carried %lu entries: %x %x %x", lastPresent.AllocationInfoCount,
          lastPresent.AllocationInfo[0].PresentAllocation, lastPresent.AllocationInfo[1].PresentAllocation,
          lastPresent.AllocationInfo[2].PresentAllocation);
+   // A disabled plane that names a resource has no allocation in the present
+   // either: it gets no entry, and its resource is not asked for a surface.
+   planes[1].hResource = (DXGI_DDI_HRESOURCE)&desktop; planes[1].SubResourceIndex = 3;
+   hr = Bc250PresentMultiplaneOverlay(&args);
+   CHECK(hr == S_OK && lastPresent.AllocationInfoCount == 2 &&
+         lastPresent.AllocationInfo[1].PresentAllocation == 0x40000104 &&
+         lastPresent.AllocationInfo[1].SubResourceIndex == 1 && lastPresent.AllocationInfo[2].PresentAllocation == 0,
+         "a disabled plane with a resource got an entry: %lu entries, second %x/%u", lastPresent.AllocationInfoCount,
+         lastPresent.AllocationInfo[1].PresentAllocation, lastPresent.AllocationInfo[1].SubResourceIndex);
+   planes[1].hResource = 0; planes[1].SubResourceIndex = 0;
 
    // An enabled plane with no resource, and a present with no enabled plane:
    // refused, no callback.
