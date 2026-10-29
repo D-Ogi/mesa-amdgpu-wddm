@@ -813,6 +813,21 @@ radv_shader_spirv_to_nir(const struct radv_compiler_info *compiler_info, struct 
       NIR_PASS(_, nir, nir_opt_find_array_copies);
       NIR_PASS(_, nir, nir_lower_vars_to_ssa);
 
+      if (nir->info.stage == MESA_SHADER_COMPUTE && !nir->options->has_sdot_4x8) {
+         /* Keep each signed packed dot product as one instruction for one full
+          * optimization round, so that the round can fuse it with the adds of
+          * its accumulator and unroll and clean up the loops around it. Then
+          * lower it in software with the real options. has_sdot_4x8 is true
+          * only in a copy of the options for this round, so no hardware dot
+          * product is selected and no capability changes.
+          */
+         const nir_shader_compiler_options *real_options = nir->options;
+         nir_shader_compiler_options deferred_options = *real_options;
+         deferred_options.has_sdot_4x8 = true;
+         nir->options = &deferred_options;
+         radv_optimize_nir(nir, false);
+         nir->options = real_options;
+      }
       radv_optimize_nir(nir, false);
 
       NIR_PASS(_, nir, nir_opt_scalar_array_vars_to_vec, nir_var_function_temp | nir_var_mem_shared);
