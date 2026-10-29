@@ -1155,21 +1155,23 @@ gfx(struct radeon_winsys_ctx *ctx)
 /* Laid out as radv_wddm2_cs: the stream, then its BO set (none here). The IB
  * names a stand-in BO that holds it exactly, because the system line refuses
  * an IB outside its BO before the kernel (BD-207). No line maps that BO on the
- * one-IB path, and the mock never sees it. */
+ * one-IB path, and the mock never sees it. The stand-in is a whole
+ * radv_wddm2_bo: the deferred-destroy witness writes its last-use fields on
+ * every submit, and a bare radeon_winsys_bo let it write past the struct. */
 struct fake_cs {
    struct radv_winsys_cs cs;
    struct set *buffers;
    struct radv_winsys_ib ib;
-   struct radeon_winsys_bo ib_bo;
+   struct radv_wddm2_bo ib_bo;
 };
 
 static struct ac_cmdbuf *
 fake_cs(struct fake_cs *f, uint64_t va, unsigned cdw)
 {
    memset(f, 0, sizeof(*f));
-   f->ib_bo.va = va;
-   f->ib_bo.size = (uint64_t)cdw * 4;
-   f->ib.bo = &f->ib_bo;
+   f->ib_bo.base.va = va;
+   f->ib_bo.base.size = (uint64_t)cdw * 4;
+   f->ib.bo = &f->ib_bo.base;
    f->ib.va = va;
    f->ib.cdw = cdw;
    f->cs.ib_buffers = &f->ib;
