@@ -1046,7 +1046,8 @@ void ac_fill_bug_info(struct radeon_info *info)
     * dimension mode.
     */
    info->has_async_compute_threadgroup_bug = info->family == CHIP_ICELAND ||
-                                             info->family == CHIP_TONGA;
+                                             info->family == CHIP_TONGA ||
+                                             info->family == CHIP_GFX1013;
 
    /* GFX7 CP requires 32 bytes alignment for the indirect buffer arguments on
     * the compute queue.
