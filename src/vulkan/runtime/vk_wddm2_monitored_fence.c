@@ -166,7 +166,7 @@ vk_wddm2_monitored_fence_signal(struct vk_device *device,
 {
    struct vk_wddm2_monitored_fence *fence = to_wddm2_monitored_fence(sync);
 
-   if (!bc250_host_fence_valid(&device->bc250_host,p_atomic_read(fence->value_map)))
+   if (!bc250_host_fence_valid(&device->bc250_host,p_atomic_read(fence->value_map),"sync CPU signal",fence->handle))
       return vk_device_set_lost(device,"Hosted fence lost before signal");
    assert(value > p_atomic_read(fence->value_map));
 
@@ -194,7 +194,7 @@ vk_wddm2_monitored_fence_get_value(struct vk_device *device,
 {
    struct vk_wddm2_monitored_fence *fence = to_wddm2_monitored_fence(sync);
    *value = p_atomic_read(fence->value_map);
-   if (!bc250_host_fence_valid(&device->bc250_host,*value))
+   if (!bc250_host_fence_valid(&device->bc250_host,*value,"sync value",fence->handle))
       return vk_device_set_lost(device,"Hosted fence value invalid");
    return VK_SUCCESS;
 }
@@ -218,7 +218,7 @@ vk_wddm2_monitored_fence_wait_many(struct vk_device *device,
          to_wddm2_monitored_fence(waits[i].sync);
 
       uint64_t value=p_atomic_read(fence->value_map);
-      if (!bc250_host_fence_valid(&device->bc250_host,value))
+      if (!bc250_host_fence_valid(&device->bc250_host,value,"sync CPU wait: poll",fence->handle))
          return vk_device_set_lost(device,"Hosted fence lost while polling");
       if (value >= waits[i].wait_value) ready++;
    }
@@ -280,7 +280,8 @@ vk_wddm2_monitored_fence_wait_many(struct vk_device *device,
    if (result == VK_SUCCESS) {
       for (uint32_t i=0;i<wait_count;++i) {
          struct vk_wddm2_monitored_fence *fence=to_wddm2_monitored_fence(waits[i].sync);
-         if (!bc250_host_fence_valid(&device->bc250_host,p_atomic_read(fence->value_map))) {
+         if (!bc250_host_fence_valid(&device->bc250_host,p_atomic_read(fence->value_map),"sync CPU wait: wake",
+                                     fence->handle)) {
             result=vk_device_set_lost(device,"Hosted fence lost after wake");
             break;
          }
@@ -486,7 +487,8 @@ vk_wddm2_monitored_fence_gpu_signal_many(struct vk_queue *queue,
       struct vk_wddm2_monitored_fence *fence =
          to_wddm2_monitored_fence(signals[i].sync);
 
-      if (!bc250_host_fence_valid(&queue->base.device->bc250_host,p_atomic_read(fence->value_map))) {
+      if (!bc250_host_fence_valid(&queue->base.device->bc250_host,p_atomic_read(fence->value_map),"sync GPU signal",
+                                  fence->handle)) {
          STACK_ARRAY_FINISH(handles);
          STACK_ARRAY_FINISH(signal_values);
          return vk_queue_set_lost(queue,"Hosted fence lost before GPU signal");

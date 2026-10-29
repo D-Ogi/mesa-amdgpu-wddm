@@ -867,7 +867,7 @@ vk_wddm2_fence_wait(struct radv_wddm2_winsys *ws, struct vk_wddm2_fence *fence)
     * kernel at all.
     */
    uint64_t observed=p_atomic_read(fence->value_map);
-   if (!bc250_host_fence_valid(&ws->host,observed)) return false;
+   if (!bc250_host_fence_valid(&ws->host,observed,"winsys fence wait: poll",fence->handle)) return false;
    if (observed >= fence->wait_value) return true;
 
    result = vk_async_event_create(&async_event);
@@ -910,7 +910,8 @@ vk_wddm2_fence_wait(struct radv_wddm2_winsys *ws, struct vk_wddm2_fence *fence)
          break;
       waited_ns += MIN2(slice_ns, total_ns - waited_ns);
       observed = p_atomic_read(fence->value_map);
-      if (!bc250_host_fence_valid(&ws->host, observed) || observed == UINT64_MAX ||
+      if (!bc250_host_fence_valid(&ws->host, observed, "winsys fence wait: slice", fence->handle) ||
+          observed == UINT64_MAX ||
           !radv_wddm2_device_executing(ws)) {
          lost = true;
          break;
@@ -959,7 +960,8 @@ vk_wddm2_fence_wait(struct radv_wddm2_winsys *ws, struct vk_wddm2_fence *fence)
       return false;
    }
 
-   return result == VK_SUCCESS && bc250_host_fence_valid(&ws->host,p_atomic_read(fence->value_map));
+   return result == VK_SUCCESS &&
+          bc250_host_fence_valid(&ws->host,p_atomic_read(fence->value_map),"winsys fence wait: end",fence->handle);
 }
 
 bool
@@ -1972,7 +1974,8 @@ radv_wddm2_cs_submit(struct radeon_winsys_ctx *_ctx,
       slot = &queue->bc250_gather[queue->bc250_gather_index];
       uint64_t pending_value = queue->bc250_progress.wait_value;
       uint64_t observed = p_atomic_read(queue->bc250_progress.value_map);
-      if (!bc250_host_fence_valid(&ws->host,observed)) return VK_ERROR_DEVICE_LOST;
+      if (!bc250_host_fence_valid(&ws->host,observed,"progress fence before submit",queue->bc250_progress.handle))
+         return VK_ERROR_DEVICE_LOST;
       radv_wddm2_check_progress(queue, observed, "before submit");
       if (queue->bc250_submit_failed)
          return VK_ERROR_DEVICE_LOST;
