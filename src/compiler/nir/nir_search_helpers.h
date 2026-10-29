@@ -266,6 +266,52 @@ is_ult_0xfffc07fc(UNUSED const nir_search_state *state, const nir_alu_instr *ins
    return is_ult(instr, src, num_components, swizzle, 0xfffc07fcU);
 }
 
+/**
+ * Is the constant accumulator of a saturating packed dot product one that can
+ * never saturate?
+ *
+ * The dot product itself is a sum of four products of 8-bit values, so it lies
+ * in a small interval [lo, hi] around zero that no 32-bit arithmetic can
+ * overflow. Adding a constant accumulator leaves int32 only if the constant is
+ * within hi of INT32_MAX or within -lo of INT32_MIN; everywhere else the
+ * saturation never fires and the plain dot product gives the same result.
+ */
+static inline bool
+is_dot_iadd_sat_noop(const nir_alu_instr *instr, unsigned src, unsigned num_components,
+                     const uint8_t *swizzle, int64_t lo, int64_t hi)
+{
+   /* only constant srcs: */
+   if (!nir_src_is_const(instr->src[src].src))
+      return false;
+
+   for (unsigned i = 0; i < num_components; i++) {
+      const int64_t val = nir_src_comp_as_int(instr->src[src].src, swizzle[i]);
+
+      if (val + hi > INT32_MAX || val + lo < INT32_MIN)
+         return false;
+   }
+
+   return true;
+}
+
+/** Signed 4x8: the dot product is in [-4*128*127, 4*128*128] = [-0xfe00, 0x10000]. */
+static inline bool
+is_sdot_4x8_iadd_sat_noop(UNUSED const nir_search_state *state, const nir_alu_instr *instr,
+                          unsigned src, unsigned num_components,
+                          const uint8_t *swizzle)
+{
+   return is_dot_iadd_sat_noop(instr, src, num_components, swizzle, -0xfe00, 0x10000);
+}
+
+/** Mixed 4x8: the dot product is in [-4*128*255, 4*127*255] = [-0x1fe00, 0x1fa04]. */
+static inline bool
+is_sudot_4x8_iadd_sat_noop(UNUSED const nir_search_state *state, const nir_alu_instr *instr,
+                           unsigned src, unsigned num_components,
+                           const uint8_t *swizzle)
+{
+   return is_dot_iadd_sat_noop(instr, src, num_components, swizzle, -0x1fe00, 0x1fa04);
+}
+
 /** Is the first 5 bits of value unsigned greater than or equal 2? */
 static inline bool
 is_first_5_bits_uge_2(UNUSED const nir_search_state *state, const nir_alu_instr *instr,
@@ -381,6 +427,47 @@ is_not_const(UNUSED const nir_search_state *state, const nir_alu_instr *instr,
              UNUSED const uint8_t *swizzle)
 {
    return !nir_src_is_const(instr->src[src].src);
+}
+
+/**
+ * Is this run-time operand of sdot_4x8_iadd, whose other operand is a
+ * constant, shared by at least three such dot products?
+ *
+ * A signed MAD24 chain needs each byte of the run-time operand as a separate
+ * value (extract_i8), and a three-source instruction cannot select a byte of
+ * its source the way a two-source multiply can. The byte extracts cost four
+ * instructions, which only pay off when several dot products share them: a
+ * chain costs 4 + 4/n instructions per dot product for n users, and the
+ * lowering without MAD24 costs 6, so the chain wins from n = 3. A use by
+ * extract_i8 counts as a quarter of a dot product, so that the count stays the
+ * same while nir_opt_algebraic lowers the users one by one.
+ */
+static inline bool
+is_shared_sdot_data(UNUSED const nir_search_state *state, const nir_alu_instr *instr,
+                    unsigned src, unsigned num_components, const uint8_t *swizzle)
+{
+   if (num_components != 1 || nir_src_is_const(instr->src[src].src))
+      return false;
+
+   const nir_def *def = instr->src[src].src.ssa;
+   unsigned quarters = 0;
+   nir_foreach_use(use, def) {
+      nir_instr *parent = nir_src_use_instr(use);
+      if (parent->type != nir_instr_type_alu)
+         continue;
+      nir_alu_instr *alu = nir_instr_as_alu(parent);
+      for (unsigned i = 0; i < nir_op_infos[alu->op].num_inputs; i++) {
+         if (&alu->src[i].src != use || alu->src[i].swizzle[0] != swizzle[0])
+            continue;
+         if (alu->op == nir_op_extract_i8) {
+            quarters += 1;
+         } else if (alu->op == nir_op_sdot_4x8_iadd && i < 2 &&
+                    nir_src_is_const(alu->src[1 - i].src)) {
+            quarters += 4;
+         }
+      }
+   }
+   return quarters >= 3 * 4;
 }
 
 static inline bool

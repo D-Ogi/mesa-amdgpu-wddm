@@ -103,3 +103,21 @@ idep_aco = declare_dependency(
   link_with : _libaco,
   sources : [aco_opcodes_h, aco_builder_h],
 )
+
+# Offline instruction-count harness for the packed 4x8 integer dot products on
+# parts whose hardware dot instructions are unusable. No GPU, no RADV, no
+# glslang, no LLVM; off by default, so a release build is unaffected.
+if get_option('build-aco-dot4-count')
+  executable(
+    'aco_dot4_count',
+    files('tools/aco_dot4_count.cpp'),
+    include_directories : [inc_include, inc_src, inc_amd, inc_amd_common],
+    link_with : [libamd_common, libamd_common_llvm],
+    dependencies : [
+      idep_aco, idep_nir, idep_vtn, idep_mesautil, idep_amd_generated_headers, dep_llvm, dep_thread,
+      dep_valgrind,
+    ],
+    cpp_args : [cpp_args_aco, cpp_msvc_compat_args],
+    build_by_default : true,
+  )
+endif

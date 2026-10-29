@@ -444,27 +444,82 @@ for sz in (16, 32, 64):
 
 # Shorthand for the expansion of just the dot product part of the [iu]dp4a
 # instructions.
-sdot_4x8_a_b = ('iadd', ('iadd', ('imul24_relaxed', ('extract_i8', a, 0), ('extract_i8', b, 0)),
-                                 ('imul24_relaxed', ('extract_i8', a, 1), ('extract_i8', b, 1))),
-                        ('iadd', ('imul24_relaxed', ('extract_i8', a, 2), ('extract_i8', b, 2)),
-                                 ('imul24_relaxed', ('extract_i8', a, 3), ('extract_i8', b, 3))))
-udot_4x8_a_b = ('iadd', ('iadd', ('umul24_relaxed', ('extract_u8', a, 0), ('extract_u8', b, 0)),
-                                 ('umul24_relaxed', ('extract_u8', a, 1), ('extract_u8', b, 1))),
-                        ('iadd', ('umul24_relaxed', ('extract_u8', a, 2), ('extract_u8', b, 2)),
-                                 ('umul24_relaxed', ('extract_u8', a, 3), ('extract_u8', b, 3))))
-sudot_4x8_a_b = ('iadd', ('iadd', ('imul24_relaxed', ('extract_i8', a, 0), ('extract_u8', b, 0)),
-                                  ('imul24_relaxed', ('extract_i8', a, 1), ('extract_u8', b, 1))),
-                         ('iadd', ('imul24_relaxed', ('extract_i8', a, 2), ('extract_u8', b, 2)),
-                                  ('imul24_relaxed', ('extract_i8', a, 3), ('extract_u8', b, 3))))
+def dot_4x8_iadd(mul, ext_a, ext_b, a, b, c):
+   """One packed 4x8 dot product and its accumulator, as five terms grouped
+   into two sums of three.
+
+   A backend with a three-input integer add (AMD's v_add3_u32, Intel's ADD3)
+   adds the five terms with two instructions in this grouping. The older
+   grouping, a balanced tree of the four products followed by one add for the
+   accumulator, needs three, because the accumulator add has a three-input add
+   as its operand and cannot be folded into it.
+
+   The result does not depend on the grouping: the four products of 8-bit
+   inputs are each exact in 32 bits, and two's complement addition is
+   associative, with or without wrapping.
+   """
+   m = [(mul, (ext_a, a, i), (ext_b, b, i)) for i in range(4)]
+   return ('iadd', ('iadd', m[0], ('iadd', m[1], m[2])), ('iadd', m[3], c))
+
+sdot_4x8_a_b_madconst = ('imad24_ir3',
+                    ('extract_i8', a, 3),
+                    ('extract_i8', b, 3),
+                    ('imad24_ir3',
+                     ('extract_i8', a, 2),
+                     ('extract_i8', b, 2),
+                     ('imad24_ir3',
+                      ('extract_i8', a, 1),
+                      ('extract_i8', b, 1),
+                      ('imul24_relaxed', ('extract_i8', a, 0), ('extract_i8', b, 0)))))
+
+# The accumulator is the addend of the first MAD24 of the chain.
+sdot_4x8_a_b_madacc = ('imad24_ir3',
+                    ('extract_i8', a, 3),
+                    ('extract_i8', b, 3),
+                    ('imad24_ir3',
+                     ('extract_i8', a, 2),
+                     ('extract_i8', b, 2),
+                     ('imad24_ir3',
+                      ('extract_i8', a, 1),
+                      ('extract_i8', b, 1),
+                      ('imad24_ir3',
+                       ('extract_i8', a, 0),
+                       ('extract_i8', b, 0),
+                       c))))
+
 sdot_2x16_a_b = ('iadd', ('imul24_relaxed', ('extract_i16', a, 0), ('extract_i16', b, 0)),
                          ('imul24_relaxed', ('extract_i16', a, 1), ('extract_i16', b, 1)))
 udot_2x16_a_b = ('iadd', ('umul24_relaxed', ('extract_u16', a, 0), ('extract_u16', b, 0)),
                          ('umul24_relaxed', ('extract_u16', a, 1), ('extract_u16', b, 1)))
 
 optimizations.extend([
-   (('sdot_4x8_iadd', a, b, c), ('iadd', sdot_4x8_a_b, c), '!options->has_sdot_4x8'),
-   (('udot_4x8_uadd', a, b, c), ('iadd', udot_4x8_a_b, c), '!options->has_udot_4x8'),
-   (('sudot_4x8_iadd', a, b, c), ('iadd', sudot_4x8_a_b, c), '!options->has_sudot_4x8'),
+   # A shader translated from DXIL can add an OpSDot result to 0 and then to
+   # the accumulator. Fuse the two adds into the dot product before the
+   # lowering below lowers it with a zero accumulator. The rule for
+   # iadd(sdot_4x8_iadd(a, b, 0), c) above cannot see through the iadd with 0.
+   (('iadd', ('iadd(is_used_once)', 0, ('sdot_4x8_iadd(is_used_once)', '#a', 'b(is_not_const)', 0)), c),
+    ('sdot_4x8_iadd', a, b, c), '!options->has_sdot_4x8'),
+   (('iadd', ('iadd(is_used_once)', 0, ('sdot_4x8_iadd(is_used_once)', 'a(is_not_const)', '#b', 0)), c),
+    ('sdot_4x8_iadd', a, b, c), '!options->has_sdot_4x8'),
+
+   # With a constant operand, a chain of signed MAD24 that ends in the
+   # accumulator. Only for a backend that selects imad24_ir3 (and the imul24
+   # that the imad24_ir3 rules make), and only when at least three such dot
+   # products share the run-time operand (is_shared_sdot_data says why). Two
+   # run-time operands keep the shapes below.
+   (('sdot_4x8_iadd', '#a', 'b(is_shared_sdot_data)', 'c(is_not_const)'), sdot_4x8_a_b_madacc, '!options->has_sdot_4x8 && options->has_imad24_ir3'),
+   (('sdot_4x8_iadd', 'a(is_shared_sdot_data)', '#b', 'c(is_not_const)'), sdot_4x8_a_b_madacc, '!options->has_sdot_4x8 && options->has_imad24_ir3'),
+   (('sdot_4x8_iadd', '#a', 'b(is_shared_sdot_data)', '#c'), ('iadd', sdot_4x8_a_b_madconst, c), '!options->has_sdot_4x8 && options->has_imad24_ir3'),
+   (('sdot_4x8_iadd', 'a(is_shared_sdot_data)', '#b', '#c'), ('iadd', sdot_4x8_a_b_madconst, c), '!options->has_sdot_4x8 && options->has_imad24_ir3'),
+   (('sdot_4x8_iadd', a, b, c),
+    dot_4x8_iadd('imul24_relaxed', 'extract_i8', 'extract_i8', a, b, c),
+    '!options->has_sdot_4x8'),
+   (('udot_4x8_uadd', a, b, c),
+    dot_4x8_iadd('umul24_relaxed', 'extract_u8', 'extract_u8', a, b, c),
+    '!options->has_udot_4x8'),
+   (('sudot_4x8_iadd', a, b, c),
+    dot_4x8_iadd('imul24_relaxed', 'extract_i8', 'extract_u8', a, b, c),
+    '!options->has_sudot_4x8'),
    (('sdot_2x16_iadd', a, b, c), ('iadd', sdot_2x16_a_b, c), '!options->has_dot_2x16'),
    (('udot_2x16_uadd', a, b, c), ('iadd', udot_2x16_a_b, c), '!options->has_dot_2x16'),
 
@@ -479,8 +534,19 @@ optimizations.extend([
    # 0x10000, and the largest negative value is 4*(-128*127) = -0xfe00.  We
    # don't have to worry about that intermediate result overflowing or
    # underflowing.
+   #
+   # The same two bounds decide the saturation: a constant accumulator that is
+   # at least 0x10000 below INT32_MAX and at least 0xfe00 above INT32_MIN can
+   # never make the sum leave int32, so the saturation is dead.  This also
+   # holds where the hardware has the saturating instruction, so it is not
+   # gated: the non-saturating instruction is never the more expensive one.
+   (('sdot_4x8_iadd_sat', a, b, '#c(is_sdot_4x8_iadd_sat_noop)'), ('sdot_4x8_iadd', a, b, c)),
    (('sdot_4x8_iadd_sat', a, b, c), ('iadd_sat', ('sdot_4x8_iadd', a, b, 0), c), '!options->has_sdot_4x8_sat'),
 
+   # The mixed dot-product multiplies a signed byte by an unsigned byte, so each
+   # product is in [-128*255, 127*255] = [-0x7f80, 0x7e81] and the sum of four is
+   # in [-0x1fe00, 0x1fa04].
+   (('sudot_4x8_iadd_sat', a, b, '#c(is_sudot_4x8_iadd_sat_noop)'), ('sudot_4x8_iadd', a, b, c)),
    (('sudot_4x8_iadd_sat', a, b, c), ('iadd_sat', ('sudot_4x8_iadd', a, b, 0), c), '!options->has_sudot_4x8_sat'),
 
    (('udot_2x16_uadd_sat', a, b, c), ('uadd_sat', udot_2x16_a_b, c), '!options->has_dot_2x16'),

@@ -520,6 +520,15 @@ option(
 )
 
 option(
+  'build-aco-dot4-count',
+  type : 'boolean',
+  value : false,
+  description : 'Build the ACO packed 4x8 integer dot-product instruction-count ' +
+                'harness (src/amd/compiler/tools/aco_dot4_count.cpp). It needs ' +
+                'neither an AMD GPU, nor RADV, nor glslang, nor LLVM.'
+)
+
+option(
   'install-intel-gpu-tests',
   type : 'boolean',
   value : false,
