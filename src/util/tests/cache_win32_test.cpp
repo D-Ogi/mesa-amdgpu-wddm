@@ -1,8 +1,11 @@
 /* SPDX-License-Identifier: MIT
  *
- * Tests of the Windows implementation of the multi-file disk cache
- * (disk_cache_os.c), for what cache_test.cpp does not reach there or reaches
- * only within one process:
+ * Tests of the Windows implementation of the disk cache (disk_cache_os.c and
+ * the single-file port in fossilize_db.c), for what cache_test.cpp does not
+ * reach there or reaches only within one process.
+ *
+ * The multi-file cache (the lab flavour's choice under
+ * MESA_DISK_CACHE_MULTI_FILE=true, which the CacheWin32 fixture sets):
  *
  * - two cache instances share entries and the size in the index;
  * - the size in the index equals the entries on the disk after writes,
@@ -15,12 +18,27 @@
  * - an entry that does not read back is deleted, so the next put writes it;
  * - a directory without write access leaves the cache off;
  * - a cache directory whose name the ANSI code page cannot hold;
- * - a cache of the database type, such as a driver's custom cache, is a
- *   multi-file cache in its own directory;
  * - the default directory: %LOCALAPPDATA% for a user account only;
  * - the module identity: one for copies of a build, another for a rebuild,
  *   and the loaded build's own when the file at its path is replaced;
  * - the writer threads run at the lowest priority.
+ *
+ * The single-file cache, the type the driver chooses itself (amdgpu-wddm
+ * BD-216, CacheWin32SingleFile):
+ *
+ * - it is the type without a variable, in mesa_shader_cache_sf/<gpu name>,
+ *   also in a directory whose name the ANSI code page cannot hold;
+ * - a cache of the database type, such as a driver's custom cache, is a
+ *   single-file cache in its own directory;
+ * - any number of puts and gets opens its two files once per instance, where
+ *   the multi-file cache opens files for each entry: an antivirus product's
+ *   real-time scanner scans a file at each open;
+ * - several processes put the same entries at once into a database that
+ *   another process holds open: each entry is written once, and the open
+ *   instance reads them all;
+ * - threads of one instance put and get at once;
+ * - the size bound: no entry past MESA_SHADER_CACHE_MAX_SIZE, and a full
+ *   database emptied at the next start when no other instance has it open.
  *
  * Every test works in a directory of its own under the current directory.
  */
@@ -33,10 +51,14 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
+#include <cwctype>
 #include <filesystem>
 #include <fstream>
 #include <iterator>
+#include <mutex>
 #include <string>
+#include <thread>
 #include <vector>
 
 #include "util/disk_cache.h"
@@ -212,11 +234,16 @@ protected:
                                 "MESA_GLSL_CACHE_DIR", "XDG_CACHE_HOME" })
          os_unset_option(name);
       set_env(L"MESA_SHADER_CACHE_DIR", dir.wstring());
+      /* The driver chooses the single-file cache; these tests are of the
+       * multi-file one, which the lab flavour gives on this variable.
+       */
+      os_set_option("MESA_DISK_CACHE_MULTI_FILE", "true", true);
    }
 
    void TearDown() override
    {
       os_unset_option("MESA_SHADER_CACHE_DIR");
+      os_unset_option("MESA_DISK_CACHE_MULTI_FILE");
       if (!HasFailure()) {
          std::error_code ec;
          fs::remove_all(dir, ec);
@@ -228,6 +255,175 @@ protected:
       return dir / CACHE_DIR_NAME;
    }
 };
+
+/* The single-file cache: the type without MESA_DISK_CACHE_MULTI_FILE. */
+class CacheWin32SingleFile : public CacheWin32 {
+protected:
+   void SetUp() override
+   {
+      CacheWin32::SetUp();
+      os_unset_option("MESA_DISK_CACHE_MULTI_FILE");
+   }
+
+   fs::path sf_dir(const char *name = gpu_name) const
+   {
+      return dir / CACHE_DIR_NAME_SF / name;
+   }
+};
+
+/* The size of a single-file database's files: the magic and version at the
+ * start, and for each entry its hash in hex, a payload header and, in the
+ * index, the entry's offset (fossilize_db.c).
+ */
+const uint64_t foz_magic_size = 16;
+const uint64_t foz_index_record_size = FOSSILIZE_BLOB_HASH_LENGTH + sizeof(struct foz_payload_header) + 8;
+
+uint64_t
+size_on_disk(const fs::path &path)
+{
+   std::error_code ec;
+   uint64_t size = fs::file_size(path, ec);
+   return ec ? 0 : size;
+}
+
+/* Counts the files this process opens under one directory: the CreateFileW
+ * and CreateFile2 calls of this executable for a path there. Mesa's util
+ * library and the static CRT are linked into the executable, so their calls go
+ * through its import address table, which the counter patches once.
+ */
+namespace open_counter {
+
+std::atomic<unsigned> opens { 0 };
+std::mutex dir_mutex;
+std::wstring dir; /* lower case, with backslashes */
+std::vector<std::wstring> first_paths; /* the first opens, for a failure message */
+
+decltype(&CreateFileW) real_create_file_w;
+decltype(&CreateFile2) real_create_file_2;
+
+std::wstring
+normalized(std::wstring path)
+{
+   for (wchar_t &c : path)
+      c = c == L'/' ? L'\\' : (wchar_t)std::towlower(c);
+   return path;
+}
+
+void
+count(const wchar_t *name)
+{
+   if (!name)
+      return;
+
+   std::lock_guard<std::mutex> lock(dir_mutex);
+   if (!dir.empty() && normalized(name).find(dir) != std::wstring::npos) {
+      if (opens++ < 8)
+         first_paths.push_back(name);
+   }
+}
+
+/* The first opens since start(), one per line. */
+std::string
+paths()
+{
+   std::lock_guard<std::mutex> lock(dir_mutex);
+   std::string text;
+   for (const std::wstring &path : first_paths)
+      text += fs::path(path).u8string() + "\n";
+   return text;
+}
+
+HANDLE WINAPI
+create_file_w(LPCWSTR name, DWORD access, DWORD share, LPSECURITY_ATTRIBUTES security, DWORD disposition,
+              DWORD flags, HANDLE template_file)
+{
+   count(name);
+   return real_create_file_w(name, access, share, security, disposition, flags, template_file);
+}
+
+HANDLE WINAPI
+create_file_2(LPCWSTR name, DWORD access, DWORD share, DWORD disposition,
+              LPCREATEFILE2_EXTENDED_PARAMETERS parameters)
+{
+   count(name);
+   return real_create_file_2(name, access, share, disposition, parameters);
+}
+
+/* Points each import of this executable that resolves to one of targets at
+ * hook. Returns the number of import slots changed.
+ */
+unsigned
+patch(const std::vector<void *> &targets, void *hook)
+{
+   uint8_t *base = (uint8_t *)GetModuleHandleW(NULL);
+   const IMAGE_NT_HEADERS *nt = (const IMAGE_NT_HEADERS *)(base + ((const IMAGE_DOS_HEADER *)base)->e_lfanew);
+   const IMAGE_DATA_DIRECTORY &imports = nt->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_IMPORT];
+   if (!imports.VirtualAddress)
+      return 0;
+
+   unsigned patched = 0;
+   for (const IMAGE_IMPORT_DESCRIPTOR *module = (const IMAGE_IMPORT_DESCRIPTOR *)(base + imports.VirtualAddress);
+        module->Name; module++) {
+      for (IMAGE_THUNK_DATA *slot = (IMAGE_THUNK_DATA *)(base + module->FirstThunk); slot->u1.Function; slot++) {
+         if (std::find(targets.begin(), targets.end(), (void *)slot->u1.Function) == targets.end())
+            continue;
+
+         DWORD protection;
+         if (!VirtualProtect(&slot->u1.Function, sizeof(slot->u1.Function), PAGE_READWRITE, &protection))
+            continue;
+         slot->u1.Function = (ULONG_PTR)hook;
+         VirtualProtect(&slot->u1.Function, sizeof(slot->u1.Function), protection, &protection);
+         patched++;
+      }
+   }
+   return patched;
+}
+
+/* Returns false if no import was found, so that the counter would see nothing. */
+bool
+install()
+{
+   static std::once_flag once;
+   static bool installed = false;
+
+   std::call_once(once, [] {
+      std::vector<void *> create_file_w_targets, create_file_2_targets;
+      for (const wchar_t *module : { L"kernel32.dll", L"kernelbase.dll" }) {
+         HMODULE handle = GetModuleHandleW(module);
+         if (!handle)
+            continue;
+         create_file_w_targets.push_back((void *)GetProcAddress(handle, "CreateFileW"));
+         create_file_2_targets.push_back((void *)GetProcAddress(handle, "CreateFile2"));
+      }
+      real_create_file_w = (decltype(&CreateFileW))create_file_w_targets.front();
+      real_create_file_2 = (decltype(&CreateFile2))create_file_2_targets.front();
+
+      unsigned patched = patch(create_file_w_targets, (void *)create_file_w);
+      patched += patch(create_file_2_targets, (void *)create_file_2);
+      installed = patched > 0;
+   });
+   return installed;
+}
+
+/* Counts from zero the opens under path. */
+void
+start(const fs::path &path)
+{
+   std::lock_guard<std::mutex> lock(dir_mutex);
+   dir = normalized(fs::absolute(path).wstring());
+   opens = 0;
+   first_paths.clear();
+}
+
+unsigned
+stop()
+{
+   std::lock_guard<std::mutex> lock(dir_mutex);
+   dir.clear();
+   return opens.load();
+}
+
+} /* namespace open_counter */
 
 const unsigned num_shared = 200;
 const unsigned num_unique = 50;
@@ -405,9 +601,16 @@ TEST_F(CacheWin32, EvictionHoldsMaxSize)
    os_unset_option("MESA_SHADER_CACHE_MAX_SIZE");
 }
 
-TEST_F(CacheWin32, ProcessesWriteAtOnce)
+const unsigned num_writers = 4;
+
+/* Starts num_writers processes of CacheWin32Child.DISABLED_Writer, which open
+ * the cache the environment gives, lets them put their entries at once and
+ * waits until each has ended with success. Their output goes to log_dir.
+ */
+void
+run_writers(const fs::path &log_dir)
 {
-   const unsigned num_children = 4;
+   const unsigned num_children = num_writers;
    const std::wstring suffix = std::to_wstring(GetCurrentProcessId());
    const std::wstring ready_name = L"Local\\mesa-cache-win32-ready-" + suffix;
    const std::wstring start_name = L"Local\\mesa-cache-win32-start-" + suffix;
@@ -437,7 +640,7 @@ TEST_F(CacheWin32, ProcessesWriteAtOnce)
       set_env(L"CACHE_WIN32_CHILD", std::to_wstring(i));
 
       SECURITY_ATTRIBUTES inherit = { sizeof(inherit), NULL, TRUE };
-      fs::path log = dir / ("child-" + std::to_string(i) + ".log");
+      fs::path log = log_dir / ("child-" + std::to_string(i) + ".log");
       HANDLE out = CreateFileW(log.c_str(), GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE, &inherit,
                                CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
       ASSERT_NE(out, INVALID_HANDLE_VALUE);
@@ -469,8 +672,20 @@ TEST_F(CacheWin32, ProcessesWriteAtOnce)
    for (unsigned i = 0; i < num_children; i++) {
       DWORD code = 1;
       GetExitCodeProcess(children.processes[i], &code);
-      EXPECT_EQ(code, 0u) << "child " << i << ", output in " << (dir / ("child-" + std::to_string(i) + ".log"));
+      EXPECT_EQ(code, 0u) << "child " << i << ", output in " << (log_dir / ("child-" + std::to_string(i) + ".log"));
    }
+
+   unset_env(L"CACHE_WIN32_READY");
+   unset_env(L"CACHE_WIN32_START");
+   CloseHandle(ready);
+   CloseHandle(start);
+}
+
+TEST_F(CacheWin32, ProcessesWriteAtOnce)
+{
+   const unsigned num_children = num_writers;
+   run_writers(dir);
+   ASSERT_FALSE(HasFailure());
 
    struct disk_cache *cache = disk_cache_create(gpu_name, driver_id, 0);
    ASSERT_TRUE(cache && !cache->path_init_failed);
@@ -495,10 +710,6 @@ TEST_F(CacheWin32, ProcessesWriteAtOnce)
    EXPECT_EQ(cache->size->value, stats.size) << "each entry counted once";
 
    disk_cache_destroy(cache);
-   unset_env(L"CACHE_WIN32_READY");
-   unset_env(L"CACHE_WIN32_START");
-   CloseHandle(ready);
-   CloseHandle(start);
 }
 
 /* A writer process of ProcessesWriteAtOnce, which starts it with the cache
@@ -697,13 +908,14 @@ TEST_F(CacheWin32, DirectoryNameOutsideAnsiCodePage)
    disk_cache_destroy(cache);
 }
 
-TEST_F(CacheWin32, DatabaseTypeIsMultiFile)
+TEST_F(CacheWin32SingleFile, DatabaseTypeIsSingleFile)
 {
    /* RADV keeps its built-in shaders in a custom cache of the database type. */
    struct disk_cache *custom = disk_cache_create_custom(gpu_name, driver_id, 0, "custom_cache", 64 * 1024);
    ASSERT_TRUE(custom && !custom->path_init_failed);
-   EXPECT_EQ(custom->type, DISK_CACHE_MULTI_FILE);
+   EXPECT_EQ(custom->type, DISK_CACHE_SINGLE_FILE);
    EXPECT_EQ(custom->max_size, 64u * 1024);
+   EXPECT_EQ(custom->foz_db.max_size, 64u * 1024) << "the bound of the database";
 
    std::error_code ec;
    EXPECT_TRUE(fs::equivalent(fs::u8path(custom->path), dir / "custom_cache", ec));
@@ -713,20 +925,300 @@ TEST_F(CacheWin32, DatabaseTypeIsMultiFile)
    put(custom, data, key);
    disk_cache_wait_for_idle(custom);
    EXPECT_TRUE(holds(custom, key, data));
-   EXPECT_EQ(scan(dir / "custom_cache").entries, 1u);
-   EXPECT_EQ(custom->size->value, scan(dir / "custom_cache").size);
+   EXPECT_EQ(size_on_disk(dir / "custom_cache" / "foz_cache_idx.foz"), foz_magic_size + foz_index_record_size);
 
-   /* The database type asked for by name gets the multi-file cache's directory. */
+   /* The variables of the other types choose nothing on Windows: the
+    * database type asked for by name is the default single-file cache, a
+    * cache of its own.
+    */
    os_set_option("MESA_DISK_CACHE_DATABASE", "true", true);
    struct disk_cache *cache = disk_cache_create(gpu_name, driver_id, 0);
    os_unset_option("MESA_DISK_CACHE_DATABASE");
    ASSERT_TRUE(cache && !cache->path_init_failed);
-   EXPECT_EQ(cache->type, DISK_CACHE_MULTI_FILE);
-   EXPECT_TRUE(fs::equivalent(fs::u8path(cache->path), cache_dir(), ec));
+   EXPECT_EQ(cache->type, DISK_CACHE_SINGLE_FILE);
+   EXPECT_TRUE(fs::equivalent(fs::u8path(cache->path), sf_dir(), ec));
    EXPECT_EQ(disk_cache_get(cache, key, NULL), nullptr) << "a cache of its own";
-
    disk_cache_destroy(cache);
+
+   os_set_option("MESA_DISK_CACHE_SINGLE_FILE", "false", true);
+   cache = disk_cache_create(gpu_name, driver_id, 0);
+   os_unset_option("MESA_DISK_CACHE_SINGLE_FILE");
+   ASSERT_TRUE(cache && !cache->path_init_failed);
+   EXPECT_EQ(cache->type, DISK_CACHE_SINGLE_FILE) << "MESA_DISK_CACHE_SINGLE_FILE=false";
+   disk_cache_destroy(cache);
+
    disk_cache_destroy(custom);
+}
+
+TEST_F(CacheWin32SingleFile, IsTheDefault)
+{
+   struct disk_cache *cache = disk_cache_create(gpu_name, driver_id, 0);
+   ASSERT_TRUE(cache && !cache->path_init_failed);
+   EXPECT_EQ(cache->type, DISK_CACHE_SINGLE_FILE);
+   EXPECT_EQ(cache->foz_db.max_size, 1024ull * 1024 * 1024) << "upstream's default limit, as the bound";
+
+   std::error_code ec;
+   EXPECT_TRUE(fs::equivalent(fs::u8path(cache->path), sf_dir(), ec)) << cache->path;
+   EXPECT_TRUE(fs::is_regular_file(sf_dir() / "foz_cache.foz", ec));
+   EXPECT_TRUE(fs::is_regular_file(sf_dir() / "foz_cache_idx.foz", ec));
+
+   std::vector<uint8_t> data = make_data(21, 5000);
+   cache_key key;
+   put(cache, data, key);
+   disk_cache_wait_for_idle(cache);
+   EXPECT_TRUE(holds(cache, key, data));
+   disk_cache_destroy(cache);
+
+   /* No multi-file cache beside it. */
+   EXPECT_FALSE(fs::exists(dir / CACHE_DIR_NAME, ec));
+
+   /* The GPU name is a directory name: what a file name cannot hold becomes '_'. */
+   cache = disk_cache_create("AMD Radeon (TM) Graphics/x:1", driver_id, 0);
+   ASSERT_TRUE(cache && !cache->path_init_failed);
+   EXPECT_TRUE(fs::equivalent(fs::u8path(cache->path), sf_dir("AMD_Radeon__TM__Graphics_x_1"), ec))
+      << cache->path;
+   disk_cache_destroy(cache);
+
+   /* The default directory, as for the multi-file cache. */
+   const std::wstring saved = get_env(L"LOCALAPPDATA");
+   fs::path local_app_data = dir / "LocalAppData";
+   fs::create_directories(local_app_data, ec);
+   unset_env(L"MESA_SHADER_CACHE_DIR");
+   set_env(L"LOCALAPPDATA", local_app_data.wstring());
+   cache = disk_cache_create(gpu_name, driver_id, 0);
+   if (!saved.empty())
+      set_env(L"LOCALAPPDATA", saved);
+   else
+      unset_env(L"LOCALAPPDATA");
+   ASSERT_TRUE(cache && !cache->path_init_failed);
+   EXPECT_TRUE(fs::equivalent(fs::u8path(cache->path), local_app_data / CACHE_DIR_NAME_SF / gpu_name, ec))
+      << cache->path;
+   disk_cache_destroy(cache);
+
+   /* A directory name that no single-byte code page holds. */
+   fs::path named = dir / L"シェーダー-šéδ";
+   set_env(L"MESA_SHADER_CACHE_DIR", named.wstring());
+   cache = disk_cache_create(gpu_name, driver_id, 0);
+   ASSERT_TRUE(cache && !cache->path_init_failed);
+   put(cache, data, key);
+   disk_cache_wait_for_idle(cache);
+   EXPECT_TRUE(holds(cache, key, data));
+   disk_cache_destroy(cache);
+   EXPECT_EQ(size_on_disk(named / CACHE_DIR_NAME_SF / gpu_name / "foz_cache_idx.foz"),
+             foz_magic_size + foz_index_record_size);
+}
+
+/* amdgpu-wddm BD-216: the cost that the single-file cache removes. A
+ * multi-file cache opens a file for each entry it reads or writes; Microsoft
+ * Defender scans a file at each open (about 7 ms each on the BC-250, 7179
+ * opens at a CS2 start). The single-file cache opens its files when an
+ * instance starts and none after, for any number of entries.
+ */
+TEST_F(CacheWin32SingleFile, OpensItsFilesOncePerInstance)
+{
+   ASSERT_TRUE(open_counter::install()) << "no CreateFileW import in this executable to count";
+
+   /* The counter sees the CRT's opens. */
+   open_counter::start(dir);
+   FILE *probe = _wfopen((dir / "probe").c_str(), L"wb");
+   ASSERT_NE(probe, nullptr);
+   fclose(probe);
+   ASSERT_EQ(open_counter::stop(), 1u) << "the counter's positive control";
+
+   const unsigned num_entries = 500;
+   std::vector<std::vector<uint8_t>> entries;
+   for (unsigned i = 0; i < num_entries; i++)
+      entries.push_back(make_data(0x7000 + i, 2000 + (i * 41) % 6000));
+
+   /* What N compiles do: N misses, N puts, and N hits after them. */
+   std::string sf_paths;
+   auto workload = [&](unsigned *first_instance, unsigned *second_instance, const fs::path &counted) {
+      cache_key key;
+      open_counter::start(counted);
+      struct disk_cache *cache = disk_cache_create(gpu_name, driver_id, 0);
+      ASSERT_TRUE(cache && !cache->path_init_failed);
+      for (const std::vector<uint8_t> &data : entries) {
+         disk_cache_compute_key(cache, data.data(), data.size(), key);
+         EXPECT_EQ(disk_cache_get(cache, key, NULL), nullptr);
+         disk_cache_put(cache, key, data.data(), data.size(), NULL);
+      }
+      disk_cache_wait_for_idle(cache);
+      for (const std::vector<uint8_t> &data : entries) {
+         disk_cache_compute_key(cache, data.data(), data.size(), key);
+         EXPECT_TRUE(holds(cache, key, data));
+      }
+      disk_cache_destroy(cache);
+      sf_paths = open_counter::paths();
+      *first_instance = open_counter::stop();
+
+      /* The next start of the application: N hits. */
+      open_counter::start(counted);
+      cache = disk_cache_create(gpu_name, driver_id, 0);
+      ASSERT_TRUE(cache && !cache->path_init_failed);
+      for (const std::vector<uint8_t> &data : entries) {
+         disk_cache_compute_key(cache, data.data(), data.size(), key);
+         EXPECT_TRUE(holds(cache, key, data));
+      }
+      disk_cache_destroy(cache);
+      *second_instance = open_counter::stop();
+   };
+
+   unsigned sf_first = 0, sf_second = 0;
+   workload(&sf_first, &sf_second, dir / CACHE_DIR_NAME_SF);
+   ASSERT_FALSE(HasFailure());
+   const std::string sf_first_paths = sf_paths;
+
+   os_set_option("MESA_DISK_CACHE_MULTI_FILE", "true", true);
+   unsigned mf_first = 0, mf_second = 0;
+   workload(&mf_first, &mf_second, dir / CACHE_DIR_NAME);
+   os_unset_option("MESA_DISK_CACHE_MULTI_FILE");
+
+   printf("BD-216 file opens for %u entries: single-file %u then %u, multi-file %u then %u\n", num_entries,
+          sf_first, sf_second, mf_first, mf_second);
+   RecordProperty("single_file_opens", std::to_string(sf_first) + "," + std::to_string(sf_second));
+   RecordProperty("multi_file_opens", std::to_string(mf_first) + "," + std::to_string(mf_second));
+
+   /* The database's two files, and the size index that disk_cache_type_create() maps for a cache of any type. */
+   EXPECT_EQ(sf_first, 3u) << "foz_cache.foz, foz_cache_idx.foz and index, once; opened:\n" << sf_first_paths;
+   EXPECT_EQ(sf_second, 3u) << "foz_cache.foz, foz_cache_idx.foz and index, once";
+   EXPECT_GE(mf_first, 2 * num_entries) << "the control: a file for each put and each hit";
+   EXPECT_GE(mf_second, num_entries) << "the control: a file for each hit";
+}
+
+TEST_F(CacheWin32SingleFile, ProcessesWriteAtOnceIntoAnOpenDatabase)
+{
+   /* This instance stays open while the writers put their entries; it reads
+    * what they wrote through the index it already holds.
+    */
+   struct disk_cache *held = disk_cache_create(gpu_name, driver_id, 0);
+   ASSERT_TRUE(held && !held->path_init_failed);
+   ASSERT_EQ(held->type, DISK_CACHE_SINGLE_FILE);
+
+   run_writers(dir);
+   ASSERT_FALSE(HasFailure());
+
+   struct disk_cache *fresh = disk_cache_create(gpu_name, driver_id, 0);
+   ASSERT_TRUE(fresh && !fresh->path_init_failed);
+
+   cache_key key;
+   for (struct disk_cache *cache : { held, fresh }) {
+      const char *which = cache == held ? "held instance" : "new instance";
+      for (unsigned i = 0; i < num_shared; i++) {
+         std::vector<uint8_t> data = shared_data(i);
+         disk_cache_compute_key(cache, data.data(), data.size(), key);
+         EXPECT_TRUE(holds(cache, key, data)) << which << ", shared entry " << i;
+      }
+      for (unsigned child = 0; child < num_writers; child++) {
+         for (unsigned i = 0; i < num_unique; i++) {
+            std::vector<uint8_t> data = unique_data(child, i);
+            disk_cache_compute_key(cache, data.data(), data.size(), key);
+            EXPECT_TRUE(holds(cache, key, data)) << which << ", child " << child << " entry " << i;
+         }
+      }
+   }
+
+   EXPECT_EQ(size_on_disk(sf_dir() / "foz_cache_idx.foz"),
+             foz_magic_size + (num_shared + num_writers * num_unique) * foz_index_record_size)
+      << "each entry written once";
+
+   disk_cache_destroy(fresh);
+   disk_cache_destroy(held);
+}
+
+TEST_F(CacheWin32SingleFile, ThreadsOfOneInstance)
+{
+   struct disk_cache *cache = disk_cache_create(gpu_name, driver_id, 0);
+   ASSERT_TRUE(cache && !cache->path_init_failed);
+
+   const unsigned num_threads = 8, per_thread = 40;
+   std::atomic<unsigned> missing { 0 };
+   std::atomic<unsigned> arrived { 0 };
+   std::vector<std::thread> threads;
+   for (unsigned t = 0; t < num_threads; t++) {
+      threads.emplace_back([&, t] {
+         cache_key key;
+         for (unsigned i = 0; i < per_thread; i++)
+            put(cache, make_data(0x9000 + t * per_thread + i, 1500 + i * 97), key);
+         disk_cache_wait_for_idle(cache);
+
+         /* Everyone's entries, once all have put theirs. */
+         arrived++;
+         while (arrived.load() < num_threads)
+            std::this_thread::yield();
+         disk_cache_wait_for_idle(cache);
+         for (unsigned j = 0; j < num_threads * per_thread; j++) {
+            std::vector<uint8_t> data = make_data(0x9000 + j, 1500 + (j % per_thread) * 97);
+            disk_cache_compute_key(cache, data.data(), data.size(), key);
+            if (!holds(cache, key, data))
+               missing++;
+         }
+      });
+   }
+   for (std::thread &thread : threads)
+      thread.join();
+
+   EXPECT_EQ(missing.load(), 0u);
+   EXPECT_EQ(size_on_disk(sf_dir() / "foz_cache_idx.foz"),
+             foz_magic_size + num_threads * per_thread * foz_index_record_size);
+   disk_cache_destroy(cache);
+}
+
+TEST_F(CacheWin32SingleFile, SizeBound)
+{
+   os_set_option("MESA_SHADER_CACHE_MAX_SIZE", "1M", true);
+   const uint64_t bound = 1024 * 1024;
+   const size_t entry_size = 64 * 1024;
+   const unsigned num_entries = 40;
+
+   struct disk_cache *a = disk_cache_create(gpu_name, driver_id, 0);
+   ASSERT_TRUE(a && !a->path_init_failed);
+   ASSERT_EQ(a->foz_db.max_size, bound);
+
+   cache_key key;
+   std::vector<std::array<uint8_t, CACHE_KEY_SIZE>> keys;
+   for (unsigned i = 0; i < num_entries; i++) {
+      put(a, make_data(0xA000 + i, entry_size), key);
+      keys.emplace_back();
+      memcpy(keys.back().data(), key, CACHE_KEY_SIZE);
+   }
+   disk_cache_wait_for_idle(a);
+
+   unsigned stored = 0;
+   for (unsigned i = 0; i < num_entries; i++) {
+      if (holds(a, keys[i].data(), make_data(0xA000 + i, entry_size)))
+         stored++;
+   }
+   EXPECT_GT(a->foz_db.writes_refused_full, 0u);
+   EXPECT_EQ(stored + a->foz_db.writes_refused_full, num_entries);
+   EXPECT_GE(stored, 10u) << "the bound holds about 15 of these entries";
+   EXPECT_LE(size_on_disk(sf_dir() / "foz_cache.foz"), bound);
+   std::error_code ec;
+   EXPECT_TRUE(fs::exists(sf_dir() / "foz_cache.foz.full", ec)) << "the marker of a full database";
+   EXPECT_TRUE(holds(a, keys[0].data(), make_data(0xA000, entry_size))) << "the first entries stay";
+
+   /* A full database that another instance has open stays as it is. */
+   struct disk_cache *b = disk_cache_create(gpu_name, driver_id, 0);
+   ASSERT_TRUE(b && !b->path_init_failed);
+   EXPECT_TRUE(holds(b, keys[0].data(), make_data(0xA000, entry_size))) << "not emptied while in use";
+   disk_cache_destroy(b);
+   disk_cache_destroy(a);
+
+   /* No instance has it open: the next start empties it. */
+   struct disk_cache *c = disk_cache_create(gpu_name, driver_id, 0);
+   ASSERT_TRUE(c && !c->path_init_failed);
+   EXPECT_EQ(disk_cache_get(c, keys[0].data(), NULL), nullptr) << "emptied at the start";
+   EXPECT_EQ(size_on_disk(sf_dir() / "foz_cache_idx.foz"), foz_magic_size);
+   EXPECT_EQ(size_on_disk(sf_dir() / "foz_cache.foz"), foz_magic_size);
+   EXPECT_FALSE(fs::exists(sf_dir() / "foz_cache.foz.full", ec)) << "no marker after the reset";
+
+   std::vector<uint8_t> data = make_data(0xB000, entry_size);
+   put(c, data, key);
+   disk_cache_wait_for_idle(c);
+   EXPECT_TRUE(holds(c, key, data)) << "entries again after the reset";
+   EXPECT_EQ(c->foz_db.writes_refused_full, 0u);
+   disk_cache_destroy(c);
+
+   os_unset_option("MESA_SHADER_CACHE_MAX_SIZE");
 }
 
 TEST_F(CacheWin32, DefaultDirectoryForUserAccountsOnly)

@@ -33,7 +33,10 @@
 #ifndef FOSSILIZE_DB_H
 #define FOSSILIZE_DB_H
 
-#ifdef HAVE_FLOCK
+#include "detect_os.h"
+
+/* amdgpu-wddm BD-216: Windows has no flock(); fossilize_db.c emulates it with a byte-range lock. */
+#if defined(HAVE_FLOCK) || DETECT_OS_WINDOWS
 #define FOZ_DB_UTIL 1
 #endif
 
@@ -93,6 +96,11 @@ struct foz_db {
    struct hash_table_u64 *index_db;  /* Hash table of all foz db entries */
    bool alive;
    const char *cache_path;
+   /* amdgpu-wddm BD-216: the size bound of the writable database on Windows (0: none). The caller sets it
+    * before foz_prepare(). A full database takes no new entry (writes_refused_full counts them), and a later
+    * foz_prepare() empties it when no other process has it open. */
+   uint64_t max_size;
+   unsigned writes_refused_full;
    struct foz_dbs_list_updater updater;
 };
 
