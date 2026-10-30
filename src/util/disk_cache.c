@@ -122,14 +122,15 @@ disk_cache_type_create(const char *gpu_name,
    size_t cv_size = sizeof(cache_version);
 
 #if DETECT_OS_WINDOWS
-   /* The database and single-file caches have no Windows implementation: a
-    * cache of either type, such as a driver's custom cache or the main cache
-    * of a process whose launcher sets MESA_DISK_CACHE_SINGLE_FILE, is a
-    * multi-file cache there instead. Left as single-file, it would get no
-    * directory and stay off without a word.
+   /* The database cache (mesa_cache_db.c) has no Windows implementation. A
+    * cache of that type, such as RADV's built-in shader cache, is a
+    * single-file cache there instead (amdgpu-wddm BD-216): one database
+    * that the process opens once, where a multi-file cache opens a file for
+    * each entry. Left as a database, it would get no directory and stay off
+    * without a word.
     */
-   if (cache_type == DISK_CACHE_DATABASE || cache_type == DISK_CACHE_SINGLE_FILE)
-      cache_type = DISK_CACHE_MULTI_FILE;
+   if (cache_type == DISK_CACHE_DATABASE)
+      cache_type = DISK_CACHE_SINGLE_FILE;
 #endif
 
    /* A ralloc context for transient data during this invocation. */
@@ -165,6 +166,7 @@ disk_cache_type_create(const char *gpu_name,
       cache->compression_disabled = true;
 
    if (cache_type == DISK_CACHE_SINGLE_FILE) {
+      cache->foz_db.max_size = max_size;   /* amdgpu-wddm BD-216: the bound of the Windows database */
       if (!disk_cache_load_cache_index_foz(local, cache))
          goto path_fail;
    } else if (cache_type == DISK_CACHE_DATABASE) {
@@ -254,6 +256,25 @@ disk_cache_create(const char *gpu_name, const char *driver_id,
    uint64_t max_size = 0;
    const char *max_size_str;
 
+#if DETECT_OS_WINDOWS
+   /* amdgpu-wddm BD-216: the driver chooses the single-file cache itself. A
+    * multi-file cache opens a file for each entry it reads or writes, inside
+    * the pipeline compiles of the application's threads, and the real-time
+    * scanner of an antivirus product scans the file at each open (Microsoft
+    * Defender: about 7 ms each on the BC-250, thousands of them at a CS2
+    * start). The lab flavour keeps the multi-file cache as a measurement
+    * control (MESA_DISK_CACHE_MULTI_FILE=true); the release flavour reads no
+    * variable for the choice.
+    */
+#ifdef AMDGPU_WDDM_LAB_FLAVOUR
+   if (debug_get_bool_option("MESA_DISK_CACHE_MULTI_FILE", false))
+      cache_type = DISK_CACHE_MULTI_FILE;
+   else
+      cache_type = DISK_CACHE_SINGLE_FILE;
+#else
+   cache_type = DISK_CACHE_SINGLE_FILE;
+#endif
+#else
    if (debug_get_bool_option("MESA_DISK_CACHE_SINGLE_FILE", false)) {
       cache_type = DISK_CACHE_SINGLE_FILE;
    } else if (debug_get_bool_option("MESA_DISK_CACHE_DATABASE", false)) {
@@ -273,6 +294,7 @@ disk_cache_create(const char *gpu_name, const char *driver_id,
    } else {
       return NULL;
    }
+#endif
 
    max_size_str = os_get_option("MESA_SHADER_CACHE_MAX_SIZE");
 

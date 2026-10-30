@@ -157,9 +157,10 @@ disk_cache_get_function_identifier(void *ptr, blake3_hasher *ctx)
  * Paths stay in UTF-8, as elsewhere in Mesa, with the forward slashes the shared code puts between components, and
  * are widened for each call into the file system: a profile path need not fit the ANSI code page.
  *
- * The single-file (Fossilize) and database caches are not implemented here: fossilize_db.c needs flock() and
- * mesa_cache_db.c is POSIX-only. disk_cache_type_create() makes a database or single-file cache, such as RADV's
- * built-in shader cache or a main cache under MESA_DISK_CACHE_SINGLE_FILE, a multi-file one.
+ * The single-file (Fossilize) cache has its Windows port in fossilize_db.c, and it is the type the driver chooses
+ * (amdgpu-wddm BD-216, disk_cache_create). The database cache is not implemented here (mesa_cache_db.c is
+ * POSIX-only): disk_cache_type_create() makes a database cache, such as RADV's built-in shader cache, a
+ * single-file one.
  */
 
 /* The size an entry takes on the disk, as st_blocks * 512 is on POSIX: its length rounded up to the 4 KiB cluster
@@ -1784,14 +1785,38 @@ process_has_default_cache_dir(void)
           disk_cache_account_has_default_dir(info.user.User.Sid);
 }
 
+/* A directory name made of gpu_name: characters other than letters, digits, '.', '-' and '_' become '_'. */
+static char *
+cache_dir_component(void *mem_ctx, const char *name)
+{
+   char *out = ralloc_strdup(mem_ctx, name && *name ? name : "default");
+   if (!out)
+      return NULL;
+
+   for (char *c = out; *c; c++) {
+      bool keep = (*c >= 'a' && *c <= 'z') || (*c >= 'A' && *c <= 'Z') || (*c >= '0' && *c <= '9') ||
+                  *c == '.' || *c == '-' || *c == '_';
+      if (!keep)
+         *c = '_';
+   }
+
+   return out;
+}
+
 /* Determine path for cache based on the first defined name as follows:
  *
- *   $MESA_SHADER_CACHE_DIR/mesa_shader_cache, in a lab build only
- *   $XDG_CACHE_HOME/mesa_shader_cache, in a lab build only
- *   %LOCALAPPDATA%/mesa_shader_cache, for a user account only
+ *   $MESA_SHADER_CACHE_DIR/<name>, in a lab build only
+ *   $XDG_CACHE_HOME/<name>, in a lab build only
+ *   %LOCALAPPDATA%/<name>, for a user account only
  *
- * If none applies, the cache stays off. Only the multi-file cache has a
- * Windows implementation; disk_cache_type_create() asks for no other type.
+ * <name> is the custom directory name if the driver gives one, otherwise mesa_shader_cache for the multi-file
+ * cache and mesa_shader_cache_sf/<gpu_name> for the single-file cache. Unlike POSIX, the single-file path has no
+ * driver_id level (amdgpu-wddm BD-216): every entry key contains the driver_id already, and one database per GPU
+ * name keeps the size bound over driver updates, where a directory per driver build would leave a full database
+ * behind at each update. The database cache has no Windows implementation; disk_cache_type_create() makes it a
+ * single-file cache.
+ *
+ * If none applies, the cache stays off.
  *
  * If the mkdir param is set we create the directory if it doesn't already
  * exist, if it does not exist and the param is false NULL will be returned.
@@ -1803,10 +1828,11 @@ disk_cache_generate_cache_dir(void *mem_ctx, const char *gpu_name,
                               enum disk_cache_type cache_type,
                               bool mkdir)
 {
-   if (cache_type != DISK_CACHE_MULTI_FILE)
+   if (cache_type != DISK_CACHE_MULTI_FILE && cache_type != DISK_CACHE_SINGLE_FILE)
       return NULL;
 
-   const char *cache_dir_name = cache_dir_name_custom ? cache_dir_name_custom : CACHE_DIR_NAME;
+   const char *cache_dir_name = cache_dir_name_custom ? cache_dir_name_custom :
+                                cache_type == DISK_CACHE_SINGLE_FILE ? CACHE_DIR_NAME_SF : CACHE_DIR_NAME;
 
 #ifdef AMDGPU_WDDM_LAB_FLAVOUR
    const char *path = get_env_utf8(mem_ctx, L"MESA_SHADER_CACHE_DIR");
@@ -1835,7 +1861,14 @@ disk_cache_generate_cache_dir(void *mem_ctx, const char *gpu_name,
    if (!path)
       return NULL;
 
-   return concatenate_and_mkdir(mem_ctx, path, cache_dir_name, mkdir);
+   path = concatenate_and_mkdir(mem_ctx, path, cache_dir_name, mkdir);
+
+   if (path && cache_type == DISK_CACHE_SINGLE_FILE && !cache_dir_name_custom) {
+      const char *gpu_dir = cache_dir_component(mem_ctx, gpu_name);
+      path = gpu_dir ? concatenate_and_mkdir(mem_ctx, path, gpu_dir, mkdir) : NULL;
+   }
+
+   return path;
 }
 
 #else

@@ -813,12 +813,13 @@ TEST_F(Cache, SingleFile)
 
 #ifndef ENABLE_SHADER_CACHE
    GTEST_SKIP() << "ENABLE_SHADER_CACHE not defined.";
-#elif DETECT_OS_WINDOWS
-   GTEST_SKIP() << "The single-file cache has no Windows implementation.";
 #else
    bool compress = true;
 
 run_tests:
+   /* On Windows the single-file cache is the default type, which the
+    * variable does not change (amdgpu-wddm BD-216).
+    */
    os_set_option("MESA_DISK_CACHE_SINGLE_FILE", "true", true);
 
    if (!compress)
@@ -912,7 +913,8 @@ TEST_F(Cache, Combined)
 #ifndef ENABLE_SHADER_CACHE
    GTEST_SKIP() << "ENABLE_SHADER_CACHE not defined.";
 #elif DETECT_OS_WINDOWS
-   GTEST_SKIP() << "The single-file cache has no Windows implementation.";
+   GTEST_SKIP() << "The database cache has no Windows implementation, and the Windows driver chooses its cache type "
+                   "itself.";
 #else
    os_set_option("MESA_DISK_CACHE_SINGLE_FILE", "true", true);
    os_set_option("MESA_DISK_CACHE_MULTI_FILE", "true", true);
@@ -1430,14 +1432,9 @@ TEST_F(Cache, Disabled)
 #ifndef ENABLE_SHADER_CACHE
    GTEST_SKIP() << "ENABLE_SHADER_CACHE not defined.";
 #else
-#if DETECT_OS_WINDOWS
-   /* The single-file cache has no Windows implementation. */
-   os_set_option("MESA_DISK_CACHE_MULTI_FILE", "true", true);
-   const char *cache_dir_name = CACHE_DIR_NAME;
-#else
+   /* On Windows the single-file cache is the default type (amdgpu-wddm BD-216). */
    os_set_option("MESA_DISK_CACHE_SINGLE_FILE", "true", true);
    const char *cache_dir_name = CACHE_DIR_NAME_SF;
-#endif
 
 #ifdef SHADER_CACHE_DISABLE_BY_DEFAULT
    os_set_option("MESA_SHADER_CACHE_DISABLE", "false", true);
@@ -1452,11 +1449,7 @@ TEST_F(Cache, Disabled)
    test_put_and_get_disabled(driver_id);
 
    os_set_option("MESA_SHADER_CACHE_DISABLE", "false", true);
-#if DETECT_OS_WINDOWS
-   os_set_option("MESA_DISK_CACHE_MULTI_FILE", "false", true);
-#else
    os_set_option("MESA_DISK_CACHE_SINGLE_FILE", "false", true);
-#endif
 
    int err = rmrf_local(CACHE_TEST_TMP);
    EXPECT_EQ(err, 0) << "Removing " CACHE_TEST_TMP " again";
