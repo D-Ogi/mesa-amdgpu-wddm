@@ -33,13 +33,21 @@
 #ifdef FOZ_DB_UTIL
 
 #include <assert.h>
+#include <errno.h>
 #include <stddef.h>
 #include <stdlib.h>
 #include <string.h>
-#include <sys/file.h>
 #include <sys/stat.h>
 #include <sys/types.h>
+
+#if DETECT_OS_WINDOWS
+#include <windows.h>
+#include <io.h>
+#include <share.h>
+#else
+#include <sys/file.h>
 #include <unistd.h>
+#endif
 
 #ifdef FOZ_DB_UTIL_DYNAMIC_LIST
 #include <sys/inotify.h>
@@ -51,6 +59,198 @@
 #include "hash_table.h"
 #include "mesa-blake3.h"
 #include "ralloc.h"
+
+#if DETECT_OS_WINDOWS
+#include <inttypes.h>
+
+#include "log.h"
+#include "os_time.h"
+#include "strndup.h"
+#include "u_string.h"
+
+/* amdgpu-wddm BD-216: the Windows port of the single-file cache.
+ *
+ * The multi-file cache opens one file for each entry it reads or writes, and on Windows the real-time scanner of
+ * an antivirus product (Microsoft Defender's WdFilter) scans the file at each of those opens: about 7 ms each on the
+ * BC-250, where a CS2 start opened thousands of them inside pipeline compiles. This database is two files that a
+ * process opens once and then reads and appends to through the open handles.
+ *
+ * - Paths are UTF-8, as elsewhere in Mesa, and are widened for the file system: a profile path need not fit the
+ *   ANSI code page.
+ * - ftell() and fseek() take a 32-bit long on Windows; the offsets below are 64-bit.
+ * - flock() is an exclusive byte-range lock of one byte far past the end of the data file. A range lock on
+ *   Windows is mandatory, not advisory, so a lock inside the file would refuse the reads of other processes; past
+ *   the end it guards nothing but itself. Like flock(), it excludes another handle of the same process too.
+ * - The upstream format has no eviction. Here the database has a size bound (foz_db::max_size): foz_write_entry()
+ *   adds nothing past it and leaves a marker file at the first refusal, and foz_prepare() empties a full database
+ *   while no other process has it open.
+ */
+#define ftell(f) _ftelli64(f)
+#define fseek(f, offset, whence) _fseeki64(f, offset, whence)
+
+#define LOCK_EX 2
+#define LOCK_NB 4
+#define LOCK_UN 8
+
+/* 2^62: no database gets there, and NTFS allows a lock past the end of a file. */
+#define FOZ_LOCK_OFFSET_HIGH 0x40000000u
+
+static int
+flock(int fd, int op)
+{
+   HANDLE handle = (HANDLE)_get_osfhandle(fd);
+   OVERLAPPED range = { .Offset = 0, .OffsetHigh = FOZ_LOCK_OFFSET_HIGH };
+
+   if (handle == INVALID_HANDLE_VALUE) {
+      errno = EBADF;
+      return -1;
+   }
+
+   if (op & LOCK_UN) {
+      /* As flock(), unlocking a lock this handle does not hold is not an error the callers act on */
+      return UnlockFileEx(handle, 0, 1, 0, &range) ? 0 : -1;
+   }
+
+   DWORD flags = LOCKFILE_EXCLUSIVE_LOCK | ((op & LOCK_NB) ? LOCKFILE_FAIL_IMMEDIATELY : 0);
+   if (LockFileEx(handle, flags, 0, 1, 0, &range))
+      return 0;
+
+   errno = GetLastError() == ERROR_LOCK_VIOLATION ? EAGAIN : EIO;
+   return -1;
+}
+
+static wchar_t *
+foz_wide_path(const char *path)
+{
+   int len = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, path, -1, NULL, 0);
+   if (len <= 0)
+      return NULL;
+
+   wchar_t *wpath = malloc(len * sizeof(wchar_t));
+   if (wpath && !MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, path, -1, wpath, len)) {
+      free(wpath);
+      return NULL;
+   }
+
+   return wpath;
+}
+
+/* fopen() of a UTF-8 path. Another process's foz_reset_if_full() holds the files without sharing for a moment:
+ * a sharing violation is retried for up to 100 ms. */
+static FILE *
+foz_fopen(const char *path, const char *mode)
+{
+   wchar_t wmode[8];
+   size_t i;
+
+   for (i = 0; mode[i] && i < ARRAY_SIZE(wmode) - 1; i++)
+      wmode[i] = mode[i];
+   wmode[i] = L'\0';
+
+   wchar_t *wpath = foz_wide_path(path);
+   if (!wpath)
+      return NULL;
+
+   FILE *file = NULL;
+   int64_t deadline = os_time_get_nano() + 100 * 1000000ll;
+
+   for (;;) {
+      file = _wfsopen(wpath, wmode, _SH_DENYNO);
+      if (file || errno != EACCES || os_time_get_nano() >= deadline)
+         break;
+      Sleep(1);
+   }
+
+   free(wpath);
+   return file;
+}
+
+static bool
+foz_truncate_handle(HANDLE handle)
+{
+   LARGE_INTEGER zero = { 0 };
+   return SetFilePointerEx(handle, zero, NULL, FILE_BEGIN) && SetEndOfFile(handle);
+}
+
+/* The marker of a full database: an empty file next to the data file, made when foz_write_entry() refuses an entry
+ * for the size bound. The data file of a full database is smaller than the bound by less than one entry, so its size
+ * alone does not tell a full database from one that still takes entries. */
+static wchar_t *
+foz_full_marker_path(const char *filename)
+{
+   char *marker = NULL;
+   if (asprintf(&marker, "%s.full", filename) == -1)
+      return NULL;
+
+   wchar_t *wmarker = foz_wide_path(marker);
+   free(marker);
+   return wmarker;
+}
+
+static void
+foz_mark_full(const char *cache_path)
+{
+   char *filename = NULL;
+   if (asprintf(&filename, "%s/foz_cache.foz", cache_path) == -1)
+      return;
+
+   wchar_t *wmarker = foz_full_marker_path(filename);
+   free(filename);
+   if (!wmarker)
+      return;
+
+   HANDLE marker = CreateFileW(wmarker, GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, NULL,
+                               OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+   if (marker != INVALID_HANDLE_VALUE)
+      CloseHandle(marker);
+   free(wmarker);
+}
+
+/* Empties the database at the two paths if it is full (its marker, or a data file at max_size) and no other process
+ * has either file open: both opens here share nothing, so they fail while any other handle is open. The index goes
+ * first and the marker last; a process stopped between the steps leaves an empty index beside a full data file, or
+ * an empty database with its marker, and the next start empties it again. A database that is still in use stays as
+ * it is, and foz_write_entry() adds nothing to it. */
+static void
+foz_reset_if_full(const char *filename, const char *idx_filename, uint64_t max_size)
+{
+   WIN32_FILE_ATTRIBUTE_DATA attributes;
+   wchar_t *wdata = foz_wide_path(filename);
+   wchar_t *widx = foz_wide_path(idx_filename);
+   wchar_t *wmarker = foz_full_marker_path(filename);
+   HANDLE data = INVALID_HANDLE_VALUE, idx = INVALID_HANDLE_VALUE;
+
+   if (!max_size || !wdata || !widx || !wmarker ||
+       !GetFileAttributesExW(wdata, GetFileExInfoStandard, &attributes))
+      goto done;
+
+   uint64_t size = ((uint64_t)attributes.nFileSizeHigh << 32) | attributes.nFileSizeLow;
+   if (size < max_size && GetFileAttributesW(wmarker) == INVALID_FILE_ATTRIBUTES)
+      goto done;
+
+   data = CreateFileW(wdata, GENERIC_READ | GENERIC_WRITE, 0, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+   if (data == INVALID_HANDLE_VALUE)
+      goto done;
+
+   idx = CreateFileW(widx, GENERIC_READ | GENERIC_WRITE, 0, NULL, OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+   if (idx == INVALID_HANDLE_VALUE)
+      goto done;
+
+   if (foz_truncate_handle(idx) && foz_truncate_handle(data))
+      DeleteFileW(wmarker);
+
+done:
+   if (idx != INVALID_HANDLE_VALUE)
+      CloseHandle(idx);
+   if (data != INVALID_HANDLE_VALUE)
+      CloseHandle(data);
+   free(wmarker);
+   free(widx);
+   free(wdata);
+}
+#else
+#define foz_fopen(path, mode) fopen(path, mode)
+#endif
 
 #define FOZ_REF_MAGIC_SIZE 16
 
@@ -191,6 +391,21 @@ update_foz_index(struct foz_db *foz_db, FILE *db_idx, unsigned file_idx)
 }
 
 /* exclusive flock with timeout. timeout is in nanoseconds */
+#if DETECT_OS_WINDOWS
+/* amdgpu-wddm BD-216: Sleep(1) can last a whole timer tick (15.6 ms by default), so a count of sleeps would stretch
+ * the timeout up to 15 times; the bound is a deadline instead. */
+static int lock_file_with_timeout(FILE *f, int64_t timeout)
+{
+   int64_t deadline = os_time_get_nano() + timeout;
+
+   for (;;) {
+      int err = flock(fileno(f), LOCK_EX | LOCK_NB);
+      if (err == 0 || errno != EAGAIN || os_time_get_nano() >= deadline)
+         return err;
+      Sleep(1);
+   }
+}
+#else
 static int lock_file_with_timeout(FILE *f, int64_t timeout)
 {
    int err;
@@ -207,6 +422,7 @@ static int lock_file_with_timeout(FILE *f, int64_t timeout)
    }
    return err;
 }
+#endif
 
 static bool
 load_foz_dbs(struct foz_db *foz_db, FILE *db_idx, uint8_t file_idx,
@@ -263,6 +479,9 @@ load_foz_dbs(struct foz_db *foz_db, FILE *db_idx, uint8_t file_idx,
 
    flock(fileno(foz_db->file[file_idx]), LOCK_UN);
 
+#ifdef FOZ_DB_UTIL_DYNAMIC_LIST
+   /* amdgpu-wddm BD-216: the updater thread exists only with the dynamic list (inotify), and on Windows thrd_t
+    * is a structure, not a scalar that can be tested. */
    if (foz_db->updater.thrd) {
    /* If MESA_DISK_CACHE_READ_ONLY_FOZ_DBS_DYNAMIC_LIST is enabled, access to
     * the foz_db hash table requires locking to prevent racing between this
@@ -270,7 +489,9 @@ load_foz_dbs(struct foz_db *foz_db, FILE *db_idx, uint8_t file_idx,
       simple_mtx_lock(&foz_db->mtx);
       update_foz_index(foz_db, db_idx, file_idx);
       simple_mtx_unlock(&foz_db->mtx);
-   } else {
+   } else
+#endif
+   {
       update_foz_index(foz_db, db_idx, file_idx);
    }
 
@@ -303,8 +524,8 @@ load_foz_dbs_ro(struct foz_db *foz_db, const char *foz_dbs_ro)
       free(foz_db_filename);
 
       /* Open files as read only */
-      foz_db->file[file_idx] = fopen(filename, "rb");
-      FILE *db_idx = fopen(idx_filename, "rb");
+      foz_db->file[file_idx] = foz_fopen(filename, "rb");
+      FILE *db_idx = foz_fopen(idx_filename, "rb");
 
       free(filename);
       free(idx_filename);
@@ -512,13 +733,23 @@ foz_prepare(struct foz_db *foz_db, char *cache_path)
    /* Open the default foz dbs for read/write. If the files didn't already exist
     * create them.
     */
+#if DETECT_OS_WINDOWS
+   /* amdgpu-wddm BD-216: the single-file database is the cache type the Windows driver chooses itself
+    * (disk_cache_create), not one a variable selects; every cache that gets here has a writable database. */
+   if (true) {
+#else
    if (debug_get_bool_option("MESA_DISK_CACHE_SINGLE_FILE", false)) {
+#endif
       if (!create_foz_db_filenames(cache_path, "foz_cache",
                                    &filename, &idx_filename))
          goto fail;
 
-      foz_db->file[0] = fopen(filename, "a+b");
-      foz_db->db_idx = fopen(idx_filename, "a+b");
+#if DETECT_OS_WINDOWS
+      foz_reset_if_full(filename, idx_filename, foz_db->max_size);
+#endif
+
+      foz_db->file[0] = foz_fopen(filename, "a+b");
+      foz_db->db_idx = foz_fopen(idx_filename, "a+b");
 
       free(filename);
       free(idx_filename);
@@ -703,6 +934,20 @@ foz_write_entry(struct foz_db *foz_db, const uint8_t *cache_key_160bit,
    header.crc = util_hash_crc32(blob, blob_size);
 
    fseek(foz_db->file[0], 0, SEEK_END);
+
+#if DETECT_OS_WINDOWS
+   /* amdgpu-wddm BD-216: the size bound (foz_reset_if_full empties the database at a later start) */
+   if (foz_db->max_size &&
+       (uint64_t)ftell(foz_db->file[0]) + FOSSILIZE_BLOB_HASH_LENGTH + sizeof(header) + blob_size >
+          foz_db->max_size) {
+      if (foz_db->writes_refused_full++ == 0) {
+         foz_mark_full(foz_db->cache_path);
+         mesa_logw("shader cache %s is full (%" PRIu64 " bytes): no new entries until a start empties it",
+                   foz_db->cache_path, foz_db->max_size);
+      }
+      goto fail;
+   }
+#endif
 
    /* Write hash header to db */
    char hash_str[BLAKE3_HEX_LEN];
