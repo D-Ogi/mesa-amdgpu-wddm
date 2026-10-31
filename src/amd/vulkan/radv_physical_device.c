@@ -2811,6 +2811,11 @@ radv_init_dri_options(struct radv_physical_device *pdev)
 
       drirc->debug.disable_trunc_coord &= !is_d3d9;
    }
+
+#ifdef _WIN32
+   if (!pdev->info.has_dedicated_vram && !getenv("radv_enable_unified_heap_on_apu"))
+      drirc->performance.enable_unified_heap_on_apu = true;
+#endif
 }
 
 static VkResult
