@@ -418,7 +418,17 @@ CreateResource(D3D10DDI_HDEVICE hDevice,                                // IN
        pResource->primary || (pCreateResource->BindFlags & D3D10_DDI_BIND_PRESENT) ||
        (pCreateResource->MiscFlags & D3D10_DDI_RESOURCE_MISC_SHARED)) {
       HRESULT hr = Bc250EnsureSurface(CastDevice(hDevice), pResource);
-      if (FAILED(hr)) { SetError(hDevice, hr); return; }
+      if (FAILED(hr)) {
+         // BD-168: an E_OUTOFMEMORY here is the status of the kernel callback
+         // that the step names; the line names the surface it was for.
+         BC250_ERROR("BC250 CreateResource surface failed: step=%s %08lx allocation=%x %ux%u format=%u "
+                     "pitch=%u bytes=%llu primary=%u shared=%u present=%u\n",
+                     pResource->surfaceStep ? pResource->surfaceStep : "-", hr, pResource->allocation,
+                     templat.width0, templat.height0, (unsigned)pCreateResource->Format, pResource->surfacePitch,
+                     (unsigned long long)pResource->surfaceBytes, pResource->primary, pResource->shared,
+                     (pCreateResource->BindFlags & D3D10_DDI_BIND_PRESENT) != 0);
+         SetError(hDevice, hr); return;
+      }
    }
 
    if (pCreateResource->pInitialDataUP) {
@@ -531,14 +541,19 @@ static void
 RefuseOpen(D3D10DDI_HDEVICE hDevice, D3D10DDI_HRESOURCE hResource, D3DKMT_HANDLE allocation,
            const OpenedSurface *data, UINT bpp, HRESULT hr, const char *why)
 {
+   const HRESULT cause = hr;
    if (hr != E_OUTOFMEMORY && hr != D3DDDIERR_DEVICEREMOVED)
       hr = D3DDDIERR_APPLICATIONERROR;
    const OpenedSurface none = {};
    if (!data) data = &none;
-   BC250_ERROR("BC250 OpenResource refused allocation=%x %ux%u pitch=%u (importable %u) size=%llu format=%u: %s, "
-               "%08lx\n", allocation, data->width, data->height, data->pitch, (data->width * bpp + 255u) & ~255u,
-               (unsigned long long)data->size, data->format, why, hr);
    Resource *resource = CastResource(hResource);
+   // BD-168: step is the failed step of Bc250EnsureSurface, "-" for a refusal
+   // before it. The first status is that of the step, the second the one the
+   // runtime gets.
+   BC250_ERROR("BC250 OpenResource refused allocation=%x %ux%u pitch=%u (importable %u) size=%llu format=%u: %s, "
+               "step=%s, %08lx, reported %08lx\n", allocation, data->width, data->height, data->pitch,
+               (data->width * bpp + 255u) & ~255u, (unsigned long long)data->size, data->format, why,
+               resource->surfaceStep ? resource->surfaceStep : "-", cause, hr);
    free(resource->transfers);
    resource->transfers = NULL;
    pipe_resource_reference(&resource->resource, NULL);
@@ -602,30 +617,48 @@ OpenResource(D3D10DDI_HDEVICE hDevice,                            // IN
    if (CastDevice(hDevice)->hosted_state && data.pitch != ((data.width * bpp + 255u) & ~255u)) {
       RefuseOpen(hDevice, hResource, info->hAllocation, &data, bpp, E_INVALIDARG, "pitch not importable"); return;
    }
-   D3D10DDI_MIPINFO mip = {};
-   mip.TexelWidth = mip.PhysicalWidth = data.width;
-   mip.TexelHeight = mip.PhysicalHeight = data.height;
-   mip.TexelDepth = mip.PhysicalDepth = 1;
-   D3D10DDIARG_CREATERESOURCE create = {};
-   create.pMipInfoList = &mip; create.ResourceDimension = D3D10DDIRESOURCE_TEXTURE2D;
-   create.Usage = D3D10_DDI_USAGE_DEFAULT;
-   create.BindFlags = D3D10_DDI_BIND_SHADER_RESOURCE | D3D10_DDI_BIND_RENDER_TARGET;
-   create.Format = format; create.SampleDesc.Count = 1;
-   create.MipLevels = 1; create.ArraySize = 1;
-   CreateResource(hDevice, &create, hResource, hRTResource);
+   // BD-168: the opened allocation is imported directly. This UMD used to
+   // create a full-size resource of its own first (CreateResource), only as
+   // the template of the import, which then replaced it. That resource took
+   // memory for each open, and when it could not be made the open failed with
+   // E_OUTOFMEMORY, which ends DWM (BD-058), although the allocation existed.
+   // The template asks for render-target use where the screen supports it and
+   // for sampling only otherwise: the compositor samples an opened surface,
+   // and Zink has no A8 render target (the b25 evidence, DWM opens of A8
+   // allocations refused). The template also refuses direct CPU maps, which
+   // the replaced resource gave the import when its own memory was not
+   // host-visible: every map of an opened surface goes through a staging copy.
+   struct pipe_screen *screen = CastPipeContext(hDevice)->screen;
+   struct pipe_resource templat = {};
+   templat.target = PIPE_TEXTURE_2D;
+   templat.format = FormatTranslate(format, FALSE);
+   templat.width0 = data.width; templat.height0 = data.height; templat.depth0 = 1;
+   templat.array_size = 1; templat.last_level = 0;
+   templat.nr_samples = templat.nr_storage_samples = 1;
+   templat.usage = translate_resource_usage(D3D10_DDI_USAGE_DEFAULT);
+   templat.flags = PIPE_RESOURCE_FLAG_DONT_MAP_DIRECTLY;
+   templat.bind = translate_resource_flags(D3D10_DDI_BIND_SHADER_RESOURCE | D3D10_DDI_BIND_RENDER_TARGET);
+   if (!screen->is_format_supported(screen, templat.format, templat.target, 1, 1, templat.bind)) {
+      templat.bind = translate_resource_flags(D3D10_DDI_BIND_SHADER_RESOURCE);
+      if (!screen->is_format_supported(screen, templat.format, templat.target, 1, 1, templat.bind)) {
+         RefuseOpen(hDevice, hResource, info->hAllocation, &data, bpp, E_NOTIMPL, "format not sampled by the screen");
+         return;
+      }
+   }
    Resource *resource = CastResource(hResource);
-   if (!resource->resource) {
-      // CreateResource has set the error.
-      BC250_ERROR("BC250 OpenResource allocation=%x %ux%u format=%u: CreateResource failed\n", info->hAllocation,
-                  data.width, data.height, data.format);
-      free(resource->transfers);
-      resource->transfers = NULL;
+   resource->hRTResource = (HANDLE)hRTResource.handle;
+   resource->Format = format;
+   resource->MipLevels = 1;
+   resource->NumSubResources = 1;
+   resource->transfers = (struct pipe_transfer **)calloc(1, sizeof *resource->transfers);
+   if (!resource->transfers) {
+      RefuseOpen(hDevice, hResource, info->hAllocation, &data, bpp, E_OUTOFMEMORY, "transfer table");
       return;
    }
    resource->allocation = info->hAllocation;
    resource->surfacePitch = data.pitch;
    resource->surfaceBytes = data.size;
-   HRESULT hr = Bc250EnsureSurface(CastDevice(hDevice), resource);
+   HRESULT hr = Bc250EnsureSurface(CastDevice(hDevice), resource, &templat);
    DebugPrintf("BC250 OpenResource %08lx handle %x\n", hr, resource->allocation);
    if (FAILED(hr))
       RefuseOpen(hDevice, hResource, info->hAllocation, &data, bpp, hr, "surface setup failed");

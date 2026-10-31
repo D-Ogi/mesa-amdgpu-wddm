@@ -187,6 +187,10 @@ struct Resource
    // and the paging fence value the map and MakeResident complete at.
    BOOL surfaceResident;
    UINT64 surfaceFence;
+   // The step at which the last Bc250EnsureSurface call failed (BD-168), or
+   // NULL. The error lines name it: a status alone does not tell a kernel
+   // callback from a refused import.
+   const char *surfaceStep;
    BOOL primary, shared;
    UINT vidpn;
    DXGI_FORMAT Format;
@@ -199,7 +203,10 @@ struct Resource
 };
 
 
-HRESULT Bc250EnsureSurface(Device *device, Resource *resource);
+// templ describes the surface when resource->resource is NULL: OpenResource
+// imports the opened allocation directly and creates no resource first.
+HRESULT Bc250EnsureSurface(Device *device, Resource *resource,
+                           const struct pipe_resource *templ = NULL);
 HRESULT Bc250QueuePresentWait(Device *device);
 HRESULT Bc250SignalPresent(Device *device);
 void Bc250AuditPresent(Device *device);

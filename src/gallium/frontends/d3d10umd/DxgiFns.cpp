@@ -60,19 +60,28 @@
  * ----------------------------------------------------------------------
  */
 
-HRESULT Bc250EnsureSurface(Device *device, Resource *resource)
+HRESULT Bc250EnsureSurface(Device *device, Resource *resource, const struct pipe_resource *templ)
 {
-   if (!resource || !resource->resource) return E_INVALIDARG;
+   if (!resource) return E_INVALIDARG;
    if (resource->presentReady) return S_OK;
-   UINT width = resource->resource->width0, height = resource->resource->height0;
-   if (!width || !height || width > 8192 || height > 8192) return E_INVALIDARG;
+   // BD-168: each failed step below sets surfaceStep, so that the error line
+   // of the caller names the step and not only the status.
+   auto fail = [resource](const char *step, HRESULT status) {
+      resource->surfaceStep = step;
+      return status;
+   };
+   resource->surfaceStep = NULL;
+   const struct pipe_resource *base = resource->resource ? resource->resource : templ;
+   if (!base) return fail("no resource", E_INVALIDARG);
+   UINT width = base->width0, height = base->height0;
+   if (!width || !height || width > 8192 || height > 8192) return fail("size", E_INVALIDARG);
    if (!device->pagingQueue) {
-      if (!device->KTCallbacks.pfnCreatePagingQueueCb) return E_NOTIMPL;
+      if (!device->KTCallbacks.pfnCreatePagingQueueCb) return fail("CreatePagingQueue", E_NOTIMPL);
       D3DDDICB_CREATEPAGINGQUEUE queue = {};
       queue.Priority = D3DDDI_PAGINGQUEUE_PRIORITY_NORMAL;
       HRESULT hr = device->KTCallbacks.pfnCreatePagingQueueCb(device->hDevice, &queue);
       DebugPrintf("BC250 CreatePagingQueue %08lx\n", hr);
-      if (FAILED(hr)) return hr;
+      if (FAILED(hr)) return fail("CreatePagingQueue", hr);
       device->pagingQueue = queue.hPagingQueue;
       device->pagingFence = (volatile UINT64 *)queue.FenceValueCPUVirtualAddress;
    }
@@ -85,10 +94,10 @@ HRESULT Bc250EnsureSurface(Device *device, Resource *resource)
       case DXGI_FORMAT_B8G8R8A8_UNORM: format = D3DDDIFMT_A8R8G8B8; break;
       case DXGI_FORMAT_B8G8R8X8_UNORM: format = D3DDDIFMT_X8R8G8B8; break;
       case DXGI_FORMAT_R8G8B8A8_UNORM: format = D3DDDIFMT_A8B8G8R8; break;
-      default: return E_NOTIMPL;
+      default: return fail("format", E_NOTIMPL);
       }
    }
-   const UINT bpp = util_format_get_blocksize(resource->resource->format);
+   const UINT bpp = util_format_get_blocksize(base->format);
    struct SurfacePrivate { UINT magic, version, width, height, pitch, format; UINT64 size; };
    static_assert(sizeof(SurfacePrivate) == 32, "LB7A ABI");
    const UINT pitchAlignment = 256u;
@@ -98,7 +107,7 @@ HRESULT Bc250EnsureSurface(Device *device, Resource *resource)
       UINT64(pitch) * ((height + 3u) & ~3u);
    if ((pitch & 15u) || pitch < ((width + 3u) & ~3u) * bpp ||
        bytes < UINT64(pitch) * ((height + 3u) & ~3u))
-      return E_INVALIDARG;
+      return fail("pitch", E_INVALIDARG);
    SurfacePrivate data = {0x4137424c, 1, width, height, pitch, format, bytes};
    HRESULT hr;
    if (!resource->allocation) {
@@ -122,7 +131,7 @@ HRESULT Bc250EnsureSurface(Device *device, Resource *resource)
       hr = device->KTCallbacks.pfnAllocateCb(device->hDevice, &allocate);
       BC250_REPORT(FAILED(hr), "BC250 Allocate hr=%08lx inputRT=%p callbackRT=%p miscShared=%u format=%u primary=%u allocation=%x resource=%x\n", hr, resource->hRTResource, allocate.hResource, resource->shared, format, resource->primary, info.hAllocation, allocate.hKMResource);
       BC250_DIAG("BC250 ALLOCATE ABI size=%zu private=%zu privateSize=%zu hResource=%zu hKMResource=%zu NumAllocations=%zu info2=%zu\n", sizeof(D3DDDICB_ALLOCATE), offsetof(D3DDDICB_ALLOCATE,pPrivateDriverData), offsetof(D3DDDICB_ALLOCATE,PrivateDriverDataSize), offsetof(D3DDDICB_ALLOCATE,hResource), offsetof(D3DDDICB_ALLOCATE,hKMResource), offsetof(D3DDDICB_ALLOCATE,NumAllocations), offsetof(D3DDDICB_ALLOCATE,pAllocationInfo2));
-      if (FAILED(hr)) return hr;
+      if (FAILED(hr)) return fail("Allocate", hr);
       resource->allocation = info.hAllocation;
       resource->surfacePitch = pitch;
       resource->surfaceBytes = bytes;
@@ -130,7 +139,7 @@ HRESULT Bc250EnsureSurface(Device *device, Resource *resource)
       if (GetEnvironmentVariableA("BC250_D3D_RUNTIME_INVENTORY", NULL, 0)) {
          // Inventory only: do not claim this unimported resource is presentable.
          auto share = (decltype(&D3DKMTShareObjects))GetProcAddress(GetModuleHandleA("gdi32.dll"), "D3DKMTShareObjects");
-         if (!share) return E_NOTIMPL;
+         if (!share) return fail("ShareObjects", E_NOTIMPL);
          OBJECT_ATTRIBUTES attrs = {}; attrs.Length = sizeof(attrs);
          HANDLE nt = NULL;
          NTSTATUS status = share(1, &allocate.hKMResource, &attrs, SHARED_ALLOCATION_ALL_ACCESS, &nt);
@@ -155,7 +164,7 @@ HRESULT Bc250EnsureSurface(Device *device, Resource *resource)
       hr = device->KTCallbacks.pfnMapGpuVirtualAddressCb(device->hDevice, &map);
       DebugPrintf("BC250 MapGpuVa %08lx va %llx\n", hr, map.VirtualAddress);
       // WDDM callbacks report successful asynchronous paging as E_PENDING.
-      if (FAILED(hr) && hr != E_PENDING) return hr;
+      if (FAILED(hr) && hr != E_PENDING) return fail("MapGpuVirtualAddress", hr);
       resource->gpuVa = map.VirtualAddress;
       resource->surfaceFence = map.PagingFenceValue;
    }
@@ -165,7 +174,7 @@ HRESULT Bc250EnsureSurface(Device *device, Resource *resource)
       resident.NumAllocations = 1; resident.AllocationList = &resource->allocation;
       hr = device->KTCallbacks.pfnMakeResidentCb(device->hDevice, &resident);
       DebugPrintf("BC250 MakeResident %08lx\n", hr);
-      if (FAILED(hr) && hr != E_PENDING) return hr;
+      if (FAILED(hr) && hr != E_PENDING) return fail("MakeResident", hr);
       resource->surfaceResident = TRUE;
       if (resident.PagingFenceValue > resource->surfaceFence)
          resource->surfaceFence = resident.PagingFenceValue;
@@ -173,21 +182,21 @@ HRESULT Bc250EnsureSurface(Device *device, Resource *resource)
    const UINT64 fence = resource->surfaceFence;
    ULONGLONG deadline = GetTickCount64() + 5000;
    while (device->pagingFence && *device->pagingFence < fence && GetTickCount64() < deadline) Sleep(1);
-   if (!device->pagingFence || *device->pagingFence < fence) return HRESULT_FROM_WIN32(WAIT_TIMEOUT);
+   if (!device->pagingFence || *device->pagingFence < fence) return fail("paging fence wait", HRESULT_FROM_WIN32(WAIT_TIMEOUT));
    BC250_DIAG("BC250 surface hosted=%u allocation=%x pitch=%u bytes=%llu\n",device->hosted_state!=NULL,resource->allocation,data.pitch,resource->gpuBytes);
    if (device->hosted_state) {
       struct winsys_handle handle={};
       handle.type=WINSYS_HANDLE_TYPE_FD;
       handle.handle=(HANDLE)(uintptr_t)resource->allocation;
       handle.stride=data.pitch; handle.size=resource->gpuBytes;
-      handle.modifier=0; handle.format=resource->resource->format;
+      handle.modifier=0; handle.format=base->format;
       handle.bc250_va=resource->gpuVa; handle.bc250_identity=device->hDevice;
-      struct pipe_resource desc=*resource->resource;
+      struct pipe_resource desc=*base;
       desc.bind |= PIPE_BIND_DISPLAY_TARGET | PIPE_BIND_SHARED;
       struct pipe_resource *imported=device->pipe->screen->resource_from_handle(device->pipe->screen,&desc,&handle,0);
       // The allocation exists: a refused import (layout, format) is not an
       // allocation failure, and E_OUTOFMEMORY would end DWM (BD-058).
-      if (!imported) return D3DDDIERR_APPLICATIONERROR;
+      if (!imported) return fail("hosted import", D3DDDIERR_APPLICATIONERROR);
       pipe_resource_reference(&resource->resource,NULL);
       resource->resource=imported;
       resource->presentReady=TRUE;
@@ -197,18 +206,18 @@ HRESULT Bc250EnsureSurface(Device *device, Resource *resource)
       D3DDDICB_LOCK2 lock = {};
       lock.hAllocation = resource->allocation;
       hr = device->KTCallbacks.pfnLock2Cb(device->hDevice, &lock);
-      if (FAILED(hr)) return hr;
+      if (FAILED(hr)) return fail("Lock2", hr);
       resource->cpuMapping = lock.pData;
    }
    struct winsys_handle handle = {};
    handle.type = WINSYS_HANDLE_TYPE_USER_MEMORY;
    handle.user_memory = resource->cpuMapping; handle.stride = data.pitch;
    handle.size = data.size;
-   struct pipe_resource desc = *resource->resource;
+   struct pipe_resource desc = *base;
    desc.bind |= PIPE_BIND_DISPLAY_TARGET | PIPE_BIND_SHARED;
    struct pipe_resource *imported = device->pipe->screen->resource_from_handle(
        device->pipe->screen, &desc, &handle, 0);
-   if (!imported) return D3DDDIERR_APPLICATIONERROR;
+   if (!imported) return fail("user-memory import", D3DDDIERR_APPLICATIONERROR);
    pipe_resource_reference(&resource->resource, NULL);
    resource->resource = imported;
    resource->presentReady = TRUE;
