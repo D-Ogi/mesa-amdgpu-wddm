@@ -585,6 +585,23 @@ error_va_reserve:
    return result;
 }
 
+static void
+radv_wddm2_bo_account(struct radv_wddm2_winsys *ws, struct radv_wddm2_bo *bo, bool add)
+{
+   if (bo->base.is_virtual)
+      return;
+   const uint64_t bytes = bo->base.size;
+   const uint64_t delta = add ? bytes : (uint64_t)0 - bytes;
+   if (bo->base.initial_domain & RADEON_DOMAIN_VRAM) {
+      if (bo->flags & RADEON_FLAG_NO_CPU_ACCESS)
+         p_atomic_add(&ws->allocated_vram, delta);
+      else
+         p_atomic_add(&ws->allocated_vram_vis, delta);
+   }
+   if (bo->base.initial_domain & RADEON_DOMAIN_GTT)
+      p_atomic_add(&ws->allocated_gtt, delta);
+}
+
 static VkResult
 radv_wddm2_bo_create_internal(struct radeon_winsys *_ws, uint64_t size, unsigned alignment,
                               enum radeon_bo_domain initial_domain, enum radeon_bo_flag flags,
@@ -802,6 +819,7 @@ radv_wddm2_bo_create_internal(struct radeon_winsys *_ws, uint64_t size, unsigned
    if (ws->debug_log_bos)
       radv_winsys_log_bo(&ws->bo_log, &bo->base, false);
 
+   radv_wddm2_bo_account(ws, bo, true);
    *out_bo = (struct radeon_winsys_bo *)bo;
    return VK_SUCCESS;
 
@@ -1848,6 +1866,7 @@ radv_wddm2_bo_from_handle(struct radeon_winsys *_ws, void *handle, unsigned prio
    }
 
    free(pdata);
+   radv_wddm2_bo_account(ws, bo, true);
    *out_bo = &bo->base;
    return VK_SUCCESS;
 
@@ -2031,7 +2050,11 @@ radv_wddm2_bo_destroy_now(struct radv_wddm2_winsys *ws, struct radv_wddm2_bo *bo
 
    radv_wddm2_bo_unmap(_ws, _bo, false);
 
-   if (bo->borrowed) { FREE(bo); return; }
+   if (bo->borrowed) {
+      radv_wddm2_bo_account(ws, bo, false);
+      FREE(bo);
+      return;
+   }
 
    if (radv_wddm2_bo_owns_va(bo) && !bo->va_gone) {
       /* Each range on its own: a refusal of one does not stop the free of the other, and only a range
@@ -2084,6 +2107,8 @@ radv_wddm2_bo_destroy_now(struct radv_wddm2_winsys *ws, struct radv_wddm2_bo *bo
          radv_wddm2_bo_keep_refused(ws, bo, status);
          return;
       }
+
+      radv_wddm2_bo_account(ws, bo, false);
 
       if (ws->debug_all_bos)
          radv_winsys_bo_list_del(&ws->global_bo_list, &bo->base);
@@ -2529,6 +2554,7 @@ radv_wddm2_bo_from_hosted(struct radeon_winsys *rws, void *identity, uint32_t al
    bo->ws=ws; bo->borrowed=true;
    bo->base.va=va; bo->base.size=size; bo->base.handle=allocation; bo->base.obj_id=allocation;
    bo->base.initial_domain=RADEON_DOMAIN_VRAM;
+   radv_wddm2_bo_account(ws, bo, true);
    *out=&bo->base;
    return VK_SUCCESS;
 }

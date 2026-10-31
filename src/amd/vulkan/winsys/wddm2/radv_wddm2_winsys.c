@@ -626,8 +626,11 @@ radv_wddm2_winsys_query_value(struct radeon_winsys *_ws, enum radeon_value_id va
 
    switch (value) {
    case RADEON_ALLOCATED_VRAM:
+      return p_atomic_read(&ws->allocated_vram);
    case RADEON_ALLOCATED_VRAM_VIS:
+      return p_atomic_read(&ws->allocated_vram_vis);
    case RADEON_ALLOCATED_GTT:
+      return p_atomic_read(&ws->allocated_gtt);
    case RADEON_VRAM_USAGE:
    case RADEON_VRAM_VIS_USAGE:
    case RADEON_GTT_USAGE: {
@@ -635,13 +638,10 @@ radv_wddm2_winsys_query_value(struct radeon_winsys *_ws, enum radeon_value_id va
          .hAdapter = ws->adapter_h,
       };
       switch (value) {
-      case RADEON_ALLOCATED_VRAM:
-      case RADEON_ALLOCATED_VRAM_VIS:
       case RADEON_VRAM_USAGE:
       case RADEON_VRAM_VIS_USAGE:
          mem_info.MemorySegmentGroup = D3DKMT_MEMORY_SEGMENT_GROUP_LOCAL;
          break;
-      case RADEON_ALLOCATED_GTT:
       case RADEON_GTT_USAGE:
          mem_info.MemorySegmentGroup = D3DKMT_MEMORY_SEGMENT_GROUP_NON_LOCAL;
          break;
@@ -653,24 +653,35 @@ radv_wddm2_winsys_query_value(struct radeon_winsys *_ws, enum radeon_value_id va
       if (!NT_SUCCESS(status))
          return 0;
 
-      switch (value) {
-      case RADEON_ALLOCATED_VRAM:
-      case RADEON_ALLOCATED_VRAM_VIS:
-      case RADEON_ALLOCATED_GTT:
-         return mem_info.CurrentReservation;
-
-      case RADEON_VRAM_USAGE:
-      case RADEON_VRAM_VIS_USAGE:
-      case RADEON_GTT_USAGE:
-         return mem_info.CurrentUsage;
-      default:
-         UNREACHABLE("Invalid value");
-      }
+      return mem_info.CurrentUsage;
    }
 
    default:
       UNREACHABLE("Unimplemented query");
    }
+}
+
+void
+radv_wddm2_query_allocated(struct radeon_winsys *base, uint64_t *vram,
+                           uint64_t *vram_vis, uint64_t *gtt)
+{
+   struct radv_wddm2_winsys *source = radv_wddm2_winsys(base);
+   *vram = *vram_vis = *gtt = 0;
+   simple_mtx_lock(&winsys_creation_mutex);
+   struct hash_table *tables[] = { winsyses, standalone_winsyses };
+   for (unsigned t = 0; t < ARRAY_SIZE(tables); t++) {
+      if (!tables[t])
+         continue;
+      hash_table_foreach(tables[t], entry) {
+         struct radv_wddm2_winsys *ws = entry->data;
+         if (memcmp(&ws->adapter_luid, &source->adapter_luid, sizeof(LUID)))
+            continue;
+         *vram += p_atomic_read(&ws->allocated_vram);
+         *vram_vis += p_atomic_read(&ws->allocated_vram_vis);
+         *gtt += p_atomic_read(&ws->allocated_gtt);
+      }
+   }
+   simple_mtx_unlock(&winsys_creation_mutex);
 }
 
 static void
