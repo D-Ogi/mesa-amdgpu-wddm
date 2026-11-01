@@ -2457,12 +2457,7 @@ wsi_win32_gdi_worker_main(void *data)
       chain->gdi_worker.count--;
       mtx_unlock(&chain->gdi_worker.mutex);
 
-      if (chain->gdi_worker.stop) {
-         wsi_win32_set_image_idle(chain, &chain->images[image_index]);
-         (void)wsi_win32_complete_present(chain, present_id, VK_ERROR_OUT_OF_DATE_KHR);
-      } else {
-         (void)wsi_win32_gdi_present_one(chain, image_index, present_id, t_enter);
-      }
+      (void)wsi_win32_gdi_present_one(chain, image_index, present_id, t_enter);
 
       mtx_lock(&chain->gdi_worker.mutex);
    }
