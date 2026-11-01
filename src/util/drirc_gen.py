@@ -90,10 +90,17 @@ class DrircOption(object):
         return " || ".join(parts) if parts else None
 
 class DrircBool(DrircOption):
-    def __init__(self, name, value, description="", c_name=None, min_device_version=None, max_device_version=None):
+    def __init__(self, name, value, description="", c_name=None, min_device_version=None, max_device_version=None,
+                 runtime_default=False):
         super().__init__(DrircOptionType.BOOL, name, description, c_name, min_device_version, max_device_version)
         self.value = value
         self.c_args = ["true" if value else "false", f"\"{self.description}\""]
+        # Opt-in typed per-invocation default. NULL keeps the declared value;
+        # environment and configuration overrides still go through xmlconfig.
+        self.runtime_default = runtime_default
+        if runtime_default:
+            assert c_name is not None
+            self.c_args[0] = f"(defaults ? defaults->{c_name} : {self.c_args[0]})"
 
 class DrircInt(DrircOption):
     def __init__(self, name, value, min_value, max_value, description="", c_name=None,
@@ -196,8 +203,21 @@ struct ${driver_prefix}_drirc {
 % endfor
 };
 
+% if runtime_options:
+/* Per-device defaults are applied before environment and drirc overrides. */
+struct ${driver_prefix}_drirc_defaults {
+% for option in runtime_options:
+   bool ${option.c_name};
+% endfor
+};
+% endif
+
 void ${driver_prefix}_parse_dri_options(struct ${driver_prefix}_drirc *drirc,
-                                        const driConfigFileParseParams *params);
+                                        const driConfigFileParseParams *params
+% if runtime_options:
+                                        , const struct ${driver_prefix}_drirc_defaults *defaults
+% endif
+                                        );
 
 #ifdef __cplusplus
 }
@@ -212,7 +232,17 @@ TEMPLATE_C = """\
 #include <stdlib.h>
 #include "${include_file}"
 
+% if runtime_options:
+void
+${driver_prefix}_parse_dri_options(struct ${driver_prefix}_drirc *drirc,
+                                 const driConfigFileParseParams *params,
+                                 const struct ${driver_prefix}_drirc_defaults *defaults)
+{
+/* Invocation-local descriptions: devices can have different defaults. */
+const driOptionDescription dri_options[] = {
+% else:
 static const driOptionDescription dri_options[] = {
+% endif
 % for section in sections:
 DRI_CONF_SECTION("${section.name}")
 %   for option in section.options:
@@ -226,10 +256,12 @@ DRI_CONF_SECTION_END
 % endfor
 };
 
+% if not runtime_options:
 void
 ${driver_prefix}_parse_dri_options(struct ${driver_prefix}_drirc *drirc,
                                    const driConfigFileParseParams *params)
 {
+% endif
    driParseOptionInfo(&drirc->available_options, dri_options, ARRAY_SIZE(dri_options));
    driParseConfigFiles(&drirc->options, &drirc->available_options, params);
 
@@ -271,6 +303,7 @@ def drirc_generate(cpath, hpath, driver_prefix, sections):
     environment = {
         'driver_prefix': driver_prefix,
         'sections': sections,
+        'runtime_options': [o for s in sections for o in s.options if getattr(o, 'runtime_default', False)],
         'type_to_ctype': lambda dtype: type_to_ctype[dtype],
         'type_to_macro': lambda dtype: type_to_macro[dtype],
         'type_to_queryfn': lambda dtype: type_to_queryfn[dtype],

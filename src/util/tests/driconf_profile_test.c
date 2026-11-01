@@ -356,6 +356,10 @@ main(int argc, char **argv)
    }
    wchar_t base[MAX_PATH];
    MultiByteToWideChar(CP_UTF8, 0, argv[1], -1, base, MAX_PATH);
+#ifdef TEST_RADV_HEAP_DEFAULTS
+   extern int test_radv_heap_defaults(const wchar_t *base);
+   failures += test_radv_heap_defaults(base);
+#endif
    test_xml();
    test_access();
    test_files(base);
