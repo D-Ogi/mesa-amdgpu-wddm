@@ -2792,6 +2792,15 @@ radv_init_dri_options(struct radv_physical_device *pdev)
                    VK_API_VERSION_PATCH(instance->vk.app_info.engine_version), device_version);
 #endif
 
+   const struct radv_drirc_defaults defaults = {
+      /* Explicit drirc wins; environment options follow the lab/release policy. */
+#ifdef _WIN32
+      .enable_unified_heap_on_apu = !pdev->info.has_dedicated_vram,
+#else
+      .enable_unified_heap_on_apu = false,
+#endif
+   };
+
    radv_parse_dri_options(drirc, &(driConfigFileParseParams){
                                     .driverName = "radv",
                                     .deviceVersion = device_version,
@@ -2803,7 +2812,7 @@ radv_init_dri_options(struct radv_physical_device *pdev)
                                     /* amdgpu-wddm: a lab build prints each option that drirc changed. */
                                     .logNonDefaultOptions = true,
 #endif
-                                 });
+                                 }, &defaults);
 
    if (instance->vk.app_info.engine_name && !strcmp(instance->vk.app_info.engine_name, "DXVK")) {
       /* Since 2.3.1+, DXVK uses the application version to notify the driver about D3D9. */
@@ -2811,11 +2820,6 @@ radv_init_dri_options(struct radv_physical_device *pdev)
 
       drirc->debug.disable_trunc_coord &= !is_d3d9;
    }
-
-#ifdef _WIN32
-   if (!pdev->info.has_dedicated_vram && !getenv("radv_enable_unified_heap_on_apu"))
-      drirc->performance.enable_unified_heap_on_apu = true;
-#endif
 }
 
 static VkResult
