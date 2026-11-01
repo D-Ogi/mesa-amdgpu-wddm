@@ -72,6 +72,9 @@ static_assert((unsigned)DXGI_FORMAT_R10G10B10A2_UNORM == WSI_IFLIP_DXGI_R10G10B1
  */
 static const struct wsi_iflip_knobs *wsi_iflip_knobs_now(void);
 
+struct wsi_win32_swapchain;
+static void wsi_win32_gdi_worker_stop(struct wsi_win32_swapchain *chain);
+
 struct wsi_win32;
 
 struct wsi_win32 {
@@ -256,6 +259,21 @@ struct wsi_win32_swapchain {
    struct wsi_win32_latency   latency;
    HANDLE                     latency_event;
    bool                       latency_logged;
+   /* BD-206: a GDI present worker thread that runs the CPU copy, BitBlt, GdiFlush and DwmFlush off
+    * the application thread. The ring holds at most image_count entries (one per image in flight). */
+   struct {
+      thrd_t thread;
+      bool alive;
+      mtx_t mutex;
+      struct u_cnd_monotonic cond;
+      bool stop;
+      unsigned head, tail, count;
+      struct {
+         uint32_t image_index;
+         uint64_t present_id;
+         uint64_t t_enter;
+      } ring[16];
+   } gdi_worker;
    struct wsi_win32_image     images[0];
 };
 
@@ -1683,6 +1701,8 @@ wsi_win32_swapchain_destroy(struct wsi_swapchain *drv_chain,
    struct wsi_win32_swapchain *chain =
       (struct wsi_win32_swapchain *) drv_chain;
 
+   wsi_win32_gdi_worker_stop(chain);
+
    /* V5. The drain decides what this teardown may touch. UNPROVEN means the presenter's queue may
     * still be reading this chain's back buffers, its copy command lists and the memory behind them,
     * and nothing below releases any of it: the chain and every reference in it are pinned and the
@@ -2357,6 +2377,151 @@ wsi_win32_wait_for_present(struct wsi_swapchain *base,
    return result;
 }
 
+/* BD-206: present one GDI frame on the worker thread. The fence was already waited for in
+ * wsi_common.c (cpu_present), so cpu_map is stable. */
+static VkResult
+wsi_win32_gdi_present_one(struct wsi_win32_swapchain *chain,
+                          uint32_t image_index, uint64_t present_id,
+                          uint64_t t_enter)
+{
+   struct wsi_win32_image *image = &chain->images[image_index];
+   VkResult result = VK_SUCCESS;
+
+   RECT rect;
+   if (!GetClientRect(chain->wnd, &rect))
+      result = VK_ERROR_SURFACE_LOST_KHR;
+   else if ((uint32_t)(rect.right - rect.left) != chain->extent.width ||
+            (uint32_t)(rect.bottom - rect.top) != chain->extent.height)
+      result = VK_ERROR_OUT_OF_DATE_KHR;
+   if (result != VK_SUCCESS) {
+      wsi_win32_set_image_idle(chain, image);
+      return wsi_win32_complete_present(chain, present_id, result);
+   }
+
+   wsi_win32_copy_frame((uint8_t *)image->sw.ppvBits, (size_t)image->sw.bmp_row_pitch,
+                        (const uint8_t *)image->base.cpu_map, image->base.row_pitches[0],
+                        chain->extent.width, chain->extent.height,
+                        wsi_win32_format_is_rgba8(chain->format),
+                        util_get_cpu_caps()->has_ssse3);
+
+   const uint64_t t_copy = chain->present_log ? os_time_get_nano() : 0;
+   HDC window_dc = GetDC(chain->wnd);
+   HDC memory_dc = window_dc ? CreateCompatibleDC(window_dc) : NULL;
+   HGDIOBJ previous = memory_dc ? SelectObject(memory_dc, image->sw.bmp) : NULL;
+   if (!window_dc)
+      result = VK_ERROR_SURFACE_LOST_KHR;
+   else if (!memory_dc || !previous || previous == HGDI_ERROR)
+      result = VK_ERROR_OUT_OF_HOST_MEMORY;
+   else if (!BitBlt(window_dc, 0, 0, chain->extent.width, chain->extent.height,
+                    memory_dc, 0, 0, SRCCOPY) || !GdiFlush())
+      result = VK_ERROR_SURFACE_LOST_KHR;
+   if (previous && previous != HGDI_ERROR)
+      SelectObject(memory_dc, previous);
+   if (memory_dc)
+      DeleteDC(memory_dc);
+   if (window_dc)
+      ReleaseDC(chain->wnd, window_dc);
+   const uint64_t t_blit = chain->present_log ? os_time_get_nano() : 0;
+   if (result == VK_SUCCESS &&
+       chain->base.present_mode != VK_PRESENT_MODE_IMMEDIATE_KHR &&
+       FAILED(DwmFlush()))
+      result = VK_ERROR_SURFACE_LOST_KHR;
+   if (chain->present_log)
+      wsi_win32_present_log(chain, "gdi", present_id, t_enter, t_copy, t_blit,
+                            os_time_get_nano(), result);
+
+   wsi_win32_set_image_idle(chain, image);
+   return wsi_win32_complete_present(chain, present_id, result);
+}
+
+static int
+wsi_win32_gdi_worker_main(void *data)
+{
+   struct wsi_win32_swapchain *chain = (struct wsi_win32_swapchain *)data;
+   u_thread_setname("wsi-gdi-present");
+
+   mtx_lock(&chain->gdi_worker.mutex);
+   while (!chain->gdi_worker.stop || chain->gdi_worker.count > 0) {
+      if (chain->gdi_worker.count == 0) {
+         u_cnd_monotonic_wait(&chain->gdi_worker.cond, &chain->gdi_worker.mutex);
+         continue;
+      }
+      unsigned idx = chain->gdi_worker.tail;
+      uint32_t image_index = chain->gdi_worker.ring[idx].image_index;
+      uint64_t present_id = chain->gdi_worker.ring[idx].present_id;
+      uint64_t t_enter = chain->gdi_worker.ring[idx].t_enter;
+      chain->gdi_worker.tail = (idx + 1) % 16;
+      chain->gdi_worker.count--;
+      mtx_unlock(&chain->gdi_worker.mutex);
+
+      if (chain->gdi_worker.stop) {
+         wsi_win32_set_image_idle(chain, &chain->images[image_index]);
+         (void)wsi_win32_complete_present(chain, present_id, VK_ERROR_OUT_OF_DATE_KHR);
+      } else {
+         (void)wsi_win32_gdi_present_one(chain, image_index, present_id, t_enter);
+      }
+
+      mtx_lock(&chain->gdi_worker.mutex);
+   }
+   mtx_unlock(&chain->gdi_worker.mutex);
+   return 0;
+}
+
+static bool
+wsi_win32_gdi_worker_start(struct wsi_win32_swapchain *chain)
+{
+   chain->gdi_worker.alive = false;
+   chain->gdi_worker.stop = false;
+   chain->gdi_worker.head = 0;
+   chain->gdi_worker.tail = 0;
+   chain->gdi_worker.count = 0;
+
+   if (mtx_init(&chain->gdi_worker.mutex, mtx_plain) != thrd_success)
+      return false;
+   if (u_cnd_monotonic_init(&chain->gdi_worker.cond) != thrd_success) {
+      mtx_destroy(&chain->gdi_worker.mutex);
+      return false;
+   }
+   if (thrd_create(&chain->gdi_worker.thread, wsi_win32_gdi_worker_main, chain) != thrd_success) {
+      u_cnd_monotonic_destroy(&chain->gdi_worker.cond);
+      mtx_destroy(&chain->gdi_worker.mutex);
+      return false;
+   }
+   chain->gdi_worker.alive = true;
+   return true;
+}
+
+static void
+wsi_win32_gdi_worker_stop(struct wsi_win32_swapchain *chain)
+{
+   if (!chain->gdi_worker.alive)
+      return;
+   mtx_lock(&chain->gdi_worker.mutex);
+   chain->gdi_worker.stop = true;
+   u_cnd_monotonic_broadcast(&chain->gdi_worker.cond);
+   mtx_unlock(&chain->gdi_worker.mutex);
+   thrd_join(chain->gdi_worker.thread, NULL);
+   u_cnd_monotonic_destroy(&chain->gdi_worker.cond);
+   mtx_destroy(&chain->gdi_worker.mutex);
+   chain->gdi_worker.alive = false;
+}
+
+static void
+wsi_win32_gdi_worker_post(struct wsi_win32_swapchain *chain,
+                          uint32_t image_index, uint64_t present_id,
+                          uint64_t t_enter)
+{
+   mtx_lock(&chain->gdi_worker.mutex);
+   unsigned idx = chain->gdi_worker.head;
+   chain->gdi_worker.ring[idx].image_index = image_index;
+   chain->gdi_worker.ring[idx].present_id = present_id;
+   chain->gdi_worker.ring[idx].t_enter = t_enter;
+   chain->gdi_worker.head = (idx + 1) % 16;
+   chain->gdi_worker.count++;
+   u_cnd_monotonic_signal(&chain->gdi_worker.cond);
+   mtx_unlock(&chain->gdi_worker.mutex);
+}
+
 static VkResult
 wsi_win32_queue_present(struct wsi_swapchain *drv_chain,
                         uint32_t image_index,
@@ -2388,59 +2553,17 @@ wsi_win32_queue_present(struct wsi_swapchain *drv_chain,
       return wsi_win32_submit_present(chain, present_id, result);
    }
 
-   RECT rect;
-   VkResult result = VK_SUCCESS;
-   if (!GetClientRect(chain->wnd, &rect))
-      result = VK_ERROR_SURFACE_LOST_KHR;
-   else if ((uint32_t)(rect.right - rect.left) != chain->extent.width ||
-            (uint32_t)(rect.bottom - rect.top) != chain->extent.height)
-      result = VK_ERROR_OUT_OF_DATE_KHR;
-   if (result != VK_SUCCESS) {
-      wsi_win32_set_image_idle(chain, image);
-      return wsi_win32_complete_present(chain, present_id, result);
+   /* BD-206: post the GDI present to the worker thread. The image stays DRAWING (not IDLE) until the
+    * worker completes the copy and BitBlt, so acquire blocks if all images are busy. The image count
+    * serves as the queue depth. If the worker failed to start, fall back to the synchronous path.
+    */
+   if (chain->gdi_worker.alive) {
+      image->state = WSI_IMAGE_QUEUED;
+      wsi_win32_gdi_worker_post(chain, image_index, present_id, t_enter);
+      return VK_SUCCESS;
    }
 
-   /* cpu_map is the blit buffer in host-cached memory (wsi_select_host_memory_type), so the copy
-    * reads at cached speed; an RGBA8 chain swaps R and B with SSSE3 where the CPU has it.
-    */
-   wsi_win32_copy_frame((uint8_t *)image->sw.ppvBits, (size_t)image->sw.bmp_row_pitch,
-                        (const uint8_t *)image->base.cpu_map, image->base.row_pitches[0],
-                        chain->extent.width, chain->extent.height,
-                        wsi_win32_format_is_rgba8(chain->format),
-                        util_get_cpu_caps()->has_ssse3);
-
-   const uint64_t t_copy = chain->present_log ? os_time_get_nano() : 0;
-   HDC window_dc = GetDC(chain->wnd);
-   HDC memory_dc = window_dc ? CreateCompatibleDC(window_dc) : NULL;
-   HGDIOBJ previous = memory_dc ? SelectObject(memory_dc, image->sw.bmp) : NULL;
-   if (!window_dc)
-      result = VK_ERROR_SURFACE_LOST_KHR;
-   else if (!memory_dc || !previous || previous == HGDI_ERROR)
-      result = VK_ERROR_OUT_OF_HOST_MEMORY;
-   else if (!BitBlt(window_dc, 0, 0, chain->extent.width, chain->extent.height,
-                    memory_dc, 0, 0, SRCCOPY) || !GdiFlush())
-      result = VK_ERROR_SURFACE_LOST_KHR;
-   if (previous && previous != HGDI_ERROR)
-      SelectObject(memory_dc, previous);
-   if (memory_dc)
-      DeleteDC(memory_dc);
-   if (window_dc)
-      ReleaseDC(chain->wnd, window_dc);
-   const uint64_t t_blit = chain->present_log ? os_time_get_nano() : 0;
-   /* IMMEDIATE: the BitBlt (with GdiFlush) has already copied the frame into
-    * the window's redirection surface, so the swapchain image is free; do not
-    * wait for DWM's next composition. The log's dwmflush_us then stays near 0.
-    */
-   if (result == VK_SUCCESS &&
-       chain->base.present_mode != VK_PRESENT_MODE_IMMEDIATE_KHR &&
-       FAILED(DwmFlush()))
-      result = VK_ERROR_SURFACE_LOST_KHR;
-   if (chain->present_log)
-      wsi_win32_present_log(chain, "gdi", present_id, t_enter, t_copy, t_blit,
-                            os_time_get_nano(), result);
-
-   wsi_win32_set_image_idle(chain, image);
-   return wsi_win32_complete_present(chain, present_id, result);
+   return wsi_win32_gdi_present_one(chain, image_index, present_id, t_enter);
 }
 
 static void
@@ -3323,6 +3446,9 @@ wsi_win32_create_chain(wsi_win32_surface *surface,
       if (result != VK_SUCCESS)
          goto fail;
    }
+
+   if (!use_dxgi)
+      wsi_win32_gdi_worker_start(chain);
 
    /* The images and their D3D12 blit contexts exist. Before this line the chain was only the swap
     * chain; after it the next route line comes from the first present (BD-105: the evidence of the
