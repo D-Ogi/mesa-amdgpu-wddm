@@ -3456,7 +3456,11 @@ zink_image_map(struct pipe_context *pctx,
          /* if the map region intersects with any clears then we have to apply them */
          zink_fb_clears_apply_region(ctx, pres, zink_rect_from_box(box),box->z, box->depth);
    }
-   if (!res->linear || !res->obj->host_visible) {
+   /* A hosted runtime import can use a HOST_VISIBLE memory type without
+    * granting CPU access to its borrowed allocation. Honor the resource's
+    * explicit mapping restriction for images as well as buffers. */
+   if (!res->linear || !res->obj->host_visible ||
+       (pres->flags & PIPE_RESOURCE_FLAG_DONT_MAP_DIRECTLY)) {
       enum pipe_format format = pres->format;
       if (usage & PIPE_MAP_DEPTH_ONLY)
          format = util_format_get_depth_only(pres->format);
