@@ -273,6 +273,7 @@ struct wsi_win32_swapchain {
          uint64_t present_id;
          uint64_t t_enter;
       } ring[16];
+      uint64_t frames_presented;
    } gdi_worker;
    struct wsi_win32_image     images[0];
 };
@@ -2430,6 +2431,8 @@ wsi_win32_gdi_present_one(struct wsi_win32_swapchain *chain,
       wsi_win32_present_log(chain, "gdi", present_id, t_enter, t_copy, t_blit,
                             os_time_get_nano(), result);
 
+   if (result == VK_SUCCESS)
+      chain->gdi_worker.frames_presented++;
    wsi_win32_set_image_idle(chain, image);
    return wsi_win32_complete_present(chain, present_id, result);
 }
@@ -2475,6 +2478,7 @@ wsi_win32_gdi_worker_start(struct wsi_win32_swapchain *chain)
    chain->gdi_worker.head = 0;
    chain->gdi_worker.tail = 0;
    chain->gdi_worker.count = 0;
+   chain->gdi_worker.frames_presented = 0;
 
    if (mtx_init(&chain->gdi_worker.mutex, mtx_plain) != thrd_success)
       return false;
@@ -2501,6 +2505,16 @@ wsi_win32_gdi_worker_stop(struct wsi_win32_swapchain *chain)
    u_cnd_monotonic_broadcast(&chain->gdi_worker.cond);
    mtx_unlock(&chain->gdi_worker.mutex);
    thrd_join(chain->gdi_worker.thread, NULL);
+
+   const char *stats_path = getenv("MESA_GDI_WORKER_STATS");
+   if (stats_path) {
+      FILE *f = fopen(stats_path, "w");
+      if (f) {
+         fprintf(f, "frames_presented %" PRIu64 "\n", chain->gdi_worker.frames_presented);
+         fclose(f);
+      }
+   }
+
    u_cnd_monotonic_destroy(&chain->gdi_worker.cond);
    mtx_destroy(&chain->gdi_worker.mutex);
    chain->gdi_worker.alive = false;
