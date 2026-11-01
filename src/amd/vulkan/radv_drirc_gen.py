@@ -117,7 +117,7 @@ def declare_options():
           c_name="disable_ngg_gs"),
         B("radv_enable_unified_heap_on_apu", False,
           "Enable an unified heap with DEVICE_LOCAL on integrated GPUs",
-          c_name="enable_unified_heap_on_apu"),
+          c_name="enable_unified_heap_on_apu", runtime_default=True),
         B("radv_report_llvm9_version_string", False,
           "Report LLVM 9.0.1 for games that apply shader workarounds if missing (for ACO only)",
           c_name="report_llvm9_version_string"),
