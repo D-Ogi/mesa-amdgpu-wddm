@@ -14,7 +14,7 @@ import subprocess
 
 def function(source, name):
     match = re.search(
-        r'(?m)^(?:static\s+)?(?:VkResult|void)\s*\n' + re.escape(name) + r'\s*\(',
+        r'(?m)^(?:static\s+)?(?:VkResult|void|bool)\s*\n' + re.escape(name) + r'\s*\(',
         source,
     )
     if not match:
@@ -62,8 +62,13 @@ def main():
     # Retain every ownership helper and the production dispatch table. Unrelated
     # signal/value/wait functions are stubbed to exclude driver dependencies.
     source = source[:source.index('\nVkResult\nvk_wddm2_check_device_status')]
+    # The CPU wait and its BD-179 helpers (the fence poll and the liveness
+    # check between slices) need the host status and the device state, so
+    # they are stubbed out as well.
     for name in ('vk_wddm2_monitored_fence_signal',
                  'vk_wddm2_monitored_fence_get_value',
+                 'vk_wddm2_monitored_fence_poll',
+                 'vk_wddm2_wait_slice_device_lost',
                  'vk_wddm2_monitored_fence_wait_many'):
         begin, end, _ = function(source, name)
         source = source[:begin] + source[end:]

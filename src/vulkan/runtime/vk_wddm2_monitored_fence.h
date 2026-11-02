@@ -70,6 +70,10 @@ vk_sync_as_wddm2_monitored_fence(struct vk_sync *sync)
 
 VkResult vk_wddm2_check_device_status(struct vk_device *device);
 
+/* The time between two liveness checks of a CPU wait on these fences
+ * (BD-179), 1 s. Only host tests write it. */
+extern uint64_t vk_wddm2_monitored_fence_wait_slice_ns;
+
 VkResult
 vk_wddm2_monitored_fence_gpu_wait_many(struct vk_queue *queue,
                                        uint32_t context_handle,

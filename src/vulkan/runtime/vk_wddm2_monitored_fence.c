@@ -252,6 +252,57 @@ vk_wddm2_monitored_fence_get_value(struct vk_device *device,
    return VK_SUCCESS;
 }
 
+/* The time between two liveness checks of a CPU wait (BD-179). The host tests
+ * shorten it; nothing else writes it. */
+uint64_t vk_wddm2_monitored_fence_wait_slice_ns = 1000000000ull;
+
+/* Read the fences of a wait: VK_SUCCESS when the wait is satisfied,
+ * VK_NOT_READY when it is not, VK_ERROR_DEVICE_LOST when a fence reads the
+ * lost-device value or the host reports the loss.
+ */
+static VkResult
+vk_wddm2_monitored_fence_poll(struct vk_device *device,
+                              uint32_t wait_count,
+                              const struct vk_sync_wait *waits,
+                              enum vk_sync_wait_flags wait_flags)
+{
+   uint32_t ready = 0;
+   for (uint32_t i = 0; i < wait_count; i++) {
+      struct vk_wddm2_monitored_fence *fence =
+         to_wddm2_monitored_fence(waits[i].sync);
+
+      uint64_t value=p_atomic_read(fence->value_map);
+      if (!bc250_host_fence_valid(&device->bc250_host,value))
+         return vk_device_set_lost(device,"Hosted fence lost while polling");
+      if (value >= waits[i].wait_value) ready++;
+   }
+   if (ready == wait_count || ((wait_flags & VK_SYNC_WAIT_ANY) && ready > 0))
+      return VK_SUCCESS;
+   return VK_NOT_READY;
+}
+
+/* Whether a CPU wait must stop after a slice that ended without its event.
+ * A hosted device asks its host, which knows whether the adapter of the
+ * device is still in the system (BD-179). A kernel device reads its
+ * execution state. A query that fails for another reason than a removed
+ * device is no evidence of a loss: the wait continues.
+ */
+static bool
+vk_wddm2_wait_slice_device_lost(struct vk_device *device)
+{
+   if (device->bc250_host.dispatch)
+      return bc250_host_check_status(&device->bc250_host) < 0;
+
+   D3DKMT_GETDEVICESTATE get_state = {
+      .hDevice = device->wddm2_handle,
+      .StateType = D3DKMT_DEVICESTATE_EXECUTION,
+   };
+   NTSTATUS status = BC250_WDDM_CALL(&device->bc250_host, GetDeviceState, &get_state);
+   if (!NT_SUCCESS(status))
+      return status == STATUS_DEVICE_REMOVED;
+   return get_state.ExecutionState != D3DKMT_DEVICEEXECUTION_ACTIVE;
+}
+
 static VkResult
 vk_wddm2_monitored_fence_wait_many(struct vk_device *device,
                                    uint32_t wait_count,
@@ -265,18 +316,10 @@ vk_wddm2_monitored_fence_wait_many(struct vk_device *device,
    /* Quick poll all the fences ourselves.  We may not have to call into the
     * kernel at all.
     */
-   uint32_t ready = 0;
-   for (uint32_t i = 0; i < wait_count; i++) {
-      struct vk_wddm2_monitored_fence *fence =
-         to_wddm2_monitored_fence(waits[i].sync);
-
-      uint64_t value=p_atomic_read(fence->value_map);
-      if (!bc250_host_fence_valid(&device->bc250_host,value))
-         return vk_device_set_lost(device,"Hosted fence lost while polling");
-      if (value >= waits[i].wait_value) ready++;
-   }
-   if (ready == wait_count || ((wait_flags & VK_SYNC_WAIT_ANY) && ready > 0))
-      return VK_SUCCESS;
+   result = vk_wddm2_monitored_fence_poll(device, wait_count, waits,
+                                          wait_flags);
+   if (result != VK_NOT_READY)
+      return result;
 
    if (abs_timeout_ns == 0)
       return VK_TIMEOUT;
@@ -321,13 +364,39 @@ vk_wddm2_monitored_fence_wait_many(struct vk_device *device,
       goto fail_close_event;
    }
 
+   /* BD-179: wait in slices. The kernel does not set the event of a wait on
+    * the fence of a stopped adapter: after a PnP restart of the display
+    * device (pnputil /restart-device, a driver install) the fences of the old
+    * device keep their last value, and a wait for a later value never ends.
+    * In the dump of the hung explorer.exe (2026-11-02, tester.35) the
+    * wallpaper's device release waited here with no bound for a graphics
+    * fence that read 1, for value 2, while it held the composition lock of
+    * the desktop window. So after each slice that ends without the event,
+    * read the fences again and ask whether the device is lost. A slow fence
+    * on a live device is no loss (K225): the wait then continues to the
+    * caller's deadline.
+    */
    for (;;) {
       now_ns = os_time_get_nano();
-      uint64_t remaining = abs_timeout_ns > now_ns ? abs_timeout_ns - now_ns : 0;
-      result = vk_async_event_wait(async_event, remaining);
-      if (result != VK_TIMEOUT || os_time_get_nano() >= abs_timeout_ns)
+      if (now_ns >= abs_timeout_ns) {
+         result = VK_TIMEOUT;
          break;
-      /* Retry early/interrupted waits and timeouts capped by the OS API. */
+      }
+      result = vk_async_event_wait(async_event,
+                                   MIN2(abs_timeout_ns - now_ns,
+                                        vk_wddm2_monitored_fence_wait_slice_ns));
+      if (result != VK_TIMEOUT)
+         break;
+      result = vk_wddm2_monitored_fence_poll(device, wait_count, waits,
+                                             wait_flags);
+      if (result != VK_NOT_READY)
+         break;
+      if (vk_wddm2_wait_slice_device_lost(device)) {
+         result = vk_device_set_lost(device,
+            "Device lost during a fence wait (stopped adapter, BD-179)");
+         break;
+      }
+      result = VK_TIMEOUT;
    }
 
    if (result == VK_SUCCESS) {
