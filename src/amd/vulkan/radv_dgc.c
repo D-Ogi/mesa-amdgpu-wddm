@@ -3425,14 +3425,27 @@ radv_CreateIndirectCommandsLayoutEXT(VkDevice _device, const VkIndirectCommandsL
 
    layout->bc250_pc_stages_valid = true;
    if (radv_device_physical(device)->bc250_expose_dgc) {
-      VK_FROM_HANDLE(radv_pipeline_layout, pl, pCreateInfo->pipelineLayout);
+      /* BD-288: the rule per push word is radv_bc250_dgc_push_word_valid(). The pipeline layout is the
+       * one the runtime resolved (pipelineLayout or a chained VkPipelineLayoutCreateInfo); a
+       * descriptor-heap layout has none and needs none. */
+      VK_FROM_HANDLE(radv_pipeline_layout, pl, layout->vk.layout);
       const VkShaderStageFlags graphics = VK_SHADER_STAGE_MESH_BIT_EXT | VK_SHADER_STAGE_TASK_BIT_EXT |
          VK_SHADER_STAGE_FRAGMENT_BIT;
+      enum radv_bc250_dgc_push_kind kind = RADV_BC250_DGC_PUSH_NONE;
+      for (uint32_t t = 0; t < pCreateInfo->tokenCount; t++) {
+         const VkIndirectCommandsTokenTypeEXT type = pCreateInfo->pTokens[t].type;
+         kind = radv_bc250_dgc_push_kind_add(kind,
+            type == VK_INDIRECT_COMMANDS_TOKEN_TYPE_PUSH_CONSTANT_EXT ||
+               type == VK_INDIRECT_COMMANDS_TOKEN_TYPE_SEQUENCE_INDEX_EXT,
+            type == VK_INDIRECT_COMMANDS_TOKEN_TYPE_PUSH_DATA_EXT ||
+               type == VK_INDIRECT_COMMANDS_TOKEN_TYPE_PUSH_DATA_SEQUENCE_INDEX_EXT);
+      }
       for (unsigned i = 0; i < layout->vk.n_pc_layouts + !!(layout->vk.dgc_info & BITFIELD_BIT(MESA_VK_DGC_SI)); i++) {
          const struct vk_indirect_command_push_constant_layout *pc = i < layout->vk.n_pc_layouts ?
             &layout->vk.pc_layouts[i] : &layout->vk.si_layout;
          for (unsigned word = pc->dst_offset_B / 4; word < (pc->dst_offset_B + pc->size_B) / 4; word++)
-            if (!pl || (pc->stages & pl->bc250_pc_stages[word] & graphics) != (pl->bc250_pc_stages[word] & graphics))
+            if (!radv_bc250_dgc_push_word_valid(kind, pl != NULL, pc->stages, pl ? pl->bc250_pc_stages[word] : 0,
+                                                graphics))
                layout->bc250_pc_stages_valid = false;
       }
    }

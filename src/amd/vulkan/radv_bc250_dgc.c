@@ -275,7 +275,8 @@ radv_bc250_dgc_report(const struct radv_device *device)
            "BC250 DGC: stages=0x%08x(%s) tokens=%s route=%s meshShader=%d taskShader=%d ext_dgc=%d "
            "expose_dgc=%d native_task=%d hybrid_task=%d task_latched=%d why=\"%s\" d3d12=%s\n",
            stages, names,
-           mesh_stages ? "DRAW_MESH_TASKS(+COUNT,+NV)|PUSH_CONSTANT|SEQUENCE_INDEX" : "no-mesh-token",
+           mesh_stages ? "DRAW_MESH_TASKS(+COUNT,+NV)|PUSH_CONSTANT|SEQUENCE_INDEX|PUSH_DATA(+SEQUENCE_INDEX)"
+                       : "no-mesh-token",
            pdev->bc250_expose_dgc ? "radv_bc250_dgc" : "none", mesh_feature, task_feature, ext_dgc,
            pdev->bc250_expose_dgc, pdev->bc250_native_task, pdev->bc250_hybrid_task,
            radv_bc250_task_latched_off(),
@@ -320,8 +321,11 @@ bc250_dgc_state_valid(const struct radv_cmd_buffer *state, const VkGeneratedComm
        s->streamout.enabled_mask || device->sqtt.bo || device->utrace.context || device->bc250_timer.enabled ||
        radv_bc250_chain_enabled(device) || device->bc250_split_batch_prep)
       return false;
+   /* BD-288: a bound descriptor heap is accepted. Its address is application-owned, like a descriptor
+    * buffer's, and bc250_dgc_capture() emits it into each captured draw (dirty_heaps below), as the
+    * direct mesh route does for its compute producer (radv_bc250.c). */
    for (unsigned i = 0; i < MAX_BIND_POINTS; i++) {
-      if (state->descriptors[i].valid_heaps || state->descriptors[i].dynamic_offset_count)
+      if (state->descriptors[i].dynamic_offset_count)
          return false;
    }
    return true;
@@ -512,6 +516,8 @@ bc250_dgc_capture(struct radv_cmd_buffer *owner, const struct radv_cmd_buffer *s
    for (unsigned i = 0; i < MAX_BIND_POINTS; i++) {
       cmd->descriptors[i].dirty |= cmd->descriptors[i].valid;
       cmd->descriptors[i].dirty_dynamic = true;
+      /* The heap addresses of the source state (BD-288): the capture starts from an empty stream. */
+      cmd->descriptors[i].dirty_heaps |= cmd->descriptors[i].valid_heaps;
       cmd->descriptors[i].indirect_descriptor_sets_va = 0;
       cmd->push_constant_state[i].need_upload = true;
    }

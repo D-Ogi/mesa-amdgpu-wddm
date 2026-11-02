@@ -44,7 +44,7 @@
  * than the direct DispatchMesh path's: bc250_dgc_state_valid() in radv_bc250_dgc.c refuses a mesh DGC
  * execute under a non-zero view mask, streamout, any VRS attachment or non-1x1 fragment size, active
  * pipeline-statistics or transform-feedback queries, a secondary or simultaneous-use command buffer, a
- * bound descriptor heap or dynamic offset, and with SQTT, utrace, the BC-250 timer, chaining or
+ * dynamic offset (a bound descriptor heap is accepted since BD-288), and with SQTT, utrace, the BC-250 timer, chaining or
  * split-batch prepare on - and the refusal is a hard vk_command_buffer_set_error(RADV_BC250_CMD_REFUSED)
  * at vkEndCommandBuffer, not a fallback to the generic path. That restriction set belongs to the BD-119
  * mesh DGC route, not to this mask. BD-121 makes it newly reachable in the hybrid-task-off arm, where a

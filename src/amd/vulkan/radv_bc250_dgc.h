@@ -3,6 +3,7 @@
 #define RADV_BC250_DGC_H
 #include "radv_dgc.h"
 #include "radv_bc250_dgc_stages.h"
+#include "radv_bc250_dgc_push.h"
 
 /* BD-121. The vk_indirect_command_layout::dgc_info bits a BC-250 mesh DGC layout may carry: a mesh
  * draw token (VK_INDIRECT_COMMANDS_TOKEN_TYPE_DRAW_MESH_TASKS_EXT and its COUNT and NV forms all set
