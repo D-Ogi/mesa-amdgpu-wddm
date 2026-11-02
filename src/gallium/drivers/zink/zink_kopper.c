@@ -1006,7 +1006,11 @@ bool
 zink_kopper_acquire_readback(struct zink_context *ctx, struct zink_resource *res, struct zink_resource **readback)
 {
    struct zink_screen *screen = zink_screen(ctx->base.screen);
-   assert(res->obj->dt);
+   /* kill_swapchain can run between the caller's dt guard and this call */
+   if (!res->obj->dt) {
+      *readback = res;
+      return false;
+   }
    struct kopper_displaytarget *cdt = res->obj->dt;
    const struct kopper_swapchain *cswap = cdt->swapchain;
    uint32_t last_dt_idx = res->obj->last_dt_idx;
@@ -1078,7 +1082,7 @@ zink_kopper_acquire_readback(struct zink_context *ctx, struct zink_resource *res
       }
       if (is_swapchain_kill(ret)) {
          kill_swapchain(ctx, res);
-         *readback = NULL;
+         *readback = res;
          cdt->age_locked = false;
          return false;
       }
