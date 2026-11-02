@@ -575,13 +575,22 @@ radv_physical_device_init_mem_types(struct radv_physical_device *pdev)
       };
    }
 
-   if (gart_index >= 0) {
+   /* The CPU-cached types are GTT memory. With a unified heap on an APU there is no GTT heap, and upstream then
+    * drops these types. On Windows they stay, in the unified heap, whose budget already counts GTT usage: the
+    * hosted D3D12 heap import requires HOST_CACHED for a WRITE_BACK (readback) heap and has no fallback, so
+    * without them every readback buffer is refused (icd-ckit3, test_queue_wait). */
+   int cached_index = gart_index;
+#ifdef _WIN32
+   if (cached_index < 0 && !pdev->info.has_dedicated_vram && pdev->drirc.performance.enable_unified_heap_on_apu)
+      cached_index = visible_vram_index;
+#endif
+   if (cached_index >= 0) {
       pdev->memory_domains[type_count] = RADEON_DOMAIN_GTT;
       pdev->memory_flags[type_count] = RADEON_FLAG_CPU_ACCESS;
       pdev->memory_properties.memoryTypes[type_count++] = (VkMemoryType){
          .propertyFlags = VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT |
                           VK_MEMORY_PROPERTY_HOST_CACHED_BIT,
-         .heapIndex = gart_index,
+         .heapIndex = cached_index,
       };
 
       pdev->memory_domains[type_count] = RADEON_DOMAIN_GTT;
@@ -589,7 +598,7 @@ radv_physical_device_init_mem_types(struct radv_physical_device *pdev)
       pdev->memory_properties.memoryTypes[type_count++] = (VkMemoryType){
          .propertyFlags = VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT |
                           VK_MEMORY_PROPERTY_HOST_CACHED_BIT,
-         .heapIndex = gart_index,
+         .heapIndex = cached_index,
       };
    }
    pdev->memory_properties.memoryTypeCount = type_count;
