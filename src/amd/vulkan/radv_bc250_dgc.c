@@ -384,39 +384,77 @@ bc250_dgc_build_program(const VkGeneratedCommandsInfoEXT *info, const struct bc2
    return program;
 }
 
+/* BD-288: the preprocess buffer holds every captured query site as a two-dword NOP (the header that
+ * bc250_dgc_prepare() writes before the upload, followed by the event word as its payload). Only an
+ * execute inside a native pipeline-statistics scope writes the EVENT_WRITE headers (enable), and the
+ * same execute writes the NOPs again after its chains (disable). The buffer is thus neutral again for
+ * the next execute of an explicit preprocess, which may run outside a query scope. Both words are
+ * written: preprocessing fills an inactive sequence with single-dword NOPs, so a site there becomes a
+ * stop/start pair with no draw between, which keeps the caller's query state. Helpers are never counted.
+ *
+ * The writes run from uploaded IB2 bodies, never from this stream. This stream calls the DGC chains as
+ * IB2, so the winsys must copy all of it into the IB1 of the submission (there is no IB3). One WRITE_DATA
+ * per site in this stream made that IB1 overflow the IB_SIZE field: 130 sequences of 2049 sites in
+ * test_amplification_shader_execute_indirect_state gave 1601736 dwords, the submission failed and the
+ * device was lost. */
 static bool
-bc250_dgc_patch_queries(struct radv_cmd_buffer *cmd, const VkGeneratedCommandsInfoEXT *info,
-                        const struct bc250_dgc_shape *shape, const struct bc250_dgc_program *program)
+bc250_dgc_write_query_sites(struct radv_cmd_buffer *cmd, const VkGeneratedCommandsInfoEXT *info,
+                            const struct bc250_dgc_program *program, bool enable, FILE *packets)
 {
    struct radv_device *device = radv_cmd_buffer_device(cmd);
-   const VkGeneratedCommandsPipelineInfoEXT *pi = vk_find_struct_const(info->pNext, GENERATED_COMMANDS_PIPELINE_INFO_EXT);
-   bool ok = program && program->pipeline == pi->pipeline && program->layout == info->indirectCommandsLayout && program->size == shape->size &&
-      program->sequences == info->maxSequenceCount && program->draws == info->maxDrawCount;
-   if (ok) {
-      bool native_stats = radv_get_num_pipeline_stat_queries(cmd) > 0;
-      FILE *packets = NULL;
-      const char *dump = BC250_ENV_STR(BC250_DGC_DUMP, NULL);
-      if (dump) {
-         VK_FROM_HANDLE(radv_indirect_command_layout, layout, info->indirectCommandsLayout);
-         char path[4096];
-         snprintf(path, sizeof(path), "%s/query-owner-%u.bin", dump, layout->vk.draw_count);
-         packets = fopen(path, "wb");
+   const struct radv_physical_device *pdev = radv_device_physical(device);
+   const uint32_t pad = pdev->info.ip[AMD_IP_GFX].ib_pad_dw_mask + 1;
+   const uint32_t alignment = MAX2(256u, pdev->info.ip[AMD_IP_GFX].ib_alignment);
+   const uint32_t sites_per_ib = (~C_3F3_IB_SIZE - pad) / 6;
+   for (unsigned first = 0; first < program->count;) {
+      const unsigned n = MIN2(program->count - first, sites_per_ib);
+      const unsigned dw = align(n * 6, pad);
+      uint64_t va;
+      void *map;
+      if (!radv_cmd_buffer_upload_alloc(cmd, dw * 4, alignment, &va, &map))
+         return false;
+      uint32_t *p = map;
+      for (unsigned i = 0; i < n; i++) {
+         const struct bc250_dgc_query_patch *patch = &program->patches[first + i];
+         const uint64_t dst = info->preprocessAddress + patch->offset;
+         *p++ = PKT3(PKT3_WRITE_DATA, 4, false);
+         *p++ = S_371_DST_SEL(V_371_MEMORY) | S_371_WR_CONFIRM(1) | S_371_ENGINE_SEL(V_371_MICRO_ENGINE);
+         *p++ = (uint32_t)dst;
+         *p++ = (uint32_t)(dst >> 32);
+         *p++ = enable ? patch->header : PKT3(PKT3_NOP, 0, false);
+         *p++ = patch->event;
       }
-      for (unsigned i = 0; i < program->count; i++) {
-         const struct bc250_dgc_query_patch *patch = &program->patches[i];
-         /* Restore both words: inactive sequences were filled entirely with
-          * NOPs by preprocessing. Their stop/start pairs contain no draw and
-          * preserve the caller's query state. Helpers are never counted. */
-         uint32_t words[] = {native_stats ? patch->header : PKT3(PKT3_NOP, 0, false), patch->event};
-         radv_cs_write_data(device, cmd->cs, V_371_MICRO_ENGINE,
-            info->preprocessAddress + patch->offset, 2, words, false);
-         /* Preserve every emitted write even if command-stream growth chains
-          * away the earlier IB. The publication tail is appended below. */
-         if (packets) fwrite(cmd->cs->b->buf + cmd->cs->b->cdw - 6, 4, 6, packets);
-      }
-      if (packets) fclose(packets);
+      for (unsigned i = n * 6; i < dw; i++)
+         *p++ = PKT3_NOP_PAD;
+      if (packets)
+         fwrite(map, 4, dw, packets);
+      radeon_check_space(device->ws, cmd->cs->b, 4);
+      device->ws->cs_execute_ib(cmd->cs->b, NULL, va, dw, false);
+      first += n;
    }
-   return ok;
+   return true;
+}
+
+static bool
+bc250_dgc_program_matches(const VkGeneratedCommandsInfoEXT *info, const struct bc250_dgc_shape *shape,
+                          const struct bc250_dgc_program *program)
+{
+   const VkGeneratedCommandsPipelineInfoEXT *pi = vk_find_struct_const(info->pNext, GENERATED_COMMANDS_PIPELINE_INFO_EXT);
+   return program && program->pipeline == pi->pipeline && program->layout == info->indirectCommandsLayout &&
+      program->size == shape->size && program->sequences == info->maxSequenceCount &&
+      program->draws == info->maxDrawCount;
+}
+
+static FILE *
+bc250_dgc_open_query_dump(const VkGeneratedCommandsInfoEXT *info, const char *mode)
+{
+   const char *dump = BC250_ENV_STR(BC250_DGC_DUMP, NULL);
+   if (!dump)
+      return NULL;
+   VK_FROM_HANDLE(radv_indirect_command_layout, layout, info->indirectCommandsLayout);
+   char path[4096];
+   snprintf(path, sizeof(path), "%s/query-owner-%u.bin", dump, layout->vk.draw_count);
+   return fopen(path, mode);
 }
 
 static bool
@@ -730,11 +768,26 @@ bc250_dgc_prepare(struct radv_cmd_buffer *cmd, const VkGeneratedCommandsInfoEXT 
    bool ok = true;
    for (uint32_t seq = 0; seq < info->maxSequenceCount && ok; seq++)
       ok = bc250_dgc_capture(cmd, state, info, &shape, seq, snapshot + (uint64_t)seq * shape.stride);
-   uint64_t source = 0;
-   if (ok)
-      ok = radv_cmd_buffer_upload_data(cmd, shape.size, 4, snapshot, &source);
    if (!ok) {
       free(snapshot);
+      vk_command_buffer_set_error(&cmd->vk, RADV_BC250_CMD_REFUSED);
+      return;
+   }
+   /* The sites come from the captured EVENT_WRITE headers, so the program is built before they
+    * become NOPs. bc250_dgc_program_from_state() captures again and finds the same sites. */
+   struct bc250_dgc_program *program = bc250_dgc_build_program(info, &shape, snapshot);
+   if (!program) {
+      free(snapshot);
+      vk_command_buffer_set_error(&cmd->vk, VK_ERROR_OUT_OF_HOST_MEMORY);
+      return;
+   }
+   /* BD-288: upload a query-neutral program (see bc250_dgc_write_query_sites()). */
+   for (unsigned i = 0; i < program->count; i++)
+      *(uint32_t *)(snapshot + program->patches[i].offset) = PKT3(PKT3_NOP, 0, false);
+   uint64_t source = 0;
+   if (!radv_cmd_buffer_upload_data(cmd, shape.size, 4, snapshot, &source)) {
+      free(snapshot);
+      free(program);
       vk_command_buffer_set_error(&cmd->vk, RADV_BC250_CMD_REFUSED);
       return;
    }
@@ -752,12 +805,7 @@ bc250_dgc_prepare(struct radv_cmd_buffer *cmd, const VkGeneratedCommandsInfoEXT 
       FILE *f = fopen(path, "wb");
       if (f) { fwrite(&params, 1, sizeof(params), f); fwrite(snapshot, 1, shape.size, f); fclose(f); }
    }
-   struct bc250_dgc_program *program = bc250_dgc_build_program(info, &shape, snapshot);
    free(snapshot);
-   if (!program) {
-      vk_command_buffer_set_error(&cmd->vk, VK_ERROR_OUT_OF_HOST_MEMORY);
-      return;
-   }
    if (program_out)
       *program_out = program;
    else
@@ -855,23 +903,26 @@ radv_bc250_dgc_execute(struct radv_cmd_buffer *cmd, VkBool32 preprocessed, const
    cmd->state.flush_bits |= AC_BARRIER_SYNC_CS | AC_BARRIER_INV_L2 | AC_BARRIER_INV_VMEM |
                             AC_BARRIER_INV_SMEM | AC_BARRIER_WB_L2;
    radv_emit_cache_flush(cmd, false);
-   const bool patched = bc250_dgc_patch_queries(cmd, info, &shape, program);
-   free(program);
-   if (!patched) {
+   if (!bc250_dgc_program_matches(info, &shape, program)) {
+      free(program);
       vk_command_buffer_set_error(&cmd->vk, RADV_BC250_CMD_REFUSED);
+      return;
+   }
+   /* Query sites change only inside a native pipeline-statistics scope; elsewhere the neutral
+    * preprocess buffer runs as it is and this stream receives no write. */
+   const bool native_stats = program->count && radv_get_num_pipeline_stat_queries(cmd) > 0;
+   FILE *packets = bc250_dgc_open_query_dump(info, "wb");
+   if (native_stats && !bc250_dgc_write_query_sites(cmd, info, program, true, packets)) {
+      if (packets) fclose(packets);
+      free(program);
+      vk_command_buffer_set_error(&cmd->vk, VK_ERROR_OUT_OF_DEVICE_MEMORY);
       return;
    }
    cmd->state.flush_bits |= AC_BARRIER_WB_L2 | AC_BARRIER_INV_L2;
    radv_emit_cache_flush(cmd, false);
    ac_emit_cp_pfp_sync_me(cmd->cs->b, false);
-   const char *dump = BC250_ENV_STR(BC250_DGC_DUMP, NULL);
-   if (dump) {
-      VK_FROM_HANDLE(radv_indirect_command_layout, layout, info->indirectCommandsLayout);
-      char path[4096];
-      snprintf(path, sizeof(path), "%s/query-owner-%u.bin", dump, layout->vk.draw_count);
-      FILE *f = fopen(path, "ab");
-      if (f) { fwrite(cmd->cs->b->buf, 4, cmd->cs->b->cdw, f); fclose(f); }
-   }
+   if (packets)
+      fwrite(cmd->cs->b->buf, 4, cmd->cs->b->cdw, packets);
    for (uint32_t seq = 0; seq < info->maxSequenceCount; seq++) {
       for (uint32_t segment = 0; segment < shape.segments; segment++) {
          radeon_check_space(device->ws, cmd->cs->b, 4);
@@ -879,6 +930,15 @@ radv_bc250_dgc_execute(struct radv_cmd_buffer *cmd, VkBool32 preprocessed, const
                                     (uint64_t)segment * shape.segment_code, shape.segment_code / 4, 0,
                                     cmd->state.cond_render.enabled);
       }
+   }
+   /* The CP has fetched every chain before the ME runs these writes, so they cannot change the
+    * commands of this execute. The cache flush at the start of every execute publishes them. */
+   const bool restored = !native_stats || bc250_dgc_write_query_sites(cmd, info, program, false, packets);
+   if (packets) fclose(packets);
+   free(program);
+   if (!restored) {
+      vk_command_buffer_set_error(&cmd->vk, VK_ERROR_OUT_OF_DEVICE_MEMORY);
+      return;
    }
    /* Captured helper dispatches and indirect draws change tracked registers.
     * Require the next ordinary draw/dispatch to re-emit all affected state. */
