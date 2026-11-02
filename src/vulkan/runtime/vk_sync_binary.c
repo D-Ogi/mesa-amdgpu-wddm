@@ -115,6 +115,30 @@ vk_sync_binary_wait_many(struct vk_device *device,
 }
 
 static VkResult
+vk_sync_binary_move(struct vk_device *device,
+                    struct vk_sync *_dst,
+                    struct vk_sync *_src)
+{
+   struct vk_sync_binary *dst = to_vk_sync_binary(_dst);
+   struct vk_sync_binary *src = to_vk_sync_binary(_src);
+
+   const struct vk_sync_binary_type *btype =
+      container_of(dst->sync.type, struct vk_sync_binary_type, sync);
+
+   assert(btype->timeline_type->move);
+   VkResult result = btype->timeline_type->move(device,
+                                                &dst->timeline,
+                                                &src->timeline);
+   if (result != VK_SUCCESS)
+      return result;
+
+   uint64_t tmp = dst->next_point;
+   dst->next_point = src->next_point;
+   src->next_point = tmp;
+   return VK_SUCCESS;
+}
+
+static VkResult
 vk_sync_binary_import_sync_file(struct vk_device *device,
                                 struct vk_sync *sync,
                                 int fd)
@@ -155,6 +179,7 @@ vk_sync_binary_get_type(const struct vk_sync_type *timeline_type)
                      VK_SYNC_FEATURE_WAIT_PENDING,
          .init = vk_sync_binary_init,
          .finish = vk_sync_binary_finish,
+         .move = timeline_type->move ? vk_sync_binary_move : NULL,
          .reset = vk_sync_binary_reset,
          .signal = vk_sync_binary_signal,
          .wait_many = vk_sync_binary_wait_many,
