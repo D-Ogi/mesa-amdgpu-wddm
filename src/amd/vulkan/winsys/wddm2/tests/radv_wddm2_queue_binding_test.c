@@ -97,6 +97,7 @@ radv_wddm2_query_local(struct radeon_winsys *ws, uint64_t *budget, uint64_t *usa
 /* The application fences of the tests carry this type. */
 const struct vk_sync_type vk_wddm2_monitored_fence_type = {0};
 const struct vk_sync_type vk_wddm2_monitored_fence_hosted_type = {0};
+const struct vk_sync_type vk_wddm2_monitored_fence_hosted_bound_type = {0};
 
 #define HOST_FAIL        ((int32_t)0xC0000001) /* STATUS_UNSUCCESSFUL */
 #define HOST_UNEXPECTED  ((int32_t)0xC0000002) /* STATUS_NOT_IMPLEMENTED */

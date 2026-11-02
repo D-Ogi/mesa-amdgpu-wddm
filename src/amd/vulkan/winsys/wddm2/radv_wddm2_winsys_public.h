@@ -43,6 +43,11 @@ VkResult radv_wddm2_winsys_create(const struct vk_dx_adapter_info *adapter_info,
                                   const struct bc250_host_policy_values *policy, bool adapter_query,
                                   struct radeon_winsys **winsys);
 
+/* The sync types of a device whose queues the host binds (NATIVE timeline mode, IMMEDIATE submit
+ * mode), or NULL for a winsys without a host. */
+struct vk_sync_type;
+const struct vk_sync_type *const *radv_wddm2_winsys_get_bound_sync_types(struct radeon_winsys *ws);
+
 void radv_wddm2_query_allocated(struct radeon_winsys *ws, uint64_t *vram,
                                 uint64_t *vram_vis, uint64_t *gtt);
 

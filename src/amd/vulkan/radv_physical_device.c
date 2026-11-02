@@ -2969,6 +2969,11 @@ radv_physical_device_try_create(struct radv_instance *instance, drmDevicePtr drm
       goto fail;
    pdev->info = *pdev->ws->query_info(pdev->ws);
    pdev->vk.supported_sync_types = pdev->ws->get_sync_types(pdev->ws);
+   /* BD-200 removed WAIT_BEFORE_SIGNAL from the hosted fence, which gives the ASSISTED timeline mode and
+    * a submit thread on demand. A bound device must submit inside the host's call (radv_CreateDevice
+    * refuses any other submit mode), so it keeps the fence type that declares WAIT_BEFORE_SIGNAL. */
+   if (radv_bound_queues_enabled(pdev) && radv_wddm2_winsys_get_bound_sync_types(pdev->ws))
+      pdev->vk.supported_sync_types = radv_wddm2_winsys_get_bound_sync_types(pdev->ws);
    pdev->global_priority_mask = radeon_to_vk_priority(RADEON_CTX_PRIORITY_LOW) |
                                 radeon_to_vk_priority(RADEON_CTX_PRIORITY_MEDIUM) |
                                 radeon_to_vk_priority(RADEON_CTX_PRIORITY_HIGH);

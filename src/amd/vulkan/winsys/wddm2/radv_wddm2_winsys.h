@@ -263,6 +263,9 @@ struct radv_wddm2_winsys {
 
    struct vk_sync_binary_type sync_binary_type;
    const struct vk_sync_type *sync_types[3];
+   /* A hosted winsys only: the sync types of a device whose queues the host binds. */
+   struct vk_sync_binary_type bound_sync_binary_type;
+   const struct vk_sync_type *bound_sync_types[3];
    struct {
       void *d3d12_device; 
       void *d3d12_queue;

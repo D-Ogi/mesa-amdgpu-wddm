@@ -830,6 +830,13 @@ radv_wddm2_winsys_get_sync_types(struct radeon_winsys *rws)
    return radv_wddm2_winsys(rws)->sync_types;
 }
 
+const struct vk_sync_type *const *
+radv_wddm2_winsys_get_bound_sync_types(struct radeon_winsys *rws)
+{
+   struct radv_wddm2_winsys *ws = radv_wddm2_winsys(rws);
+   return ws->bound_sync_types[0] ? ws->bound_sync_types : NULL;
+}
+
 static struct util_sync_provider *
 radv_wddm2_winsys_get_sync_provider(struct radeon_winsys *rws)
 {
@@ -1049,6 +1056,12 @@ radv_wddm2_winsys_create(const struct vk_dx_adapter_info *adapter_info,
    ws->sync_types[0] = fence_type;
    ws->sync_types[1] = &ws->sync_binary_type.sync;
    ws->sync_types[2] = NULL;
+   if (host) {
+      ws->bound_sync_binary_type = vk_sync_binary_get_type(&vk_wddm2_monitored_fence_hosted_bound_type);
+      ws->bound_sync_types[0] = &vk_wddm2_monitored_fence_hosted_bound_type;
+      ws->bound_sync_types[1] = &ws->bound_sync_binary_type.sync;
+      ws->bound_sync_types[2] = NULL;
+   }
 
    _mesa_hash_table_insert(winsyses, key, ws);
    simple_mtx_unlock(&winsys_creation_mutex);

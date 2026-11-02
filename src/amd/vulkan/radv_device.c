@@ -2131,6 +2131,8 @@ radv_CreateDevice(VkPhysicalDevice physicalDevice, const VkDeviceCreateInfo *pCr
        * it: no submit thread, and nothing submitted at queue creation,
        * which register shadowing would do before any bind. */
       if (device->vk.submit_mode != VK_QUEUE_SUBMIT_MODE_IMMEDIATE || device->uses_shadow_regs) {
+         amdgpu_wddm_log("radv/bc250: a bound device refuses submit mode %d (timeline mode %d), shadow regs %d\n",
+                         device->vk.submit_mode, device->vk.timeline_mode, device->uses_shadow_regs);
          result = VK_ERROR_FEATURE_NOT_PRESENT;
          goto fail;
       }

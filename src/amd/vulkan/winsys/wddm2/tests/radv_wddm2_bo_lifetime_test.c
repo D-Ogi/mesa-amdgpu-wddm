@@ -195,6 +195,7 @@ radv_wddm2_query_local(struct radeon_winsys *ws, uint64_t *budget, uint64_t *usa
 /* The application fences of a queue carry these types; no test makes one. */
 const struct vk_sync_type vk_wddm2_monitored_fence_type = {0};
 const struct vk_sync_type vk_wddm2_monitored_fence_hosted_type = {0};
+const struct vk_sync_type vk_wddm2_monitored_fence_hosted_bound_type = {0};
 
 /* The CPU wait bounds of the winsys (radv_wddm2_cs.c). The host tests shorten
  * them; nothing else writes them. */

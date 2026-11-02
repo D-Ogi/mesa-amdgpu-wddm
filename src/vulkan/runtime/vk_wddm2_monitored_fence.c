@@ -407,6 +407,27 @@ const struct vk_sync_type vk_wddm2_monitored_fence_hosted_type = {
    .wait_many = vk_wddm2_monitored_fence_wait_many,
 };
 
+const struct vk_sync_type vk_wddm2_monitored_fence_hosted_bound_type = {
+   .size = sizeof(struct vk_wddm2_monitored_fence),
+   /* WAIT_BEFORE_SIGNAL is declared. A bound device submits each batch inside the host's call that made
+    * it, so it needs the NATIVE timeline mode and the IMMEDIATE submit mode, and radv_CreateDevice refuses
+    * a bound device in any other submit mode. Each bound queue has its own context, so the BD-200 stall of
+    * one shared context does not apply. */
+   .features = VK_SYNC_FEATURE_TIMELINE |
+               VK_SYNC_FEATURE_GPU_WAIT |
+               VK_SYNC_FEATURE_CPU_WAIT |
+               VK_SYNC_FEATURE_CPU_SIGNAL |
+               VK_SYNC_FEATURE_WAIT_ANY |
+               VK_SYNC_FEATURE_WAIT_PENDING |
+               VK_SYNC_FEATURE_WAIT_BEFORE_SIGNAL,
+   .init = vk_wddm2_monitored_fence_init,
+   .finish = vk_wddm2_monitored_fence_finish,
+   .move = vk_wddm2_monitored_fence_move,
+   .signal = vk_wddm2_monitored_fence_signal,
+   .get_value = vk_wddm2_monitored_fence_get_value,
+   .wait_many = vk_wddm2_monitored_fence_wait_many,
+};
+
 VkResult
 vk_wddm2_check_device_status(struct vk_device *device)
 {

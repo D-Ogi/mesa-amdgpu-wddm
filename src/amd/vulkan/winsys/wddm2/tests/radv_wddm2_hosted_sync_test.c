@@ -9,7 +9,10 @@
  *   timeline and binary semaphores; a Win32 export or import of such a fence, and a temporary Win32 import
  *   into a binary semaphore, are refused with VK_ERROR_INVALID_EXTERNAL_HANDLE instead of calling a NULL
  *   hook or the DuplicateHandle of a NULL shared handle;
- * - not hosted: timeline semaphores report both handle types importable and exportable, as before.
+ * - not hosted: timeline semaphores report both handle types importable and exportable, as before;
+ * - bound (the host binds the queues): the hosted type plus WAIT_BEFORE_SIGNAL, so vk_device_init gives
+ *   the NATIVE timeline mode and the IMMEDIATE submit mode that radv_CreateDevice requires of a bound
+ *   device, while an unbound hosted device keeps the BD-200 ASSISTED mode.
  * The extensions themselves stay listed (radv_physical_device.c is unchanged): vkd3d-proton checks these
  * properties before it shares a fence.
  *
@@ -27,8 +30,11 @@
 #include "vk_sync_binary.h"
 #include "vk_wddm2_monitored_fence.h"
 
+#include "vk_alloc.h"
+
 #include <stdarg.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 static unsigned passes, failures;
@@ -177,6 +183,88 @@ test_hosted_handles(void)
          "temporary Win32 import into a hosted binary semaphore refused, no temporary payload");
 }
 
+/* The device create info enables no feature, so the supported set stays empty. */
+static VKAPI_ATTR void VKAPI_CALL
+no_features(VkPhysicalDevice physical_device, VkPhysicalDeviceFeatures2 *features)
+{
+}
+
+/* The timeline and submit modes that vk_device_init gives a device whose physical device has the sync
+ * types of fence_type. */
+static void
+device_modes(const struct vk_sync_type *fence_type, enum vk_device_timeline_mode *timeline,
+             enum vk_queue_submit_mode *submit)
+{
+   setup(fence_type);
+   instance.alloc = *vk_default_allocator();
+   pdev.dispatch_table.GetPhysicalDeviceFeatures2 = no_features;
+   const VkDeviceCreateInfo info = {.sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO};
+   struct vk_device dev;
+   const VkResult result = vk_device_init(&dev, &pdev, NULL, &info, NULL);
+   check(result == VK_SUCCESS, "vk_device_init: %d", result);
+   *timeline = dev.timeline_mode;
+   *submit = dev.submit_mode;
+}
+
+/* BD-200 removed WAIT_BEFORE_SIGNAL from the hosted fence, so an unbound hosted device gets the ASSISTED
+ * timeline mode and a submit thread on demand. A device whose queues the host binds must submit inside
+ * the host's call: radv_CreateDevice refuses it in any submit mode but IMMEDIATE (VK_ERROR_FEATURE_NOT_PRESENT,
+ * icd-ckit1 arm C). radv_physical_device.c gives it the bound type, which keeps NATIVE and IMMEDIATE. */
+static void
+test_bound_modes(void)
+{
+   enum vk_device_timeline_mode timeline;
+   enum vk_queue_submit_mode submit;
+
+   device_modes(&vk_wddm2_monitored_fence_hosted_bound_type, &timeline, &submit);
+   check(timeline == VK_DEVICE_TIMELINE_MODE_NATIVE && submit == VK_QUEUE_SUBMIT_MODE_IMMEDIATE,
+         "bound hosted device: timeline mode %d, submit mode %d (want NATIVE %d, IMMEDIATE %d)", timeline,
+         submit, VK_DEVICE_TIMELINE_MODE_NATIVE, VK_QUEUE_SUBMIT_MODE_IMMEDIATE);
+
+   if (!getenv("MESA_VK_ENABLE_SUBMIT_THREAD")) {
+      device_modes(&vk_wddm2_monitored_fence_hosted_type, &timeline, &submit);
+      check(timeline == VK_DEVICE_TIMELINE_MODE_ASSISTED && submit == VK_QUEUE_SUBMIT_MODE_THREADED_ON_DEMAND,
+            "unbound hosted device (BD-200): timeline mode %d, submit mode %d (want ASSISTED %d, "
+            "THREADED_ON_DEMAND %d)",
+            timeline, submit, VK_DEVICE_TIMELINE_MODE_ASSISTED, VK_QUEUE_SUBMIT_MODE_THREADED_ON_DEMAND);
+   }
+
+   const enum vk_sync_features same = VK_SYNC_FEATURE_TIMELINE | VK_SYNC_FEATURE_GPU_WAIT |
+                                      VK_SYNC_FEATURE_CPU_WAIT | VK_SYNC_FEATURE_CPU_SIGNAL |
+                                      VK_SYNC_FEATURE_WAIT_ANY | VK_SYNC_FEATURE_WAIT_PENDING;
+   check(vk_wddm2_monitored_fence_hosted_bound_type.features ==
+            (vk_wddm2_monitored_fence_hosted_type.features | VK_SYNC_FEATURE_WAIT_BEFORE_SIGNAL) &&
+            (vk_wddm2_monitored_fence_hosted_type.features & same) == same,
+         "bound type = hosted type + WAIT_BEFORE_SIGNAL (0x%x, 0x%x)",
+         vk_wddm2_monitored_fence_hosted_bound_type.features, vk_wddm2_monitored_fence_hosted_type.features);
+}
+
+/* The bound type is a hosted fence: no Win32 handle type, and the submission path takes it. */
+static void
+test_bound_properties(void)
+{
+   setup(&vk_wddm2_monitored_fence_hosted_bound_type);
+   for (unsigned i = 0; i < ARRAY_SIZE(win32_types); i++) {
+      for (int timeline = 0; timeline < 2; timeline++) {
+         const VkExternalSemaphoreProperties p =
+            properties(timeline ? VK_SEMAPHORE_TYPE_TIMELINE : VK_SEMAPHORE_TYPE_BINARY, win32_types[i].type);
+         check(!p.externalSemaphoreFeatures && !p.compatibleHandleTypes && !p.exportFromImportedHandleTypes,
+               "bound %s %s semaphore: features 0x%x, compatible 0x%x, export-from-imported 0x%x (want 0)",
+               timeline ? "timeline" : "binary", win32_types[i].name, p.externalSemaphoreFeatures,
+               p.compatibleHandleTypes, p.exportFromImportedHandleTypes);
+      }
+   }
+   struct vk_wddm2_monitored_fence fence;
+   memset(&fence, 0, sizeof(fence));
+   fence.base.type = &vk_wddm2_monitored_fence_hosted_bound_type;
+   check(vk_sync_as_wddm2_monitored_fence(&fence.base) == &fence,
+         "a bound fence is a wddm2 monitored fence to the submission path");
+   void *handle = (void *)(uintptr_t)0x55;
+   check(vk_sync_export_win32_handle(&device, &fence.base, &handle) == VK_ERROR_INVALID_EXTERNAL_HANDLE &&
+            handle == (void *)(uintptr_t)0x55,
+         "export of a bound fence refused, handle untouched");
+}
+
 static const struct {
    const char *name;
    void (*run)(void);
@@ -184,6 +272,8 @@ static const struct {
    {"hosted_properties", test_hosted_properties},
    {"native_properties", test_native_properties},
    {"hosted_handles", test_hosted_handles},
+   {"bound_modes", test_bound_modes},
+   {"bound_properties", test_bound_properties},
 };
 
 int
