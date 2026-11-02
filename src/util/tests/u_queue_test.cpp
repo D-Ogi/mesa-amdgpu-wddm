@@ -35,7 +35,7 @@ TEST(UtilQueue, FinishWithSeveralThreads)
    ASSERT_TRUE(util_queue_init(&queue, "test", 64, 4, 0, NULL));
 
    /* Threads start on demand: start all four, so that the finish barrier spans four. */
-   util_queue_adjust_num_threads(&queue, 4, false);
+   util_queue_adjust_num_threads(&queue, 4);
    ASSERT_EQ(queue.num_threads, 4u);
 
    std::atomic<unsigned> done(0);

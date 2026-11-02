@@ -27,8 +27,6 @@
 
 #include <string>
 
-#include <dirent.h>
-#include <fcntl.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <stdbool.h>
@@ -37,14 +35,16 @@
 #include <stdarg.h>
 #include <inttypes.h>
 #include <limits.h>
-#include <sys/file.h>
-#include <sys/stat.h>
 #include <time.h>
 #ifdef _WIN32
 #include <direct.h>
 #include <filesystem>
 #else
+#include <dirent.h>
+#include <fcntl.h>
 #include <ftw.h>
+#include <sys/file.h>
+#include <sys/stat.h>
 #include <unistd.h>
 #include <utime.h>
 #endif
@@ -1583,6 +1583,8 @@ protected:
       GTEST_SKIP() << "ENABLE_SHADER_CACHE not defined.";
 #elif DETECT_OS_ANDROID
       GTEST_SKIP() << "Android does not write cache files to disk.";
+#elif DETECT_OS_WINDOWS
+      GTEST_SKIP() << "Windows multi-file tests are in cache_win32_test.";
 #else
 #ifdef SHADER_CACHE_DISABLE_BY_DEFAULT
       os_set_option("MESA_SHADER_CACHE_DISABLE", "false", true);
@@ -1595,7 +1597,7 @@ protected:
    }
 
    void TearDown() override {
-#if defined(ENABLE_SHADER_CACHE) && !DETECT_OS_ANDROID
+#if defined(ENABLE_SHADER_CACHE) && !DETECT_OS_ANDROID && !DETECT_OS_WINDOWS
       close_cache();
       os_set_option("MESA_DISK_CACHE_MULTI_FILE", "false", true);
       os_unset_option("MESA_SHADER_CACHE_DIR");
@@ -1604,7 +1606,7 @@ protected:
 #endif
    }
 
-#if defined(ENABLE_SHADER_CACHE) && !DETECT_OS_ANDROID
+#if defined(ENABLE_SHADER_CACHE) && !DETECT_OS_ANDROID && !DETECT_OS_WINDOWS
    void open_cache() {
       cache = disk_cache_create("test", "make_check", 0);
       ASSERT_NE(cache, nullptr);
@@ -1704,7 +1706,7 @@ protected:
 #endif
 };
 
-#if defined(ENABLE_SHADER_CACHE) && !DETECT_OS_ANDROID
+#if defined(ENABLE_SHADER_CACHE) && !DETECT_OS_ANDROID && !DETECT_OS_WINDOWS
 
 #define IMPOSSIBLE_UNALIGNED_SIZE UINT64_C(0xefffffbd7fa092)
 #define IMPOSSIBLE_HUGE_SIZE (UINT64_MAX & ~UINT64_C(511))
@@ -1908,4 +1910,4 @@ TEST_F(CacheMultiFile, IndexMappingHasGuardPages)
                                    cache->index_reserve_size - 1));
 }
 
-#endif /* ENABLE_SHADER_CACHE && !DETECT_OS_ANDROID */
+#endif /* ENABLE_SHADER_CACHE && !DETECT_OS_ANDROID && !DETECT_OS_WINDOWS */
