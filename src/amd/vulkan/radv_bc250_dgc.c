@@ -5,6 +5,7 @@
  * No private executable, grid encoding or barrier is synthesized a second time.
  */
 #include "radv_bc250_dgc.h"
+#include "radv_bc250_dgc_query.h"
 #include "radv_bc250.h"
 #include "radv_cmd_buffer.h"
 #include "radv_cs.h"
@@ -331,13 +332,23 @@ bc250_dgc_state_valid(const struct radv_cmd_buffer *state, const VkGeneratedComm
    return true;
 }
 
-struct bc250_dgc_query_patch { uint64_t offset; uint32_t header, event; };
+/* radv_bc250_dgc_query.h keeps its own copy of the packet constants, so that a host test can run it. */
+static_assert(RADV_BC250_DGC_Q_PKT3(RADV_BC250_DGC_Q_OP_NOP, 0) == PKT3(PKT3_NOP, 0, false), "NOP header");
+static_assert(RADV_BC250_DGC_Q_PKT3(RADV_BC250_DGC_Q_OP_WRITE_DATA, 4) == PKT3(PKT3_WRITE_DATA, 4, false), "WRITE_DATA header");
+static_assert(RADV_BC250_DGC_Q_OP_EVENT_WRITE == PKT3_EVENT_WRITE, "EVENT_WRITE opcode");
+static_assert(RADV_BC250_DGC_Q_NOP_PAD == PKT3_NOP_PAD, "single-dword NOP");
+static_assert(RADV_BC250_DGC_Q_PIPELINESTAT_START == V_028A90_PIPELINESTAT_START, "PIPELINESTAT_START");
+static_assert(RADV_BC250_DGC_Q_PIPELINESTAT_STOP == V_028A90_PIPELINESTAT_STOP, "PIPELINESTAT_STOP");
+static_assert(RADV_BC250_DGC_Q_WRITE_CONTROL ==
+              (S_371_DST_SEL(V_371_MEMORY) | S_371_WR_CONFIRM(1) | S_371_ENGINE_SEL(V_371_MICRO_ENGINE)), "WRITE_DATA control");
+static_assert(RADV_BC250_DGC_Q_IB_SIZE_MAX == ~C_3F3_IB_SIZE, "IB_SIZE field");
+
 struct bc250_dgc_program {
    VkIndirectCommandsLayoutEXT layout;
    VkPipeline pipeline;
    uint64_t size;
    uint32_t sequences, draws, count;
-   struct bc250_dgc_query_patch patches[];
+   struct radv_bc250_dgc_query_site patches[];
 };
 
 /* The query-event offsets of one captured program. It is never looked up by preprocess address
@@ -348,88 +359,53 @@ static struct bc250_dgc_program *
 bc250_dgc_build_program(const VkGeneratedCommandsInfoEXT *info, const struct bc250_dgc_shape *shape,
                         const uint8_t *snapshot)
 {
-   unsigned count = 0;
-   struct bc250_dgc_program *program = NULL;
-   for (unsigned pass = 0; pass < 2; pass++) {
-      unsigned index = 0;
-      for (uint32_t seq = 0; seq < info->maxSequenceCount; seq++) {
-         const uint32_t *words = (const uint32_t *)(snapshot + (uint64_t)seq * shape->stride);
-         for (unsigned i = 0; i < shape->code / 4;) {
-            uint32_t header = words[i];
-            unsigned len = header == PKT3_NOP_PAD || header >> 30 == 2 ? 1 : ((header >> 16) & 0x3fff) + 2;
-            if ((header >> 30 != 2 && header >> 30 != 3) || i + len > shape->code / 4) {
-               free(program); return NULL;
-            }
-            if ((header >> 8 & 255) == PKT3_EVENT_WRITE && len > 1 &&
-                ((words[i + 1] & 63) == V_028A90_PIPELINESTAT_START ||
-                 (words[i + 1] & 63) == V_028A90_PIPELINESTAT_STOP)) {
-               if (len != 2) { free(program); return NULL; }
-               if (pass)
-                  program->patches[index] = (struct bc250_dgc_query_patch){
-                     (uint64_t)seq * shape->stride + i * 4, header, words[i + 1]};
-               index++;
-            }
-            i += len;
-         }
-      }
-      if (!pass) {
-         count = index;
-         program = malloc(sizeof(*program) + (size_t)count * sizeof(program->patches[0]));
-         if (!program) return NULL;
-      }
+   uint64_t count = 0;
+   for (uint32_t seq = 0; seq < info->maxSequenceCount; seq++) {
+      const int64_t n = radv_bc250_dgc_query_scan((const uint32_t *)(snapshot + (uint64_t)seq * shape->stride),
+                                                  shape->code / 4, (uint64_t)seq * shape->stride, NULL, 0);
+      if (n < 0)
+         return NULL;
+      count += n;
    }
+   if (count > UINT32_MAX)
+      return NULL;
+   struct bc250_dgc_program *program = malloc(sizeof(*program) + (size_t)count * sizeof(program->patches[0]));
+   if (!program)
+      return NULL;
+   uint64_t index = 0;
+   for (uint32_t seq = 0; seq < info->maxSequenceCount; seq++)
+      index += radv_bc250_dgc_query_scan((const uint32_t *)(snapshot + (uint64_t)seq * shape->stride),
+                                         shape->code / 4, (uint64_t)seq * shape->stride,
+                                         program->patches + index, count - index);
    const VkGeneratedCommandsPipelineInfoEXT *pi = vk_find_struct_const(info->pNext, GENERATED_COMMANDS_PIPELINE_INFO_EXT);
    *program = (struct bc250_dgc_program){.layout = info->indirectCommandsLayout, .pipeline = pi->pipeline,
-      .size = shape->size, .sequences = info->maxSequenceCount, .draws = info->maxDrawCount, .count = count};
+      .size = shape->size, .sequences = info->maxSequenceCount, .draws = info->maxDrawCount, .count = (uint32_t)count};
    return program;
 }
 
-/* BD-288: the preprocess buffer holds every captured query site as a two-dword NOP (the header that
- * bc250_dgc_prepare() writes before the upload, followed by the event word as its payload). Only an
- * execute inside a native pipeline-statistics scope writes the EVENT_WRITE headers (enable), and the
- * same execute writes the NOPs again after its chains (disable). The buffer is thus neutral again for
- * the next execute of an explicit preprocess, which may run outside a query scope. Both words are
- * written: preprocessing fills an inactive sequence with single-dword NOPs, so a site there becomes a
- * stop/start pair with no draw between, which keeps the caller's query state. Helpers are never counted.
- *
- * The writes run from uploaded IB2 bodies, never from this stream. This stream calls the DGC chains as
- * IB2, so the winsys must copy all of it into the IB1 of the submission (there is no IB3). One WRITE_DATA
- * per site in this stream made that IB1 overflow the IB_SIZE field: 130 sequences of 2049 sites in
- * test_amplification_shader_execute_indirect_state gave 1601736 dwords, the submission failed and the
- * device was lost. */
+/* BD-288: the sites of the uploaded program are two-dword NOPs; an execute inside a native
+ * pipeline-statistics scope switches them with uploaded IB2 bodies (radv_bc250_dgc_query.h). */
 static bool
 bc250_dgc_write_query_sites(struct radv_cmd_buffer *cmd, const VkGeneratedCommandsInfoEXT *info,
                             const struct bc250_dgc_program *program, bool enable, FILE *packets)
 {
    struct radv_device *device = radv_cmd_buffer_device(cmd);
    const struct radv_physical_device *pdev = radv_device_physical(device);
-   const uint32_t pad = pdev->info.ip[AMD_IP_GFX].ib_pad_dw_mask + 1;
-   const uint32_t alignment = MAX2(256u, pdev->info.ip[AMD_IP_GFX].ib_alignment);
-   const uint32_t sites_per_ib = (~C_3F3_IB_SIZE - pad) / 6;
-   for (unsigned first = 0; first < program->count;) {
-      const unsigned n = MIN2(program->count - first, sites_per_ib);
-      const unsigned dw = align(n * 6, pad);
+   const unsigned pad = pdev->info.ip[AMD_IP_GFX].ib_pad_dw_mask + 1;
+   const unsigned alignment = MAX2(256u, pdev->info.ip[AMD_IP_GFX].ib_alignment);
+   const uint64_t per_body = radv_bc250_dgc_query_sites_per_body(pad);
+   for (uint64_t first = 0; first < program->count;) {
+      const uint64_t n = MIN2(program->count - first, per_body);
+      const uint64_t dw = radv_bc250_dgc_query_body_dw(n, pad);
       uint64_t va;
       void *map;
-      if (!radv_cmd_buffer_upload_alloc(cmd, dw * 4, alignment, &va, &map))
+      if (!radv_cmd_buffer_upload_alloc(cmd, (unsigned)(dw * 4), alignment, &va, &map))
          return false;
-      uint32_t *p = map;
-      for (unsigned i = 0; i < n; i++) {
-         const struct bc250_dgc_query_patch *patch = &program->patches[first + i];
-         const uint64_t dst = info->preprocessAddress + patch->offset;
-         *p++ = PKT3(PKT3_WRITE_DATA, 4, false);
-         *p++ = S_371_DST_SEL(V_371_MEMORY) | S_371_WR_CONFIRM(1) | S_371_ENGINE_SEL(V_371_MICRO_ENGINE);
-         *p++ = (uint32_t)dst;
-         *p++ = (uint32_t)(dst >> 32);
-         *p++ = enable ? patch->header : PKT3(PKT3_NOP, 0, false);
-         *p++ = patch->event;
-      }
-      for (unsigned i = n * 6; i < dw; i++)
-         *p++ = PKT3_NOP_PAD;
+      radv_bc250_dgc_query_body(map, program->patches + first, n, info->preprocessAddress, enable, pad);
       if (packets)
          fwrite(map, 4, dw, packets);
       radeon_check_space(device->ws, cmd->cs->b, 4);
-      device->ws->cs_execute_ib(cmd->cs->b, NULL, va, dw, false);
+      device->ws->cs_execute_ib(cmd->cs->b, NULL, va, (uint32_t)dw, false);
       first += n;
    }
    return true;
@@ -783,7 +759,7 @@ bc250_dgc_prepare(struct radv_cmd_buffer *cmd, const VkGeneratedCommandsInfoEXT 
    }
    /* BD-288: upload a query-neutral program (see bc250_dgc_write_query_sites()). */
    for (unsigned i = 0; i < program->count; i++)
-      *(uint32_t *)(snapshot + program->patches[i].offset) = PKT3(PKT3_NOP, 0, false);
+      *(uint32_t *)(snapshot + program->patches[i].offset) = radv_bc250_dgc_query_neutral();
    uint64_t source = 0;
    if (!radv_cmd_buffer_upload_data(cmd, shape.size, 4, snapshot, &source)) {
       free(snapshot);
@@ -910,7 +886,7 @@ radv_bc250_dgc_execute(struct radv_cmd_buffer *cmd, VkBool32 preprocessed, const
    }
    /* Query sites change only inside a native pipeline-statistics scope; elsewhere the neutral
     * preprocess buffer runs as it is and this stream receives no write. */
-   const bool native_stats = program->count && radv_get_num_pipeline_stat_queries(cmd) > 0;
+   const bool native_stats = radv_bc250_dgc_query_switch(program->count, radv_get_num_pipeline_stat_queries(cmd));
    FILE *packets = bc250_dgc_open_query_dump(info, "wb");
    if (native_stats && !bc250_dgc_write_query_sites(cmd, info, program, true, packets)) {
       if (packets) fclose(packets);
