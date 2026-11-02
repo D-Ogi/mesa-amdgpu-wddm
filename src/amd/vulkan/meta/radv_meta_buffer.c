@@ -419,8 +419,22 @@ radv_update_memory(struct radv_cmd_buffer *cmd_buffer, uint64_t va, uint64_t siz
       radv_update_memory_cp(cmd_buffer, va, data, size);
    } else {
       uint64_t src_va;
+      uint8_t *ptr;
 
-      radv_cmd_buffer_upload_data(cmd_buffer, size, 4, data, &src_va);
+      /* The compute copy shader (ac_nir_meta_cs_clear_copy_buffer.c) loads
+       * S = dwords_per_thread * 4 bytes per thread, S <= 16, with no clamp on
+       * the source. When dst_va % S != 0, the last thread loads
+       * S - (dst_align_offset + size) % S bytes past the end of the data, at most
+       * S - 4 = 12 bytes. A new upload BO can be exactly as large as the data
+       * (radv_cmd_buffer_resize_upload_buf), so that load leaves the BO and the
+       * GPU faults: 65536 bytes to dst offset 4 hung the GPU on WDDM (BD-287).
+       * Allocate 16 bytes more than the data so the load stays inside the BO.
+       * The shader does not store the extra bytes.
+       */
+      const unsigned alloc_size = size + 16;
+      if (!radv_cmd_buffer_upload_alloc(cmd_buffer, alloc_size, 4, &src_va, (void **)&ptr))
+         return;
+      memcpy(ptr, data, size);
 
       const VkAddressCopyFlagsKHR src_copy_flags =
          radv_get_copy_flags_from_bo(cmd_buffer->linear_suballocators[RADV_SUBALLOCATOR_CPU_UPLOAD].bo);
