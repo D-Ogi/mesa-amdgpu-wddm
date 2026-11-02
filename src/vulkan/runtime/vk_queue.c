@@ -783,7 +783,7 @@ vk_queue_submit_thread_func(void *_data)
 
       mtx_lock(&queue->submit.mutex);
 
-      /* Only remove the submit from from the list and free it after
+      /* Only remove the submit from the list and free it after
        * queue->submit() has completed.  This ensures that, when
        * vk_queue_drain() completes, there are no more pending jobs.
        */
