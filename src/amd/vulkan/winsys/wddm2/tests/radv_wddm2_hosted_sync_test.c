@@ -29,6 +29,15 @@
 #include "vk_sync.h"
 #include "vk_sync_binary.h"
 #include "vk_wddm2_monitored_fence.h"
+#include "util/bc250_host_bootstrap.h"
+#include "util/os_time.h"
+
+#ifdef Status
+#undef Status
+#endif
+#include <windows.h>
+#include <winternl.h>
+#include "d3dkmthk.h"
 
 #include "vk_alloc.h"
 
@@ -265,6 +274,120 @@ test_bound_properties(void)
          "export of a bound fence refused, handle untouched");
 }
 
+/* BD-179: the CPU wait on a hosted fence waits in slices and asks the host for the device status between
+ * them. The scripted host takes the wait, keeps its event and never sets it, as the kernel does for the
+ * fence of a stopped adapter. Its status turns lost after a given number of status calls, or never. */
+static struct {
+   HANDLE event;
+   unsigned waits, status_calls, lost_after, reports;
+   uint64_t *write_at_wait; /* when set, the host writes *write_value there at the wait, without the event */
+   uint64_t write_value;
+} slice_host;
+
+static int32_t
+slice_dispatch(void *userdata, uint32_t operation, void *argument)
+{
+   (void)userdata;
+   switch (operation) {
+   case BC250_HOST_WaitForSynchronizationObjectFromCpu: {
+      const D3DKMT_WAITFORSYNCHRONIZATIONOBJECTFROMCPU *w = argument;
+      slice_host.waits++;
+      slice_host.event = w->hAsyncEvent;
+      if (slice_host.write_at_wait)
+         *slice_host.write_at_wait = slice_host.write_value;
+      return 0;
+   }
+   case BC250_HOST_CHECK_STATUS:
+      slice_host.status_calls++;
+      return slice_host.lost_after && slice_host.status_calls >= slice_host.lost_after ? (int32_t)0xc00002b6 : 0;
+   case BC250_HOST_REPORT_LOST:
+      slice_host.reports++;
+      return (int32_t)0xc00002b6;
+   default:
+      return (int32_t)0xc00000bb;
+   }
+}
+
+static uint64_t slice_fence_value;
+static struct vk_wddm2_monitored_fence slice_fence;
+
+/* One wait on a hosted fence that reads 1. write_value, when nonzero, is what the host writes into the fence
+ * when it takes the wait, without setting the event. */
+static VkResult
+slice_wait(uint64_t wait_value, uint64_t timeout_ns, unsigned lost_after, uint64_t write_value,
+           uint64_t *elapsed_ms)
+{
+   setup(&vk_wddm2_monitored_fence_hosted_type);
+   static int identity;
+   device.bc250_host.sType = BC250_HOST_STYPE;
+   device.bc250_host.identity = &identity;
+   device.bc250_host.dispatch = slice_dispatch;
+   memset(&slice_host, 0, sizeof(slice_host));
+   slice_host.lost_after = lost_after;
+   slice_host.write_at_wait = write_value ? &slice_fence_value : NULL;
+   slice_host.write_value = write_value;
+   slice_fence_value = 1;
+   memset(&slice_fence, 0, sizeof(slice_fence));
+   slice_fence.base.type = &vk_wddm2_monitored_fence_hosted_type;
+   slice_fence.handle = 0x40000700u;
+   slice_fence.value_map = &slice_fence_value;
+   const struct vk_sync_wait wait = {
+      .sync = &slice_fence.base,
+      .stage_mask = ~(VkPipelineStageFlags2)0,
+      .wait_value = wait_value,
+   };
+   const uint64_t start = os_time_get_nano();
+   const uint64_t deadline = timeout_ns == UINT64_MAX ? UINT64_MAX : start + timeout_ns;
+   VkResult result =
+      vk_wddm2_monitored_fence_hosted_type.wait_many(&device, 1, &wait, VK_SYNC_WAIT_COMPLETE, deadline);
+   *elapsed_ms = (os_time_get_nano() - start) / 1000000;
+   return result;
+}
+
+static void
+test_wait_stopped_adapter(void)
+{
+   const uint64_t slice = vk_wddm2_monitored_fence_wait_slice_ns;
+   vk_wddm2_monitored_fence_wait_slice_ns = 20000000ull; /* 20 ms */
+   uint64_t ms = 0;
+
+   /* The case of the dump: the fence reads 1, the wait wants 2, no deadline, the event never comes. The
+    * host reports the loss at its fourth status call: the poll before the wait, then one call per slice. */
+   VkResult result = slice_wait(2, UINT64_MAX, 4, 0, &ms);
+   check(result == VK_ERROR_DEVICE_LOST && slice_host.waits == 1 && slice_host.status_calls == 4 && ms < 5000,
+         "no deadline, event never set, host lost at its 4th status call: result %d (want %d), waits %u, "
+         "status calls %u (want 4), %llu ms",
+         result, VK_ERROR_DEVICE_LOST, slice_host.waits, slice_host.status_calls, (unsigned long long)ms);
+   check(vk_device_is_lost_no_report(&device), "the device is marked lost");
+
+   vk_wddm2_monitored_fence_wait_slice_ns = slice;
+}
+
+static void
+test_wait_live_device(void)
+{
+   const uint64_t slice = vk_wddm2_monitored_fence_wait_slice_ns;
+   vk_wddm2_monitored_fence_wait_slice_ns = 20000000ull; /* 20 ms */
+   uint64_t ms = 0;
+
+   /* K225: a slow fence on a live device is no loss. A finite deadline of 150 ms, a healthy host: the wait
+    * takes several slices and ends with VK_TIMEOUT, the device is not lost. */
+   VkResult result = slice_wait(2, 150000000ull, 0, 0, &ms);
+   check(result == VK_TIMEOUT && slice_host.status_calls >= 3 && ms >= 140 && !vk_device_is_lost_no_report(&device),
+         "live host, 150 ms deadline: result %d (want %d), status calls %u (want >= 3), %llu ms, lost %d",
+         result, VK_TIMEOUT, slice_host.status_calls, (unsigned long long)ms,
+         (int)vk_device_is_lost_no_report(&device));
+
+   /* A fence that reaches its value while the event stays unset: the first slice reads it and the wait
+    * succeeds, with no deadline. */
+   result = slice_wait(2, UINT64_MAX, 0, 2, &ms);
+   check(result == VK_SUCCESS && slice_host.waits == 1 && ms < 5000 && !vk_device_is_lost_no_report(&device),
+         "fence reaches its value with no event: result %d (want 0), waits %u, %llu ms, lost %d", result,
+         slice_host.waits, (unsigned long long)ms, (int)vk_device_is_lost_no_report(&device));
+
+   vk_wddm2_monitored_fence_wait_slice_ns = slice;
+}
+
 static const struct {
    const char *name;
    void (*run)(void);
@@ -274,6 +397,8 @@ static const struct {
    {"hosted_handles", test_hosted_handles},
    {"bound_modes", test_bound_modes},
    {"bound_properties", test_bound_properties},
+   {"wait_stopped_adapter", test_wait_stopped_adapter},
+   {"wait_live_device", test_wait_live_device},
 };
 
 int
