@@ -73,6 +73,8 @@ struct radv_wddm2_queue {
    struct radv_wddm2_winsys *bc250_ws;
    struct bc250_gather_slot bc250_gather[BC250_GATHER_SLOTS_MAX];
    unsigned bc250_gather_index;
+   /* The largest gather IB1 of this queue so far, in dwords (BD-288: logged at each new maximum). */
+   uint64_t bc250_gather_max_dw;
    struct bc250_gather_slot bc250_gather_spare[BC250_GATHER_SPARES_MAX];
    unsigned bc250_gather_spare_count;
    bool bc250_submit_failed;

@@ -1580,6 +1580,12 @@ radv_wddm2_bc250_submit(struct radv_wddm2_ctx *ctx, struct radv_wddm2_queue *que
          amdgpu_wddm_log("bc250: gather exceeds IB_SIZE field: %" PRIu64 " dwords\n", total);
          return STATUS_INVALID_PARAMETER;
       }
+      /* BD-288: the measured size of the largest IB1 against the field. One line per new maximum. */
+      if (total > queue->bc250_gather_max_dw) {
+         queue->bc250_gather_max_dw = total;
+         amdgpu_wddm_log("bc250: gather max=%" PRIu64 " dwords of %u ibs=%u calls=%u copies=%u nested=%u\n",
+                         total, G_3F3_IB_SIZE(UINT32_MAX), n, calls, copies, nested);
+      }
       bytes = (uint32_t)(total * 4);
       if (!queue->bc250_gather[queue->bc250_gather_index].bo || queue->bc250_gather[queue->bc250_gather_index].bo->size < bytes) {
          struct radeon_winsys_bo *replacement = NULL;
