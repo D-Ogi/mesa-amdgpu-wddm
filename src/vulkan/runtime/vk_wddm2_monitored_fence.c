@@ -160,23 +160,6 @@ vk_wddm2_monitored_fence_finish(struct vk_device *device,
 }
 
 static VkResult
-vk_wddm2_monitored_fence_move(struct vk_device *device,
-                               struct vk_sync *_dst,
-                               struct vk_sync *_src)
-{
-   struct vk_wddm2_monitored_fence *dst = to_wddm2_monitored_fence(_dst);
-   struct vk_wddm2_monitored_fence *src = to_wddm2_monitored_fence(_src);
-
-   SWAP(dst->handle, src->handle);
-   SWAP(dst->value_map, src->value_map);
-#ifdef _WIN32
-   SWAP(dst->shared_handle, src->shared_handle);
-#endif
-
-   return VK_SUCCESS;
-}
-
-static VkResult
 vk_wddm2_monitored_fence_signal(struct vk_device *device,
                                 struct vk_sync *sync,
                                 uint64_t value)
@@ -437,20 +420,15 @@ vk_wddm2_monitored_fence_export_opaque_win32_handle(struct vk_device *device,
 
 const struct vk_sync_type vk_wddm2_monitored_fence_type = {
    .size = sizeof(struct vk_wddm2_monitored_fence),
-   /* WAIT_BEFORE_SIGNAL is NOT declared: on a single WDDM context,
-    * WaitForSynchronizationObjectFromGpu stalls the context and blocks the
-    * signal behind it.  Without this flag the runtime selects ASSISTED mode
-    * and enables the submit thread on demand, which reorders submissions so
-    * the signal reaches the context before the wait (BD-200). */
    .features = VK_SYNC_FEATURE_TIMELINE |
                VK_SYNC_FEATURE_GPU_WAIT |
                VK_SYNC_FEATURE_CPU_WAIT |
                VK_SYNC_FEATURE_CPU_SIGNAL |
                VK_SYNC_FEATURE_WAIT_ANY |
+               VK_SYNC_FEATURE_WAIT_BEFORE_SIGNAL |
                VK_SYNC_FEATURE_WAIT_PENDING,
    .init = vk_wddm2_monitored_fence_init,
    .finish = vk_wddm2_monitored_fence_finish,
-   .move = vk_wddm2_monitored_fence_move,
    .signal = vk_wddm2_monitored_fence_signal,
    .get_value = vk_wddm2_monitored_fence_get_value,
    .wait_many = vk_wddm2_monitored_fence_wait_many,
@@ -460,16 +438,15 @@ const struct vk_sync_type vk_wddm2_monitored_fence_type = {
 
 const struct vk_sync_type vk_wddm2_monitored_fence_hosted_type = {
    .size = sizeof(struct vk_wddm2_monitored_fence),
-   /* WAIT_BEFORE_SIGNAL is NOT declared: same reason as above. */
    .features = VK_SYNC_FEATURE_TIMELINE |
                VK_SYNC_FEATURE_GPU_WAIT |
                VK_SYNC_FEATURE_CPU_WAIT |
                VK_SYNC_FEATURE_CPU_SIGNAL |
                VK_SYNC_FEATURE_WAIT_ANY |
+               VK_SYNC_FEATURE_WAIT_BEFORE_SIGNAL |
                VK_SYNC_FEATURE_WAIT_PENDING,
    .init = vk_wddm2_monitored_fence_init,
    .finish = vk_wddm2_monitored_fence_finish,
-   .move = vk_wddm2_monitored_fence_move,
    .signal = vk_wddm2_monitored_fence_signal,
    .get_value = vk_wddm2_monitored_fence_get_value,
    .wait_many = vk_wddm2_monitored_fence_wait_many,
