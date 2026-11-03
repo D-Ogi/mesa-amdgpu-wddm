@@ -10,9 +10,10 @@
  *   into a binary semaphore, are refused with VK_ERROR_INVALID_EXTERNAL_HANDLE instead of calling a NULL
  *   hook or the DuplicateHandle of a NULL shared handle;
  * - not hosted: timeline semaphores report both handle types importable and exportable, as before;
- * - bound (the host binds the queues): the hosted type plus WAIT_BEFORE_SIGNAL, so vk_device_init gives
+ * - bound (the host binds the queues): the hosted type with WAIT_BEFORE_SIGNAL, so vk_device_init gives
  *   the NATIVE timeline mode and the IMMEDIATE submit mode that radv_CreateDevice requires of a bound
- *   device, while an unbound hosted device keeps the BD-200 ASSISTED mode.
+ *   device; an unbound hosted device gets the same modes, because the hosted type declares
+ *   WAIT_BEFORE_SIGNAL too.
  * The extensions themselves stay listed (radv_physical_device.c is unchanged): vkd3d-proton checks these
  * properties before it shares a fence.
  *
@@ -215,10 +216,11 @@ device_modes(const struct vk_sync_type *fence_type, enum vk_device_timeline_mode
    *submit = dev.submit_mode;
 }
 
-/* BD-200 removed WAIT_BEFORE_SIGNAL from the hosted fence, so an unbound hosted device gets the ASSISTED
- * timeline mode and a submit thread on demand. A device whose queues the host binds must submit inside
- * the host's call: radv_CreateDevice refuses it in any submit mode but IMMEDIATE (VK_ERROR_FEATURE_NOT_PRESENT,
- * icd-ckit1 arm C). radv_physical_device.c gives it the bound type, which keeps NATIVE and IMMEDIATE. */
+/* A device whose queues the host binds must submit inside the host's call: radv_CreateDevice refuses it
+ * in any submit mode but IMMEDIATE (VK_ERROR_FEATURE_NOT_PRESENT, icd-ckit1 arm C). radv_physical_device.c
+ * gives it the bound type, which keeps NATIVE and IMMEDIATE. The hosted type declares WAIT_BEFORE_SIGNAL
+ * again (the ASSISTED mode without a correct WAIT_PENDING held each submission until the GPU completed its
+ * waits), so an unbound hosted device also gets NATIVE and IMMEDIATE. */
 static void
 test_bound_modes(void)
 {
@@ -232,19 +234,19 @@ test_bound_modes(void)
 
    if (!getenv("MESA_VK_ENABLE_SUBMIT_THREAD")) {
       device_modes(&vk_wddm2_monitored_fence_hosted_type, &timeline, &submit);
-      check(timeline == VK_DEVICE_TIMELINE_MODE_ASSISTED && submit == VK_QUEUE_SUBMIT_MODE_THREADED_ON_DEMAND,
-            "unbound hosted device (BD-200): timeline mode %d, submit mode %d (want ASSISTED %d, "
-            "THREADED_ON_DEMAND %d)",
-            timeline, submit, VK_DEVICE_TIMELINE_MODE_ASSISTED, VK_QUEUE_SUBMIT_MODE_THREADED_ON_DEMAND);
+      check(timeline == VK_DEVICE_TIMELINE_MODE_NATIVE && submit == VK_QUEUE_SUBMIT_MODE_IMMEDIATE,
+            "unbound hosted device: timeline mode %d, submit mode %d (want NATIVE %d, IMMEDIATE %d)",
+            timeline, submit, VK_DEVICE_TIMELINE_MODE_NATIVE, VK_QUEUE_SUBMIT_MODE_IMMEDIATE);
    }
 
    const enum vk_sync_features same = VK_SYNC_FEATURE_TIMELINE | VK_SYNC_FEATURE_GPU_WAIT |
                                       VK_SYNC_FEATURE_CPU_WAIT | VK_SYNC_FEATURE_CPU_SIGNAL |
                                       VK_SYNC_FEATURE_WAIT_ANY | VK_SYNC_FEATURE_WAIT_PENDING;
-   check(vk_wddm2_monitored_fence_hosted_bound_type.features ==
+   check((vk_wddm2_monitored_fence_hosted_bound_type.features & VK_SYNC_FEATURE_WAIT_BEFORE_SIGNAL) &&
+            vk_wddm2_monitored_fence_hosted_bound_type.features ==
             (vk_wddm2_monitored_fence_hosted_type.features | VK_SYNC_FEATURE_WAIT_BEFORE_SIGNAL) &&
             (vk_wddm2_monitored_fence_hosted_type.features & same) == same,
-         "bound type = hosted type + WAIT_BEFORE_SIGNAL (0x%x, 0x%x)",
+         "bound type = hosted type with WAIT_BEFORE_SIGNAL (0x%x, 0x%x)",
          vk_wddm2_monitored_fence_hosted_bound_type.features, vk_wddm2_monitored_fence_hosted_type.features);
 }
 

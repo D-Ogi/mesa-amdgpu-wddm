@@ -440,17 +440,21 @@ vk_wddm2_monitored_fence_export_opaque_win32_handle(struct vk_device *device,
 
 const struct vk_sync_type vk_wddm2_monitored_fence_type = {
    .size = sizeof(struct vk_wddm2_monitored_fence),
-   /* WAIT_BEFORE_SIGNAL is NOT declared: on a single WDDM context,
-    * WaitForSynchronizationObjectFromGpu stalls the context and blocks the
-    * signal behind it.  Without this flag the runtime selects ASSISTED mode
-    * and enables the submit thread on demand, which reorders submissions so
-    * the signal reaches the context before the wait (BD-200). */
+   /* WAIT_BEFORE_SIGNAL is declared, so the runtime selects the NATIVE
+    * timeline mode and the IMMEDIATE submit mode. Without it the runtime
+    * selects ASSISTED mode, which needs a correct VK_SYNC_WAIT_PENDING (a
+    * wait for the submission of the signal). wait_many ignores that flag and
+    * waits for the fence value, so ASSISTED mode held each submission until
+    * the GPU completed its waits: Quake II RTX lost 11 % of its frame rate
+    * on the tester.36 candidate. The flag goes away again only together with
+    * a correct WAIT_PENDING (BD-200). */
    .features = VK_SYNC_FEATURE_TIMELINE |
                VK_SYNC_FEATURE_GPU_WAIT |
                VK_SYNC_FEATURE_CPU_WAIT |
                VK_SYNC_FEATURE_CPU_SIGNAL |
                VK_SYNC_FEATURE_WAIT_ANY |
-               VK_SYNC_FEATURE_WAIT_PENDING,
+               VK_SYNC_FEATURE_WAIT_PENDING |
+               VK_SYNC_FEATURE_WAIT_BEFORE_SIGNAL,
    .init = vk_wddm2_monitored_fence_init,
    .finish = vk_wddm2_monitored_fence_finish,
    .move = vk_wddm2_monitored_fence_move,
@@ -463,13 +467,14 @@ const struct vk_sync_type vk_wddm2_monitored_fence_type = {
 
 const struct vk_sync_type vk_wddm2_monitored_fence_hosted_type = {
    .size = sizeof(struct vk_wddm2_monitored_fence),
-   /* WAIT_BEFORE_SIGNAL is NOT declared: same reason as above. */
+   /* WAIT_BEFORE_SIGNAL is declared: same reason as above. */
    .features = VK_SYNC_FEATURE_TIMELINE |
                VK_SYNC_FEATURE_GPU_WAIT |
                VK_SYNC_FEATURE_CPU_WAIT |
                VK_SYNC_FEATURE_CPU_SIGNAL |
                VK_SYNC_FEATURE_WAIT_ANY |
-               VK_SYNC_FEATURE_WAIT_PENDING,
+               VK_SYNC_FEATURE_WAIT_PENDING |
+               VK_SYNC_FEATURE_WAIT_BEFORE_SIGNAL,
    .init = vk_wddm2_monitored_fence_init,
    .finish = vk_wddm2_monitored_fence_finish,
    .move = vk_wddm2_monitored_fence_move,
@@ -482,8 +487,8 @@ const struct vk_sync_type vk_wddm2_monitored_fence_hosted_bound_type = {
    .size = sizeof(struct vk_wddm2_monitored_fence),
    /* WAIT_BEFORE_SIGNAL is declared. A bound device submits each batch inside the host's call that made
     * it, so it needs the NATIVE timeline mode and the IMMEDIATE submit mode, and radv_CreateDevice refuses
-    * a bound device in any other submit mode. Each bound queue has its own context, so the BD-200 stall of
-    * one shared context does not apply. */
+    * a bound device in any other submit mode. The bound type must keep this flag even if the hosted type
+    * loses it again. */
    .features = VK_SYNC_FEATURE_TIMELINE |
                VK_SYNC_FEATURE_GPU_WAIT |
                VK_SYNC_FEATURE_CPU_WAIT |
