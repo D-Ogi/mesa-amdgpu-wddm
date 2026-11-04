@@ -452,6 +452,7 @@ OpenResource(D3D10DDI_HDEVICE hDevice,                            // IN
    }
    const D3DDDI_OPENALLOCATIONINFO2 *info = pOpenResource->pOpenAllocationInfo2;
    if (!info->pPrivateDriverData || info->PrivateDriverDataSize < sizeof(SurfacePrivate)) {
+      DebugPrintf("BC250 Fail OpenResource private %u bytes\n", info->PrivateDriverDataSize);
       SetError(hDevice, E_INVALIDARG); return;
    }
    SurfacePrivate data;
@@ -468,7 +469,12 @@ OpenResource(D3D10DDI_HDEVICE hDevice,                            // IN
    if (data.magic != 0x4137424c || data.version != 1 || !data.width || !data.height ||
        data.width > 8192 || data.height > 8192 || (data.pitch & 15u) ||
        data.pitch < ((data.width + 3u) & ~3u) * bpp ||
-       data.size < UINT64(data.pitch) * ((data.height + 3u) & ~3u)) { SetError(hDevice, E_INVALIDARG); return; }
+       data.size < UINT64(data.pitch) * ((data.height + 3u) & ~3u)) {
+      DebugPrintf("BC250 Fail OpenResource layout magic %08x version %u %ux%u pitch %u format %u size %llu private %u\n",
+                  data.magic, data.version, data.width, data.height, data.pitch, data.format, data.size,
+                  info->PrivateDriverDataSize);
+      SetError(hDevice, E_INVALIDARG); return;
+   }
    if (format == DXGI_FORMAT_UNKNOWN) { SetError(hDevice, E_NOTIMPL); return; }
    D3D10DDI_MIPINFO mip = {};
    mip.TexelWidth = mip.PhysicalWidth = data.width;

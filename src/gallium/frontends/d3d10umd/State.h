@@ -182,14 +182,26 @@ CastPipeDevice(DXGI_DDI_HDEVICE hDevice)
 }
 
 
+// The runtime removes the device for most error codes of a void DDI function,
+// so the retained line names the function and line that set it (BD-292).
 static inline void
-SetError(D3D10DDI_HDEVICE hDevice, HRESULT hr)
+Bc250SetErrorAt(D3D10DDI_HDEVICE hDevice, HRESULT hr, const char *function, unsigned line)
 {
    if (FAILED(hr)) {
-      DebugPrintf("BC250 SetError %08lx\n", hr);
+      DebugPrintf("BC250 SetError %08lx %s:%u\n", hr, function, line);
       Device *pDevice = CastDevice(hDevice);
       pDevice->UMCallbacks.pfnSetErrorCb(pDevice->hRTCoreLayer, hr);
    }
+}
+#define SetError(hDevice, hr) Bc250SetErrorAt((hDevice), (hr), __func__, __LINE__)
+
+// A failed step of a surface helper whose HRESULT a caller passes on: the
+// retained line names the step before the caller reports the code (BD-292).
+static inline HRESULT
+Bc250Fail(const char *step, HRESULT hr)
+{
+   DebugPrintf("BC250 Fail %s %08lx\n", step, hr);
+   return hr;
 }
 
 
