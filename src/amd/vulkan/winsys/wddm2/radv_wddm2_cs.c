@@ -1585,6 +1585,11 @@ radv_wddm2_cs_submit(struct radeon_winsys_ctx *_ctx,
       if (!NT_SUCCESS(status))
          return VK_ERROR_DEVICE_LOST;
 
+      /* BD-200: the kernel has the signals now, which is what VK_SYNC_WAIT_PENDING waits for. */
+      for (uint32_t i = 0; i < signal_count; i++)
+         vk_wddm2_monitored_fence_note_submitted(vk_sync_as_wddm2_monitored_fence(signals[i].sync),
+                                                 signals[i].signal_value);
+
       struct vk_wddm2_monitored_fence *fence = vk_sync_as_wddm2_monitored_fence(signals[0].sync);
       ctx->per_ip[submit->ip_type].last_submission.handle = fence->handle;
       ctx->per_ip[submit->ip_type].last_submission.wait_value = signals[0].signal_value;
