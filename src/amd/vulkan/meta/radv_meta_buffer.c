@@ -11,6 +11,7 @@
 #include "tools/radv_debug_hang.h"
 #include "radv_cp_dma.h"
 #include "radv_meta.h"
+#include "radv_meta_copy_overread.h"
 #include "radv_sdma.h"
 #include "radv_tracepoints.h"
 #include "vk_shader_module.h"
@@ -347,7 +348,32 @@ radv_copy_memory(struct radv_cmd_buffer *cmd_buffer, uint64_t src_va, uint64_t d
       /* The dispatch itself no longer carries the addresses: they are counted here, around the call. */
       const struct radv_draw_stats_op stats_op = RADV_DRAW_STATS_TRANSFER(
          cmd_buffer, radv_draw_stats_va_range(dst_va, size), radv_draw_stats_va_range(src_va, size));
-      radv_compute_copy_memory(cmd_buffer, &options, &dispatch, size);
+
+      /* bc250 (BD-290): the last thread of the compute copy can load past the end of the source range into a page
+       * that is not mapped (radv_meta_copy_overread.h). Then copy the bytes of that thread with CP DMA, and the
+       * rest with the same shader parameters, so that the compute part ends on a thread boundary.
+       */
+      const uint64_t tail =
+         dispatch.cpdma_supported
+            ? radv_copy_memory_overread_tail(src_va, size, dispatch.shader_key.dwords_per_thread * 4,
+                                             dispatch.shader_key.dst_align_offset)
+            : 0;
+
+      if (tail) {
+         const uint64_t head = size - tail;
+
+         if (head) {
+            info.size = head;
+            info.dwords_per_thread = dispatch.shader_key.dwords_per_thread;
+            if (radv_prepare_cs_clear_copy_buffer(cmd_buffer, &options, &info, &dispatch))
+               radv_compute_copy_memory(cmd_buffer, &options, &dispatch, head);
+            else
+               radv_cp_dma_copy_memory(cmd_buffer, src_va, dst_va, head);
+         }
+         radv_cp_dma_copy_memory(cmd_buffer, src_va + head, dst_va + head, tail);
+      } else {
+         radv_compute_copy_memory(cmd_buffer, &options, &dispatch, size);
+      }
       radv_draw_stats_transfer_end(cmd_buffer, stats_op);
    } else if (size) {
       radv_cp_dma_copy_memory(cmd_buffer, src_va, dst_va, size);
