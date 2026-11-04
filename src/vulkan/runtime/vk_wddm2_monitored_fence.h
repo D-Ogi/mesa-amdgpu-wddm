@@ -45,8 +45,17 @@ struct vk_wddm2_monitored_fence {
    uint32_t handle;
 #ifdef _WIN32
    HANDLE shared_handle;
+   /* BD-200: the payload came from another process (an import). */
+   bool shared_handle_imported;
 #endif
    uint64_t *value_map;
+
+   /* BD-200: the largest value of a signal that this process has handed to
+    * the kernel (a CPU signal, or a GPU signal queued behind a submission).
+    * VK_SYNC_WAIT_PENDING waits for this value, not for value_map. Only
+    * meaningful while no other process can signal the payload (no
+    * VK_SYNC_IS_SHAREABLE, no VK_SYNC_IS_SHARED). */
+   uint64_t pending_value;
 };
 
 static inline bool
@@ -65,6 +74,16 @@ vk_sync_as_wddm2_monitored_fence(struct vk_sync *sync)
 }
 
 VkResult vk_wddm2_check_device_status(struct vk_device *device);
+
+/* BD-200: record that a signal of value to the fence is in the kernel's
+ * hands, and wake the VK_SYNC_WAIT_PENDING waits of this process. A winsys
+ * that queues a GPU signal of a monitored fence calls it after the kernel
+ * accepted the signal. */
+void vk_wddm2_monitored_fence_note_submitted(struct vk_wddm2_monitored_fence *fence, uint64_t value);
+
+/* The time between two liveness checks of a CPU wait on these fences
+ * (BD-179), 1 s. Only host tests write it. */
+extern uint64_t vk_wddm2_monitored_fence_wait_slice_ns;
 
 VkResult
 vk_wddm2_monitored_fence_gpu_wait_many(struct vk_queue *queue,
