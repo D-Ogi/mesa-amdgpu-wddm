@@ -26,7 +26,9 @@
 #include <assert.h>
 #include <inttypes.h>
 
+#include "c11/threads.h"
 #include "util/os_time.h"
+#include "util/timespec.h"
 #include "util/u_atomic.h"
 
 #ifndef _WIN32
@@ -121,7 +123,9 @@ vk_wddm2_monitored_fence_init(struct vk_device *device,
 
    fence->handle = create.hSyncObject;
    fence->value_map = create.Info.MonitoredFence.FenceValueCPUVirtualAddress;
+   fence->pending_value = initial_value;
 #ifdef _WIN32
+   fence->shared_handle_imported = false;
    {
       if (!device->bc250_host.dispatch) {
       OBJECT_ATTRIBUTES oa = { sizeof(OBJECT_ATTRIBUTES) };
@@ -169,8 +173,11 @@ vk_wddm2_monitored_fence_move(struct vk_device *device,
 
    SWAP(dst->handle, src->handle);
    SWAP(dst->value_map, src->value_map);
+   /* BD-200: the submitted value belongs to the payload. */
+   SWAP(dst->pending_value, src->pending_value);
 #ifdef _WIN32
    SWAP(dst->shared_handle, src->shared_handle);
+   SWAP(dst->shared_handle_imported, src->shared_handle_imported);
 #endif
 
    return VK_SUCCESS;
@@ -201,6 +208,7 @@ vk_wddm2_monitored_fence_signal(struct vk_device *device,
       return NTSTATUS_to_VkResult(device, status);
    }
 
+   vk_wddm2_monitored_fence_note_submitted(fence, value);
    return VK_SUCCESS;
 }
 
@@ -268,6 +276,17 @@ vk_wddm2_wait_slice_device_lost(struct vk_device *device)
    return get_state.ExecutionState != D3DKMT_DEVICEEXECUTION_ACTIVE;
 }
 
+/* BD-200: the wait for VK_SYNC_WAIT_PENDING, after vk_wddm2_check_device_status. */
+static bool
+vk_wddm2_monitored_fence_pending_known(uint32_t wait_count,
+                                       const struct vk_sync_wait *waits);
+static VkResult
+vk_wddm2_monitored_fence_wait_pending(struct vk_device *device,
+                                      uint32_t wait_count,
+                                      const struct vk_sync_wait *waits,
+                                      enum vk_sync_wait_flags wait_flags,
+                                      uint64_t abs_timeout_ns);
+
 static VkResult
 vk_wddm2_monitored_fence_wait_many(struct vk_device *device,
                                    uint32_t wait_count,
@@ -277,6 +296,21 @@ vk_wddm2_monitored_fence_wait_many(struct vk_device *device,
 {
    VkResult result;
    NTSTATUS status;
+
+   /* BD-200: VK_SYNC_WAIT_PENDING asks for the submission of the signal, not
+    * for its completion (vk_sync.h). The threaded and on-demand submit modes
+    * use it to hold a submission until its waits are in the kernel's hands;
+    * a wait for completion there makes the CPU wait for the GPU on every
+    * submission (Quake II RTX 64 fps against 73, the revert 3b660ba0). This
+    * process knows every signal of a payload that no other process can
+    * reach. For a payload that another process can signal, this process
+    * cannot see the submission, so the wait below is for completion, which
+    * implies it.
+    */
+   if ((wait_flags & VK_SYNC_WAIT_PENDING) &&
+       vk_wddm2_monitored_fence_pending_known(wait_count, waits))
+      return vk_wddm2_monitored_fence_wait_pending(device, wait_count, waits,
+                                                   wait_flags, abs_timeout_ns);
 
    /* Quick poll all the fences ourselves.  We may not have to call into the
     * kernel at all.
@@ -416,6 +450,7 @@ vk_wddm2_monitored_fence_import_opaque_win32_handle(struct vk_device *device,
    fence->handle = open.hSyncObject;
    fence->shared_handle = handle;
    fence->value_map = open.MonitoredFence.FenceValueCPUVirtualAddress;
+   fence->shared_handle_imported = true;
 
    return VK_SUCCESS;
 }
@@ -555,6 +590,158 @@ vk_wddm2_check_device_status(struct vk_device *device)
    }
 }
 
+/* BD-200: VK_SYNC_WAIT_PENDING.
+ *
+ * A wait for pending is a wait for some thread of this process to hand a
+ * signal of at least the wait value to the kernel. Every such hand-over goes
+ * through vk_wddm2_monitored_fence_note_submitted: the CPU signal above, the
+ * GPU signal of vk_wddm2_monitored_fence_gpu_signal_many below and the GPU
+ * signal of the winsys submit. It raises the fence's pending value and wakes
+ * every pending wait of the process, which sleep on one condition variable.
+ * A wake lets each wait read its own fences again, so a wake for another
+ * fence costs a read, not a lost wake.
+ */
+static once_flag vk_wddm2_pending_once = ONCE_FLAG_INIT;
+static mtx_t vk_wddm2_pending_mtx;
+static cnd_t vk_wddm2_pending_cnd;
+
+static void
+vk_wddm2_pending_init(void)
+{
+   mtx_init(&vk_wddm2_pending_mtx, mtx_plain);
+   cnd_init(&vk_wddm2_pending_cnd);
+}
+
+void
+vk_wddm2_monitored_fence_note_submitted(struct vk_wddm2_monitored_fence *fence, uint64_t value)
+{
+   uint64_t old = p_atomic_read(&fence->pending_value);
+   while (old < value) {
+      const uint64_t seen = p_atomic_cmpxchg(&fence->pending_value, old, value);
+      if (seen == old)
+         break;
+      old = seen;
+   }
+
+   /* The raise is done before the lock, and a wait reads the value under the
+    * lock before it sleeps, so a wait either reads the new value or sleeps
+    * before this broadcast. */
+   call_once(&vk_wddm2_pending_once, vk_wddm2_pending_init);
+   mtx_lock(&vk_wddm2_pending_mtx);
+   cnd_broadcast(&vk_wddm2_pending_cnd);
+   mtx_unlock(&vk_wddm2_pending_mtx);
+}
+
+/* Whether this process sees every signal of these payloads: none can be
+ * exported or was imported, so no other process can signal it. */
+static bool
+vk_wddm2_monitored_fence_pending_known(uint32_t wait_count,
+                                       const struct vk_sync_wait *waits)
+{
+   for (uint32_t i = 0; i < wait_count; i++) {
+      if (p_atomic_read(&waits[i].sync->flags) &
+          (VK_SYNC_IS_SHAREABLE | VK_SYNC_IS_SHARED))
+         return false;
+#ifdef _WIN32
+      if (to_wddm2_monitored_fence(waits[i].sync)->shared_handle_imported)
+         return false;
+#endif
+   }
+   return true;
+}
+
+/* VK_SUCCESS when the waits are pending (or complete), VK_NOT_READY when not,
+ * VK_ERROR_DEVICE_LOST when a fence reads the lost-device value. Marks
+ * nothing lost itself: it runs under the pending lock. */
+static VkResult
+vk_wddm2_monitored_fence_poll_pending(struct vk_device *device,
+                                      uint32_t wait_count,
+                                      const struct vk_sync_wait *waits,
+                                      enum vk_sync_wait_flags wait_flags)
+{
+   uint32_t ready = 0;
+   for (uint32_t i = 0; i < wait_count; i++) {
+      struct vk_wddm2_monitored_fence *fence =
+         to_wddm2_monitored_fence(waits[i].sync);
+
+      const uint64_t value = p_atomic_read(fence->value_map);
+      if (!bc250_host_fence_valid(&device->bc250_host, value, "sync CPU wait: pending", fence->handle))
+         return VK_ERROR_DEVICE_LOST;
+      const uint64_t pending = p_atomic_read(&fence->pending_value);
+      if (MAX2(value, pending) >= waits[i].wait_value)
+         ready++;
+   }
+   if (ready == wait_count || ((wait_flags & VK_SYNC_WAIT_ANY) && ready > 0))
+      return VK_SUCCESS;
+   return VK_NOT_READY;
+}
+
+static VkResult
+vk_wddm2_monitored_fence_wait_pending(struct vk_device *device,
+                                      uint32_t wait_count,
+                                      const struct vk_sync_wait *waits,
+                                      enum vk_sync_wait_flags wait_flags,
+                                      uint64_t abs_timeout_ns)
+{
+   VkResult result = vk_wddm2_monitored_fence_poll_pending(device, wait_count,
+                                                           waits, wait_flags);
+   if (result == VK_ERROR_DEVICE_LOST)
+      return vk_device_set_lost(device, "Hosted fence lost while polling");
+   if (result != VK_NOT_READY)
+      return result;
+   if (abs_timeout_ns == 0)
+      return VK_TIMEOUT;
+
+   call_once(&vk_wddm2_pending_once, vk_wddm2_pending_init);
+   mtx_lock(&vk_wddm2_pending_mtx);
+   bool lost = false;
+   /* BD-179: once per slice ask whether the device is lost: on a stopped
+    * adapter nothing submits. The check runs at the end of each slice also
+    * while submissions to other fences wake the wait. */
+   uint64_t check_ns = os_time_get_nano() + vk_wddm2_monitored_fence_wait_slice_ns;
+   for (;;) {
+      result = vk_wddm2_monitored_fence_poll_pending(device, wait_count,
+                                                     waits, wait_flags);
+      if (result != VK_NOT_READY)
+         break;
+
+      const uint64_t now_ns = os_time_get_nano();
+      if (now_ns >= abs_timeout_ns) {
+         result = VK_TIMEOUT;
+         break;
+      }
+      if (now_ns >= check_ns) {
+         mtx_unlock(&vk_wddm2_pending_mtx);
+         lost = vk_wddm2_wait_slice_device_lost(device);
+         mtx_lock(&vk_wddm2_pending_mtx);
+         if (lost)
+            break;
+         check_ns = now_ns + vk_wddm2_monitored_fence_wait_slice_ns;
+         continue;
+      }
+
+      struct timespec deadline;
+      timespec_get(&deadline, TIME_UTC);
+      timespec_add_nsec(&deadline, &deadline,
+                        MIN2(abs_timeout_ns, check_ns) - now_ns);
+      if (cnd_timedwait(&vk_wddm2_pending_cnd, &vk_wddm2_pending_mtx,
+                        &deadline) == thrd_error) {
+         result = VK_ERROR_UNKNOWN;
+         break;
+      }
+   }
+   mtx_unlock(&vk_wddm2_pending_mtx);
+
+   if (lost)
+      return vk_device_set_lost(device,
+         "Device lost during a pending wait (stopped adapter, BD-179)");
+   if (result == VK_ERROR_DEVICE_LOST)
+      return vk_device_set_lost(device, "Hosted fence lost while polling");
+   if (result == VK_ERROR_UNKNOWN)
+      return vk_errorf(device, VK_ERROR_UNKNOWN, "cnd_timedwait failed");
+   return result;
+}
+
 VkResult
 vk_wddm2_monitored_fence_gpu_wait_many(struct vk_queue *queue,
                                        uint32_t context_handle,
@@ -633,6 +820,11 @@ vk_wddm2_monitored_fence_gpu_signal_many(struct vk_queue *queue,
    if (unlikely(!NT_SUCCESS(status))) {
       return vk_queue_set_lost(queue,
          "D3DKMTSignalSynchronizationObjectFromGpu failed");
+   }
+
+   for (uint32_t i = 0; i < signal_count; i++) {
+      vk_wddm2_monitored_fence_note_submitted(to_wddm2_monitored_fence(signals[i].sync),
+                                              signals[i].signal_value);
    }
 
    return VK_SUCCESS;
