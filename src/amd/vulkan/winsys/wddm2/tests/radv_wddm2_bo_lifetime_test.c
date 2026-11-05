@@ -197,6 +197,14 @@ const struct vk_sync_type vk_wddm2_monitored_fence_type = {0};
 const struct vk_sync_type vk_wddm2_monitored_fence_hosted_type = {0};
 const struct vk_sync_type vk_wddm2_monitored_fence_hosted_bound_type = {0};
 
+/* radv_wddm2_cs.c reports the signal of a submitted monitored fence; no test submits one. */
+void
+vk_wddm2_monitored_fence_note_submitted(struct vk_wddm2_monitored_fence *fence, uint64_t value)
+{
+   (void)fence;
+   (void)value;
+}
+
 /* The CPU wait bounds of the winsys (radv_wddm2_cs.c). The host tests shorten
  * them; nothing else writes them. */
 extern uint64_t radv_wddm2_fence_wait_slice_ns;
