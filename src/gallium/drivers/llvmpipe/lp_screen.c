@@ -840,6 +840,8 @@ llvmpipe_destroy_screen(struct pipe_screen *_screen)
 #endif
    mtx_destroy(&screen->rast_mutex);
    mtx_destroy(&screen->cs_mutex);
+   mtx_destroy(&screen->late_mutex);
+   mtx_destroy(&screen->ctx_mutex);
    FREE(screen);
 }
 
