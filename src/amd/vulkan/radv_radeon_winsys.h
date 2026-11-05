@@ -451,6 +451,13 @@ struct radeon_winsys {
 
    void (*buffer_unmap)(struct radeon_winsys *ws, struct radeon_winsys_bo *bo, bool replace);
 
+   /* Optional, WDDM only (BD-309): true when bo is one kernel allocation that this winsys created
+    * itself, with its handle in *allocation and whether it is CPU-locked now in *cpu_mapped. False
+    * for imports, sparse reservations and every BO whose allocation another owner holds. Reads state
+    * only: no kernel call. */
+   bool (*buffer_get_kmt_allocation)(struct radeon_winsys *ws, struct radeon_winsys_bo *bo, uint32_t *allocation,
+                                     bool *cpu_mapped);
+
    void (*buffer_set_metadata)(struct radeon_winsys *ws, struct radeon_winsys_bo *bo, struct radeon_bo_metadata *md);
    void (*buffer_get_metadata)(struct radeon_winsys *ws, struct radeon_winsys_bo *bo, struct radeon_bo_metadata *md);
 

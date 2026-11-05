@@ -27,6 +27,9 @@
 #include "radv_tir.h"
 #include "radv_pgp_view.h"
 #include "radv_pgp_so.h"
+#include "radv_bc250_memory.h"
+#include "radv_device.h"
+#include "radv_device_memory.h"
 
 #include "util/bitset.h"
 #include "util/u_debug.h"
@@ -558,9 +561,37 @@ radv_bc250_pgp_so_query(VkPhysicalDevice physical_device, uint32_t revision,
    return pdev->info.gfx_level == GFX10 ? VK_SUCCESS : VK_ERROR_FEATURE_NOT_PRESENT;
 }
 
+/* BD-309 (radv_bc250_memory.h): the kernel allocation behind a VkDeviceMemory, for the D3D11 shell's
+ * offers of engine-private resources. Imports are refused here and BOs another owner holds are refused
+ * by the winsys. */
+static VKAPI_ATTR VkResult VKAPI_CALL
+radv_bc250_get_memory_allocation(VkDevice _device, VkDeviceMemory _memory, struct bc250_memory_allocation *out)
+{
+   if (!_device || !_memory || !out || out->revision != BC250_MEMORY_ALLOCATION_REVISION ||
+       out->size != sizeof(*out))
+      return VK_ERROR_INITIALIZATION_FAILED;
+   VK_FROM_HANDLE(radv_device, device, _device);
+   VK_FROM_HANDLE(radv_device_memory, mem, _memory);
+   out->allocation = 0;
+   out->flags = 0;
+   out->bytes = 0;
+   if (!mem->bo || mem->vk.import_handle_type || mem->vk.host_ptr || !device->ws->buffer_get_kmt_allocation)
+      return VK_ERROR_FEATURE_NOT_PRESENT;
+   uint32_t allocation = 0;
+   bool cpu_mapped = false;
+   if (!device->ws->buffer_get_kmt_allocation(device->ws, mem->bo, &allocation, &cpu_mapped))
+      return VK_ERROR_FEATURE_NOT_PRESENT;
+   out->allocation = allocation;
+   out->flags = cpu_mapped ? BC250_MEMORY_ALLOCATION_CPU_MAPPED : 0;
+   out->bytes = mem->bo->size;
+   return VK_SUCCESS;
+}
+
 VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL
 radv_GetInstanceProcAddr(VkInstance _instance, const char *pName)
 {
+   if (!_instance && pName && !strcmp(pName, BC250_MEMORY_ALLOCATION_QUERY_NAME))
+      return (PFN_vkVoidFunction)radv_bc250_get_memory_allocation;
    if (!_instance && pName && !strcmp(pName, BC250_PGP_SO_QUERY_NAME))
       return (PFN_vkVoidFunction)radv_bc250_pgp_so_query;
    if (!_instance && pName && !strcmp(pName, BC250_PGP_VIEW_QUERY_NAME))

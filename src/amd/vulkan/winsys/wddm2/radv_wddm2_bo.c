@@ -1046,6 +1046,23 @@ radv_wddm2_bo_get_handle(struct radeon_winsys *_ws, struct radeon_winsys_bo *_bo
    return false;
 }
 
+/* BD-309: the D3D11 shell offers the allocation of an engine-private resource. Only an allocation this
+ * winsys created through CreateAllocation2 qualifies: a borrowed one (runtime surface) is offered by its
+ * owner, an opened shared resource is another process's, and a virtual BO has no allocation of its own. */
+static bool
+radv_wddm2_bo_get_kmt_allocation(struct radeon_winsys *_ws, struct radeon_winsys_bo *_bo, uint32_t *allocation,
+                                 bool *cpu_mapped)
+{
+   struct radv_wddm2_bo *bo = radv_wddm2_bo(_bo);
+   *allocation = 0;
+   *cpu_mapped = false;
+   if (!bo || bo->borrowed || bo->resource_handle || bo->base.is_virtual || bo->destroyed || !bo->base.handle)
+      return false;
+   *allocation = bo->base.handle;
+   *cpu_mapped = bo->map != NULL;
+   return true;
+}
+
 static VkResult
 radv_wddm2_bo_from_handle(struct radeon_winsys *_ws, void *handle, unsigned priority,
                            struct radeon_winsys_bo **out_bo, uint64_t *alloc_size)
@@ -3575,6 +3592,7 @@ radv_wddm2_bo_init_functions(struct radv_wddm2_winsys *ws)
    ws->base.buffer_make_resident = radv_wddm2_bo_make_resident;
    ws->base.buffer_from_ptr = radv_wddm2_bo_from_ptr;
    ws->base.buffer_get_handle = radv_wddm2_bo_get_handle;
+   ws->base.buffer_get_kmt_allocation = radv_wddm2_bo_get_kmt_allocation;
    ws->base.buffer_from_handle = radv_wddm2_bo_from_handle;
    ws->base.buffer_get_flags_from_handle = radv_wddm2_bo_get_flags_from_handle;
    ws->base.buffer_get_metadata = radv_wddm2_bo_get_metadata;
