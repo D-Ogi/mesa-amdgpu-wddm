@@ -243,18 +243,31 @@ HRESULT Bc250EnsureSurface(Device *device, Resource *resource)
 {
    if (!resource || !resource->resource) return Bc250Fail("EnsureSurface resource", E_INVALIDARG);
    if (resource->presentReady) return S_OK;
+   // An opened allocation that Lock2 refused once has no CPU view for its
+   // whole life: report it without another Lock2 (BD-296).
+   if (resource->noContent) return Bc250Fail("EnsureSurface no CPU view", E_INVALIDARG);
+   // The step of a failure, for OpenResource (SurfaceOpen.h, BD-296).
+   resource->failedStep = BC250_SURFACE_STEP_NONE;
+   auto fail = [resource](unsigned step, const char *name, HRESULT code) {
+      resource->failedStep = step;
+      return Bc250Fail(name, code);
+   };
    UINT width = resource->resource->width0, height = resource->resource->height0;
    if (!width || !height || width > 8192 || height > 8192) {
       DebugPrintf("BC250 Fail EnsureSurface size %ux%u\n", width, height);
+      resource->failedStep = BC250_SURFACE_STEP_SIZE;
       return E_INVALIDARG;
    }
    if (!device->pagingQueue) {
-      if (!device->KTCallbacks.pfnCreatePagingQueueCb) return E_NOTIMPL;
+      if (!device->KTCallbacks.pfnCreatePagingQueueCb) {
+         resource->failedStep = BC250_SURFACE_STEP_PAGING_QUEUE;
+         return E_NOTIMPL;
+      }
       D3DDDICB_CREATEPAGINGQUEUE queue = {};
       queue.Priority = D3DDDI_PAGINGQUEUE_PRIORITY_NORMAL;
       HRESULT hr = device->KTCallbacks.pfnCreatePagingQueueCb(device->hDevice, &queue);
       DebugPrintf("BC250 CreatePagingQueue %08lx\n", hr);
-      if (FAILED(hr)) return Bc250Fail("EnsureSurface CreatePagingQueue", hr);
+      if (FAILED(hr)) return fail(BC250_SURFACE_STEP_PAGING_QUEUE, "EnsureSurface CreatePagingQueue", hr);
       device->pagingQueue = queue.hPagingQueue;
       device->pagingFence = (volatile UINT64 *)queue.FenceValueCPUVirtualAddress;
    }
@@ -267,7 +280,7 @@ HRESULT Bc250EnsureSurface(Device *device, Resource *resource)
       case DXGI_FORMAT_B8G8R8A8_UNORM: format = D3DDDIFMT_A8R8G8B8; break;
       case DXGI_FORMAT_B8G8R8X8_UNORM: format = D3DDDIFMT_X8R8G8B8; break;
       case DXGI_FORMAT_R8G8B8A8_UNORM: format = D3DDDIFMT_A8B8G8R8; break;
-      default: return Bc250Fail("EnsureSurface format", E_NOTIMPL);
+      default: return fail(BC250_SURFACE_STEP_FORMAT, "EnsureSurface format", E_NOTIMPL);
       }
    }
    const UINT bpp = util_format_get_blocksize(resource->resource->format);
@@ -287,6 +300,7 @@ HRESULT Bc250EnsureSurface(Device *device, Resource *resource)
        bytes < UINT64(pitch) * ((height + 3u) & ~3u)) {
       DebugPrintf("BC250 Fail EnsureSurface layout %ux%u bpp %u pitch %u bytes %llu opened %u\n",
                   width, height, bpp, pitch, bytes, resource->allocation != 0);
+      resource->failedStep = BC250_SURFACE_STEP_LAYOUT;
       return E_INVALIDARG;
    }
    SurfacePrivate data = {0x4137424c, 1, width, height, pitch, format, bytes};
@@ -311,7 +325,7 @@ HRESULT Bc250EnsureSurface(Device *device, Resource *resource)
       allocate.NumAllocations = 1; allocate.pAllocationInfo2 = &info;
       hr = device->KTCallbacks.pfnAllocateCb(device->hDevice, &allocate);
       DebugPrintf("BC250 Allocate %08lx format %u primary %u handle %x resource %x\n", hr, format, resource->primary, info.hAllocation, allocate.hKMResource);
-      if (FAILED(hr)) return Bc250Fail("EnsureSurface Allocate", hr);
+      if (FAILED(hr)) return fail(BC250_SURFACE_STEP_ALLOCATE, "EnsureSurface Allocate", hr);
       resource->allocation = info.hAllocation;
       resource->surfacePitch = pitch;
       resource->surfaceBytes = bytes;
@@ -331,7 +345,7 @@ HRESULT Bc250EnsureSurface(Device *device, Resource *resource)
       hr = device->KTCallbacks.pfnMapGpuVirtualAddressCb(device->hDevice, &map);
       DebugPrintf("BC250 MapGpuVa %08lx va %llx\n", hr, map.VirtualAddress);
       // WDDM callbacks report successful asynchronous paging as E_PENDING.
-      if (FAILED(hr) && hr != E_PENDING) return Bc250Fail("EnsureSurface MapGpuVa", hr);
+      if (FAILED(hr) && hr != E_PENDING) return fail(BC250_SURFACE_STEP_MAP_GPU_VA, "EnsureSurface MapGpuVa", hr);
       resource->gpuVa = map.VirtualAddress;
       resource->surfaceFence = map.PagingFenceValue;
    }
@@ -341,7 +355,7 @@ HRESULT Bc250EnsureSurface(Device *device, Resource *resource)
       resident.NumAllocations = 1; resident.AllocationList = &resource->allocation;
       hr = device->KTCallbacks.pfnMakeResidentCb(device->hDevice, &resident);
       DebugPrintf("BC250 MakeResident %08lx\n", hr);
-      if (FAILED(hr) && hr != E_PENDING) return Bc250Fail("EnsureSurface MakeResident", hr);
+      if (FAILED(hr) && hr != E_PENDING) return fail(BC250_SURFACE_STEP_MAKE_RESIDENT, "EnsureSurface MakeResident", hr);
       resource->surfaceResident = TRUE;
       if (resident.PagingFenceValue > resource->surfaceFence)
          resource->surfaceFence = resident.PagingFenceValue;
@@ -350,12 +364,12 @@ HRESULT Bc250EnsureSurface(Device *device, Resource *resource)
    ULONGLONG deadline = GetTickCount64() + 5000;
    while (device->pagingFence && *device->pagingFence < fence && GetTickCount64() < deadline) Sleep(1);
    if (!device->pagingFence || *device->pagingFence < fence)
-      return Bc250Fail("EnsureSurface paging fence", HRESULT_FROM_WIN32(WAIT_TIMEOUT));
+      return fail(BC250_SURFACE_STEP_PAGING_FENCE, "EnsureSurface paging fence", HRESULT_FROM_WIN32(WAIT_TIMEOUT));
    if (!resource->cpuMapping) {
       D3DDDICB_LOCK2 lock = {};
       lock.hAllocation = resource->allocation;
       hr = device->KTCallbacks.pfnLock2Cb(device->hDevice, &lock);
-      if (FAILED(hr)) return Bc250Fail("EnsureSurface Lock2", hr);
+      if (FAILED(hr)) return fail(BC250_SURFACE_STEP_LOCK2, "EnsureSurface Lock2", hr);
       resource->cpuMapping = lock.pData;
    }
    struct winsys_handle handle = {};
@@ -366,7 +380,7 @@ HRESULT Bc250EnsureSurface(Device *device, Resource *resource)
    desc.bind |= PIPE_BIND_DISPLAY_TARGET | PIPE_BIND_SHARED;
    struct pipe_resource *imported = device->pipe->screen->resource_from_handle(
        device->pipe->screen, &desc, &handle, 0);
-   if (!imported) return Bc250Fail("EnsureSurface import", E_OUTOFMEMORY);
+   if (!imported) return fail(BC250_SURFACE_STEP_IMPORT, "EnsureSurface import", E_OUTOFMEMORY);
    pipe_resource_reference(&resource->resource, NULL);
    resource->resource = imported;
    resource->presentReady = TRUE;

@@ -41,6 +41,8 @@
 #include "util/u_math.h"
 #include "util/u_rect.h"
 #include "util/u_surface.h"
+#include "util/box.h"
+#include "util/format/u_format.h"
 
 // Byte-identical copy of bc250-win driver/contract/amdgpu_wddm_surface_format.h.
 #include "amdgpu_wddm_surface_format.h"
@@ -439,6 +441,28 @@ CalcPrivateOpenedResourceSize(D3D10DDI_HDEVICE hDevice,                         
  * ----------------------------------------------------------------------
  */
 
+// The texture of an open without content (BD-296): zero, which the
+// compositor shows as transparent black, never the bytes of an old texture.
+static void
+Bc250ClearOpenedTexture(struct pipe_context *pipe, Resource *resource)
+{
+   struct pipe_resource *r = resource->resource;
+   struct pipe_box box;
+   struct pipe_transfer *transfer = NULL;
+   u_box_2d(0, 0, r->width0, r->height0, &box);
+   uint8_t *map = (uint8_t *)pipe->texture_map(pipe, r, 0, PIPE_MAP_WRITE | PIPE_MAP_DISCARD_WHOLE_RESOURCE,
+                                               &box, &transfer);
+   if (!map) {
+      DebugPrintf("BC250 OpenResource handle %x: clear map failed\n", resource->allocation);
+      return;
+   }
+   const size_t row = util_format_get_stride(r->format, r->width0);
+   const unsigned rows = util_format_get_nblocksy(r->format, r->height0);
+   for (unsigned y = 0; y < rows; ++y) memset(map + (size_t)y * transfer->stride, 0, row);
+   pipe->texture_unmap(pipe, transfer);
+}
+
+
 void APIENTRY
 OpenResource(D3D10DDI_HDEVICE hDevice,                            // IN
              __in const D3D10DDIARG_OPENRESOURCE *pOpenResource,  // IN
@@ -494,6 +518,22 @@ OpenResource(D3D10DDI_HDEVICE hDevice,                            // IN
    resource->surfaceBytes = data.size;
    HRESULT hr = Bc250EnsureSurface(CastDevice(hDevice), resource);
    if (SUCCEEDED(hr)) Bc250ShadowCreate(CastDevice(hDevice), resource);
+   if (Bc250OpenWithoutContent(true, resource->failedStep, hr)) {
+      // BD-296 (SurfaceOpen.h): an allocation with no CPU view, such as a
+      // standard GDI texture in local memory. Keep the llvmpipe texture that
+      // CreateResource made, cleared to zero, so that the compositor keeps
+      // its device. The texture is not the allocation: the window shows no
+      // content until the next open of a readable surface.
+      Bc250ClearOpenedTexture(CastPipeContext(hDevice), resource);
+      resource->noContent = TRUE;
+      // Retained in both flavours (Debug.cpp), bounded: the first 64 opens of the process, then every 1000th.
+      static volatile LONG opens = 0;
+      const LONG n = InterlockedIncrement(&opens);
+      if (n <= 64 || n % 1000 == 0)
+         DebugPrintf("BC250 NoContent open %ld handle %x %ux%u format %u: Lock2 %08lx, no CPU view\n",
+                     n, resource->allocation, data.width, data.height, data.format, hr);
+      return;
+   }
    DebugPrintf("BC250 OpenResource %08lx handle %x shadow %u\n", hr, resource->allocation,
                resource->shadow != NULL);
    SetError(hDevice, hr);

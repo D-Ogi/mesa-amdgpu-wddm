@@ -34,6 +34,7 @@
 #include "DriverIncludes.h"
 #include "util/u_hash_table.h"
 #include "cso_cache/cso_context.h"
+#include "SurfaceOpen.h"
 
 #define SUPPORT_MSAA 0
 #define SUPPORT_D3D10_1 0
@@ -218,6 +219,11 @@ struct Resource
    // and the paging fence value the map and MakeResident complete at.
    BOOL surfaceResident;
    UINT64 surfaceFence;
+   // The Bc250SurfaceStep of the last failure of Bc250EnsureSurface, and
+   // whether OpenResource kept this opened resource with no content because
+   // Lock2 refused its allocation (SurfaceOpen.h, BD-296).
+   UINT failedStep;
+   BOOL noContent;
    BOOL primary, shared;
    UINT vidpn;
    DXGI_FORMAT Format;
