@@ -38,8 +38,8 @@ DebugPrintf(const char *format, ...)
 #else
     const bool verbose = false; // full tracing is a lab build's (BD-167): as with the variable unset
 #endif
-    const bool retained = strstr(format, "BC250 SetError") ||
-       strstr(format, "BC250 Renderer") || strstr(format, "BC250 Perf") ||
+    const bool retained = strstr(format, "BC250 SetError") || strstr(format, "BC250 Fail ") ||
+       strstr(format, "BC250 Renderer") || strstr(format, "BC250 Perf") || strstr(format, "BC250 NoContent ") ||
        strstr(format, "Assertion") || strstr(format, "0x%08lX");
     if (!verbose && !retained) return;
     char buf[4096];

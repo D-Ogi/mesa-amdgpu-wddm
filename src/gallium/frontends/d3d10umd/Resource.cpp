@@ -41,6 +41,8 @@
 #include "util/u_math.h"
 #include "util/u_rect.h"
 #include "util/u_surface.h"
+#include "util/box.h"
+#include "util/format/u_format.h"
 
 // Byte-identical copy of bc250-win driver/contract/amdgpu_wddm_surface_format.h.
 #include "amdgpu_wddm_surface_format.h"
@@ -439,6 +441,28 @@ CalcPrivateOpenedResourceSize(D3D10DDI_HDEVICE hDevice,                         
  * ----------------------------------------------------------------------
  */
 
+// The texture of an open without content (BD-296): zero, which the
+// compositor shows as transparent black, never the bytes of an old texture.
+static void
+Bc250ClearOpenedTexture(struct pipe_context *pipe, Resource *resource)
+{
+   struct pipe_resource *r = resource->resource;
+   struct pipe_box box;
+   struct pipe_transfer *transfer = NULL;
+   u_box_2d(0, 0, r->width0, r->height0, &box);
+   uint8_t *map = (uint8_t *)pipe->texture_map(pipe, r, 0, PIPE_MAP_WRITE | PIPE_MAP_DISCARD_WHOLE_RESOURCE,
+                                               &box, &transfer);
+   if (!map) {
+      DebugPrintf("BC250 OpenResource handle %x: clear map failed\n", resource->allocation);
+      return;
+   }
+   const size_t row = util_format_get_stride(r->format, r->width0);
+   const unsigned rows = util_format_get_nblocksy(r->format, r->height0);
+   for (unsigned y = 0; y < rows; ++y) memset(map + (size_t)y * transfer->stride, 0, row);
+   pipe->texture_unmap(pipe, transfer);
+}
+
+
 void APIENTRY
 OpenResource(D3D10DDI_HDEVICE hDevice,                            // IN
              __in const D3D10DDIARG_OPENRESOURCE *pOpenResource,  // IN
@@ -452,6 +476,7 @@ OpenResource(D3D10DDI_HDEVICE hDevice,                            // IN
    }
    const D3DDDI_OPENALLOCATIONINFO2 *info = pOpenResource->pOpenAllocationInfo2;
    if (!info->pPrivateDriverData || info->PrivateDriverDataSize < sizeof(SurfacePrivate)) {
+      DebugPrintf("BC250 Fail OpenResource private %u bytes\n", info->PrivateDriverDataSize);
       SetError(hDevice, E_INVALIDARG); return;
    }
    SurfacePrivate data;
@@ -468,7 +493,12 @@ OpenResource(D3D10DDI_HDEVICE hDevice,                            // IN
    if (data.magic != 0x4137424c || data.version != 1 || !data.width || !data.height ||
        data.width > 8192 || data.height > 8192 || (data.pitch & 15u) ||
        data.pitch < ((data.width + 3u) & ~3u) * bpp ||
-       data.size < UINT64(data.pitch) * ((data.height + 3u) & ~3u)) { SetError(hDevice, E_INVALIDARG); return; }
+       data.size < UINT64(data.pitch) * ((data.height + 3u) & ~3u)) {
+      DebugPrintf("BC250 Fail OpenResource layout magic %08x version %u %ux%u pitch %u format %u size %llu private %u\n",
+                  data.magic, data.version, data.width, data.height, data.pitch, data.format, data.size,
+                  info->PrivateDriverDataSize);
+      SetError(hDevice, E_INVALIDARG); return;
+   }
    if (format == DXGI_FORMAT_UNKNOWN) { SetError(hDevice, E_NOTIMPL); return; }
    D3D10DDI_MIPINFO mip = {};
    mip.TexelWidth = mip.PhysicalWidth = data.width;
@@ -486,8 +516,27 @@ OpenResource(D3D10DDI_HDEVICE hDevice,                            // IN
    resource->allocation = info->hAllocation;
    resource->surfacePitch = data.pitch;
    resource->surfaceBytes = data.size;
+   resource->opening = TRUE;
    HRESULT hr = Bc250EnsureSurface(CastDevice(hDevice), resource);
+   resource->opening = FALSE;
    if (SUCCEEDED(hr)) Bc250ShadowCreate(CastDevice(hDevice), resource);
+   if (Bc250OpenWithoutContent(true, resource->failedStep, hr)) {
+      // BD-296 (SurfaceOpen.h): an allocation with no CPU view, such as a
+      // standard GDI texture in local memory. Keep the llvmpipe texture that
+      // CreateResource made, cleared to zero, so that the compositor keeps
+      // its device. The texture is not the allocation: the window shows no
+      // content until the next open of a readable surface.
+      Bc250ClearOpenedTexture(CastPipeContext(hDevice), resource);
+      resource->noContent = TRUE;
+      // Retained in both flavours (Debug.cpp), bounded: the first 64 opens of the process, then every 1000th
+      // (Bc250NoContentLogged). This is the only line of such an open: Bc250EnsureSurface wrote none for its Lock2.
+      static volatile LONG opens = 0;
+      const LONG n = InterlockedIncrement(&opens);
+      if (Bc250NoContentLogged(n))
+         DebugPrintf("BC250 NoContent open %ld handle %x %ux%u format %u: Lock2 %08lx, no CPU view\n",
+                     n, resource->allocation, data.width, data.height, data.format, hr);
+      return;
+   }
    DebugPrintf("BC250 OpenResource %08lx handle %x shadow %u\n", hr, resource->allocation,
                resource->shadow != NULL);
    SetError(hDevice, hr);

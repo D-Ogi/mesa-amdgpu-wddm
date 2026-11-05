@@ -34,6 +34,7 @@
 #include "DriverIncludes.h"
 #include "util/u_hash_table.h"
 #include "cso_cache/cso_context.h"
+#include "SurfaceOpen.h"
 
 #define SUPPORT_MSAA 0
 #define SUPPORT_D3D10_1 0
@@ -182,14 +183,26 @@ CastPipeDevice(DXGI_DDI_HDEVICE hDevice)
 }
 
 
+// The runtime removes the device for most error codes of a void DDI function,
+// so the retained line names the function and line that set it (BD-292).
 static inline void
-SetError(D3D10DDI_HDEVICE hDevice, HRESULT hr)
+Bc250SetErrorAt(D3D10DDI_HDEVICE hDevice, HRESULT hr, const char *function, unsigned line)
 {
    if (FAILED(hr)) {
-      DebugPrintf("BC250 SetError %08lx\n", hr);
+      DebugPrintf("BC250 SetError %08lx %s:%u\n", hr, function, line);
       Device *pDevice = CastDevice(hDevice);
       pDevice->UMCallbacks.pfnSetErrorCb(pDevice->hRTCoreLayer, hr);
    }
+}
+#define SetError(hDevice, hr) Bc250SetErrorAt((hDevice), (hr), __func__, __LINE__)
+
+// A failed step of a surface helper whose HRESULT a caller passes on: the
+// retained line names the step before the caller reports the code (BD-292).
+static inline HRESULT
+Bc250Fail(const char *step, HRESULT hr)
+{
+   DebugPrintf("BC250 Fail %s %08lx\n", step, hr);
+   return hr;
 }
 
 
@@ -206,6 +219,15 @@ struct Resource
    // and the paging fence value the map and MakeResident complete at.
    BOOL surfaceResident;
    UINT64 surfaceFence;
+   // The Bc250SurfaceStep of the last failure of Bc250EnsureSurface, and
+   // whether OpenResource kept this opened resource with no content because
+   // Lock2 refused its allocation (SurfaceOpen.h, BD-296).
+   UINT failedStep;
+   BOOL noContent;
+   // TRUE only while OpenResource runs Bc250EnsureSurface for this resource:
+   // a refused Lock2 is then logged by OpenResource, under its budget
+   // (Bc250SurfaceFailLogged, SurfaceOpen.h).
+   BOOL opening;
    BOOL primary, shared;
    UINT vidpn;
    DXGI_FORMAT Format;

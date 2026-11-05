@@ -64,6 +64,23 @@ using Bc250CompilerEntry = Bc250DdiEntry<F, Bc250CompilerTraits, Compiler,
                   std::integral_constant<decltype(&DestroyDevice), &DestroyDevice>>>;
 
 static void APIENTRY DestroyDevice(D3D10DDI_HDEVICE hDevice);
+
+static HRESULT
+Bc250DxgiResult(const char *entry, HRESULT hr)
+{
+   if (FAILED(hr) && hr != DXGI_DDI_ERR_WASSTILLDRAWING)
+      DebugPrintf("BC250 Fail %s %08lx\n", entry, hr);
+   return hr;
+}
+#define BC250_DXGI_LOGGED(name, entry, type) \
+   static HRESULT APIENTRY name(type *args) { return Bc250DxgiResult(#entry, entry(args)); }
+BC250_DXGI_LOGGED(Bc250DxgiPresent, _Present, DXGI_DDI_ARG_PRESENT)
+BC250_DXGI_LOGGED(Bc250DxgiSetDisplayMode, _SetDisplayMode, DXGI_DDI_ARG_SETDISPLAYMODE)
+BC250_DXGI_LOGGED(Bc250DxgiRotateResourceIdentities, _RotateResourceIdentities,
+                  DXGI_DDI_ARG_ROTATE_RESOURCE_IDENTITIES)
+BC250_DXGI_LOGGED(Bc250DxgiBlt, _Blt, DXGI_DDI_ARG_BLT)
+#undef BC250_DXGI_LOGGED
+
 static void APIENTRY RelocateDeviceFuncs(D3D10DDI_HDEVICE hDevice,
                                 __in struct D3D10DDI_DEVICEFUNCS *pDeviceFunctions);
 static void APIENTRY RelocateDeviceFuncs1(D3D10DDI_HDEVICE hDevice,
@@ -336,22 +353,24 @@ CreateDeviceOnCompilerStack(D3D10DDI_HADAPTER hAdapter,                 // IN
    }
 
    /*
-    * Fill in DXGI DDI functions
+    * Fill in DXGI DDI functions. A failed Present, SetDisplayMode,
+    * RotateResourceIdentities or Blt goes back to DXGI as its return value,
+    * so the retained line names the entry point (BD-292).
     */
    pCreateData->DXGIBaseDDI.pDXGIDDIBaseFunctions->pfnPresent =
-      Bc250CompilerEntry<_Present>::Call;
+      Bc250CompilerEntry<Bc250DxgiPresent>::Call;
    pCreateData->DXGIBaseDDI.pDXGIDDIBaseFunctions->pfnGetGammaCaps =
       Bc250CompilerEntry<_GetGammaCaps, false>::Call;
    pCreateData->DXGIBaseDDI.pDXGIDDIBaseFunctions->pfnSetDisplayMode =
-      Bc250CompilerEntry<_SetDisplayMode, false>::Call;
+      Bc250CompilerEntry<Bc250DxgiSetDisplayMode, false>::Call;
    pCreateData->DXGIBaseDDI.pDXGIDDIBaseFunctions->pfnSetResourcePriority =
       Bc250CompilerEntry<_SetResourcePriority, false>::Call;
    pCreateData->DXGIBaseDDI.pDXGIDDIBaseFunctions->pfnQueryResourceResidency =
       Bc250CompilerEntry<_QueryResourceResidency, false>::Call;
    pCreateData->DXGIBaseDDI.pDXGIDDIBaseFunctions->pfnRotateResourceIdentities =
-      Bc250CompilerEntry<_RotateResourceIdentities, false>::Call;
+      Bc250CompilerEntry<Bc250DxgiRotateResourceIdentities, false>::Call;
    pCreateData->DXGIBaseDDI.pDXGIDDIBaseFunctions->pfnBlt =
-      Bc250CompilerEntry<_Blt>::Call;
+      Bc250CompilerEntry<Bc250DxgiBlt>::Call;
 
    // E26: the linear shared-resource path is implemented for the tested formats.
    createGuard.complete = true;
