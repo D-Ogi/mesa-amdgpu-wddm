@@ -2874,7 +2874,8 @@ test_opened_import(void)
 
 /* BD-309: buffer_get_kmt_allocation names the kernel allocation of a BO this winsys created, and the
  * CPU lock that an offer must not meet. The negative cases are the BOs whose allocation is not ours to
- * offer: a host import (runtime surface) and a virtual BO, which has no allocation of its own. */
+ * offer: a host import (runtime surface), a virtual BO, which has no allocation of its own, an opened shared
+ * resource (another process's) and a destroyed BO. */
 static void
 test_kmt_allocation(void)
 {
@@ -2933,6 +2934,26 @@ test_kmt_allocation(void)
             "the virtual BO is refused (0x%x)", allocation);
       destroy_bo(ws, v, "kmt_allocation/virtual");
    }
+
+   /* Negative: an opened shared resource and a destroyed BO. This line reaches neither state through its calls
+    * here: it refuses to open an NT handle while the host seam is active (opened_import), and it releases a plain
+    * BO at its destroy. So the case sets the field the winsys keeps for each state on the plain BO, asks, and
+    * restores the field. */
+   struct radv_wddm2_bo *w = radv_wddm2_bo(bo);
+   w->resource_handle = 0x7001;
+   allocation = 0xdead;
+   mapped = true;
+   check(!ws->base.buffer_get_kmt_allocation(&ws->base, bo, &allocation, &mapped) && allocation == 0 && !mapped,
+         "a BO of an opened shared resource is refused and names no allocation");
+   w->resource_handle = 0;
+   w->destroyed = true;
+   allocation = 0xdead;
+   mapped = true;
+   check(!ws->base.buffer_get_kmt_allocation(&ws->base, bo, &allocation, &mapped) && allocation == 0 && !mapped,
+         "a destroyed BO (held, or in the pool) is refused and names no allocation");
+   w->destroyed = false;
+   check(ws->base.buffer_get_kmt_allocation(&ws->base, bo, &allocation, &mapped) && allocation == bo->handle,
+         "with the fields restored the plain BO names its allocation again");
 
    destroy_bo(ws, bo, "kmt_allocation/plain");
    retire(qa, published_of(qa));
