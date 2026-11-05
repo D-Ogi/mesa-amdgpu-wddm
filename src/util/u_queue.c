@@ -82,6 +82,12 @@ atexit_handler(void)
       mtx_unlock(&iter->lock);
       simple_mtx_unlock(&iter->finish_lock);
    }
+   /* Set the flag while the lock is held, so that every thread that reads it
+    * after the unlock sees it set and does not lock exit_mutex again. A thread
+    * that read it before and waits for the lock now is a call into the library
+    * during its unload, which the caller must not make.
+    */
+   exit_mutex_destroyed = true;
    mtx_unlock(&exit_mutex);
 
    /* In a shared library, atexit handlers run when the library is unloaded.
@@ -90,7 +96,6 @@ atexit_handler(void)
     * Verifier stops with LOCK_IN_UNLOADED_DLL (0x201) when a driver DLL that
     * contains this file is unloaded. Delete it here.
     */
-   exit_mutex_destroyed = true;
    mtx_destroy(&exit_mutex);
 }
 
