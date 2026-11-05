@@ -60,6 +60,11 @@ static struct list_head queue_list = {
    .prev = &queue_list,
 };
 static mtx_t exit_mutex;
+/* Set when atexit_handler has destroyed exit_mutex. A queue that is destroyed
+ * later (for example by a C++ static destructor of this module) then changes
+ * the list without the lock: the queue threads are stopped at that time.
+ */
+static bool exit_mutex_destroyed;
 
 static void
 atexit_handler(void)
@@ -76,6 +81,15 @@ atexit_handler(void)
       simple_mtx_unlock(&iter->finish_lock);
    }
    mtx_unlock(&exit_mutex);
+
+   /* In a shared library, atexit handlers run when the library is unloaded.
+    * On Windows, mtx_t is a CRITICAL_SECTION: a critical section that is not
+    * deleted stays registered after its memory is unmapped, and Application
+    * Verifier stops with LOCK_IN_UNLOADED_DLL (0x201) when a driver DLL that
+    * contains this file is unloaded. Delete it here.
+    */
+   exit_mutex_destroyed = true;
+   mtx_destroy(&exit_mutex);
 }
 
 static void
@@ -90,6 +104,10 @@ add_to_atexit_list(struct util_queue *queue)
 {
    call_once(&atexit_once_flag, global_init);
 
+   /* After atexit_handler, no thread of a new queue is stopped at exit. */
+   if (exit_mutex_destroyed)
+      return;
+
    mtx_lock(&exit_mutex);
    list_add(&queue->head, &queue_list);
    mtx_unlock(&exit_mutex);
@@ -99,15 +117,18 @@ static void
 remove_from_atexit_list(struct util_queue *queue)
 {
    struct util_queue *iter, *tmp;
+   const bool locked = !exit_mutex_destroyed;
 
-   mtx_lock(&exit_mutex);
+   if (locked)
+      mtx_lock(&exit_mutex);
    LIST_FOR_EACH_ENTRY_SAFE(iter, tmp, &queue_list, head) {
       if (iter == queue) {
          list_del(&iter->head);
          break;
       }
    }
-   mtx_unlock(&exit_mutex);
+   if (locked)
+      mtx_unlock(&exit_mutex);
 }
 
 /****************************************************************************
