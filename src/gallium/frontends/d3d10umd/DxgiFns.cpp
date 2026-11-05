@@ -250,6 +250,7 @@ HRESULT Bc250EnsureSurface(Device *device, Resource *resource)
    resource->failedStep = BC250_SURFACE_STEP_NONE;
    auto fail = [resource](unsigned step, const char *name, HRESULT code) {
       resource->failedStep = step;
+      if (!Bc250SurfaceFailLogged(resource->opening != FALSE, step)) return code;
       return Bc250Fail(name, code);
    };
    UINT width = resource->resource->width0, height = resource->resource->height0;

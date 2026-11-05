@@ -59,3 +59,25 @@ Bc250OpenWithoutContent(bool opened, unsigned failedStep, long hr)
 {
    return opened && hr < 0 && failedStep == BC250_SURFACE_STEP_LOCK2;
 }
+
+/* The retained log of an open without content, bounded per process: the
+ * first 64 opens, then every 1000th. A CPU desktop with GDI hardware
+ * acceleration on opens each new window surface once, for the whole life of
+ * DWM (kit r1 of BD-296: 596 opens in one session). */
+static inline bool
+Bc250NoContentLogged(long n)
+{
+   return n <= 64 || n % 1000 == 0;
+}
+
+/* Whether Bc250EnsureSurface writes its own "BC250 Fail" line for a failed
+ * step. Not for Lock2 while OpenResource opens the resource: that failure
+ * becomes an open without content, and its line ("BC250 NoContent open",
+ * with the Lock2 code) is under the budget above. Without this rule each
+ * such open wrote one unbounded Fail line (kit r1: 596 Fail lines for 64
+ * NoContent lines). Every other failure keeps its line. */
+static inline bool
+Bc250SurfaceFailLogged(bool opening, unsigned step)
+{
+   return !(opening && step == BC250_SURFACE_STEP_LOCK2);
+}

@@ -516,7 +516,9 @@ OpenResource(D3D10DDI_HDEVICE hDevice,                            // IN
    resource->allocation = info->hAllocation;
    resource->surfacePitch = data.pitch;
    resource->surfaceBytes = data.size;
+   resource->opening = TRUE;
    HRESULT hr = Bc250EnsureSurface(CastDevice(hDevice), resource);
+   resource->opening = FALSE;
    if (SUCCEEDED(hr)) Bc250ShadowCreate(CastDevice(hDevice), resource);
    if (Bc250OpenWithoutContent(true, resource->failedStep, hr)) {
       // BD-296 (SurfaceOpen.h): an allocation with no CPU view, such as a
@@ -526,10 +528,11 @@ OpenResource(D3D10DDI_HDEVICE hDevice,                            // IN
       // content until the next open of a readable surface.
       Bc250ClearOpenedTexture(CastPipeContext(hDevice), resource);
       resource->noContent = TRUE;
-      // Retained in both flavours (Debug.cpp), bounded: the first 64 opens of the process, then every 1000th.
+      // Retained in both flavours (Debug.cpp), bounded: the first 64 opens of the process, then every 1000th
+      // (Bc250NoContentLogged). This is the only line of such an open: Bc250EnsureSurface wrote none for its Lock2.
       static volatile LONG opens = 0;
       const LONG n = InterlockedIncrement(&opens);
-      if (n <= 64 || n % 1000 == 0)
+      if (Bc250NoContentLogged(n))
          DebugPrintf("BC250 NoContent open %ld handle %x %ux%u format %u: Lock2 %08lx, no CPU view\n",
                      n, resource->allocation, data.width, data.height, data.format, hr);
       return;

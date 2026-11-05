@@ -224,6 +224,10 @@ struct Resource
    // Lock2 refused its allocation (SurfaceOpen.h, BD-296).
    UINT failedStep;
    BOOL noContent;
+   // TRUE only while OpenResource runs Bc250EnsureSurface for this resource:
+   // a refused Lock2 is then logged by OpenResource, under its budget
+   // (Bc250SurfaceFailLogged, SurfaceOpen.h).
+   BOOL opening;
    BOOL primary, shared;
    UINT vidpn;
    DXGI_FORMAT Format;
