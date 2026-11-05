@@ -35,6 +35,7 @@
 #include <stdint.h>
 
 #include "radv_wddm2_winsys.h"
+#include "radv_wddm2_winsys_cache.h"
 #include "radv_wddm2_bc250.h"
 #include "util/amdgpu_wddm_stdio.h"
 
@@ -757,18 +758,7 @@ radv_wddm2_winsys_destroy(struct radeon_winsys *_ws)
    bool destroy = false;
 
    simple_mtx_lock(&winsys_creation_mutex);
-   if (!--ws->refcount) {
-      _mesa_hash_table_remove_key(winsyses, ws->cache_key);
-
-      /* Clean the hashtable up if empty, though there is no
-       * empty function. */
-      if (_mesa_hash_table_num_entries(winsyses) == 0) {
-         _mesa_hash_table_destroy(winsyses, NULL);
-         winsyses = NULL;
-      }
-
-      destroy = true;
-   }
+   destroy = radv_wddm2_cache_release(&winsyses, ws->cache_key, &ws->refcount);
    simple_mtx_unlock(&winsys_creation_mutex);
    if (!destroy)
       return;
@@ -890,17 +880,14 @@ radv_wddm2_winsys_create(const struct vk_dx_adapter_info *adapter_info,
       return VK_ERROR_INCOMPATIBLE_DRIVER;
    /* We have to keep this lock till insertion. */
    simple_mtx_lock(&winsys_creation_mutex);
-   if (!winsyses)
-      winsyses = _mesa_pointer_hash_table_create(NULL);
-   if (!winsyses) {
+   if (!radv_wddm2_cache_prepare(&winsyses)) {
       amdgpu_wddm_log("radv/amdgpu: failed to alloc winsys hash table.\n");
       result = VK_ERROR_OUT_OF_HOST_MEMORY;
       goto fail;
    }
 
-   struct hash_entry *entry = _mesa_hash_table_search(winsyses, key);
-   if (entry) {
-      ws = (struct radv_wddm2_winsys *)entry->data;
+   ws = radv_wddm2_cache_find(winsyses, key);
+   if (ws) {
       if (ws->adapter_query != adapter_query) {
          result = VK_ERROR_INITIALIZATION_FAILED;
          goto fail;
@@ -1063,7 +1050,7 @@ radv_wddm2_winsys_create(const struct vk_dx_adapter_info *adapter_info,
       ws->bound_sync_types[2] = NULL;
    }
 
-   _mesa_hash_table_insert(winsyses, key, ws);
+   radv_wddm2_cache_insert(winsyses, key, ws);
    simple_mtx_unlock(&winsys_creation_mutex);
 
    *winsys = &ws->base;
