@@ -25,6 +25,7 @@
 
 #include <assert.h>
 #include <inttypes.h>
+#include <stdlib.h>
 
 #include "c11/threads.h"
 #include "util/os_time.h"
@@ -605,11 +606,24 @@ static once_flag vk_wddm2_pending_once = ONCE_FLAG_INIT;
 static mtx_t vk_wddm2_pending_mtx;
 static cnd_t vk_wddm2_pending_cnd;
 
+/* In a shared library, atexit handlers run when the library is unloaded. The
+ * pending lock is a CRITICAL_SECTION on Windows: if it is not deleted before
+ * the ICD is unloaded, Application Verifier stops with LOCK_IN_UNLOADED_DLL
+ * (0x201). No device of this module exists at that time, so no wait uses it.
+ */
+static void
+vk_wddm2_pending_fini(void)
+{
+   cnd_destroy(&vk_wddm2_pending_cnd);
+   mtx_destroy(&vk_wddm2_pending_mtx);
+}
+
 static void
 vk_wddm2_pending_init(void)
 {
    mtx_init(&vk_wddm2_pending_mtx, mtx_plain);
    cnd_init(&vk_wddm2_pending_cnd);
+   atexit(vk_wddm2_pending_fini);
 }
 
 void
