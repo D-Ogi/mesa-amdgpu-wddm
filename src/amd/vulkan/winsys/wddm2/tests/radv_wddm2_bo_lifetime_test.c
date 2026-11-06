@@ -197,6 +197,14 @@ const struct vk_sync_type vk_wddm2_monitored_fence_type = {0};
 const struct vk_sync_type vk_wddm2_monitored_fence_hosted_type = {0};
 const struct vk_sync_type vk_wddm2_monitored_fence_hosted_bound_type = {0};
 
+/* radv_wddm2_cs.c reports the signal of a submitted monitored fence; no test submits one. */
+void
+vk_wddm2_monitored_fence_note_submitted(struct vk_wddm2_monitored_fence *fence, uint64_t value)
+{
+   (void)fence;
+   (void)value;
+}
+
 /* The CPU wait bounds of the winsys (radv_wddm2_cs.c). The host tests shorten
  * them; nothing else writes them. */
 extern uint64_t radv_wddm2_fence_wait_slice_ns;
@@ -2864,10 +2872,101 @@ test_opened_import(void)
    free(ws);
 }
 
+/* BD-309: buffer_get_kmt_allocation names the kernel allocation of a BO this winsys created, and the
+ * CPU lock that an offer must not meet. The negative cases are the BOs whose allocation is not ours to
+ * offer: a host import (runtime surface), a virtual BO, which has no allocation of its own, an opened shared
+ * resource (another process's) and a destroyed BO. */
+static void
+test_kmt_allocation(void)
+{
+   struct radv_wddm2_winsys *ws = make_ws();
+   check(ws->base.buffer_get_kmt_allocation != NULL, "the winsys answers buffer_get_kmt_allocation");
+   if (!ws->base.buffer_get_kmt_allocation) {
+      free(ws);
+      return;
+   }
+   struct radeon_winsys_ctx *a = new_ctx(ws);
+   struct radv_wddm2_queue *qa = gfx(a);
+
+   struct radeon_winsys_bo *bo = new_bo(ws, 65536);
+   uint32_t allocation = 0xdead;
+   bool mapped = true;
+   const unsigned locks_before = h.unexpected;
+   check(ws->base.buffer_get_kmt_allocation(&ws->base, bo, &allocation, &mapped) && allocation == bo->handle &&
+            allocation && !mapped,
+         "a plain BO names its own allocation 0x%x (handle 0x%x), not CPU-locked", allocation, bo->handle);
+
+   void *ptr = ws->base.buffer_map(&ws->base, bo, false, NULL);
+   check(ptr != NULL, "the BO maps (Lock2)");
+   struct obj *o = find(h.allocs, h.n_allocs, bo->handle);
+   check(ws->base.buffer_get_kmt_allocation(&ws->base, bo, &allocation, &mapped) && mapped && o && o->locked,
+         "while it is mapped the query reports the CPU lock the host holds (mapped=%d locked=%d)", mapped,
+         o ? o->locked : -1);
+   ws->base.buffer_unmap(&ws->base, bo, false);
+   check(ws->base.buffer_get_kmt_allocation(&ws->base, bo, &allocation, &mapped) && !mapped && o && !o->locked,
+         "after the unmap the lock is released and the query says so (mapped=%d locked=%d)", mapped,
+         o ? o->locked : -1);
+   check(h.unexpected == locks_before, "the host saw no unexpected Unlock2 (%u)", h.unexpected - locks_before);
+
+   /* Negative: a host import of the same allocation. The runtime surface's owner offers it. */
+   struct radeon_winsys_bo *borrowed = NULL;
+#if BD201_HOSTED_IMPORT_FLAGS
+   VkResult result = ws->base.buffer_from_hosted(&ws->base, ws->host.identity, bo->handle, 0, bo->va, 65536, &borrowed);
+#else
+   VkResult result = ws->base.buffer_from_hosted(&ws->base, ws->host.identity, bo->handle, bo->va, 65536, &borrowed);
+#endif
+   check(result == VK_SUCCESS && borrowed, "a host import (%d)", (int)result);
+   if (borrowed) {
+      allocation = 0xdead;
+      check(!ws->base.buffer_get_kmt_allocation(&ws->base, borrowed, &allocation, &mapped) && allocation == 0,
+            "the import is refused and names no allocation (0x%x)", allocation);
+      destroy_bo(ws, borrowed, "kmt_allocation/borrowed");
+   }
+
+   /* Negative: a virtual BO. */
+   struct radeon_winsys_bo *v = NULL;
+   result = ws->base.buffer_create(&ws->base, 1024 * 1024, 65536, RADEON_DOMAIN_GTT, RADEON_FLAG_VIRTUAL, 0, 0, NULL,
+                                   &v);
+   check(result == VK_SUCCESS && v, "a virtual BO (%d)", (int)result);
+   if (v) {
+      allocation = 0xdead;
+      check(!ws->base.buffer_get_kmt_allocation(&ws->base, v, &allocation, &mapped) && allocation == 0,
+            "the virtual BO is refused (0x%x)", allocation);
+      destroy_bo(ws, v, "kmt_allocation/virtual");
+   }
+
+   /* Negative: an opened shared resource and a destroyed BO. This line reaches neither state through its calls
+    * here: it refuses to open an NT handle while the host seam is active (opened_import), and it releases a plain
+    * BO at its destroy. So the case sets the field the winsys keeps for each state on the plain BO, asks, and
+    * restores the field. */
+   struct radv_wddm2_bo *w = radv_wddm2_bo(bo);
+   w->resource_handle = 0x7001;
+   allocation = 0xdead;
+   mapped = true;
+   check(!ws->base.buffer_get_kmt_allocation(&ws->base, bo, &allocation, &mapped) && allocation == 0 && !mapped,
+         "a BO of an opened shared resource is refused and names no allocation");
+   w->resource_handle = 0;
+   w->destroyed = true;
+   allocation = 0xdead;
+   mapped = true;
+   check(!ws->base.buffer_get_kmt_allocation(&ws->base, bo, &allocation, &mapped) && allocation == 0 && !mapped,
+         "a destroyed BO (held, or in the pool) is refused and names no allocation");
+   w->destroyed = false;
+   check(ws->base.buffer_get_kmt_allocation(&ws->base, bo, &allocation, &mapped) && allocation == bo->handle,
+         "with the fields restored the plain BO names its allocation again");
+
+   destroy_bo(ws, bo, "kmt_allocation/plain");
+   retire(qa, published_of(qa));
+   ws->base.ctx_destroy(a);
+   contract();
+   free(ws);
+}
+
 static const struct {
    const char *name;
    void (*fn)(void);
 } tests[] = {
+   {"kmt_allocation", test_kmt_allocation},
    {"in_flight", test_in_flight},
    {"no_host_memory", test_no_host_memory},
    {"create_rollback", test_create_rollback},
